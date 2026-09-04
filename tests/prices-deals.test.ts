@@ -160,6 +160,7 @@ describe("VaporStats Steam Prices and Deals", () => {
 
   // G1: hourly incremental feed processing advances only successful checkpoints
   test("incremental feed checkpoint - advances only on successful processing", async () => {
+    const feedAnchor = new Date("2023-12-01T00:00:00.000Z");
     // 1. Initial run with mock fetch returning 2 apps and last_modified 1700005000
     const mockFeedFetchSuccess = (async (input: unknown) => {
       const url = String(input);
@@ -230,6 +231,7 @@ describe("VaporStats Steam Prices and Deals", () => {
     const successResult = await runHourlyPriceFeedTick(d1, {
       apiKey: "test_steam_key",
       customFetch: mockFeedFetchSuccess,
+      anchorTime: feedAnchor,
     });
     expect(successResult.executed).toBe(true);
     expect(successResult.checkpointAdvanced).toBe(true);
@@ -266,9 +268,12 @@ describe("VaporStats Steam Prices and Deals", () => {
     const initialEmptyResult = await runHourlyPriceFeedTick(freshD1, {
       apiKey: "test_key",
       customFetch: mockFeedTrackingFetch,
+      anchorTime: feedAnchor,
     });
     expect(initialEmptyResult.checkpointAdvanced).toBe(false);
-    expect(initialEmptyResult.checkpointCursor).toBeNull();
+    expect(initialEmptyResult.checkpointCursor).toBe(
+      Math.floor(feedAnchor.getTime() / 1000) - 30 * 24 * 60 * 60
+    );
 
     // Regression: If any detail refresh fails, checkpoint does NOT advance
     const mockPartialFailureFetch = (async (input: unknown) => {
@@ -406,7 +411,156 @@ describe("VaporStats Steam Prices and Deals", () => {
     });
   });
 
+  test("price feed recovers catalog rows from prior price-only ingestion", async () => {
+    await recordPriceObservation(d1, {
+      appid: 999,
+      currency: "USD",
+      initial_price: 2999,
+      final_price: 2999,
+      discount_percent: 0,
+      is_free: false,
+      is_available: true,
+      observed_at: "2026-09-04T12:00:00.000Z",
+    });
+    await setCheckpoint(
+      d1,
+      DEFAULT_PRICE_CHECKPOINT_KEY,
+      JSON.stringify({ pending: [] }),
+      1788562121
+    );
+
+    let feedCalls = 0;
+    const result = await runHourlyPriceFeedTick(d1, {
+      apiKey: "test_key",
+      anchorTime: new Date("2026-09-04T14:20:00.000Z"),
+      customFetch: (async (input: unknown) => {
+        if (String(input).includes("IStoreService/GetAppList")) {
+          feedCalls++;
+          return new Response("unexpected feed call", { status: 500 });
+        }
+        return Response.json({
+          "999": {
+            success: true,
+            data: {
+              type: "game",
+              name: "New Release",
+              steam_appid: 999,
+              is_free: false,
+              short_description: "A newly discovered game.",
+              header_image: "https://cdn.example/999.jpg",
+              developers: ["Developer"],
+              publishers: ["Publisher"],
+              release_date: { coming_soon: false, date: "Sep 4, 2026" },
+              price_overview: {
+                currency: "USD",
+                initial: 2999,
+                final: 2999,
+                discount_percent: 0,
+              },
+            },
+          },
+        });
+      }) as unknown as typeof fetch,
+    });
+
+    const app = sqliteDb
+      .query(
+        `SELECT name, type, is_playable, is_eligible, release_date
+         FROM apps WHERE appid = 999`
+      )
+      .get() as Record<string, unknown> | null;
+    const checkpoint = await getCheckpoint(d1, DEFAULT_PRICE_CHECKPOINT_KEY);
+
+    expect(result).toMatchObject({ successful: 1, pending: 0 });
+    expect(feedCalls).toBe(0);
+    expect(app).toEqual({
+      name: "New Release",
+      type: "game",
+      is_playable: 1,
+      is_eligible: 1,
+      release_date: "Sep 4, 2026",
+    });
+    expect(JSON.parse(checkpoint?.value ?? "{}").catalogBackfillQueued).toBe(true);
+    expect(checkpoint?.cursor).toBe(
+      Math.floor(new Date("2026-09-04T14:20:00.000Z").getTime() / 1000) -
+        30 * 24 * 60 * 60
+    );
+  });
+
+  test("catalog feed continues every page before advancing its timestamp", async () => {
+    await setCheckpoint(
+      d1,
+      DEFAULT_PRICE_CHECKPOINT_KEY,
+      JSON.stringify({ pending: [], catalogBackfillQueued: true }),
+      100
+    );
+
+    const feedUrls: URL[] = [];
+    const fetcher = (async (input: unknown) => {
+      const url = new URL(String(input));
+      if (url.pathname.includes("GetAppList")) {
+        feedUrls.push(url);
+        const secondPage = feedUrls.length === 2;
+        return Response.json({
+          response: {
+            apps: secondPage
+              ? [{ appid: 30, last_modified: 160 }]
+              : [
+                  { appid: 10, last_modified: 140 },
+                  { appid: 20, last_modified: 150 },
+                ],
+            have_more_results: !secondPage,
+            last_appid: secondPage ? 30 : 20,
+          },
+        });
+      }
+
+      const appid = Number(url.searchParams.get("appids"));
+      return Response.json({
+        [appid]: {
+          success: true,
+          data: {
+            type: "game",
+            name: `Game ${appid}`,
+            steam_appid: appid,
+            is_free: true,
+          },
+        },
+      });
+    }) as unknown as typeof fetch;
+
+    const first = await runHourlyPriceFeedTick(d1, {
+      apiKey: "test_key",
+      customFetch: fetcher,
+      maxAppsToProcess: 2,
+    });
+    const firstCheckpoint = await getCheckpoint(d1, DEFAULT_PRICE_CHECKPOINT_KEY);
+    const firstValue = JSON.parse(firstCheckpoint?.value ?? "{}");
+
+    expect(first.checkpointAdvanced).toBe(false);
+    expect(firstCheckpoint?.cursor).toBe(100);
+    expect(firstValue).toMatchObject({
+      continuationAppId: 20,
+      continuationLastModified: 150,
+    });
+
+    const second = await runHourlyPriceFeedTick(d1, {
+      apiKey: "test_key",
+      customFetch: fetcher,
+      maxAppsToProcess: 2,
+    });
+    const secondCheckpoint = await getCheckpoint(d1, DEFAULT_PRICE_CHECKPOINT_KEY);
+    const secondValue = JSON.parse(secondCheckpoint?.value ?? "{}");
+
+    expect(feedUrls[1].searchParams.get("if_modified_since")).toBe("100");
+    expect(feedUrls[1].searchParams.get("last_appid")).toBe("20");
+    expect(second.checkpointAdvanced).toBe(true);
+    expect(secondCheckpoint?.cursor).toBe(160);
+    expect(secondValue.continuationAppId).toBeUndefined();
+  });
+
   test("price feed drains pending IDs before fetching more work", async () => {
+    const anchorTime = new Date("1970-01-31T00:00:00.000Z");
     let feedRuns = 0;
     let rateLimitReturned = false;
     const detailCalls: number[] = [];
@@ -442,6 +596,7 @@ describe("VaporStats Steam Prices and Deals", () => {
     const first = await runHourlyPriceFeedTick(d1, {
       apiKey: "test_key",
       customFetch: fetcher,
+      anchorTime,
     });
     expect(first).toMatchObject({
       attempted: 2,
@@ -459,6 +614,7 @@ describe("VaporStats Steam Prices and Deals", () => {
     const second = await runHourlyPriceFeedTick(d1, {
       apiKey: "test_key",
       customFetch: fetcher,
+      anchorTime,
     });
     expect(second).toMatchObject({
       attempted: 2,
@@ -474,6 +630,7 @@ describe("VaporStats Steam Prices and Deals", () => {
     const third = await runHourlyPriceFeedTick(d1, {
       apiKey: "test_key",
       customFetch: fetcher,
+      anchorTime,
     });
     expect(third).toMatchObject({
       attempted: 1,

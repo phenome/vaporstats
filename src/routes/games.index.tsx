@@ -10,7 +10,7 @@ export const Route = createFileRoute("/games/")({
   ssr: false,
   headers: () => getLiveApiCacheHeaders(),
   loader: async () => {
-    const response = await fetch("/api/catalog?limit=100");
+    const response = await fetch("/api/catalog?limit=500");
     if (!response.ok) throw new Error("Catalog request failed");
     const result = (await response.json()) as {
       status?: string;

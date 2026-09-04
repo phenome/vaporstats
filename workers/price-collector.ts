@@ -1,8 +1,9 @@
 import type { D1Database } from "../src/lib/db";
-import { getCheckpoint, setCheckpoint } from "../src/lib/catalog";
+import { getCheckpoint, setCheckpoint, upsertApp } from "../src/lib/catalog";
 import { recordPriceObservation, type PriceState } from "../src/lib/prices";
 
 export const DEFAULT_PRICE_CHECKPOINT_KEY = "steam_catalog_feed";
+const INITIAL_CATALOG_LOOKBACK_SECONDS = 30 * 24 * 60 * 60;
 
 export interface CatalogFeedApp {
   appid: number;
@@ -28,16 +29,27 @@ export interface SteamPriceOverview {
   final_formatted?: string;
 }
 
+export interface SteamStoreAppData {
+  type?: string;
+  name?: string;
+  steam_appid?: number;
+  is_free?: boolean;
+  short_description?: string;
+  header_image?: string;
+  developers?: string[];
+  publishers?: string[];
+  fullgame?: { appid?: number; name?: string };
+  release_date?: {
+    coming_soon?: boolean;
+    date?: string;
+  };
+  price_overview?: SteamPriceOverview;
+}
+
 export interface SteamStoreAppDetails {
   [appid: string]: {
     success: boolean;
-    data?: {
-      type?: string;
-      name?: string;
-      steam_appid?: number;
-      is_free?: boolean;
-      price_overview?: SteamPriceOverview;
-    };
+    data?: SteamStoreAppData;
   };
 }
 
@@ -46,6 +58,7 @@ export interface PriceDetailsResult {
   success: boolean;
   rateLimited: boolean;
   currency: string;
+  catalogApp: Parameters<typeof upsertApp>[1] | null;
   initial_price: number | null;
   final_price: number | null;
   discount_percent: number;
@@ -53,6 +66,37 @@ export interface PriceDetailsResult {
   is_available: boolean;
   formatted_initial: string | null;
   formatted_final: string | null;
+}
+
+function toCatalogApp(details: SteamStoreAppData): Parameters<typeof upsertApp>[1] | null {
+  const appid = details.steam_appid;
+  const name = details.name?.trim();
+  const type = details.type?.toLowerCase() ?? "";
+  if (!Number.isInteger(appid) || !appid || !name) return null;
+
+  const parentAppId =
+    type === "dlc" && Number.isInteger(details.fullgame?.appid)
+      ? details.fullgame!.appid!
+      : null;
+  const isPlayable = type === "game";
+  const isEligible = isPlayable || (type === "dlc" && parentAppId !== null);
+
+  return {
+    appid,
+    name,
+    type: type || "unknown",
+    is_eligible: isEligible,
+    is_playable: isPlayable,
+    parent_appid: parentAppId,
+    release_date: details.release_date?.date || null,
+    release_status: details.release_date?.coming_soon ? "upcoming" : "released",
+    description: details.short_description ?? "",
+    header_image:
+      details.header_image ||
+      `https://shared.fastly.steamstatic.com/store_item_assets/steam/apps/${appid}/header.jpg`,
+    developer: details.developers?.[0] ?? "",
+    publisher: details.publishers?.[0] ?? "",
+  };
 }
 
 function unavailablePriceDetails(
@@ -63,6 +107,7 @@ function unavailablePriceDetails(
   return {
     appid,
     success,
+    catalogApp: null,
     rateLimited,
     currency: "USD",
     initial_price: null,
@@ -83,10 +128,16 @@ export async function fetchSteamCatalogFeed(
   apiKey: string | undefined,
   options: {
     ifModifiedSince?: number;
+    lastAppId?: number;
     maxResults?: number;
     customFetch?: typeof fetch;
   } = {}
-): Promise<{ apps: CatalogFeedApp[]; lastModified: number | null } | null> {
+): Promise<{
+  apps: CatalogFeedApp[];
+  lastModified: number | null;
+  haveMoreResults: boolean;
+  lastAppId: number | null;
+} | null> {
   if (!apiKey) {
     return null;
   }
@@ -105,6 +156,9 @@ export async function fetchSteamCatalogFeed(
 
   if (options.ifModifiedSince !== undefined && options.ifModifiedSince > 0) {
     url.searchParams.set("if_modified_since", String(options.ifModifiedSince));
+  }
+  if (options.lastAppId !== undefined && options.lastAppId > 0) {
+    url.searchParams.set("last_appid", String(options.lastAppId));
   }
 
   try {
@@ -132,6 +186,9 @@ export async function fetchSteamCatalogFeed(
     return {
       apps,
       lastModified: highestModified,
+      haveMoreResults: data.response?.have_more_results === true,
+      lastAppId:
+        typeof data.response?.last_appid === "number" ? data.response.last_appid : null,
     };
   } catch (err: unknown) {
     console.error(`Steam catalog feed fetch threw: ${err}`);
@@ -171,12 +228,14 @@ export async function fetchSteamPriceDetails(
     }
 
     const details = entry.data;
+    const catalogApp = toCatalogApp(details);
 
     if (details.is_free === true) {
       return {
         appid,
         success: true,
         rateLimited: false,
+        catalogApp,
         currency: "USD",
         initial_price: 0,
         final_price: 0,
@@ -194,6 +253,7 @@ export async function fetchSteamPriceDetails(
         appid,
         success: true,
         rateLimited: false,
+        catalogApp,
         currency: po.currency || "USD",
         initial_price: po.initial,
         final_price: po.final,
@@ -205,7 +265,7 @@ export async function fetchSteamPriceDetails(
       };
     }
 
-    return unavailablePriceDetails(appid, true);
+    return { ...unavailablePriceDetails(appid, true), catalogApp };
   } catch {
     return unavailablePriceDetails(appid, false);
   }
@@ -263,6 +323,15 @@ export async function refreshIndicatedAppPrices(
       continue;
     }
 
+    if (priceDetails.catalogApp) {
+      const existingApp = await db
+        .prepare("SELECT appid FROM apps WHERE appid = ?")
+        .bind(appid)
+        .first<{ appid: number }>();
+      if (!existingApp) {
+        await upsertApp(db, priceDetails.catalogApp);
+      }
+    }
     successful++;
     const recordResult = await recordPriceObservation(db, {
       appid,
@@ -288,16 +357,62 @@ export async function refreshIndicatedAppPrices(
   return { attempted, successful, failed, changed, rateLimited, pendingAppIds };
 }
 
-function readPendingAppIds(checkpoint: { value: string } | null): number[] {
-  if (!checkpoint) return [];
-  try {
-    const value = JSON.parse(checkpoint.value) as { pending?: unknown };
-    return Array.isArray(value.pending)
-      ? value.pending.filter((appid): appid is number => Number.isInteger(appid) && appid > 0)
-      : [];
-  } catch {
-    return [];
+interface PriceFeedCheckpointValue {
+  pending: number[];
+  catalogBackfillQueued: boolean;
+  continuationAppId: number | null;
+  continuationLastModified: number | null;
+}
+
+function readPriceFeedCheckpoint(checkpoint: { value: string } | null): PriceFeedCheckpointValue {
+  if (!checkpoint) {
+    return {
+      pending: [],
+      catalogBackfillQueued: false,
+      continuationAppId: null,
+      continuationLastModified: null,
+    };
   }
+  try {
+    const value = JSON.parse(checkpoint.value) as {
+      pending?: unknown;
+      catalogBackfillQueued?: unknown;
+      continuationAppId?: unknown;
+      continuationLastModified?: unknown;
+    };
+    return {
+      pending: Array.isArray(value.pending)
+        ? value.pending.filter((appid): appid is number => Number.isInteger(appid) && appid > 0)
+        : [],
+      catalogBackfillQueued: value.catalogBackfillQueued === true,
+      continuationAppId:
+        typeof value.continuationAppId === "number" ? value.continuationAppId : null,
+      continuationLastModified:
+        typeof value.continuationLastModified === "number"
+          ? value.continuationLastModified
+          : null,
+    };
+  } catch {
+    return {
+      pending: [],
+      catalogBackfillQueued: false,
+      continuationAppId: null,
+      continuationLastModified: null,
+    };
+  }
+}
+
+async function getOrphanedPriceAppIds(db: D1Database): Promise<number[]> {
+  const result = await db
+    .prepare(
+      `SELECT p.appid
+       FROM app_prices p
+       LEFT JOIN apps a ON a.appid = p.appid
+       WHERE a.appid IS NULL
+       ORDER BY p.appid ASC`
+    )
+    .all<{ appid: number }>();
+  return (result.results ?? []).map((row) => row.appid);
 }
 
 
@@ -353,14 +468,29 @@ export async function runHourlyPriceFeedTick(
   const customFetch = options.customFetch ?? fetch;
   const anchorTime = options.anchorTime ?? new Date();
   const existingCheckpoint = await getCheckpoint(db, checkpointKey);
-  const pendingBeforeFeed = readPendingAppIds(existingCheckpoint);
-  const feedResult = pendingBeforeFeed.length > 0
-    ? { apps: [], lastModified: null }
-    : await fetchSteamCatalogFeed(apiKey, {
-        ifModifiedSince: existingCheckpoint?.cursor ?? undefined,
+  const checkpointValue = readPriceFeedCheckpoint(existingCheckpoint);
+  let pendingBeforeFeed = checkpointValue.pending;
+  const storedCursor = existingCheckpoint?.cursor ?? null;
+  const recoveryCutoff =
+    Math.floor(anchorTime.getTime() / 1000) - INITIAL_CATALOG_LOOKBACK_SECONDS;
+  const feedCursor =
+    !checkpointValue.catalogBackfillQueued &&
+    (storedCursor === null || storedCursor > recoveryCutoff)
+      ? recoveryCutoff
+      : storedCursor;
+  if (!checkpointValue.catalogBackfillQueued) {
+    const orphanedPriceAppIds = await getOrphanedPriceAppIds(db);
+    pendingBeforeFeed = [...new Set([...orphanedPriceAppIds, ...pendingBeforeFeed])];
+  }
+  const fetchedPage = pendingBeforeFeed.length === 0;
+  const feedResult = fetchedPage
+    ? await fetchSteamCatalogFeed(apiKey, {
+        ifModifiedSince: feedCursor ?? undefined,
+        lastAppId: checkpointValue.continuationAppId ?? undefined,
         maxResults: options.maxAppsToProcess ?? 200,
         customFetch,
-      });
+      })
+    : { apps: [], lastModified: null, haveMoreResults: false, lastAppId: null };
 
   if (!feedResult) {
     return {
@@ -388,18 +518,54 @@ export async function runHourlyPriceFeedTick(
     attemptCap: 200,
   });
   const pending = refreshStats.pendingAppIds;
-  const newCursor = feedResult.lastModified;
-  const previousCursor = existingCheckpoint?.cursor ?? null;
-  const cursorAdvanced =
-    newCursor !== null && (previousCursor === null || newCursor > previousCursor);
+  const previousCursor = feedCursor;
+  let nextCursor = previousCursor;
+  let continuationAppId = checkpointValue.continuationAppId;
+  let continuationLastModified = checkpointValue.continuationLastModified;
+  let cursorAdvanced = false;
+
+  if (fetchedPage) {
+    if (
+      feedResult.lastModified !== null &&
+      (continuationLastModified === null ||
+        feedResult.lastModified > continuationLastModified)
+    ) {
+      continuationLastModified = feedResult.lastModified;
+    }
+
+    if (feedResult.haveMoreResults) {
+      continuationAppId = feedResult.lastAppId;
+    } else {
+      continuationAppId = null;
+      if (
+        continuationLastModified !== null &&
+        (previousCursor === null || continuationLastModified > previousCursor)
+      ) {
+        nextCursor = continuationLastModified;
+        cursorAdvanced = true;
+      }
+      continuationLastModified = null;
+    }
+  }
+
   const checkpointAdvanced = cursorAdvanced && pending.length === 0;
 
-  if (pending.length > 0 || pendingBeforeFeed.length > 0 || cursorAdvanced) {
+  if (
+    pending.length > 0 ||
+    pendingBeforeFeed.length > 0 ||
+    fetchedPage ||
+    !checkpointValue.catalogBackfillQueued
+  ) {
     await setCheckpoint(
       db,
       checkpointKey,
-      JSON.stringify({ pending: [...new Set(pending)] }),
-      cursorAdvanced ? newCursor : previousCursor
+      JSON.stringify({
+        pending: [...new Set(pending)],
+        catalogBackfillQueued: true,
+        ...(continuationAppId !== null ? { continuationAppId } : {}),
+        ...(continuationLastModified !== null ? { continuationLastModified } : {}),
+      }),
+      nextCursor
     );
   }
 
@@ -412,7 +578,7 @@ export async function runHourlyPriceFeedTick(
     rateLimited: refreshStats.rateLimited,
     changed: refreshStats.changed,
     pending: pending.length,
-    checkpointCursor: cursorAdvanced ? newCursor : previousCursor,
+    checkpointCursor: nextCursor,
     checkpointAdvanced,
   };
 }
