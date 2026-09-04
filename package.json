@@ -12,8 +12,10 @@
     "check:output": "bun scripts/check-output.ts",
     "check:migrations": "bun scripts/check-migrations.ts",
     "verify": "tsc --noEmit && bun test && bun run build && bun run check:output && echo LAUNCH VERIFY OK",
-    "deploy:production": "wrangler d1 migrations apply vaporstats-d1 --remote --config wrangler.jsonc --env=\"\" && wrangler deploy --config dist/server/wrangler.json --env=\"\" && wrangler deploy --config wrangler.ingestion.jsonc --env=\"\"",
-    "deploy:staging": "wrangler d1 migrations apply vaporstats-staging-d1 --remote --config wrangler.jsonc --env staging && wrangler deploy --config dist/server/wrangler.json --env=\"\" && wrangler deploy --config wrangler.ingestion.jsonc --env staging"
+    "deploy:production": "wrangler deploy --config dist/server/wrangler.json --env=\"\"",
+    "deploy:staging": "wrangler deploy --config dist/server/wrangler.json --env=\"\"",
+    "deploy:ingestion:production": "wrangler d1 migrations apply vaporstats-d1 --remote --config wrangler.jsonc --env=\"\" && wrangler deploy --config wrangler.ingestion.jsonc --env=\"\"",
+    "deploy:ingestion:staging": "wrangler d1 migrations apply vaporstats-staging-d1 --remote --config wrangler.jsonc --env staging && wrangler deploy --config wrangler.ingestion.jsonc --env staging"
   },
   "dependencies": {
     "@tanstack/react-router": "^1.170.32",
