@@ -25,6 +25,7 @@ import { handleGameHttpRequest } from "../src/routes/games.$game";
 import { handleChildHttpRequest } from "../src/routes/games.$game_.$child";
 import { handlePrivacyHttpRequest } from "../src/routes/privacy";
 import ingestionWorker, { type IngestionEnv } from "../workers/ingestion";
+import publicWorker from "../src/server";
 
 // Load SQL migrations for in-memory D1 test database
 const migration0001 = readFileSync(resolve(import.meta.dir, "../migrations/0001_catalog.sql"), "utf8");
@@ -108,6 +109,27 @@ function parseJsonc(content: string): Record<string, unknown> {
     .replace(/,\s*([\]}])/g, "$1");
   return JSON.parse(cleaned);
 }
+
+describe("public worker asset routing", () => {
+  it("serves built assets through the ASSETS binding", async () => {
+    const assetRequest = new Request("https://vaporstats.com/assets/site.css");
+    const response = await publicWorker.fetch(assetRequest, {
+      ASSETS: {
+        fetch(request: Request) {
+          expect(request).toBe(assetRequest);
+          return Promise.resolve(
+            new Response("body {}", {
+              headers: { "Content-Type": "text/css" },
+            }),
+          );
+        },
+      } as Fetcher,
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("Content-Type")).toBe("text/css");
+  });
+});
 
 describe("public worker launch contract", () => {
   let sqliteDb: Database;
