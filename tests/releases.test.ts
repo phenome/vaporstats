@@ -42,6 +42,7 @@ import {
 } from "../src/routes/releases.index";
 import {
   handleWeekReleasesHttpRequest,
+  loadReleaseWeekData,
   ReleasesWeekPageView,
   ReleaseWeekNotFoundView,
 } from "../src/routes/releases.$week";
@@ -535,6 +536,26 @@ describe("Releases Discovery and Calendar", () => {
     expect(seedBody.prices.attempted).toBeGreaterThan(0);
 
     console.log("precise release facts");
+  });
+
+  test("release week loader fetches its client-safe API", async () => {
+    const requests: string[] = [];
+    const result = await loadReleaseWeekData(
+      "2026-W36",
+      (async (input: string | URL | Request) => {
+        requests.push(String(input));
+        return Response.json({
+          status: "empty",
+          data: null,
+          message: "No releases found for week 2026-W36",
+          source_timestamp: "2026-09-04T00:00:00.000Z",
+        });
+      }) as typeof fetch
+    );
+
+    expect(requests).toEqual(["/api/releases?week=2026-W36"]);
+    expect(result.week).toBe("2026-W36");
+    expect(result.data.days).toHaveLength(7);
   });
 
   // G2: the Releases root resolves to the current Monday-through-Sunday week

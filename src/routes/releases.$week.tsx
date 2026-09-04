@@ -5,6 +5,7 @@ import { getDb, type D1Database } from "../lib/db";
 import {
   getReleasesForWeek,
   parseIsoWeek,
+  type IsoWeekBounds,
   type WeeklyReleasesResult,
 } from "../lib/releases";
 import { ReleaseCalendar } from "../components/release-calendar";
@@ -46,6 +47,65 @@ export function ReleaseWeekNotFoundView({ week }: { week: string }) {
   );
 }
 
+
+function createEmptyWeekResult(
+  bounds: IsoWeekBounds,
+  asOf?: string
+): WeeklyReleasesResult {
+  const today = asOf ? asOf.slice(0, 10) : new Date().toISOString().slice(0, 10);
+  return {
+    week: bounds.week,
+    year: bounds.year,
+    weekNumber: bounds.weekNumber,
+    startDate: bounds.startDate,
+    endDate: bounds.endDate,
+    prevWeek: bounds.prevWeek,
+    nextWeek: bounds.nextWeek,
+    days: bounds.days.map((date, index) => ({
+      date,
+      dayOfWeek: [
+        "Monday",
+        "Tuesday",
+        "Wednesday",
+        "Thursday",
+        "Friday",
+        "Saturday",
+        "Sunday",
+      ][index],
+      status: date <= today ? "released" : "upcoming",
+      entities: [],
+    })),
+    totalCount: 0,
+  };
+}
+
+export async function loadReleaseWeekData(
+  weekParam: string,
+  customFetch: typeof fetch = fetch
+): Promise<{ data: WeeklyReleasesResult; week: string }> {
+  const bounds = parseIsoWeek(weekParam);
+  if (!bounds) throw notFound();
+
+  const response = await customFetch(
+    `/api/releases?week=${encodeURIComponent(bounds.week)}`
+  );
+  const result = (await response.json()) as {
+    status?: "data" | "empty" | "error";
+    data?: WeeklyReleasesResult | null;
+    error?: string;
+  };
+  if (!response.ok || result.status === "error") {
+    throw new Error(result.error || "Release calendar request failed");
+  }
+
+  return {
+    data: result.status === "data" && result.data
+      ? result.data
+      : createEmptyWeekResult(bounds),
+    week: bounds.week,
+  };
+}
+
 /**
  * Pure HTTP request handler for /releases/$week.
  * Validates ISO-week parameter strictly and renders weekly discovery calendar.
@@ -74,22 +134,7 @@ export async function handleWeekReleasesHttpRequest(
   const data = await getReleasesForWeek(db, bounds.week, { asOfDate: asOf });
 
   // If week exists in calendar, render calendar (even if 0 releases, it shows the 7 days)
-  const fallbackData: WeeklyReleasesResult = data || {
-    week: bounds.week,
-    year: bounds.year,
-    weekNumber: bounds.weekNumber,
-    startDate: bounds.startDate,
-    endDate: bounds.endDate,
-    prevWeek: bounds.prevWeek,
-    nextWeek: bounds.nextWeek,
-    days: bounds.days.map((d, i) => ({
-      date: d,
-      dayOfWeek: ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"][i],
-      status: d <= (asOf ? asOf.slice(0, 10) : new Date().toISOString().slice(0, 10)) ? "released" : "upcoming",
-      entities: [],
-    })),
-    totalCount: 0,
-  };
+  const fallbackData = data || createEmptyWeekResult(bounds, asOf);
 
   const appHtml = renderToString(<ReleasesWeekPageView data={fallbackData} />);
   const title = `Releases: Week ${bounds.weekNumber} (${bounds.week}) - VaporStats`;
@@ -119,16 +164,9 @@ function wrapHtml(title: string, bodyContent: string): string {
 }
 
 export const Route = createFileRoute("/releases/$week")({
+  ssr: false,
   headers: () => getEntityCacheHeaders(),
-  loader: async ({ params }) => {
-    const bounds = parseIsoWeek(params.week);
-    if (!bounds) {
-      throw notFound();
-    }
-    const db = await getDb();
-    const data = await getReleasesForWeek(db, bounds.week);
-    return { data, week: bounds.week };
-  },
+  loader: async ({ params }) => loadReleaseWeekData(params.week),
   component: ReleasesWeekRouteComponent,
 });
 
