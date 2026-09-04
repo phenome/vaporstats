@@ -509,8 +509,12 @@ describe("operating triggers", () => {
     sqliteDb.exec(`
       INSERT INTO apps (appid, name, slug, type, is_playable, is_eligible)
       VALUES (570, 'Dota 2', '570-dota-2', 'game', 1, 1);
-      INSERT INTO tracked_games (appid, tier, slot, next_due_at)
-      VALUES (570, 'daily', 138, '2026-09-04T14:20:00.000Z');
+      INSERT INTO tracked_games (
+        appid, tier, slot, next_due_at, latest_players, last_successful_at
+      )
+      VALUES (
+        570, 'daily', 138, '2026-09-05T23:00:00.000Z', 500000, '2026-09-04T14:00:00.000Z'
+      );
     `);
 
     await ingestionWorker.scheduled(
@@ -519,13 +523,7 @@ describe("operating triggers", () => {
         scheduledTime: new Date("2026-09-04T14:20:00.000Z").getTime(),
         type: "scheduled",
       },
-      {
-        DB: d1,
-        FETCH: (async () =>
-          Response.json({
-            response: { result: 1, player_count: 500_000 },
-          })) as unknown as typeof fetch,
-      }
+      { DB: d1 }
     );
 
     const tracked = await d1
@@ -542,7 +540,7 @@ describe("operating triggers", () => {
       tier: "fast",
       slot: 0,
       next_due_at: "2026-09-04T14:30:00.000Z",
-      last_successful_at: "2026-09-04T14:20:00.000Z",
+      last_successful_at: "2026-09-04T14:00:00.000Z",
     });
   });
 

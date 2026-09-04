@@ -99,9 +99,7 @@ export default {
           budgetTime,
           customFetch,
         });
-        if (tickResult.succeeded > 0) {
-          await reRankTrackedTiers(db, anchorTime);
-        }
+        await reRankTrackedTiers(db, anchorTime);
 
         let discoveryResult = null;
         let rollupResult = null;
