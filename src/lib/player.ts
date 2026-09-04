@@ -1,3 +1,4 @@
+import { getCurrentPrice, type PriceState } from "./prices";
 import type { D1Database, D1PreparedStatement } from "./db";
 
 /**
@@ -51,6 +52,7 @@ export interface GameOverviewData {
   appid: number;
   latest_players: number | null;
   observed_at: string | null;
+  current_price: PriceState | null;
 }
 
 /**
@@ -374,10 +376,14 @@ export async function getGameOverview(
     return null;
   }
 
-  const obs = await getLatestPlayerObservation(db, appid);
+  const [obs, currentPrice] = await Promise.all([
+    getLatestPlayerObservation(db, appid),
+    getCurrentPrice(db, appid),
+  ]);
   return {
     appid,
     latest_players: obs ? obs.current_players : null,
     observed_at: obs ? obs.observed_at : null,
+    current_price: currentPrice,
   };
 }

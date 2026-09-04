@@ -253,7 +253,7 @@ describe("Bounded Player Collection and Overview", () => {
       is_playable: true,
       is_eligible: true,
     });
-    await registerTrackedGame(db, 570, "fast", new Date("2026-09-04T10:00:00.000Z"));
+    await registerTrackedGame(db, 570, "fast", new Date(0));
 
     // Verify unauthenticated manual POST trigger is rejected with 401
     const unauthReq = new Request("https://ingestion.local/api/ingest/scheduled", {
@@ -297,11 +297,11 @@ describe("Bounded Player Collection and Overview", () => {
         Authorization: "Bearer secret-123",
       },
       body: JSON.stringify({
-        anchorTime: "2026-09-04T10:00:00.000Z",
         tickCap: 99999,
         dailyCap: 999999,
       }),
     });
+    const requestStartedAt = Date.now();
     const authRes = await ingestionWorker.fetch(authReq, {
       DB: db,
       INGESTION_TRIGGER_SECRET: "secret-123",
@@ -315,7 +315,7 @@ describe("Bounded Player Collection and Overview", () => {
       .bind(570)
       .first<{ current_players: number; observed_at: string }>();
     expect(obs?.current_players).toBe(650000);
-    expect(obs?.observed_at).toBe("2026-09-04T10:00:00.000Z");
+    expect(new Date(obs!.observed_at).getTime()).toBeGreaterThanOrEqual(requestStartedAt);
 
     // Verify publicly exposed via overview API
     const overviewReq = new Request("https://vaporstats.com/api/games/570/overview");
@@ -342,6 +342,59 @@ describe("Bounded Player Collection and Overview", () => {
     expect(gameHtml).not.toContain("Steam Store (US/USD)");
     expect(gameHtml).not.toContain("Price tracking begins with leaf 1.2.2.");
   });
+  test("overlapping manual collection is rejected", async () => {
+    const db = await createFreshInitializedDb();
+    await upsertApp(db, {
+      appid: 570,
+      name: "Dota 2",
+      type: "game",
+      is_playable: true,
+      is_eligible: true,
+    });
+    await registerTrackedGame(db, 570, "fast", new Date(0));
+
+    let signalStarted: (() => void) | undefined;
+    const started = new Promise<void>((resolve) => {
+      signalStarted = resolve;
+    });
+    let releaseFetch: (() => void) | undefined;
+    const blocked = new Promise<void>((resolve) => {
+      releaseFetch = resolve;
+    });
+    const blockingFetch = (async () => {
+      signalStarted?.();
+      await blocked;
+      return new Response(
+        JSON.stringify({ response: { result: 1, player_count: 650000 } }),
+        { status: 200 }
+      );
+    }) as unknown as typeof fetch;
+    const trigger = () =>
+      ingestionWorker.fetch(
+        new Request("https://ingestion.local/api/ingest/scheduled", {
+          method: "POST",
+          headers: { Authorization: "Bearer secret-123" },
+        }),
+        {
+          DB: db,
+          INGESTION_TRIGGER_SECRET: "secret-123",
+          FETCH: blockingFetch,
+        }
+      );
+
+    const first = trigger();
+    await started;
+    const overlapping = await trigger();
+    expect(overlapping.status).toBe(409);
+    expect((await overlapping.json()) as { success: boolean; reason: string }).toEqual({
+      success: false,
+      reason: "run_in_progress",
+    });
+
+    releaseFetch?.();
+    expect((await first).status).toBe(200);
+  });
+
 
   test("bounded collection tiers", async () => {
     // G3: Tracked tiers contain at most ten fast, ninety hourly, and nine hundred daily games

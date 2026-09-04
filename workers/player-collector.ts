@@ -120,6 +120,7 @@ export async function executeWithConnectionPool<T, R>(
 
 export interface CollectionTickOptions {
   anchorTime?: Date;
+  budgetTime?: Date;
   customFetch?: typeof fetch;
   dailyCap?: number;
   tickCap?: number;
@@ -146,12 +147,13 @@ export async function runPlayerCollectionTick(
   options: CollectionTickOptions = {}
 ): Promise<CollectionTickResult> {
   const anchorTime = options.anchorTime ?? new Date();
+  const budgetTime = options.budgetTime ?? anchorTime;
   const customFetch = options.customFetch ?? fetch;
   const dailyCap = options.dailyCap ?? DAILY_REQUEST_CAP;
   const tickCap = options.tickCap ?? TICK_REQUEST_CAP;
   const concurrency = options.concurrency ?? CONCURRENCY_LIMIT;
 
-  const dateKey = formatUtcDateKey(anchorTime);
+  const dateKey = formatUtcDateKey(budgetTime);
   const currentDaily = await getDailyRequestCount(db, dateKey);
   const remainingDaily = Math.max(0, dailyCap - currentDaily);
 
@@ -243,6 +245,7 @@ export async function runPlayerCollectionTick(
 
 export interface DiscoveryOptions {
   anchorTime?: Date;
+  budgetTime?: Date;
   customFetch?: typeof fetch;
   officialChartAppIds?: number[];
   dailyCap?: number;
@@ -273,6 +276,7 @@ export async function runDailyDiscoveryAndReRanking(
   options: DiscoveryOptions = {}
 ): Promise<DiscoveryResult> {
   const anchorTime = options.anchorTime ?? new Date();
+  const budgetTime = options.budgetTime ?? anchorTime;
   const customFetch = options.customFetch ?? fetch;
   const dailyCap = options.dailyCap ?? DAILY_REQUEST_CAP;
   const tickCap = options.tickCap ?? TICK_REQUEST_CAP;
@@ -337,7 +341,7 @@ export async function runDailyDiscoveryAndReRanking(
   }
 
   // Calculate discovery initial-player request allowance based on daily and tick caps
-  const dateKey = formatUtcDateKey(anchorTime);
+  const dateKey = formatUtcDateKey(budgetTime);
   const currentDaily = await getDailyRequestCount(db, dateKey);
   const remainingDaily = Math.max(0, dailyCap - currentDaily);
   const remainingTick = Math.max(0, tickCap - alreadyAttemptedInTick);

@@ -55,6 +55,10 @@ const migration0001 = readFileSync(
   resolve(import.meta.dir, "../migrations/0001_catalog.sql"),
   "utf8"
 );
+const migration0002 = readFileSync(
+  resolve(import.meta.dir, "../migrations/0002_player_activity.sql"),
+  "utf8"
+);
 const migration0004Path = resolve(import.meta.dir, "../migrations/0004_related_apps.sql");
 const migration0004 = existsSync(migration0004Path) ? readFileSync(migration0004Path, "utf8") : "";
 const migration0005Path = resolve(import.meta.dir, "../migrations/0005_prices.sql");
@@ -132,6 +136,7 @@ async function initTestDb(): Promise<D1Database> {
   const sqlite = new Database(":memory:");
   sqlite.run("PRAGMA foreign_keys = ON;");
   sqlite.run(migration0001);
+  sqlite.run(migration0002);
   if (migration0004) {
     sqlite.run(migration0004);
   }
@@ -457,11 +462,23 @@ describe("Releases Discovery and Calendar", () => {
     });
 
     expect(authRes.status).toBe(200);
-    const seedBody = (await authRes.json()) as { success: boolean; seed: unknown; releases: unknown; prices: { attempted: number } };
+    const seedBody = (await authRes.json()) as {
+      success: boolean;
+      seed: unknown;
+      releases: unknown;
+      tracking: { registered: number };
+      prices: { attempted: number };
+    };
     expect(seedBody.success).toBe(true);
     expect(seedBody.seed).toBeDefined();
     expect(seedBody.releases).toBeDefined();
+    expect(seedBody.tracking.registered).toBeGreaterThan(0);
     expect(seedBody.prices).toBeDefined();
+
+    const trackedRoots = await authSeedDb
+      .prepare("SELECT COUNT(*) AS count FROM tracked_games")
+      .first<{ count: number }>();
+    expect(trackedRoots?.count).toBe(seedBody.tracking.registered);
 
     // Check relationships in app_relationships
     const relServer = await authSeedDb
@@ -576,7 +593,7 @@ describe("Releases Discovery and Calendar", () => {
     const res = await handleWeekReleasesHttpRequest(req, "2026-W36", db);
 
     expect(res.status).toBe(200);
-    expect(res.headers.get("Cache-Control")).toBe(CACHE_POLICIES.liveApi);
+    expect(res.headers.get("Cache-Control")).toBe(CACHE_POLICIES.entity);
     const html = await res.text();
 
     // Navigation links present in rendered HTML

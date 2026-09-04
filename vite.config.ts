@@ -8,7 +8,24 @@ import path from "node:path";
 export default defineConfig({
   plugins: [
     cloudflare({ viteEnvironment: { name: "ssr" } }),
-    tanstackStart(),
+    tanstackStart({
+      pages: [
+        "/",
+        "/games",
+        "/search",
+        "/rankings",
+        "/rankings/peak",
+        "/deals",
+        "/releases",
+        "/privacy",
+      ].map((path) => ({ path })),
+      prerender: {
+        enabled: true,
+        crawlLinks: false,
+        autoStaticPathsDiscovery: false,
+        failOnError: true,
+      },
+    }),
     react(),
     tailwindcss(),
   ],

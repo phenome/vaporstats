@@ -1,15 +1,11 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "vaporstats",
-  "main": "@tanstack/react-start/server-entry",
+  "name": "vaporstats-ingestion",
+  "main": "workers/ingestion.ts",
   "compatibility_date": "2026-09-04",
   "compatibility_flags": [
     "nodejs_compat"
   ],
-  "assets": {
-    "directory": "./dist/client",
-    "binding": "ASSETS"
-  },
   "d1_databases": [
     {
       "binding": "DB",
@@ -18,6 +14,11 @@
       "migrations_dir": "migrations"
     }
   ],
+  "triggers": {
+    "crons": [
+      "*/10 * * * *"
+    ]
+  },
   "observability": {
     "enabled": true
   }

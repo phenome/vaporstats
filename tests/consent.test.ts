@@ -329,6 +329,40 @@ describe("Analytics Consent and Privacy Foundation", () => {
 
     console.log("consent withdrawal");
   });
+  test("withdrawal wins an in-flight analytics load", async () => {
+    let resolveLoader: ((adapter: AnalyticsAdapter) => void) | undefined;
+    let optOutCalled = false;
+    let resetCalled = false;
+    const adapter: AnalyticsAdapter = {
+      init: () => {},
+      capture: () => {},
+      opt_out_capturing: () => {
+        optOutCalled = true;
+      },
+      reset: () => {
+        resetCalled = true;
+      },
+    };
+
+    setAnalyticsLoader(
+      () =>
+        new Promise<AnalyticsAdapter>((resolve) => {
+          resolveLoader = resolve;
+        })
+    );
+    memoryStorage.setItem(CONSENT_STORAGE_KEY, "accepted");
+
+    const initialization = initAnalyticsIfConsented();
+    await withdrawConsent();
+    resolveLoader?.(adapter);
+
+    expect(await initialization).toBe(false);
+    expect(getConsentStatus()).toBe("rejected");
+    expect(isAnalyticsLoaded()).toBe(false);
+    expect(optOutCalled).toBe(true);
+    expect(resetCalled).toBe(true);
+  });
+
   test("consent notification state propagation", async () => {
     const notifications: string[] = [];
 

@@ -13,7 +13,10 @@ import { getCanonicalGamePath, toSlug } from "../lib/slug";
 import { CACHE_POLICIES, getLiveApiCacheHeaders } from "../lib/cache";
 import { SearchForm } from "../components/search-form";
 
+import { RouteDataError, RouteLoading } from "../components/route-state";
 export const Route = createFileRoute("/search")({
+  ssr: false,
+  headers: () => getLiveApiCacheHeaders(),
   validateSearch: (search: Record<string, unknown>) => ({
     q: typeof search.q === "string" ? search.q : "",
   }),
@@ -23,10 +26,17 @@ export const Route = createFileRoute("/search")({
     if (!trimmed) {
       return { query: "", items: [], total: 0 };
     }
-    const db = await getDb();
-    const results = await searchCatalog(db, trimmed);
-    return results;
+    const response = await fetch(`/api/search?q=${encodeURIComponent(trimmed)}`);
+    if (!response.ok) throw new Error("Search request failed");
+    const result = (await response.json()) as {
+      status?: string;
+      data?: SearchCatalogResult;
+    };
+    if (result.status === "error") throw new Error("Search request failed");
+    return result.data ?? { query: trimmed, items: [], total: 0 };
   },
+  pendingComponent: () => <RouteLoading label="Searching Steam catalog..." />,
+  errorComponent: RouteDataError,
   component: SearchRouteComponent,
 });
 

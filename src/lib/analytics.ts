@@ -147,6 +147,9 @@ export async function initAnalyticsIfConsented(): Promise<boolean> {
       // absent from loaded modules, chunk manifests, and network requests prior to
       // explicit stored user acceptance. Static imports would bundle it unconditionally.
       const posthogModule = await import("posthog-js");
+      if (getConsentStatus() !== "accepted" || isWithdrawn) {
+        return false;
+      }
       const posthogCandidate = "default" in posthogModule ? posthogModule.default : posthogModule;
       const posthog = posthogCandidate as unknown as AnalyticsAdapter;
       const apiKey = typeof process !== "undefined" && process.env
@@ -166,6 +169,16 @@ export async function initAnalyticsIfConsented(): Promise<boolean> {
         });
       }
       adapter = posthog;
+    }
+
+    if (getConsentStatus() !== "accepted" || isWithdrawn) {
+      try {
+        adapter.opt_out_capturing();
+        adapter.reset();
+      } catch {
+        // ignore client errors while preserving the withdrawn state
+      }
+      return false;
     }
 
     activeAdapter = adapter;

@@ -1,8 +1,9 @@
-import { createFileRoute, redirect } from "@tanstack/react-router";
+import { Navigate, createFileRoute } from "@tanstack/react-router";
 import { getDb, type D1Database } from "../lib/db";
 import { getCurrentIsoWeek, parseIsoWeek } from "../lib/releases";
 import { handleWeekReleasesHttpRequest } from "./releases.$week";
 import { getLiveApiCacheHeaders } from "../lib/cache";
+import { RouteLoading } from "../components/route-state";
 
 export interface ResolvedReleaseWeek {
   week: string;
@@ -57,13 +58,22 @@ export async function handleReleasesIndexHttpRequest(
 }
 
 export const Route = createFileRoute("/releases/")({
-  loader: async () => {
-    const currentWeek = getCurrentIsoWeek();
-    throw redirect({
-      to: "/releases/$week",
-      params: { week: currentWeek },
-    });
-  },
+  ssr: false,
+  headers: () => getLiveApiCacheHeaders(),
+  loader: async () => ({ currentWeek: getCurrentIsoWeek() }),
+  pendingComponent: () => <RouteLoading label="Opening the current release week..." />,
+  component: ReleasesIndexRoute,
 });
+
+function ReleasesIndexRoute() {
+  const { currentWeek } = Route.useLoaderData();
+  return (
+    <Navigate
+      to="/releases/$week"
+      params={{ week: currentWeek }}
+      replace
+    />
+  );
+}
 
 export default handleReleasesIndexHttpRequest;

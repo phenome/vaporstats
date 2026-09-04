@@ -156,7 +156,7 @@ export function FooterPrivacyControl(): React.JSX.Element {
           type="button"
           onClick={handleWithdraw}
           aria-label="Withdraw analytics consent"
-          className="px-2.5 py-1 min-h-[44px] min-w-[44px] inline-flex items-center justify-center text-[11px] font-mono uppercase tracking-wider text-zinc-300 bg-zinc-900 border border-zinc-800 hover:border-zinc-600 hover:text-white transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-orange-500"
+          className="min-h-[44px] min-w-[44px] inline-flex items-center justify-center px-1 text-[11px] font-mono uppercase tracking-wider text-zinc-400 hover:bg-zinc-900/60 hover:text-zinc-200 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-orange-500"
         >
           Withdraw
         </button>
@@ -165,7 +165,7 @@ export function FooterPrivacyControl(): React.JSX.Element {
           type="button"
           onClick={handleAccept}
           aria-label="Enable analytics"
-          className="px-2.5 py-1 min-h-[44px] min-w-[44px] inline-flex items-center justify-center text-[11px] font-mono uppercase tracking-wider text-zinc-400 bg-zinc-900 border border-zinc-800 hover:border-zinc-600 hover:text-zinc-200 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-orange-500"
+          className="min-h-[44px] min-w-[44px] inline-flex items-center justify-center px-1 text-[11px] font-mono uppercase tracking-wider text-zinc-500 hover:bg-zinc-900/60 hover:text-zinc-300 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-orange-500"
         >
           {status === "rejected" ? "Enable" : "Accept"}
         </button>

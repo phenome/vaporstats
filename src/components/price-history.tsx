@@ -45,7 +45,7 @@ export function PriceHistoryChart({
         );
         if (cancelled) return;
         if (!res.ok) {
-          if (!data) setStatus("error");
+          setStatus("error");
           return;
         }
         const json = (await res.json()) as {
@@ -53,15 +53,14 @@ export function PriceHistoryChart({
           data?: PriceHistoryResult;
         };
         if (cancelled) return;
-        if ((json.status === "data" || json.status === "empty") && json.data) {
-          setData(json.data);
+        if (json.status === "data" || json.status === "empty") {
+          setData(json.data ?? null);
           setStatus("success");
-        } else if (!data) {
-          setData(null);
-          setStatus("success");
+        } else {
+          setStatus("error");
         }
       } catch {
-        if (!cancelled && !data) {
+        if (!cancelled) {
           setStatus("error");
         }
       }
@@ -225,7 +224,7 @@ export function PriceHistoryChart({
             className="h-48 flex items-center justify-center font-mono text-xs text-zinc-500 border border-dashed border-zinc-900"
             data-testid="price-history-empty"
           >
-            No price observations recorded yet.
+            No data yet
           </div>
         )}
 

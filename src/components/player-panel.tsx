@@ -1,9 +1,11 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
+import { formatPriceCents, formatPriceUtc, type PriceState } from "../lib/prices";
 
 export interface PlayerOverview {
   appid: number;
   latest_players: number | null;
   observed_at: string | null;
+  current_price?: PriceState | null;
 }
 
 export type PlayerPanelStatus = "pending" | "success" | "error";
@@ -148,65 +150,92 @@ export function PlayerPanel({
     customFetch,
     staleThresholdMs,
   });
+  const price = data?.current_price ?? null;
 
   return (
-    <div key={appid} className="border border-zinc-800 bg-zinc-950 p-5 space-y-3">
-      <div className="flex items-center justify-between">
-        <span className="text-[11px] font-mono text-zinc-400 uppercase tracking-wider">
-          Current Players
-        </span>
-        <span className="w-2 h-2 rounded-none bg-orange-500 inline-block"></span>
-      </div>
+    <>
+      <div key={`players-${appid}`} className="border border-zinc-800 bg-zinc-950 p-5 space-y-3">
+        <div className="flex items-center justify-between">
+          <span className="text-[11px] font-mono text-zinc-400 uppercase tracking-wider">
+            Current Players
+          </span>
+          <span className="w-2 h-2 rounded-none bg-orange-500 inline-block"></span>
+        </div>
 
-      <div className="pt-2">
-        {status === "pending" && (
-          <div className="space-y-1" data-testid="player-panel-loading">
-            <div className="text-xl font-mono text-zinc-500 tracking-tight">
-              Loading
-            </div>
-            <p className="text-[11px] text-zinc-600 font-mono">
-              Retrieving live player activity.
-            </p>
-          </div>
-        )}
-
-        {status === "error" && (
-          <div className="space-y-1" data-testid="player-panel-error">
-            <div className="text-xl font-mono text-amber-500/80 tracking-tight">
-              Live data unavailable
-            </div>
-            <p className="text-[11px] text-zinc-500 font-mono">
-              Unable to retrieve current player count.
-            </p>
-          </div>
-        )}
-
-        {status === "success" && data?.latest_players === null && (
-          <div className="space-y-1" data-testid="no-data-state">
-            <div className="text-xl font-mono text-zinc-400 tracking-tight">
-              No data yet
-            </div>
-            <p className="text-[11px] text-zinc-500 font-mono">
-              Awaiting first scheduled observation probe.
-            </p>
-          </div>
-        )}
-
-        {status === "success" &&
-          data?.latest_players !== null &&
-          data?.latest_players !== undefined && (
-            <div className="space-y-1" data-testid="player-panel-data">
-              <div className="text-3xl font-mono font-bold text-zinc-100 tabular-nums">
-                {data.latest_players.toLocaleString("en-US")}
-              </div>
-              {data.observed_at && (
-                <p className="text-[11px] text-zinc-500 font-mono">
-                  {`Observed: ${data.observed_at} UTC`}
-                </p>
-              )}
+        <div className="pt-2">
+          {status === "pending" && (
+            <div className="space-y-1" data-testid="player-panel-loading">
+              <div className="text-xl font-mono text-zinc-500 tracking-tight">Loading</div>
+              <p className="text-[11px] text-zinc-600 font-mono">Retrieving live player activity.</p>
             </div>
           )}
+          {status === "error" && (
+            <div className="space-y-1" data-testid="player-panel-error">
+              <div className="text-xl font-mono text-amber-500/80 tracking-tight">
+                Live data unavailable
+              </div>
+              <p className="text-[11px] text-zinc-500 font-mono">
+                Unable to retrieve current player count.
+              </p>
+            </div>
+          )}
+          {status === "success" && data?.latest_players === null && (
+            <div className="space-y-1" data-testid="no-data-state">
+              <div className="text-xl font-mono text-zinc-400 tracking-tight">No data yet</div>
+              <p className="text-[11px] text-zinc-500 font-mono">
+                Awaiting first scheduled observation probe.
+              </p>
+            </div>
+          )}
+          {status === "success" &&
+            data?.latest_players !== null &&
+            data?.latest_players !== undefined && (
+              <div className="space-y-1" data-testid="player-panel-data">
+                <div className="text-3xl font-mono font-bold text-zinc-100 tabular-nums">
+                  {data.latest_players.toLocaleString("en-US")}
+                </div>
+                {data.observed_at && (
+                  <p className="text-[11px] text-zinc-500 font-mono">
+                    {`Observed: ${data.observed_at} UTC`}
+                  </p>
+                )}
+              </div>
+            )}
+        </div>
       </div>
-    </div>
+
+      <div key={`price-${appid}`} className="border border-zinc-800 bg-zinc-950 p-5 space-y-3">
+        <div className="flex items-center justify-between">
+          <span className="text-[11px] font-mono text-zinc-400 uppercase tracking-wider">
+            Current Price (US / USD)
+          </span>
+          <span className="w-2 h-2 bg-emerald-500 inline-block"></span>
+        </div>
+        <div className="pt-2">
+          {status === "pending" && <div className="text-xl font-mono text-zinc-500">Loading</div>}
+          {status === "error" && (
+            <div className="text-xl font-mono text-amber-500/80">Live data unavailable</div>
+          )}
+          {status === "success" && !price && (
+            <div className="text-xl font-mono text-zinc-400">No data yet</div>
+          )}
+          {status === "success" && price && (
+            <div className="space-y-1">
+              <div className="text-3xl font-mono font-bold text-zinc-100 tabular-nums">
+                {price.is_free
+                  ? "Free"
+                  : price.is_available && price.final_price !== null
+                    ? formatPriceCents(price.final_price, price.currency)
+                    : "Price unavailable"}
+              </div>
+              <p className="text-[11px] text-zinc-500 font-mono">
+                {`Observed: ${formatPriceUtc(price.observed_at)}`}
+                {price.discount_percent > 0 ? ` · -${price.discount_percent}%` : ""}
+              </p>
+            </div>
+          )}
+        </div>
+      </div>
+    </>
   );
 }

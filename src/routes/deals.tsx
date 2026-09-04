@@ -6,25 +6,34 @@ import { getDeals, type DealItem } from "../lib/prices";
 import { DealsList } from "../components/deals";
 import { getLiveApiCacheHeaders } from "../lib/cache";
 
+import { RouteDataError, RouteLoading } from "../components/route-state";
 export const Route = createFileRoute("/deals")({
+  ssr: false,
+  headers: () => getLiveApiCacheHeaders(),
   loader: async ({ location }) => {
     const search = location.search as {
       type?: "game" | "dlc" | "expansion" | "all";
       sort?: "discount" | "price" | "recent";
     };
-    const db = await getDb();
-    const result = await getDeals(db, {
-      type: search.type,
-      sort: search.sort,
-      limit: 100,
-    });
+    const type = search.type ?? "all";
+    const sort = search.sort ?? "discount";
+    const params = new URLSearchParams({ type, sort, limit: "100" });
+    const response = await fetch(`/api/deals?${params}`);
+    if (!response.ok) throw new Error("Deals request failed");
+    const result = (await response.json()) as {
+      status?: string;
+      data?: { deals: DealItem[]; total: number };
+    };
+    if (result.status === "error") throw new Error("Deals request failed");
     return {
-      deals: result.deals,
-      total: result.total,
-      type: search.type ?? "all",
-      sort: search.sort ?? "discount",
+      deals: result.data?.deals ?? [],
+      total: result.data?.total ?? 0,
+      type,
+      sort,
     };
   },
+  pendingComponent: () => <RouteLoading label="Loading Steam deals..." />,
+  errorComponent: RouteDataError,
   component: DealsRouteComponent,
 });
 

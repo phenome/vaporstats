@@ -11,17 +11,33 @@ import {
 import { getCanonicalGamePath } from "../lib/slug";
 import { CACHE_POLICIES, getLiveApiCacheHeaders } from "../lib/cache";
 
+import { RouteDataError, RouteLoading } from "../components/route-state";
 export const Route = createFileRoute("/rankings/peak")({
+  ssr: false,
+  headers: () => getLiveApiCacheHeaders(),
   validateSearch: (search: Record<string, unknown>) => ({
     period: typeof search.period === "string" ? search.period : "all",
   }),
   loaderDeps: ({ search: { period } }) => ({ period }),
   loader: async ({ deps: { period } }) => {
     const validPeriod = parseHistoryRange(period);
-    const db = await getDb();
-    const peaks = await getPeakRankings(db, validPeriod, { limit: 100 });
-    return { peaks, period: validPeriod };
+    const response = await fetch(
+      `/api/rankings?type=peak&period=${encodeURIComponent(validPeriod)}&limit=100`
+    );
+    if (!response.ok) throw new Error("Peak rankings request failed");
+    const result = (await response.json()) as {
+      status?: string;
+      data?: PeakRankedGame[];
+      period?: HistoryRange;
+    };
+    if (result.status === "error") throw new Error("Peak rankings request failed");
+    return {
+      peaks: Array.isArray(result.data) ? result.data : [],
+      period: result.period ?? validPeriod,
+    };
   },
+  pendingComponent: () => <RouteLoading label="Loading peak rankings..." />,
+  errorComponent: RouteDataError,
   component: PeakRankingsRouteComponent,
 });
 

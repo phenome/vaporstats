@@ -179,30 +179,7 @@ export function ChildAppPageView({
               {child.description || "No official description provided."}
             </p>
 
-            <div className="pt-3 border-t border-zinc-900 grid grid-cols-2 sm:grid-cols-5 gap-4 text-xs">
-              <div>
-                <div className="text-zinc-600 text-[10px] uppercase">Current Price</div>
-                <div className="text-zinc-100 font-bold">
-                  {price
-                    ? price.is_free
-                      ? "Free"
-                      : price.is_available && price.final_price !== null
-                      ? formatPriceCents(price.final_price, price.currency)
-                      : "Price unavailable"
-                    : "No data yet"}
-                </div>
-                {price && price.discount_percent > 0 && (
-                  <span className="text-emerald-400 font-bold text-[10px]">
-                    -{price.discount_percent}%
-                  </span>
-                )}
-              </div>
-              <div>
-                <div className="text-zinc-600 text-[10px] uppercase">Price Observed</div>
-                <div className="text-zinc-300 truncate text-[11px]">
-                  {price?.observed_at ? formatPriceUtc(price.observed_at) : "No data yet"}
-                </div>
-              </div>
+            <div className="pt-3 border-t border-zinc-900 grid grid-cols-1 sm:grid-cols-3 gap-4 text-xs">
               <div>
                 <div className="text-zinc-600 text-[10px] uppercase">Parent Game</div>
                 <a href={parentUrl} className="text-zinc-200 hover:text-orange-400 truncate block">

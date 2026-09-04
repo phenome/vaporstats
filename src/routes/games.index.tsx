@@ -3,13 +3,24 @@ import { createFileRoute } from "@tanstack/react-router";
 import { listPlayableGames, type CatalogEntity } from "../lib/catalog";
 import { getDb } from "../lib/db";
 import { getCanonicalGamePath } from "../lib/slug";
+import { getLiveApiCacheHeaders } from "../lib/cache";
+import { RouteDataError, RouteLoading } from "../components/route-state";
 
 export const Route = createFileRoute("/games/")({
+  ssr: false,
+  headers: () => getLiveApiCacheHeaders(),
   loader: async () => {
-    const db = await getDb();
-    const games = await listPlayableGames(db, { limit: 100 });
-    return { games };
+    const response = await fetch("/api/catalog?limit=100");
+    if (!response.ok) throw new Error("Catalog request failed");
+    const result = (await response.json()) as {
+      status?: string;
+      data?: CatalogEntity[];
+    };
+    if (result.status === "error") throw new Error("Catalog request failed");
+    return { games: Array.isArray(result.data) ? result.data : [] };
   },
+  pendingComponent: () => <RouteLoading label="Loading playable games..." />,
+  errorComponent: RouteDataError,
   component: GamesRouteView,
 });
 
@@ -24,7 +35,7 @@ export function GamesIndexComponent({ games: propGames }: { games?: CatalogEntit
           <div className="flex items-center gap-2 mb-1">
             <span className="w-2 h-2 bg-orange-500"></span>
             <span className="text-[11px] font-mono uppercase tracking-widest text-orange-400">
-              D1 Catalog Index
+              Steam Game Catalog
             </span>
           </div>
           <h1 className="text-2xl font-mono font-bold text-white tracking-tight">

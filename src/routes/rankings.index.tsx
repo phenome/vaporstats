@@ -9,12 +9,19 @@ import {
 import { getCanonicalGamePath } from "../lib/slug";
 import { CACHE_POLICIES, getLiveApiCacheHeaders } from "../lib/cache";
 
+import { RouteDataError, RouteLoading } from "../components/route-state";
 export const Route = createFileRoute("/rankings/")({
+  ssr: false,
+  headers: () => getLiveApiCacheHeaders(),
   loader: async () => {
-    const db = await getDb();
-    const games = await getMostPlayedRankings(db, { limit: 100 });
-    return { games };
+    const response = await fetch("/api/rankings?type=most_played&limit=100");
+    if (!response.ok) throw new Error("Rankings request failed");
+    const result = (await response.json()) as { status?: string; data?: RankedGame[] };
+    if (result.status === "error") throw new Error("Rankings request failed");
+    return { games: Array.isArray(result.data) ? result.data : [] };
   },
+  pendingComponent: () => <RouteLoading label="Loading rankings..." />,
+  errorComponent: RouteDataError,
   component: RankingsRouteComponent,
 });
 

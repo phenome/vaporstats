@@ -8,7 +8,7 @@ import {
   type WeeklyReleasesResult,
 } from "../lib/releases";
 import { ReleaseCalendar } from "../components/release-calendar";
-import { CACHE_POLICIES, getLiveApiCacheHeaders } from "../lib/cache";
+import { CACHE_POLICIES, getEntityCacheHeaders } from "../lib/cache";
 
 export interface ReleasesWeekPageViewProps {
   data: WeeklyReleasesResult;
@@ -98,7 +98,7 @@ export async function handleWeekReleasesHttpRequest(
     status: 200,
     headers: {
       "Content-Type": "text/html; charset=utf-8",
-      ...getLiveApiCacheHeaders(),
+      ...getEntityCacheHeaders(),
     },
   });
 }
@@ -119,6 +119,7 @@ function wrapHtml(title: string, bodyContent: string): string {
 }
 
 export const Route = createFileRoute("/releases/$week")({
+  headers: () => getEntityCacheHeaders(),
   loader: async ({ params }) => {
     const bounds = parseIsoWeek(params.week);
     if (!bounds) {

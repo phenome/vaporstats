@@ -57,7 +57,7 @@ export function PlayerHistoryChart({
         const res = await fetchFn(`/api/players/history?appid=${appid}&range=${range}`);
         if (cancelled) return;
         if (!res.ok) {
-          setStatus((prev) => (prev === "success" ? prev : "error"));
+          setStatus("error");
           return;
         }
         const json = (await res.json()) as { status?: string; data?: PlayerHistoryResult };
@@ -71,7 +71,7 @@ export function PlayerHistoryChart({
         }
       } catch {
         if (!cancelled) {
-          setStatus((prev) => (prev === "success" ? prev : "error"));
+          setStatus("error");
         }
       }
     }
