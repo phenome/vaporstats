@@ -33,5 +33,21 @@
   ],
   "observability": {
     "enabled": true
+  },
+  "env": {
+    "staging": {
+      "name": "vaporstats-staging",
+      "workers_dev": true,
+      "preview_urls": false,
+      "routes": [],
+      "d1_databases": [
+        {
+          "binding": "DB",
+          "database_name": "vaporstats-staging-d1",
+          "database_id": "bddcda15-1f29-4d2b-980e-37e5b4a74bf3",
+          "migrations_dir": "migrations"
+        }
+      ]
+    }
   }
 }
