@@ -3,6 +3,7 @@ import {
   TICK_REQUEST_CAP,
   DAILY_REQUEST_CAP,
   calculateDeterministicSlot,
+  reRankTrackedTiers,
 } from "../src/lib/player";
 import {
   runPlayerCollectionTick,
@@ -98,6 +99,9 @@ export default {
           budgetTime,
           customFetch,
         });
+        if (tickResult.succeeded > 0) {
+          await reRankTrackedTiers(db, anchorTime);
+        }
 
         let discoveryResult = null;
         let rollupResult = null;
