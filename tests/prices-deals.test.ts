@@ -309,9 +309,10 @@ describe("VaporStats Steam Prices and Deals", () => {
     expect(failResult.executed).toBe(false);
     expect(failResult.checkpointAdvanced).toBe(false);
 
-    // Checkpoint remains preserved at prior successful cursor (1700005000)
+    // Cursor advances safely while the failed AppID is retained for retry.
     const preservedCheckpoint = await getCheckpoint(d1, DEFAULT_PRICE_CHECKPOINT_KEY);
-    expect(preservedCheckpoint?.cursor).toBe(1700005000);
+    expect(preservedCheckpoint?.cursor).toBe(1700009999);
+    expect(JSON.parse(preservedCheckpoint?.value ?? "{}").pending).toContain(1086940);
 
     console.log("incremental feed checkpoint");
   });
@@ -347,6 +348,17 @@ describe("VaporStats Steam Prices and Deals", () => {
     });
     expect(calledAppIds).toEqual([1, 2, 3]);
 
+    const targetFill = await refreshIndicatedAppPrices(
+      d1,
+      Array.from({ length: 102 }, (_, index) => index + 10),
+      { customFetch: (async (input: unknown) => {
+        const appid = Number(new URL(String(input)).searchParams.get("appids"));
+        return successResponse(appid);
+      }) as unknown as typeof fetch, successTarget: 100, attemptCap: 200 }
+    );
+    expect(targetFill).toMatchObject({ attempted: 100, successful: 100, failed: 0 });
+
+
     calledAppIds.length = 0;
     const stopOnRateLimit = (async (input: unknown) => {
       const appid = Number(new URL(String(input)).searchParams.get("appids"));
@@ -381,6 +393,70 @@ describe("VaporStats Steam Prices and Deals", () => {
       is_available: false,
       rateLimited: false,
     });
+  });
+
+  test("hourly feed retries pending IDs without losing the advanced cursor", async () => {
+    let feedRuns = 0;
+    const detailCalls: number[] = [];
+    const fetcher = (async (input: unknown) => {
+      const url = String(input);
+      if (url.includes("IStoreService/GetAppList")) {
+        feedRuns++;
+        const apps = feedRuns === 1
+          ? [
+              { appid: 1, last_modified: 100 },
+              { appid: 2, last_modified: 100 },
+              { appid: 3, last_modified: 100 },
+            ]
+          : [{ appid: 4, last_modified: 200 }];
+        return new Response(
+          JSON.stringify({ response: { apps, have_more_results: false } }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+
+      const appid = Number(new URL(url).searchParams.get("appids"));
+      detailCalls.push(appid);
+      if (feedRuns === 1 && appid === 2) {
+        return new Response("Too Many Requests", { status: 429 });
+      }
+      return new Response(
+        JSON.stringify({ [appid]: { success: true, data: { is_free: true } } }),
+        { status: 200, headers: { "Content-Type": "application/json" } }
+      );
+    }) as unknown as typeof fetch;
+
+    const first = await runHourlyPriceFeedTick(d1, {
+      apiKey: "test_key",
+      customFetch: fetcher,
+    });
+    expect(first).toMatchObject({
+      attempted: 2,
+      successful: 1,
+      failed: 1,
+      rateLimited: true,
+      pending: 2,
+      checkpointAdvanced: false,
+      checkpointCursor: 100,
+    });
+    const pendingCheckpoint = await getCheckpoint(d1, DEFAULT_PRICE_CHECKPOINT_KEY);
+    expect(pendingCheckpoint?.cursor).toBe(100);
+    expect(JSON.parse(pendingCheckpoint?.value ?? "{}").pending).toEqual([2, 3]);
+
+    const second = await runHourlyPriceFeedTick(d1, {
+      apiKey: "test_key",
+      customFetch: fetcher,
+    });
+    expect(second).toMatchObject({
+      attempted: 3,
+      successful: 3,
+      failed: 0,
+      rateLimited: false,
+      pending: 0,
+      checkpointAdvanced: true,
+      checkpointCursor: 200,
+    });
+    expect(detailCalls).toEqual([1, 2, 2, 3, 4]);
   });
   // G2: current US/USD price, discount, and source time persist for eligible entities
   test("current price state - persists US/USD price, discount, and source time", async () => {

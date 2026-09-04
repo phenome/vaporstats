@@ -231,6 +231,7 @@ export async function refreshIndicatedAppPrices(
   failed: number;
   changed: number;
   rateLimited: boolean;
+  pendingAppIds: number[];
 }> {
   const customFetch = options.customFetch ?? fetch;
   const anchorTime = options.anchorTime ?? new Date();
@@ -243,20 +244,20 @@ export async function refreshIndicatedAppPrices(
   let failed = 0;
   let changed = 0;
   let rateLimited = false;
+  const pendingAppIds: number[] = [];
 
-  for (
-    let index = 0;
-    index < appids.length && attempted < attemptCap && successful < successTarget;
-    index++
-  ) {
+  let index = 0;
+  for (; index < appids.length && attempted < attemptCap && successful < successTarget; index++) {
     const appid = appids[index];
     attempted++;
     const priceDetails = await fetchSteamPriceDetails(appid, { customFetch });
 
     if (!priceDetails.success) {
       failed++;
+      pendingAppIds.push(appid);
       if (priceDetails.rateLimited) {
         rateLimited = true;
+        index++;
         break;
       }
       continue;
@@ -280,9 +281,25 @@ export async function refreshIndicatedAppPrices(
       changed++;
     }
   }
+  for (; index < appids.length; index++) {
+    pendingAppIds.push(appids[index]);
+  }
 
-  return { attempted, successful, failed, changed, rateLimited };
+  return { attempted, successful, failed, changed, rateLimited, pendingAppIds };
 }
+
+function readPendingAppIds(checkpoint: { value: string } | null): number[] {
+  if (!checkpoint) return [];
+  try {
+    const value = JSON.parse(checkpoint.value) as { pending?: unknown };
+    return Array.isArray(value.pending)
+      ? value.pending.filter((appid): appid is number => Number.isInteger(appid) && appid > 0)
+      : [];
+  } catch {
+    return [];
+  }
+}
+
 
 export interface HourlyPriceFeedTickResult {
   executed: boolean;
@@ -293,6 +310,7 @@ export interface HourlyPriceFeedTickResult {
   failed: number;
   changed: number;
   rateLimited: boolean;
+  pending: number;
   checkpointAdvanced: boolean;
   checkpointCursor: number | null;
 }
@@ -301,7 +319,7 @@ export interface HourlyPriceFeedTickResult {
  * Hourly scheduled tick:
  * - Checks incremental Steam catalog feed when credentials exist
  * - Refreshes details ONLY for indicated apps (no catalog-wide sweep)
- * - Advances checkpoint ONLY on success
+ * - Advances the feed cursor while retaining failed/unprocessed app IDs
  */
 export async function runHourlyPriceFeedTick(
   db: D1Database,
@@ -323,6 +341,7 @@ export async function runHourlyPriceFeedTick(
       successful: 0,
       failed: 0,
       rateLimited: false,
+      pending: 0,
       changed: 0,
       checkpointAdvanced: false,
       checkpointCursor: null,
@@ -332,87 +351,65 @@ export async function runHourlyPriceFeedTick(
   const checkpointKey = options.checkpointKey ?? DEFAULT_PRICE_CHECKPOINT_KEY;
   const customFetch = options.customFetch ?? fetch;
   const anchorTime = options.anchorTime ?? new Date();
-
-  // Read existing checkpoint
   const existingCheckpoint = await getCheckpoint(db, checkpointKey);
-  const ifModifiedSince = existingCheckpoint?.cursor ?? undefined;
-
-  const maxToProcess = options.maxAppsToProcess ?? 100;
-
+  const pendingBeforeFeed = readPendingAppIds(existingCheckpoint);
   const feedResult = await fetchSteamCatalogFeed(apiKey, {
-    ifModifiedSince,
-    maxResults: maxToProcess,
+    ifModifiedSince: existingCheckpoint?.cursor ?? undefined,
+    maxResults: options.maxAppsToProcess ?? 200,
     customFetch,
   });
 
   if (!feedResult) {
-    // Feed fetch failed: DO NOT advance checkpoint
     return {
       executed: false,
       reason: "feed_fetch_failed",
-      appsIndicated: 0,
+      appsIndicated: pendingBeforeFeed.length,
       attempted: 0,
       successful: 0,
       failed: 0,
       rateLimited: false,
+      pending: pendingBeforeFeed.length,
       changed: 0,
       checkpointAdvanced: false,
       checkpointCursor: existingCheckpoint?.cursor ?? null,
     };
   }
 
-  const apps = feedResult.apps;
-  const indicatedAppIds = apps.map((a) => a.appid);
-
-  // Refresh prices only for indicated apps
+  const indicatedAppIds = [
+    ...new Set([...pendingBeforeFeed, ...feedResult.apps.map((app) => app.appid)]),
+  ];
   const refreshStats = await refreshIndicatedAppPrices(db, indicatedAppIds, {
     customFetch,
     anchorTime,
-    successTarget: maxToProcess,
-    attemptCap: indicatedAppIds.length,
+    successTarget: 100,
+    attemptCap: 200,
   });
-
-  // Do not advance checkpoint if any detail refresh failed
-  if (refreshStats.failed > 0) {
-    return {
-      executed: true,
-      appsIndicated: apps.length,
-      attempted: refreshStats.attempted,
-      successful: refreshStats.successful,
-      failed: refreshStats.failed,
-      changed: refreshStats.changed,
-      rateLimited: refreshStats.rateLimited,
-      checkpointAdvanced: false,
-      checkpointCursor: existingCheckpoint?.cursor ?? null,
-    };
-  }
-
-  // Advance checkpoint only when all indicated apps were successfully processed
-  let checkpointAdvanced = false;
+  const pending = refreshStats.pendingAppIds;
   const newCursor = feedResult.lastModified;
+  const previousCursor = existingCheckpoint?.cursor ?? null;
+  const cursorAdvanced =
+    newCursor !== null && (previousCursor === null || newCursor > previousCursor);
+  const checkpointAdvanced = cursorAdvanced && pending.length === 0;
 
-  if (apps.length > 0 && refreshStats.successful === apps.length && newCursor !== null) {
+  if (pending.length > 0 || pendingBeforeFeed.length > 0 || cursorAdvanced) {
     await setCheckpoint(
       db,
       checkpointKey,
-      `sync:${new Date().toISOString()}`,
-      newCursor
+      JSON.stringify({ pending: [...new Set(pending)] }),
+      cursorAdvanced ? newCursor : previousCursor
     );
-    checkpointAdvanced = true;
   }
 
   return {
     executed: true,
-    appsIndicated: apps.length,
+    appsIndicated: indicatedAppIds.length,
     attempted: refreshStats.attempted,
     successful: refreshStats.successful,
     failed: refreshStats.failed,
     rateLimited: refreshStats.rateLimited,
     changed: refreshStats.changed,
+    pending: pending.length,
+    checkpointCursor: cursorAdvanced ? newCursor : previousCursor,
     checkpointAdvanced,
-    checkpointCursor:
-      checkpointAdvanced && newCursor !== null
-        ? newCursor
-        : (existingCheckpoint?.cursor ?? null),
   };
 }
