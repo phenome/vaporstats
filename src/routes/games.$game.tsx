@@ -57,7 +57,7 @@ function GameRouteComponent() {
   );
 }
 
-export function GameNotFoundComponent() {
+function GameNotFoundComponent() {
   return (
     <div className="max-w-7xl mx-auto px-4 py-16 text-center space-y-4 font-mono">
       <div className="text-4xl font-bold text-orange-500">404</div>

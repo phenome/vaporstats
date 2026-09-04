@@ -66,7 +66,7 @@ function ChildRouteComponent() {
   const { parent, child, price, priceHistory } = Route.useLoaderData();
   return <ChildAppPageView parent={parent} child={child} price={price} priceHistory={priceHistory} />;
 }
-export function ChildNotFoundComponent() {
+function ChildNotFoundComponent() {
   return (
     <div className="max-w-7xl mx-auto px-4 py-16 text-center space-y-4 font-mono">
       <div className="text-4xl font-bold text-orange-500">404</div>
