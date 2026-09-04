@@ -315,6 +315,73 @@ describe("VaporStats Steam Prices and Deals", () => {
 
     console.log("incremental feed checkpoint");
   });
+
+  test("bounded price refresh - fills its success target and stops on rate limiting", async () => {
+    const calledAppIds: number[] = [];
+    const successResponse = (appid: number) =>
+      new Response(
+        JSON.stringify({
+          [appid]: {
+            success: true,
+            data: { name: `Game ${appid}`, is_free: true },
+          },
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } }
+      );
+    const continueAfterFailure = (async (input: unknown) => {
+      const appid = Number(new URL(String(input)).searchParams.get("appids"));
+      calledAppIds.push(appid);
+      return appid === 1 ? new Response("Store error", { status: 500 }) : successResponse(appid);
+    }) as unknown as typeof fetch;
+
+    const filled = await refreshIndicatedAppPrices(d1, [1, 2, 3, 4], {
+      customFetch: continueAfterFailure,
+      successTarget: 2,
+      attemptCap: 4,
+    });
+    expect(filled).toMatchObject({
+      attempted: 3,
+      successful: 2,
+      failed: 1,
+      rateLimited: false,
+    });
+    expect(calledAppIds).toEqual([1, 2, 3]);
+
+    calledAppIds.length = 0;
+    const stopOnRateLimit = (async (input: unknown) => {
+      const appid = Number(new URL(String(input)).searchParams.get("appids"));
+      calledAppIds.push(appid);
+      return appid === 2
+        ? new Response("Too Many Requests", { status: 429 })
+        : successResponse(appid);
+    }) as unknown as typeof fetch;
+
+    const rateLimited = await refreshIndicatedAppPrices(d1, [1, 2, 3, 4], {
+      customFetch: stopOnRateLimit,
+      successTarget: 3,
+      attemptCap: 4,
+    });
+    expect(rateLimited).toMatchObject({
+      attempted: 2,
+      successful: 1,
+      failed: 1,
+      rateLimited: true,
+    });
+    expect(calledAppIds).toEqual([1, 2]);
+
+    const unavailable = await fetchSteamPriceDetails(5, {
+      customFetch: (async () =>
+        new Response(JSON.stringify({ "5": { success: false } }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        })) as unknown as typeof fetch,
+    });
+    expect(unavailable).toMatchObject({
+      success: true,
+      is_available: false,
+      rateLimited: false,
+    });
+  });
   // G2: current US/USD price, discount, and source time persist for eligible entities
   test("current price state - persists US/USD price, discount, and source time", async () => {
     const observedAt = "2026-09-04T12:00:00.000Z";

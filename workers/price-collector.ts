@@ -44,6 +44,7 @@ export interface SteamStoreAppDetails {
 export interface PriceDetailsResult {
   appid: number;
   success: boolean;
+  rateLimited: boolean;
   currency: string;
   initial_price: number | null;
   final_price: number | null;
@@ -52,6 +53,26 @@ export interface PriceDetailsResult {
   is_available: boolean;
   formatted_initial: string | null;
   formatted_final: string | null;
+}
+
+function unavailablePriceDetails(
+  appid: number,
+  success: boolean,
+  rateLimited = false
+): PriceDetailsResult {
+  return {
+    appid,
+    success,
+    rateLimited,
+    currency: "USD",
+    initial_price: null,
+    final_price: null,
+    discount_percent: 0,
+    is_free: false,
+    is_available: false,
+    formatted_initial: null,
+    formatted_final: null,
+  };
 }
 
 /**
@@ -136,45 +157,26 @@ export async function fetchSteamPriceDetails(
     });
 
     if (!res.ok) {
-      return {
-        appid,
-        success: false,
-        currency: "USD",
-        initial_price: null,
-        final_price: null,
-        discount_percent: 0,
-        is_free: false,
-        is_available: false,
-        formatted_initial: null,
-        formatted_final: null,
-      };
+      return unavailablePriceDetails(appid, false, res.status === 429);
     }
 
     const json = (await res.json()) as SteamStoreAppDetails;
     const entry = json[String(appid)];
 
-    if (!entry || !entry.success || !entry.data) {
-      return {
-        appid,
-        success: false,
-        currency: "USD",
-        initial_price: null,
-        final_price: null,
-        discount_percent: 0,
-        is_free: false,
-        is_available: false,
-        formatted_initial: null,
-        formatted_final: null,
-      };
+    if (entry && !entry.success) {
+      return unavailablePriceDetails(appid, true);
+    }
+    if (!entry?.data) {
+      return unavailablePriceDetails(appid, false);
     }
 
     const details = entry.data;
 
-    // Explicitly free-to-play
     if (details.is_free === true) {
       return {
         appid,
         success: true,
+        rateLimited: false,
         currency: "USD",
         initial_price: 0,
         final_price: 0,
@@ -186,12 +188,12 @@ export async function fetchSteamPriceDetails(
       };
     }
 
-    // Priced with price_overview
     if (details.price_overview) {
       const po = details.price_overview;
       return {
         appid,
         success: true,
+        rateLimited: false,
         currency: po.currency || "USD",
         initial_price: po.initial,
         final_price: po.final,
@@ -203,32 +205,9 @@ export async function fetchSteamPriceDetails(
       };
     }
 
-    // Available app metadata exists, but no price overview and not free (e.g. unpriced, coming soon, unlisted)
-    return {
-      appid,
-      success: true,
-      currency: "USD",
-      initial_price: null,
-      final_price: null,
-      discount_percent: 0,
-      is_free: false,
-      is_available: false,
-      formatted_initial: null,
-      formatted_final: null,
-    };
+    return unavailablePriceDetails(appid, true);
   } catch {
-    return {
-      appid,
-      success: false,
-      currency: "USD",
-      initial_price: null,
-      final_price: null,
-      discount_percent: 0,
-      is_free: false,
-      is_available: false,
-      formatted_initial: null,
-      formatted_final: null,
-    };
+    return unavailablePriceDetails(appid, false);
   }
 }
 
@@ -243,29 +222,43 @@ export async function refreshIndicatedAppPrices(
   options: {
     customFetch?: typeof fetch;
     anchorTime?: Date;
+    successTarget?: number;
+    attemptCap?: number;
   } = {}
 ): Promise<{
   attempted: number;
   successful: number;
   failed: number;
   changed: number;
+  rateLimited: boolean;
 }> {
   const customFetch = options.customFetch ?? fetch;
   const anchorTime = options.anchorTime ?? new Date();
   const observedAt = anchorTime.toISOString();
+  const successTarget = Math.max(0, Math.floor(options.successTarget ?? appids.length));
+  const attemptCap = Math.max(0, Math.floor(options.attemptCap ?? appids.length));
 
   let attempted = 0;
   let successful = 0;
   let failed = 0;
   let changed = 0;
+  let rateLimited = false;
 
-  for (const appid of appids) {
+  for (
+    let index = 0;
+    index < appids.length && attempted < attemptCap && successful < successTarget;
+    index++
+  ) {
+    const appid = appids[index];
     attempted++;
     const priceDetails = await fetchSteamPriceDetails(appid, { customFetch });
 
     if (!priceDetails.success) {
-      // Failed refresh: preserve prior state without writing zero or deleting
       failed++;
+      if (priceDetails.rateLimited) {
+        rateLimited = true;
+        break;
+      }
       continue;
     }
 
@@ -288,7 +281,7 @@ export async function refreshIndicatedAppPrices(
     }
   }
 
-  return { attempted, successful, failed, changed };
+  return { attempted, successful, failed, changed, rateLimited };
 }
 
 export interface HourlyPriceFeedTickResult {
@@ -299,6 +292,7 @@ export interface HourlyPriceFeedTickResult {
   successful: number;
   failed: number;
   changed: number;
+  rateLimited: boolean;
   checkpointAdvanced: boolean;
   checkpointCursor: number | null;
 }
@@ -328,6 +322,7 @@ export async function runHourlyPriceFeedTick(
       attempted: 0,
       successful: 0,
       failed: 0,
+      rateLimited: false,
       changed: 0,
       checkpointAdvanced: false,
       checkpointCursor: null,
@@ -359,6 +354,7 @@ export async function runHourlyPriceFeedTick(
       attempted: 0,
       successful: 0,
       failed: 0,
+      rateLimited: false,
       changed: 0,
       checkpointAdvanced: false,
       checkpointCursor: existingCheckpoint?.cursor ?? null,
@@ -372,6 +368,8 @@ export async function runHourlyPriceFeedTick(
   const refreshStats = await refreshIndicatedAppPrices(db, indicatedAppIds, {
     customFetch,
     anchorTime,
+    successTarget: maxToProcess,
+    attemptCap: indicatedAppIds.length,
   });
 
   // Do not advance checkpoint if any detail refresh failed
@@ -383,6 +381,7 @@ export async function runHourlyPriceFeedTick(
       successful: refreshStats.successful,
       failed: refreshStats.failed,
       changed: refreshStats.changed,
+      rateLimited: refreshStats.rateLimited,
       checkpointAdvanced: false,
       checkpointCursor: existingCheckpoint?.cursor ?? null,
     };
@@ -408,6 +407,7 @@ export async function runHourlyPriceFeedTick(
     attempted: refreshStats.attempted,
     successful: refreshStats.successful,
     failed: refreshStats.failed,
+    rateLimited: refreshStats.rateLimited,
     changed: refreshStats.changed,
     checkpointAdvanced,
     checkpointCursor:
