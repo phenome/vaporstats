@@ -448,6 +448,63 @@ describe("operating triggers", () => {
     }
   });
 
+  it("runs the price feed on every ten-minute scheduled invocation", async () => {
+    sqliteDb.exec(
+      "INSERT INTO apps (appid, name, slug, type, is_playable, is_eligible) VALUES (570, 'Dota 2', '570-dota-2', 'game', 1, 1)"
+    );
+    const logs: string[] = [];
+    const originalLog = console.log;
+    console.log = (...args: unknown[]) => {
+      logs.push(args.map(String).join(" "));
+    };
+
+    const customFetch = (async (input: unknown) => {
+      const url = String(input);
+      if (url.includes("IStoreService/GetAppList")) {
+        return Response.json({
+          response: {
+            apps: [{ appid: 570, last_modified: 100 }],
+            have_more_results: false,
+          },
+        });
+      }
+      if (url.includes("api/appdetails")) {
+        return Response.json({
+          "570": {
+            success: true,
+            data: { name: "Dota 2", is_free: true },
+          },
+        });
+      }
+      return Response.json({});
+    }) as unknown as typeof fetch;
+
+    try {
+      await ingestionWorker.scheduled(
+        {
+          cron: "*/10 * * * *",
+          scheduledTime: new Date("2026-09-04T14:20:00.000Z").getTime(),
+          type: "scheduled",
+        },
+        {
+          DB: d1,
+          STEAM_API_KEY: "test_key",
+          FETCH: customFetch,
+        }
+      );
+
+      const completionLog = logs.find((line) =>
+        line.includes('"event":"ingestion_completion"')
+      );
+      const parsed = JSON.parse(completionLog!) as {
+        prices: { executed: boolean; successful: number } | null;
+      };
+      expect(parsed.prices).toMatchObject({ executed: true, successful: 1 });
+    } finally {
+      console.log = originalLog;
+    }
+  });
+
   it("verifies hard ingestion constants are bounded and inspectable", () => {
     expect(TICK_REQUEST_CAP).toBe(100);
     expect(DAILY_REQUEST_CAP).toBe(5000);

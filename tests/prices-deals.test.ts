@@ -297,17 +297,28 @@ describe("VaporStats Steam Prices and Deals", () => {
     expect(partialFailResult.failed).toBe(1);
     expect(partialFailResult.checkpointAdvanced).toBe(false);
 
-    // 2. Next run with failing feed fetch -> DOES NOT advance checkpoint
-    const mockFeedFetchFailure = (async () => {
+    // Pending work is retried before the feed is contacted again.
+    let failedFeedFetches = 0;
+    const mockPendingFailureFetch = (async (input: unknown) => {
+      if (String(input).includes("IStoreService/GetAppList")) {
+        failedFeedFetches++;
+      }
       return new Response("Internal Server Error", { status: 500 });
     }) as unknown as typeof fetch;
 
     const failResult = await runHourlyPriceFeedTick(d1, {
       apiKey: "test_steam_key",
-      customFetch: mockFeedFetchFailure,
+      customFetch: mockPendingFailureFetch,
     });
-    expect(failResult.executed).toBe(false);
-    expect(failResult.checkpointAdvanced).toBe(false);
+    expect(failResult).toMatchObject({
+      executed: true,
+      attempted: 1,
+      successful: 0,
+      failed: 1,
+      pending: 1,
+      checkpointAdvanced: false,
+    });
+    expect(failedFeedFetches).toBe(0);
 
     // Cursor advances safely while the failed AppID is retained for retry.
     const preservedCheckpoint = await getCheckpoint(d1, DEFAULT_PRICE_CHECKPOINT_KEY);
@@ -395,8 +406,9 @@ describe("VaporStats Steam Prices and Deals", () => {
     });
   });
 
-  test("hourly feed retries pending IDs without losing the advanced cursor", async () => {
+  test("price feed drains pending IDs before fetching more work", async () => {
     let feedRuns = 0;
+    let rateLimitReturned = false;
     const detailCalls: number[] = [];
     const fetcher = (async (input: unknown) => {
       const url = String(input);
@@ -417,7 +429,8 @@ describe("VaporStats Steam Prices and Deals", () => {
 
       const appid = Number(new URL(url).searchParams.get("appids"));
       detailCalls.push(appid);
-      if (feedRuns === 1 && appid === 2) {
+      if (!rateLimitReturned && appid === 2) {
+        rateLimitReturned = true;
         return new Response("Too Many Requests", { status: 429 });
       }
       return new Response(
@@ -448,14 +461,30 @@ describe("VaporStats Steam Prices and Deals", () => {
       customFetch: fetcher,
     });
     expect(second).toMatchObject({
-      attempted: 3,
-      successful: 3,
+      attempted: 2,
+      successful: 2,
+      failed: 0,
+      rateLimited: false,
+      pending: 0,
+      checkpointAdvanced: false,
+      checkpointCursor: 100,
+    });
+    expect(feedRuns).toBe(1);
+
+    const third = await runHourlyPriceFeedTick(d1, {
+      apiKey: "test_key",
+      customFetch: fetcher,
+    });
+    expect(third).toMatchObject({
+      attempted: 1,
+      successful: 1,
       failed: 0,
       rateLimited: false,
       pending: 0,
       checkpointAdvanced: true,
       checkpointCursor: 200,
     });
+    expect(feedRuns).toBe(2);
     expect(detailCalls).toEqual([1, 2, 2, 3, 4]);
   });
   // G2: current US/USD price, discount, and source time persist for eligible entities

@@ -316,8 +316,9 @@ export interface HourlyPriceFeedTickResult {
 }
 
 /**
- * Hourly scheduled tick:
- * - Checks incremental Steam catalog feed when credentials exist
+ * Ten-minute scheduled tick:
+ * - Drains retained work before requesting more catalog changes
+ * - Checks the incremental Steam catalog feed when credentials exist
  * - Refreshes details ONLY for indicated apps (no catalog-wide sweep)
  * - Advances the feed cursor while retaining failed/unprocessed app IDs
  */
@@ -353,11 +354,13 @@ export async function runHourlyPriceFeedTick(
   const anchorTime = options.anchorTime ?? new Date();
   const existingCheckpoint = await getCheckpoint(db, checkpointKey);
   const pendingBeforeFeed = readPendingAppIds(existingCheckpoint);
-  const feedResult = await fetchSteamCatalogFeed(apiKey, {
-    ifModifiedSince: existingCheckpoint?.cursor ?? undefined,
-    maxResults: options.maxAppsToProcess ?? 200,
-    customFetch,
-  });
+  const feedResult = pendingBeforeFeed.length > 0
+    ? { apps: [], lastModified: null }
+    : await fetchSteamCatalogFeed(apiKey, {
+        ifModifiedSince: existingCheckpoint?.cursor ?? undefined,
+        maxResults: options.maxAppsToProcess ?? 200,
+        customFetch,
+      });
 
   if (!feedResult) {
     return {

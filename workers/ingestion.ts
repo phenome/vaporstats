@@ -61,7 +61,7 @@ async function releaseIngestionLease(db: D1Database, token: string): Promise<voi
 
 /**
  * Cloudflare Worker for scheduled ten-minute player activity ingestion
- * and hourly incremental Steam price catalog feed processing.
+ * and incremental Steam price catalog feed processing.
  * Owns Steam credentials, shares D1 with public Worker, and anchors slot calculation to scheduled event time.
  * Accepts optional injected fetch in env for tests; production default remains global fetch.
  */
@@ -112,7 +112,7 @@ export default {
         }
 
         let priceResult = null;
-        if (anchorTime.getUTCMinutes() < 10 && env.STEAM_API_KEY) {
+        if (env.STEAM_API_KEY) {
           priceResult = await runHourlyPriceFeedTick(db, {
             apiKey: env.STEAM_API_KEY,
             customFetch,
