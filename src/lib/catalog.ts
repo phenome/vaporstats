@@ -7,6 +7,14 @@ export type ReleaseDateSource =
   | "appdetails"
   | null;
 
+export type ReleaseEventType = "early_access" | "full_release" | "patch";
+
+export interface GameReleaseEvent {
+  event_type: ReleaseEventType;
+  event_date: string;
+  source: Exclude<ReleaseDateSource, null>;
+}
+
 export interface CatalogEntity {
   appid: number;
   name: string;
@@ -42,6 +50,7 @@ export interface GameDetail extends CatalogEntity {
   latest_players: number | null;
   peak_players: number | null;
   last_observed_at: string | null;
+  release_events?: GameReleaseEvent[];
 }
 
 interface RawAppRow {
@@ -178,12 +187,29 @@ export async function getGameByAppId(
       last_observed_at = obs.observed_at;
     }
   }
+  let release_events: GameReleaseEvent[] = [];
+
+  const releaseEventsTable = await db
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='app_release_events'")
+    .first<{ name: string }>();
+
+  if (releaseEventsTable) {
+    const eventResult = await db
+      .prepare(`SELECT event_type, event_date, source
+       FROM app_release_events
+       WHERE appid = ?
+       ORDER BY event_date DESC, event_type ASC`)
+      .bind(appid)
+      .all<GameReleaseEvent>();
+    release_events = eventResult.results ?? [];
+  }
 
   return {
     ...entity,
     latest_players,
     peak_players,
     last_observed_at,
+    release_events,
   };
 }
 

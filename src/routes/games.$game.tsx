@@ -1,9 +1,9 @@
 import React from "react";
 import { renderToString } from "react-dom/server";
 import { createFileRoute, notFound, redirect } from "@tanstack/react-router";
-import { getGameByAppId, type GameDetail } from "../lib/catalog";
-import { getRelatedApps, type GroupedRelatedApps } from "../lib/related";
-import { getPlayerHistory, type PlayerHistoryResult } from "../lib/player-history";
+import { getGameByAppId } from "../lib/catalog";
+import { getRelatedApps } from "../lib/related";
+import { getPlayerHistory } from "../lib/player-history";
 import { getDb, type D1Database } from "../lib/db";
 import { getCurrentPrice, getPriceHistory } from "../lib/prices";
 import { parseGameSlug, toSlug, getCanonicalGamePath } from "../lib/slug";
