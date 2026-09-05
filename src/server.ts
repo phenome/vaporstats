@@ -249,9 +249,6 @@ export function startServer(options: StartServerOptions = {}) {
   return serverPromise;
 }
 
-const server = { fetch: handleRequest };
-export default server;
-
 if (import.meta.main) {
   void startServer().catch((error) => {
     console.error("Failed to start VaporStats server", error);
