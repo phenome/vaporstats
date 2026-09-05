@@ -1,11 +1,24 @@
 import React from "react";
 import { renderToString } from "react-dom/server";
 import { createFileRoute, notFound, redirect } from "@tanstack/react-router";
+import { createServerFn } from "@tanstack/react-start";
 import { getPublisherGames, type PublisherDetail } from "../lib/publishers";
-import { getDb, type AppDatabase } from "../lib/db";
+import { getDb } from "../lib/db-access";
+import type { AppDatabase } from "../lib/db";
 import { parsePublisherSlug, getCanonicalPublisherPath } from "../lib/slug";
 import { CACHE_POLICIES, getEntityCacheHeaders } from "../lib/cache";
 import { PublisherPageView } from "../components/publisher-page";
+const getPublisher = createServerFn({ method: "GET" })
+  .validator((data: { slug: string }) => {
+    if (!data || typeof data.slug !== "string") {
+      throw new Error("Invalid publisher slug");
+    }
+    return data;
+  })
+  .handler(async ({ data }) => {
+    const db = await getDb();
+    return getPublisherGames(db, data.slug);
+  });
 
 export const Route = createFileRoute("/publisher/$publisher")({
   headers: () => getEntityCacheHeaders(),
@@ -15,8 +28,7 @@ export const Route = createFileRoute("/publisher/$publisher")({
       throw notFound();
     }
 
-    const db = await getDb();
-    const publisher = await getPublisherGames(db, parsed.slug);
+    const publisher = await getPublisher({ data: { slug: parsed.slug } });
     if (!publisher) {
       throw notFound();
     }

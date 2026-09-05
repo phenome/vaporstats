@@ -1,7 +1,9 @@
 import React from "react";
 import { renderToString } from "react-dom/server";
 import { createFileRoute, notFound, redirect } from "@tanstack/react-router";
-import { getDb, type AppDatabase } from "../lib/db";
+import { createServerFn } from "@tanstack/react-start";
+import { getDb } from "../lib/db-access";
+import type { AppDatabase } from "../lib/db";
 import type { CatalogEntity } from "../lib/catalog";
 import {
   getChildApp,
@@ -20,6 +22,37 @@ import { PriceHistoryChart } from "../components/price-history";
 import { parseGameSlug, toSlug, getCanonicalGamePath, getCanonicalPublisherPath } from "../lib/slug";
 import { CACHE_POLICIES, getEntityCacheHeaders } from "../lib/cache";
 
+const getChildAppData = createServerFn({ method: "GET" })
+  .validator((data: { parentAppId: number; childAppId: number }) => {
+    if (
+      !data ||
+      !Number.isInteger(data.parentAppId) ||
+      data.parentAppId <= 0 ||
+      !Number.isInteger(data.childAppId) ||
+      data.childAppId <= 0
+    ) {
+      throw new Error("Invalid related app IDs");
+    }
+    return data;
+  })
+  .handler(async ({ data }) => {
+    const db = await getDb();
+    return getChildApp(db, data.parentAppId, data.childAppId);
+  });
+
+const getChildPricing = createServerFn({ method: "GET" })
+  .validator((data: { appid: number }) => {
+    if (!data || !Number.isInteger(data.appid) || data.appid <= 0) {
+      throw new Error("Invalid app ID");
+    }
+    return data;
+  })
+  .handler(async ({ data }) => {
+    const db = await getDb();
+    const currentPrice = await getCurrentPrice(db, data.appid);
+    const priceHistory = await getPriceHistory(db, data.appid, "all", { currentPrice });
+    return { currentPrice, priceHistory };
+  });
 export const Route = createFileRoute("/games/$game_/$child")({
   headers: () => getEntityCacheHeaders(),
   loader: async ({ params }) => {
@@ -29,8 +62,9 @@ export const Route = createFileRoute("/games/$game_/$child")({
       throw notFound();
     }
 
-    const db = await getDb();
-    const result = await getChildApp(db, p.appid, c.appid);
+    const result = await getChildAppData({
+      data: { parentAppId: p.appid, childAppId: c.appid },
+    });
     if (!result) {
       throw notFound();
     }
@@ -50,9 +84,10 @@ export const Route = createFileRoute("/games/$game_/$child")({
         statusCode: 301,
       });
     }
+    const { currentPrice, priceHistory } = await getChildPricing({
+      data: { appid: result.child.appid },
+    });
 
-    const currentPrice = await getCurrentPrice(db, result.child.appid);
-    const priceHistory = await getPriceHistory(db, result.child.appid, "all", { currentPrice });
 
     return { parent: result.parent, child: result.child, price: currentPrice, priceHistory };
   },

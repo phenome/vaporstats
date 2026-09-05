@@ -1,5 +1,6 @@
 import { Navigate, createFileRoute } from "@tanstack/react-router";
-import { getDb, type AppDatabase } from "../lib/db";
+import { getDb } from "../lib/db-access";
+import type { AppDatabase } from "../lib/db";
 import { getCurrentIsoWeek, parseIsoWeek } from "../lib/releases";
 import { handleWeekReleasesHttpRequest } from "./releases.$week";
 import { getLiveApiCacheHeaders, getPageCacheHeaders } from "../lib/cache";

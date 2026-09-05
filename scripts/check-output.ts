@@ -1,4 +1,4 @@
-import { existsSync, readdirSync, statSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 
 const DIST_DIR = join(process.cwd(), "dist");
@@ -24,6 +24,13 @@ function countFiles(dir: string): number {
   }
   return count;
 }
+function listJavaScriptFiles(dir: string): string[] {
+  return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+    const fullPath = join(dir, entry.name);
+    if (entry.isDirectory()) return listJavaScriptFiles(fullPath);
+    return entry.isFile() && entry.name.endsWith(".js") ? [fullPath] : [];
+  });
+}
 
 const totalFiles = countFiles(DIST_DIR);
 console.log("Dist output file count: " + totalFiles + " (threshold: < " + MAX_THRESHOLD + ")");
@@ -41,6 +48,18 @@ if (!existsSync(CLIENT_DIR) || !statSync(CLIENT_DIR).isDirectory()) {
 const clientFiles = countFiles(CLIENT_DIR);
 if (clientFiles === 0) {
   console.error("ERROR: client output directory is empty.");
+  process.exit(1);
+}
+const serverRuntimeFiles = listJavaScriptFiles(CLIENT_DIR).filter((file) => {
+  const source = readFileSync(file, "utf8");
+  return (
+    source.includes("bun:sqlite") ||
+    source.includes("DATABASE_PATH") ||
+    source.includes("schema_migrations")
+  );
+});
+if (serverRuntimeFiles.length > 0) {
+  console.error("ERROR: server runtime code leaked into client output: " + serverRuntimeFiles.join(", "));
   process.exit(1);
 }
 

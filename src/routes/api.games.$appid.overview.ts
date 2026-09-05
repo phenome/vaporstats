@@ -1,5 +1,6 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { getDb, type AppDatabase } from "../lib/db";
+import { getDb } from "../lib/db-access";
+import type { AppDatabase } from "../lib/db";
 import { getGameOverview, type GameOverviewData } from "../lib/player";
 import { getLiveApiCacheHeaders } from "../lib/cache";
 

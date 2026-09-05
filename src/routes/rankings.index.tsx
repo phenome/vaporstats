@@ -2,7 +2,8 @@ import React from "react";
 import { renderToString } from "react-dom/server";
 import { createFileRoute } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
-import { getDb, type AppDatabase } from "../lib/db";
+import { getDb } from "../lib/db-access";
+import type { AppDatabase } from "../lib/db";
 import {
   getMostPlayedRankings,
   type RankedGame,

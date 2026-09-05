@@ -1,6 +1,7 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { listPlayableGames } from "../lib/catalog";
-import { getDb, type AppDatabase } from "../lib/db";
+import { getDb } from "../lib/db-access";
+import type { AppDatabase } from "../lib/db";
 import { CACHE_POLICIES, getLiveApiCacheHeaders } from "../lib/cache";
 
 export async function handleCatalogRequest(

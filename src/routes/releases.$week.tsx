@@ -1,7 +1,8 @@
 import React from "react";
 import { renderToString } from "react-dom/server";
 import { createFileRoute, notFound } from "@tanstack/react-router";
-import { getDb, type AppDatabase } from "../lib/db";
+import { getDb } from "../lib/db-access";
+import type { AppDatabase } from "../lib/db";
 import {
   getReleasesForWeek,
   parseIsoWeek,
