@@ -4,6 +4,20 @@ import { cloudflare } from "@cloudflare/vite-plugin";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 import path from "node:path";
+import { optimizeAll } from "./scripts/optimize-images";
+
+let optimized = false;
+function imageOptimizerPlugin() {
+  return {
+    name: "vite-plugin-image-optimizer",
+    async buildStart() {
+      if (!optimized) {
+        optimized = true;
+        await optimizeAll();
+      }
+    },
+  };
+}
 
 export default defineConfig({
   plugins: [
@@ -28,6 +42,7 @@ export default defineConfig({
     }),
     react(),
     tailwindcss(),
+    imageOptimizerPlugin(),
   ],
   resolve: {
     alias: {

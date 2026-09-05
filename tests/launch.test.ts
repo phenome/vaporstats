@@ -133,6 +133,26 @@ describe("public worker asset routing", () => {
     expect(response.status).toBe(200);
     expect(response.headers.get("Content-Type")).toBe("text/css");
   });
+
+  it("serves root static assets (favicon, logo) through the ASSETS binding", async () => {
+    const iconRequest = new Request("https://vaporstats.com/favicon.ico");
+    const response = await publicWorker.fetch(iconRequest, {
+      ASSETS: {
+        fetch(request: Request) {
+          expect(request).toBe(iconRequest);
+          return Promise.resolve(
+            new Response("ico-bytes", {
+              headers: { "Content-Type": "image/x-icon" },
+            }),
+          );
+        },
+      } as Fetcher,
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("Content-Type")).toBe("image/x-icon");
+    expect(response.headers.get("Cache-Control")).toBe("public, max-age=86400");
+  });
 });
 
 describe("public worker launch contract", () => {

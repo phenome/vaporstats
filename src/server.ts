@@ -58,18 +58,30 @@ export default {
       return rateLimitResponse;
     }
 
-    if (url.pathname.startsWith("/assets/")) {
+    const isStaticFile =
+      url.pathname.startsWith("/assets/") ||
+      url.pathname === "/favicon.ico" ||
+      url.pathname === "/site.webmanifest" ||
+      /\.(?:ico|png|svg|webp|webmanifest)$/i.test(url.pathname);
+
+    if (isStaticFile) {
       const res = await env.ASSETS.fetch(request);
       if (res.ok) {
         const headers = new Headers(res.headers);
-        headers.set("Cache-Control", CACHE_POLICIES.immutableAsset);
+        if (url.pathname.startsWith("/assets/")) {
+          headers.set("Cache-Control", CACHE_POLICIES.immutableAsset);
+        } else {
+          headers.set("Cache-Control", "public, max-age=86400");
+        }
         return new Response(res.body, {
           status: res.status,
           statusText: res.statusText,
           headers,
         });
       }
-      return res;
+      if (url.pathname.startsWith("/assets/")) {
+        return res;
+      }
     }
 
     return serverEntry.fetch(request);

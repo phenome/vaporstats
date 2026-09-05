@@ -9,10 +9,19 @@ export function SiteHeader() {
         <div className="flex items-center gap-6">
           <a
             href="/"
-            className="min-h-[44px] min-w-[44px] inline-flex items-center gap-2 font-mono font-bold text-lg tracking-wider text-zinc-100 hover:text-orange-500 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-orange-500"
+            className="min-h-[44px] min-w-[44px] inline-flex items-center gap-2 font-mono font-bold text-lg tracking-wider text-zinc-100 hover:opacity-90 transition-opacity focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-orange-500"
+            aria-label="VAPORSTATS Home"
           >
-            <span className="w-3 h-3 bg-orange-500 inline-block"></span>
-            VAPORSTATS
+            <picture>
+              <source srcSet="/logo.webp" type="image/webp" />
+              <img
+                src="/logo.png"
+                alt="VAPORSTATS"
+                width={176}
+                height={32}
+                className="h-8 w-auto object-contain"
+              />
+            </picture>
           </a>
 
           {/* Navigation Links */}

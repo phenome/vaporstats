@@ -12,6 +12,12 @@ export const Route = createRootRoute({
       { name: "viewport", content: "width=device-width, initial-scale=1" },
       { title: "VaporStats - Steam Analytics" },
     ],
+    links: [
+      { rel: "icon", href: "/favicon.ico", sizes: "32x32" },
+      { rel: "icon", href: "/favicon.png", type: "image/png" },
+      { rel: "apple-touch-icon", href: "/apple-touch-icon.png" },
+      { rel: "manifest", href: "/site.webmanifest" },
+    ],
   }),
   notFoundComponent: RootNotFoundComponent,
   component: RootComponent,
