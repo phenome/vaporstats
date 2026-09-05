@@ -55,6 +55,10 @@ const migration0005 = readFileSync(
   resolve(import.meta.dir, "../migrations/0005_prices.sql"),
   "utf8"
 );
+const migration0007 = readFileSync(
+  resolve(import.meta.dir, "../migrations/0007_release_lifecycle.sql"),
+  "utf8"
+);
 
 function createSqliteD1Adapter(db: Database): D1Database {
   return {
@@ -134,6 +138,7 @@ describe("VaporStats Steam Prices and Deals", () => {
     sqliteDb.exec(migration0003);
     sqliteDb.exec(migration0004);
     sqliteDb.exec(migration0005);
+    sqliteDb.exec(migration0007);
     d1 = createSqliteD1Adapter(sqliteDb);
 
     // Seed test apps
@@ -264,6 +269,7 @@ describe("VaporStats Steam Prices and Deals", () => {
     freshMemoryDb.exec(migration0001);
     freshMemoryDb.exec(migration0004);
     freshMemoryDb.exec(migration0005);
+    freshMemoryDb.exec(migration0007);
     const freshD1 = createSqliteD1Adapter(freshMemoryDb);
     const initialEmptyResult = await runHourlyPriceFeedTick(freshD1, {
       apiKey: "test_key",

@@ -18,9 +18,13 @@ export interface SyncReleaseFactsOptions {
     type: string;
     parent_appid?: number | null;
     release_date?: string | null;
+    original_steam_release_date?: string | null;
+    release_from_early_access_date?: string | null;
+    original_release_date?: string | null;
     header_image?: string;
     is_eligible?: boolean;
     is_playable?: boolean;
+    is_early_access?: boolean | null;
   }>;
 }
 
@@ -39,9 +43,13 @@ interface RawCatalogAppRow {
   type: string;
   parent_appid: number | null;
   release_date: string | null;
+  original_steam_release_date: string | null;
+  release_from_early_access_date: string | null;
+  original_release_date: string | null;
   header_image: string;
   is_eligible: number;
   is_playable: number;
+  is_early_access: number | null;
 }
 
 /**
@@ -83,9 +91,13 @@ export async function syncReleaseFactsFromApps(
     type: string;
     parent_appid?: number | null;
     release_date?: string | null;
+    original_steam_release_date?: string | null;
+    release_from_early_access_date?: string | null;
+    original_release_date?: string | null;
     header_image?: string;
     is_eligible?: boolean;
     is_playable?: boolean;
+    is_early_access?: boolean | null;
   }> = [];
 
   if (options.apps) {
@@ -94,7 +106,10 @@ export async function syncReleaseFactsFromApps(
   } else {
     const stmt = db
       .prepare(
-        `SELECT appid, name, slug, type, parent_appid, release_date, header_image, is_eligible, is_playable
+        `SELECT appid, name, slug, type, parent_appid, release_date,
+                original_steam_release_date, release_from_early_access_date,
+                original_release_date, header_image, is_eligible, is_playable,
+                is_early_access
          FROM apps
          WHERE release_date IS NOT NULL
            AND is_eligible = 1
@@ -112,9 +127,14 @@ export async function syncReleaseFactsFromApps(
       type: r.type,
       parent_appid: r.parent_appid,
       release_date: r.release_date,
+      original_steam_release_date: r.original_steam_release_date,
+      release_from_early_access_date: r.release_from_early_access_date,
+      original_release_date: r.original_release_date,
       header_image: r.header_image,
       is_eligible: r.is_eligible === 1,
       is_playable: r.is_playable === 1,
+      is_early_access:
+        r.is_early_access === null ? null : r.is_early_access === 1,
     }));
   }
 
@@ -133,6 +153,59 @@ export async function syncReleaseFactsFromApps(
     if (!isReleaseEntityEligible(app.type, isEligible, isPlayable, parentAppId)) {
       skippedIneligibleCount++;
       continue;
+    }
+
+    const earlyAccessDate = parsePreciseReleaseDate(
+      app.original_steam_release_date
+    );
+    const releaseFromEarlyAccessDate = parsePreciseReleaseDate(
+      app.release_from_early_access_date
+    );
+    const originalReleaseDate = earlyAccessDate
+      ? parsePreciseReleaseDate(app.original_release_date)
+      : null;
+    const fullReleaseDate =
+      releaseFromEarlyAccessDate ?? originalReleaseDate;
+    const fullReleaseSource = releaseFromEarlyAccessDate
+      ? "release_from_early_access_date"
+      : originalReleaseDate
+        ? "original_release_date"
+        : null;
+    await db
+      .prepare(
+        `DELETE FROM app_release_events
+         WHERE appid = ?
+           AND event_type IN ('early_access', 'full_release')`
+      )
+      .bind(app.appid)
+      .run();
+
+    if (earlyAccessDate) {
+      await db
+        .prepare(
+          `INSERT INTO app_release_events
+             (appid, event_type, event_date, source, created_at, updated_at)
+           VALUES (?, 'early_access', ?, 'original_steam_release_date', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+           ON CONFLICT (appid, event_type, event_date) DO UPDATE SET
+             source = excluded.source,
+             updated_at = CURRENT_TIMESTAMP`
+        )
+        .bind(app.appid, earlyAccessDate)
+        .run();
+    }
+
+    if (fullReleaseDate) {
+      await db
+        .prepare(
+          `INSERT INTO app_release_events
+             (appid, event_type, event_date, source, created_at, updated_at)
+           VALUES (?, 'full_release', ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+           ON CONFLICT (appid, event_type, event_date) DO UPDATE SET
+             source = excluded.source,
+             updated_at = CURRENT_TIMESTAMP`
+        )
+        .bind(app.appid, fullReleaseDate, fullReleaseSource)
+        .run();
     }
 
     const preciseDate = parsePreciseReleaseDate(app.release_date);

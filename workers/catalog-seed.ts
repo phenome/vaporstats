@@ -1,7 +1,8 @@
 import type { D1Database } from "../src/lib/db";
-import { getCheckpoint, setCheckpoint, upsertApp } from "../src/lib/catalog";
+import { getCheckpoint, setCheckpoint, upsertApp, type ReleaseDateSource } from "../src/lib/catalog";
 import { toSlug } from "../src/lib/slug";
 import { upsertAppRelationship } from "../src/lib/related";
+import { syncReleaseFactsFromApps } from "./release-facts";
 
 export interface SeedAppInput {
   appid: number;
@@ -17,6 +18,14 @@ export interface SeedAppInput {
   header_image?: string;
   developer?: string;
   publisher?: string;
+  original_release_date?: string | null;
+  steam_release_date?: string | null;
+  original_steam_release_date?: string | null;
+  release_from_early_access_date?: string | null;
+  appdetails_release_date?: string | null;
+  release_date_source?: ReleaseDateSource;
+  is_coming_soon?: boolean | null;
+  is_early_access?: boolean | null;
 }
 
 export interface CuratedChildSeed {
@@ -30,7 +39,7 @@ export interface CuratedChildSeed {
 
 export const CURATED_SEED_CHILDREN: CuratedChildSeed[] = [
   {
-    appid: 740, // Counter-Strike Dedicated Server under 730
+    appid: 740,
     parentAppId: 730,
     name: "Counter-Strike Dedicated Server",
     relationshipType: "server",
@@ -38,7 +47,7 @@ export const CURATED_SEED_CHILDREN: CuratedChildSeed[] = [
     release_date: "2004-10-07",
   },
   {
-    appid: 2138330, // Cyberpunk 2077: Phantom Liberty under 1091500
+    appid: 2138330,
     parentAppId: 1091500,
     name: "Cyberpunk 2077: Phantom Liberty",
     relationshipType: "expansion",
@@ -68,22 +77,17 @@ export interface SeedResult {
 
 export const DEFAULT_SEED_LIMIT = 50;
 
-/**
- * Curated bounded AppID list for initial seed discovery.
- * Bounds initial seed to high-value titles without unbounded catalog scanning.
- * Curated parents (730 and 1091500) lead the list so children can attach within small budgets.
- */
 export const INITIAL_SEED_APP_IDS: number[] = [
-  730,     // Counter-Strike 2 (parent of 740)
-  1091500, // Cyberpunk 2077 (parent of 2138330)
-  570,     // Dota 2
-  440,     // Team Fortress 2
-  1086940, // Baldur's Gate 3
-  1245620, // ELDEN RING
-  252490,  // Rust
-  271590,  // Grand Theft Auto V
-  1172470, // Apex Legends
-  550,     // Left 4 Dead 2
+  730,
+  1091500,
+  570,
+  440,
+  1086940,
+  1245620,
+  252490,
+  271590,
+  1172470,
+  550,
 ];
 
 interface SteamAppDetailsResponse {
@@ -106,6 +110,29 @@ interface SteamAppDetailsResponse {
   };
 }
 
+interface StoreBrowseRelease {
+  original_release_date?: number | string | null;
+  steam_release_date?: number | string | null;
+  original_steam_release_date?: number | string | null;
+  release_from_early_access_date?: number | string | null;
+  is_coming_soon?: boolean | null;
+  is_early_access?: boolean | null;
+  [key: string]: unknown;
+}
+
+interface StoreBrowseItem {
+  appid?: number | string;
+  id?: number | string;
+  release?: StoreBrowseRelease | null;
+}
+
+interface StoreBrowseResponse {
+  response?: {
+    store_items?: StoreBrowseItem[];
+  };
+  store_items?: StoreBrowseItem[];
+}
+
 class SteamRateLimitError extends Error {
   constructor() {
     super("Steam rate limit reached");
@@ -120,21 +147,108 @@ function isSteamRateLimitError(error: unknown): error is SteamRateLimitError {
 export const CATALOG_REFRESH_CHECKPOINT_KEY = "catalog_metadata_refresh";
 export const CATALOG_REFRESH_SUCCESS_TARGET = 10;
 export const CATALOG_REFRESH_ATTEMPT_CAP = 20;
+const STORE_BROWSE_BATCH_SIZE = 50;
+const STORE_BROWSE_URL = "https://api.steampowered.com/IStoreBrowseService/GetItems/v1/";
 
-/**
- * Obtains the storefront's displayed original release date.
- * Steam's appdetails endpoint can expose a later re-release date instead.
- */
-function parseStorefrontReleaseDate(html: string): string | null {
-  const match = html.match(
-    /<div class="subtitle column">\s*Release Date:\s*<\/div>\s*<div class="date">\s*([^<]+?)\s*<\/div>/i
+const losAngelesDateFormatter = new Intl.DateTimeFormat("en-CA", {
+  timeZone: "America/Los_Angeles",
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+});
+
+function unixSeconds(value: number | string | null | undefined): number | null {
+  if (value === null || value === undefined || value === "") {
+    return null;
+  }
+  const parsed = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : null;
+}
+
+export function unixSecondsToLosAngelesDate(value: number | string | null | undefined): string | null {
+  if (typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    return value;
+  }
+  const seconds = unixSeconds(value);
+  if (seconds === null) {
+    return null;
+  }
+  const date = new Date(seconds * 1000);
+  if (Number.isNaN(date.getTime())) {
+    return null;
+  }
+  const parts = losAngelesDateFormatter.formatToParts(date);
+  const year = parts.find((part) => part.type === "year")?.value;
+  const month = parts.find((part) => part.type === "month")?.value;
+  const day = parts.find((part) => part.type === "day")?.value;
+  return year && month && day ? `${year}-${month}-${day}` : null;
+}
+
+function storeBrowseAppId(item: StoreBrowseItem): number | null {
+  const value = item.appid ?? item.id;
+  const parsed = typeof value === "number" ? value : Number(value);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+}
+
+function releaseFields(
+  release: StoreBrowseRelease | null | undefined,
+  appdetailsReleaseDate: string | null
+): Pick<
+  SeedAppInput,
+  | "release_date"
+  | "release_date_source"
+  | "original_release_date"
+  | "steam_release_date"
+  | "original_steam_release_date"
+  | "release_from_early_access_date"
+  | "appdetails_release_date"
+  | "is_coming_soon"
+  | "is_early_access"
+> {
+  const originalReleaseDate = unixSecondsToLosAngelesDate(
+    release?.original_release_date ?? (release?.["originalReleaseDate"] as number | string | null | undefined)
   );
-  return match?.[1]?.trim() || null;
+  const steamReleaseDate = unixSecondsToLosAngelesDate(
+    release?.steam_release_date ?? (release?.["steamReleaseDate"] as number | string | null | undefined)
+  );
+  const originalSteamReleaseDate = unixSecondsToLosAngelesDate(
+    release?.original_steam_release_date ?? (release?.["originalSteamReleaseDate"] as number | string | null | undefined)
+  );
+  const releaseFromEarlyAccessDate = unixSecondsToLosAngelesDate(
+    release?.release_from_early_access_date ?? (release?.["releaseFromEarlyAccessDate"] as number | string | null | undefined)
+  );
+
+  const releaseDate = originalReleaseDate ?? steamReleaseDate ?? appdetailsReleaseDate;
+  const releaseDateSource: ReleaseDateSource = originalReleaseDate
+    ? "original_release_date"
+    : steamReleaseDate
+      ? "steam_release_date"
+      : appdetailsReleaseDate
+        ? "appdetails"
+        : null;
+
+  const rawEarlyAccess = release?.is_early_access ?? release?.["isEarlyAccess"];
+  const isEarlyAccess = typeof rawEarlyAccess === "boolean" ? rawEarlyAccess : null;
+
+  const rawComingSoon = release?.is_coming_soon ?? release?.["isComingSoon"];
+  const isComingSoon = typeof rawComingSoon === "boolean" ? rawComingSoon : null;
+
+  return {
+    release_date: releaseDate,
+    release_date_source: releaseDateSource,
+    original_release_date: originalReleaseDate,
+    steam_release_date: steamReleaseDate,
+    original_steam_release_date: originalSteamReleaseDate,
+    release_from_early_access_date: releaseFromEarlyAccessDate,
+    appdetails_release_date: appdetailsReleaseDate,
+    is_coming_soon: isComingSoon,
+    is_early_access: isEarlyAccess,
+  };
 }
 
 /**
- * Obtains Steam-derived app record for a specific AppID via Steam store API.
- * Supports injectable fetchFn for tests and worker runtime.
+ * Obtains Steam catalog metadata for one AppID. Release lifecycle metadata is
+ * attached by the batched StoreBrowse request used by the import/refresh paths.
  */
 export async function fetchSteamAppDetails(
   appid: number,
@@ -151,32 +265,12 @@ export async function fetchSteamAppDetails(
 
   const data = (await response.json()) as SteamAppDetailsResponse;
   const appData = data[appid.toString()];
-
   if (!appData || !appData.success || !appData.data) {
     return null;
   }
 
   const details = appData.data;
-  const releaseStatus = details.release_date?.coming_soon ? "upcoming" : "released";
-  let releaseDate = details.release_date?.date ?? null;
-
-  try {
-    const storefrontResponse = await customFetch(
-      `https://store.steampowered.com/app/${appid}/?cc=us&l=english`
-    );
-    if (storefrontResponse.status === 429) {
-      throw new SteamRateLimitError();
-    }
-    if (storefrontResponse.ok) {
-      releaseDate = parseStorefrontReleaseDate(await storefrontResponse.text()) ?? releaseDate;
-    }
-  } catch (error) {
-    if (isSteamRateLimitError(error)) {
-      throw error;
-    }
-    // Keep the API date when the storefront request is unavailable.
-  }
-
+  const appdetailsReleaseDate = details.release_date?.date ?? null;
   return {
     appid: details.steam_appid,
     name: details.name,
@@ -184,8 +278,8 @@ export async function fetchSteamAppDetails(
     is_eligible: true,
     is_playable: details.type === "game",
     parent_appid: null,
-    release_date: releaseDate,
-    release_status: releaseStatus,
+    ...releaseFields(null, appdetailsReleaseDate),
+    release_status: details.release_date?.coming_soon ? "upcoming" : "released",
     description: details.short_description ?? "",
     header_image: details.header_image ?? "",
     developer: details.developers?.[0] ?? "",
@@ -193,21 +287,141 @@ export async function fetchSteamAppDetails(
   };
 }
 
+async function fetchStoreBrowseReleases(
+  appIds: number[],
+  customFetch: typeof fetch
+): Promise<Map<number, StoreBrowseRelease | null>> {
+  const releases = new Map<number, StoreBrowseRelease | null>();
+  if (appIds.length === 0) {
+    return releases;
+  }
+
+  const input = {
+    ids: appIds.map((appid) => ({ appid })),
+    context: {
+      language: "english",
+      country_code: "US",
+      steam_realm: 1,
+    },
+    data_request: {
+      include_release: true,
+    },
+  };
+  const url = `${STORE_BROWSE_URL}?input_json=${encodeURIComponent(JSON.stringify(input))}`;
+  const response = await customFetch(url);
+  if (!response.ok) {
+    if (response.status === 429) {
+      throw new SteamRateLimitError();
+    }
+    return releases;
+  }
+
+  try {
+    const data = (await response.json()) as StoreBrowseResponse;
+    const items = data.response?.store_items ?? data.store_items ?? [];
+    for (const item of items) {
+      const appid = storeBrowseAppId(item);
+      if (appid !== null) {
+        releases.set(appid, item.release ?? null);
+      }
+    }
+  } catch {
+    // Non-JSON or malformed StoreBrowse response
+  }
+  return releases;
+}
+
+async function fetchCatalogRecords(
+  appIds: number[],
+  customFetch: typeof fetch
+): Promise<{ records: Map<number, SeedAppInput | null>; rateLimited: boolean }> {
+  const records = new Map<number, SeedAppInput | null>();
+  let rateLimited = false;
+
+  for (let offset = 0; offset < appIds.length; offset += STORE_BROWSE_BATCH_SIZE) {
+    const batch = appIds.slice(offset, offset + STORE_BROWSE_BATCH_SIZE);
+    let releases = new Map<number, StoreBrowseRelease | null>();
+    try {
+      releases = await fetchStoreBrowseReleases(batch, customFetch);
+    } catch (error) {
+      if (isSteamRateLimitError(error)) {
+        rateLimited = true;
+        break;
+      }
+    }
+
+    for (const appid of batch) {
+      let record: SeedAppInput | null = null;
+      try {
+        record = await fetchSteamAppDetails(appid, customFetch);
+      } catch (error) {
+        if (isSteamRateLimitError(error)) {
+          rateLimited = true;
+          break;
+        }
+        records.set(appid, null);
+        continue;
+      }
+
+      if (!record) {
+        records.set(appid, null);
+        continue;
+      }
+
+      const lifecycle = releaseFields(
+        releases.get(appid),
+        record.appdetails_release_date ?? record.release_date ?? null
+      );
+      records.set(appid, {
+        ...record,
+        ...lifecycle,
+        release_status:
+          lifecycle.is_coming_soon === true
+            ? "upcoming"
+            : lifecycle.is_coming_soon === false
+              ? "released"
+              : record.release_status,
+      });
+    }
+
+    if (rateLimited) {
+      break;
+    }
+  }
+
+  return { records, rateLimited };
+}
+
 interface CatalogRefreshCheckpoint {
   pending: number[];
+}
+
+function normalizeAppIds(values: unknown[]): number[] {
+  const seen = new Set<number>();
+  const appIds: number[] = [];
+  for (const value of values) {
+    const parsed =
+      typeof value === "number"
+        ? value
+        : typeof value === "string" && /^\d+$/.test(value.trim())
+          ? Number(value.trim())
+          : null;
+    if (parsed !== null && Number.isInteger(parsed) && parsed > 0 && !seen.has(parsed)) {
+      seen.add(parsed);
+      appIds.push(parsed);
+    }
+  }
+  return appIds;
 }
 
 function readCatalogRefreshCheckpoint(checkpoint: { value: string } | null): CatalogRefreshCheckpoint {
   if (!checkpoint) {
     return { pending: [] };
   }
-
   try {
     const value = JSON.parse(checkpoint.value) as { pending?: unknown };
     return {
-      pending: Array.isArray(value.pending)
-        ? value.pending.filter((appid): appid is number => Number.isInteger(appid) && appid > 0)
-        : [],
+      pending: Array.isArray(value.pending) ? normalizeAppIds(value.pending) : [],
     };
   } catch {
     return { pending: [] };
@@ -219,25 +433,35 @@ export interface CatalogRefreshQueueResult {
   alreadyQueued: boolean;
 }
 
-/**
- * Queues every eligible catalog AppID for one bounded metadata refresh pass.
- * The checkpoint is the stale marker; no schema column is needed.
- */
+export interface CatalogRefreshQueueOptions {
+  checkpointKey?: string;
+  appIds?: number[];
+}
+
+/** Queues selected AppIDs, or the whole eligible catalog when appIds is omitted. */
 export async function queueCatalogRefresh(
   db: D1Database,
-  checkpointKey = CATALOG_REFRESH_CHECKPOINT_KEY
+  options: CatalogRefreshQueueOptions | string = {}
 ): Promise<CatalogRefreshQueueResult> {
+  const normalizedOptions = typeof options === "string" ? { checkpointKey: options } : options;
+  const checkpointKey = normalizedOptions.checkpointKey ?? CATALOG_REFRESH_CHECKPOINT_KEY;
   const existing = readCatalogRefreshCheckpoint(await getCheckpoint(db, checkpointKey));
-  if (existing.pending.length > 0) {
-    return { queued: existing.pending.length, alreadyQueued: true };
+  let requested: number[];
+
+  if (normalizedOptions.appIds === undefined) {
+    const result = await db
+      .prepare("SELECT appid FROM apps WHERE is_eligible = 1 ORDER BY appid ASC")
+      .all<{ appid: number }>();
+    requested = normalizeAppIds((result.results ?? []).map((row) => row.appid));
+  } else {
+    requested = normalizeAppIds(normalizedOptions.appIds);
   }
 
-  const result = await db
-    .prepare("SELECT appid FROM apps WHERE is_eligible = 1 ORDER BY appid ASC")
-    .all<{ appid: number }>();
-  const pending = (result.results ?? []).map((row) => row.appid);
+  const pending = normalizeAppIds([...existing.pending, ...requested]);
+  const alreadyQueued =
+    requested.length > 0 && requested.every((appid) => existing.pending.includes(appid));
   await setCheckpoint(db, checkpointKey, JSON.stringify({ pending }), null);
-  return { queued: pending.length, alreadyQueued: false };
+  return { queued: pending.length, alreadyQueued };
 }
 
 export interface CatalogRefreshBatchOptions {
@@ -258,8 +482,8 @@ export interface CatalogRefreshBatchResult {
 }
 
 /**
- * Refreshes a bounded number of queued catalog records and leaves the rest checkpointed.
- * Ordinary failures are skipped; a Steam 429 leaves the current AppID queued for retry.
+ * Refreshes a bounded queue. Successful appdetails responses count toward the
+ * target; ordinary failures rotate to the tail and 429 stops immediately.
  */
 export async function refreshCatalogBatch(
   db: D1Database,
@@ -288,70 +512,123 @@ export async function refreshCatalogBatch(
       ? Math.max(successTarget, Math.min(100, Math.floor(options.attemptCap)))
       : CATALOG_REFRESH_ATTEMPT_CAP;
   const fetchFn = options.fetchFn ?? fetch;
-  let index = 0;
+  const working = [...checkpoint.pending];
+  const retained: number[] = [];
+  const records: SeedAppInput[] = [];
   let attempted = 0;
   let successful = 0;
   let failed = 0;
   let rateLimited = false;
-  const records: SeedAppInput[] = [];
 
-  while (
-    index < checkpoint.pending.length &&
-    attempted < attemptCap &&
-    successful < successTarget
-  ) {
-    const appid = checkpoint.pending[index];
-    const existing = await db
-      .prepare(
-        "SELECT appid, parent_appid, is_eligible, is_playable FROM apps WHERE appid = ?"
-      )
-      .bind(appid)
-      .first<{
-        appid: number;
-        parent_appid: number | null;
-        is_eligible: number;
-        is_playable: number;
-      }>();
-
-    if (!existing) {
-      index++;
-      continue;
-    }
-
-    let record: SeedAppInput | null = null;
+  while (working.length > 0 && attempted < attemptCap && successful < successTarget) {
+    const capacity = Math.min(
+      STORE_BROWSE_BATCH_SIZE,
+      working.length,
+      attemptCap - attempted,
+      successTarget - successful
+    );
+    const batchIds = working.splice(0, capacity);
+    let releases: Map<number, StoreBrowseRelease | null>;
     try {
-      attempted++;
-      record = await fetchSteamAppDetails(appid, fetchFn);
+      releases = await fetchStoreBrowseReleases(batchIds, fetchFn);
     } catch (error) {
       if (isSteamRateLimitError(error)) {
         rateLimited = true;
+        attempted += Math.min(1, batchIds.length);
+        working.unshift(...batchIds);
         break;
       }
-      failed++;
-      index++;
+      retained.push(...batchIds);
+      failed += batchIds.length;
+      attempted += batchIds.length;
       continue;
     }
 
-    index++;
-    if (!record) {
-      failed++;
-      continue;
+    let stoppedAt = batchIds.length;
+    for (let index = 0; index < batchIds.length; index++) {
+      const appid = batchIds[index];
+      const existing = await db
+        .prepare("SELECT appid, parent_appid, is_eligible, is_playable FROM apps WHERE appid = ?")
+        .bind(appid)
+        .first<{
+          appid: number;
+          parent_appid: number | null;
+          is_eligible: number;
+          is_playable: number;
+        }>();
+
+      if (!existing) {
+        failed++;
+        attempted++;
+        retained.push(appid);
+        continue;
+      }
+
+      let record: SeedAppInput | null;
+      try {
+        attempted++;
+        record = await fetchSteamAppDetails(appid, fetchFn);
+      } catch (error) {
+        if (isSteamRateLimitError(error)) {
+          rateLimited = true;
+          stoppedAt = index;
+          break;
+        }
+        failed++;
+        retained.push(appid);
+        continue;
+      }
+
+      if (!record) {
+        failed++;
+        retained.push(appid);
+        continue;
+      }
+
+      const lifecycle = releaseFields(
+        releases.get(appid),
+        record.appdetails_release_date ?? record.release_date ?? null
+      );
+      const refreshedRecord = {
+        ...record,
+        type: record.type ?? (record.is_playable ? "game" : "accessory"),
+        ...lifecycle,
+        release_status:
+          lifecycle.is_coming_soon === true
+            ? "upcoming"
+            : lifecycle.is_coming_soon === false
+              ? "released"
+              : record.release_status,
+        parent_appid: existing.parent_appid,
+        is_eligible: existing.is_eligible === 1,
+        is_playable: existing.is_playable === 1,
+      };
+
+      try {
+        await upsertApp(db, refreshedRecord);
+        await syncReleaseFactsFromApps(db, { apps: [refreshedRecord] });
+        successful++;
+        records.push(refreshedRecord);
+      } catch (error) {
+        if (isSteamRateLimitError(error)) {
+          rateLimited = true;
+          stoppedAt = index;
+          break;
+        }
+        failed++;
+        retained.push(appid);
+        continue;
+      }
     }
 
-    const refreshedRecord: SeedAppInput = {
-      ...record,
-      parent_appid: existing.parent_appid,
-      is_eligible: existing.is_eligible === 1,
-      is_playable: existing.is_playable === 1,
-    };
-    await upsertApp(db, refreshedRecord);
-    records.push(refreshedRecord);
-    successful++;
+    if (rateLimited) {
+      working.unshift(...batchIds.slice(stoppedAt));
+      break;
+    }
   }
 
-  const pending = checkpoint.pending.slice(index);
+  const pending = normalizeAppIds([...working, ...retained]);
   await setCheckpoint(db, checkpointKey, JSON.stringify({ pending }), null);
-
   return {
     active: pending.length > 0,
     attempted,
@@ -363,59 +640,37 @@ export async function refreshCatalogBatch(
   };
 }
 
-
-/**
- * Runs bounded initial catalog seeding with Steam-derived records.
- * Hard-clamped to a finite integer in range 1..50 (sanitizes NaN, negative, fractional, huge values).
- * Total imported roots + curated children strictly never exceeds limit.
- * Curated children are only imported if their parent was imported in this run.
- */
+/** Runs bounded initial catalog seeding with Steam-derived records. */
 export async function runBoundedCatalogImport(
   db: D1Database,
   options: SeedOptions = {}
 ): Promise<SeedResult> {
-  // Sanitize limit to finite integer in range 1..50
   let limit = DEFAULT_SEED_LIMIT;
   if (typeof options.limit === "number") {
-    if (isNaN(options.limit) || !Number.isFinite(options.limit)) {
-      limit = DEFAULT_SEED_LIMIT;
-    } else {
-      limit = Math.min(50, Math.max(1, Math.floor(options.limit)));
-    }
+    limit = Number.isFinite(options.limit)
+      ? Math.min(50, Math.max(1, Math.floor(options.limit)))
+      : DEFAULT_SEED_LIMIT;
   }
 
   const checkpointKey = options.checkpointKey ?? "initial_catalog_seed";
   const fetchFn = options.fetchFn ?? fetch;
-
-  // Curated children to consider (only if not restricted by explicit appIds)
   const candidateChildren = options.children ?? (options.appIds ? [] : CURATED_SEED_CHILDREN);
-
   let rateLimited = false;
   let recordsToImport: SeedAppInput[] = [];
 
   if (options.apps) {
-    // Directly provided records (slice against limit)
     recordsToImport = options.apps.slice(0, limit);
   } else {
-    // Budget root slots so total (roots + children) never exceeds limit
-    const maxChildrenBudget = options.appIds ? 0 : Math.min(candidateChildren.length, Math.floor(limit / 2));
+    const maxChildrenBudget = options.appIds
+      ? 0
+      : Math.min(candidateChildren.length, Math.floor(limit / 2));
     const rootLimit = Math.max(1, limit - maxChildrenBudget);
-    const sourceIds = (options.appIds ?? INITIAL_SEED_APP_IDS).slice(0, rootLimit);
-
-    for (const appid of sourceIds) {
-      try {
-        const record = await fetchSteamAppDetails(appid, fetchFn);
-        if (record) {
-          recordsToImport.push(record);
-        }
-      } catch (error) {
-        if (isSteamRateLimitError(error)) {
-          rateLimited = true;
-          break;
-        }
-        throw error;
-      }
-    }
+    const sourceIds = normalizeAppIds(options.appIds ?? INITIAL_SEED_APP_IDS).slice(0, rootLimit);
+    const fetched = await fetchCatalogRecords(sourceIds, fetchFn);
+    rateLimited = fetched.rateLimited;
+    recordsToImport = sourceIds
+      .map((appid) => fetched.records.get(appid) ?? null)
+      .filter((record): record is SeedAppInput => record !== null);
   }
 
   let seededCount = 0;
@@ -425,13 +680,12 @@ export async function runBoundedCatalogImport(
   const allImportedRecords: SeedAppInput[] = [];
   const importedAppIdSet = new Set<number>();
 
-  // 1. Upsert root records
   for (const app of recordsToImport) {
     const isPlayable = app.is_playable ?? (app.type === "game" && !app.parent_appid);
     const isEligible = app.is_eligible ?? true;
     const type = app.type ?? (isPlayable ? "game" : "accessory");
-
     const record: SeedAppInput = {
+      ...app,
       appid: app.appid,
       name: app.name,
       slug: toSlug(app.name),
@@ -447,10 +701,15 @@ export async function runBoundedCatalogImport(
         `https://shared.fastly.steamstatic.com/store_item_assets/steam/apps/${app.appid}/header.jpg`,
       developer: app.developer ?? "",
       publisher: app.publisher ?? "",
+      original_release_date: app.original_release_date ?? null,
+      steam_release_date: app.steam_release_date ?? null,
+      original_steam_release_date: app.original_steam_release_date ?? null,
+      release_from_early_access_date: app.release_from_early_access_date ?? null,
+      release_date_source: app.release_date_source ?? null,
+      is_early_access: app.is_early_access ?? null,
     };
 
     await upsertApp(db, record);
-
     seededCount++;
     if (isPlayable && isEligible && !app.parent_appid) {
       playableCount++;
@@ -462,35 +721,34 @@ export async function runBoundedCatalogImport(
     importedAppIdSet.add(app.appid);
   }
 
-  // 2. Curated children are only imported if their parent was imported in this run
-  // Slice eligible children against remaining capacity to strictly respect limit
   const remainingCapacity = Math.max(0, limit - allImportedRecords.length);
   const eligibleChildren = candidateChildren.filter((child) => importedAppIdSet.has(child.parentAppId));
   const childrenToImport = eligibleChildren.slice(0, remainingCapacity);
+  let childRecords = new Map<number, SeedAppInput | null>();
+  if (!options.apps && !rateLimited && childrenToImport.length > 0) {
+    const fetchedChildren = await fetchCatalogRecords(
+      childrenToImport.map((child) => child.appid),
+      fetchFn
+    );
+    if (fetchedChildren.rateLimited) {
+      rateLimited = true;
+    }
+    childRecords = fetchedChildren.records;
+  }
 
   for (const child of childrenToImport) {
     if (rateLimited) {
       break;
     }
-    let childRecord: SeedAppInput | null = null;
-    if (!options.apps) {
-      try {
-        childRecord = await fetchSteamAppDetails(child.appid, fetchFn);
-      } catch (error) {
-        if (isSteamRateLimitError(error)) {
-          break;
-        }
-        throw error;
-      }
-    }
-
+    const childRecord = childRecords.get(child.appid) ?? null;
     const childInput: SeedAppInput = {
+      ...childRecord,
       appid: child.appid,
       name: childRecord?.name || child.name || `App ${child.appid}`,
       slug: toSlug(childRecord?.name || child.name || `App ${child.appid}`),
       type: child.relationshipType,
       is_eligible: true,
-      is_playable: false, // Force children non-playable
+      is_playable: false,
       parent_appid: child.parentAppId,
       release_date: childRecord?.release_date || child.release_date || null,
       release_status: childRecord?.release_status || "released",
@@ -500,19 +758,21 @@ export async function runBoundedCatalogImport(
         `https://shared.fastly.steamstatic.com/store_item_assets/steam/apps/${child.appid}/header.jpg`,
       developer: childRecord?.developer || "",
       publisher: childRecord?.publisher || "",
+      original_release_date: childRecord?.original_release_date ?? null,
+      steam_release_date: childRecord?.steam_release_date ?? null,
+      original_steam_release_date: childRecord?.original_steam_release_date ?? null,
+      release_from_early_access_date: childRecord?.release_from_early_access_date ?? null,
+      release_date_source: childRecord?.release_date_source ?? null,
+      is_early_access: childRecord?.is_early_access ?? null,
     };
 
-    // Upsert child app row
     await upsertApp(db, childInput);
-
-    // Upsert relationship between parent and child
     await upsertAppRelationship(db, {
       parent_appid: child.parentAppId,
       child_appid: child.appid,
       relationship_type: child.relationshipType,
       prominence: child.prominence,
     });
-
     seededCount++;
     accessoryCount++;
     lastAppId = child.appid;
@@ -520,9 +780,7 @@ export async function runBoundedCatalogImport(
     importedAppIdSet.add(child.appid);
   }
 
-  // Record checkpoint to persist seeding progress
   await setCheckpoint(db, checkpointKey, `seeded:${seededCount}`, lastAppId);
-
   return {
     seededCount,
     playableCount,

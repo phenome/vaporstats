@@ -1,6 +1,12 @@
 import type { D1Database } from "./db";
 import { toSlug } from "./slug";
 
+export type ReleaseDateSource =
+  | "original_release_date"
+  | "steam_release_date"
+  | "appdetails"
+  | null;
+
 export interface CatalogEntity {
   appid: number;
   name: string;
@@ -10,6 +16,12 @@ export interface CatalogEntity {
   is_playable: boolean;
   parent_appid: number | null;
   release_date: string | null;
+  steam_release_date: string | null;
+  original_release_date: string | null;
+  original_steam_release_date: string | null;
+  release_from_early_access_date: string | null;
+  release_date_source: ReleaseDateSource;
+  is_early_access: boolean | null;
   release_status: "released" | "upcoming" | "unannounced";
   description: string;
   header_image: string;
@@ -18,6 +30,8 @@ export interface CatalogEntity {
   created_at: string;
   updated_at: string;
 }
+
+export interface AppSummary extends CatalogEntity {}
 
 export interface GameDetail extends CatalogEntity {
   /**
@@ -39,6 +53,12 @@ interface RawAppRow {
   is_playable: number;
   parent_appid: number | null;
   release_date: string | null;
+  steam_release_date: string | null;
+  original_release_date: string | null;
+  original_steam_release_date: string | null;
+  release_from_early_access_date: string | null;
+  release_date_source: ReleaseDateSource;
+  is_early_access: number | boolean | null;
   release_status: string;
   description: string;
   header_image: string;
@@ -57,7 +77,18 @@ function mapRowToEntity(row: RawAppRow): CatalogEntity {
     is_eligible: row.is_eligible === 1,
     is_playable: row.is_playable === 1,
     parent_appid: row.parent_appid,
-    release_date: row.release_date,
+    release_date: row.release_date ?? null,
+    steam_release_date: row.steam_release_date ?? null,
+    original_release_date: row.original_release_date ?? null,
+    original_steam_release_date: row.original_steam_release_date ?? null,
+    release_from_early_access_date: row.release_from_early_access_date ?? null,
+    release_date_source: row.release_date_source ?? null,
+    is_early_access:
+      row.is_early_access == null
+        ? null
+        : typeof row.is_early_access === "boolean"
+          ? row.is_early_access
+          : row.is_early_access === 1,
     release_status: (row.release_status as CatalogEntity["release_status"]) || "released",
     description: row.description || "",
     header_image: row.header_image || "",
@@ -170,6 +201,12 @@ export async function upsertApp(
     is_playable?: boolean;
     parent_appid?: number | null;
     release_date?: string | null;
+    steam_release_date?: string | null;
+    original_release_date?: string | null;
+    original_steam_release_date?: string | null;
+    release_from_early_access_date?: string | null;
+    release_date_source?: ReleaseDateSource;
+    is_early_access?: boolean | null;
     release_status?: string;
     description?: string;
     header_image?: string;
@@ -183,6 +220,13 @@ export async function upsertApp(
   const isPlayable = app.is_playable !== false ? 1 : 0;
   const parentAppId = app.parent_appid ?? null;
   const releaseDate = app.release_date ?? null;
+  const steamReleaseDate = app.steam_release_date ?? null;
+  const originalReleaseDate = app.original_release_date ?? null;
+  const originalSteamReleaseDate = app.original_steam_release_date ?? null;
+  const releaseFromEarlyAccessDate = app.release_from_early_access_date ?? null;
+  const releaseDateSource = app.release_date_source ?? null;
+  const isEarlyAccess =
+    app.is_early_access == null ? null : app.is_early_access ? 1 : 0;
   const releaseStatus = app.release_status ?? "released";
   const description = app.description ?? "";
   const headerImage = app.header_image ?? "";
@@ -192,10 +236,12 @@ export async function upsertApp(
   const stmt = db
     .prepare(
       `INSERT INTO apps (
-        appid, name, slug, type, is_eligible, is_playable, 
-        parent_appid, release_date, release_status, description, 
+        appid, name, slug, type, is_eligible, is_playable,
+        parent_appid, release_date, steam_release_date, original_release_date,
+        original_steam_release_date, release_from_early_access_date,
+        release_date_source, is_early_access, release_status, description,
         header_image, developer, publisher, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
       ON CONFLICT(appid) DO UPDATE SET
         name = excluded.name,
         slug = excluded.slug,
@@ -204,6 +250,12 @@ export async function upsertApp(
         is_playable = excluded.is_playable,
         parent_appid = excluded.parent_appid,
         release_date = excluded.release_date,
+        steam_release_date = excluded.steam_release_date,
+        original_release_date = excluded.original_release_date,
+        original_steam_release_date = excluded.original_steam_release_date,
+        release_from_early_access_date = excluded.release_from_early_access_date,
+        release_date_source = excluded.release_date_source,
+        is_early_access = excluded.is_early_access,
         release_status = excluded.release_status,
         description = excluded.description,
         header_image = excluded.header_image,
@@ -220,6 +272,12 @@ export async function upsertApp(
       isPlayable,
       parentAppId,
       releaseDate,
+      steamReleaseDate,
+      originalReleaseDate,
+      originalSteamReleaseDate,
+      releaseFromEarlyAccessDate,
+      releaseDateSource,
+      isEarlyAccess,
       releaseStatus,
       description,
       headerImage,

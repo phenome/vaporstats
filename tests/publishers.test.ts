@@ -25,6 +25,7 @@ const migrationFiles = [
   "0004_related_apps.sql",
   "0005_prices.sql",
   "0006_releases.sql",
+  "0007_release_lifecycle.sql",
 ];
 const migrationSql = migrationFiles
   .map((file) => readFileSync(resolve(import.meta.dir, `../migrations/${file}`), "utf8"))
@@ -254,6 +255,12 @@ describe("mention link integration", () => {
           is_playable: true,
           parent_appid: null,
           release_date: "2022-02-25",
+          steam_release_date: null,
+          original_release_date: null,
+          original_steam_release_date: null,
+          release_from_early_access_date: null,
+          release_date_source: null,
+          is_early_access: null,
           release_status: "released",
           description: "An action RPG.",
           header_image: "",

@@ -68,6 +68,10 @@ const migration0006 = readFileSync(
   resolve(import.meta.dir, "../migrations/0006_releases.sql"),
   "utf8"
 );
+const migration0007 = readFileSync(
+  resolve(import.meta.dir, "../migrations/0007_release_lifecycle.sql"),
+  "utf8"
+);
 
 function createSqliteD1Adapter(db: Database): D1Database {
   return {
@@ -145,6 +149,7 @@ async function initTestDb(): Promise<D1Database> {
     sqlite.run(migration0005);
   }
   sqlite.run(migration0006);
+  sqlite.run(migration0007);
   return createSqliteD1Adapter(sqlite);
 }
 
@@ -536,6 +541,49 @@ describe("Releases Discovery and Calendar", () => {
     expect(seedBody.prices.attempted).toBeGreaterThan(0);
 
     console.log("precise release facts");
+  });
+  test("release lifecycle events re-sync idempotently and preserve patches", async () => {
+    const db = await initTestDb();
+    await upsertApp(db, {
+      appid: 990001,
+      name: "Lifecycle Game",
+      type: "game",
+      is_playable: true,
+      is_eligible: true,
+      release_date: "2024-06-20",
+      original_release_date: "2024-01-15",
+      original_steam_release_date: "2024-01-15",
+      release_from_early_access_date: "2024-06-20",
+      is_early_access: false,
+    });
+    await db
+      .prepare("INSERT INTO app_release_events (appid, event_type, source, event_date) VALUES (?, 'patch', 'original_release_date', ?)")
+      .bind(990001, "2024-03-10")
+      .run();
+
+    const firstSync = await syncReleaseFactsFromApps(db);
+    const firstEvents = await db
+      .prepare(
+        "SELECT event_type, event_date, source FROM app_release_events WHERE appid = ? ORDER BY event_type, event_date"
+      )
+      .bind(990001)
+      .all<{ event_type: string; event_date: string; source: string }>();
+    const secondSync = await syncReleaseFactsFromApps(db);
+    const secondEvents = await db
+      .prepare(
+        "SELECT event_type, event_date, source FROM app_release_events WHERE appid = ? ORDER BY event_type, event_date"
+      )
+      .bind(990001)
+      .all<{ event_type: string; event_date: string; source: string }>();
+
+    expect(firstSync.persistedCount).toBe(1);
+    expect(secondSync.persistedCount).toBe(1);
+    expect(firstEvents.results).toEqual([
+      { event_type: "early_access", event_date: "2024-01-15", source: "original_steam_release_date" },
+      { event_type: "full_release", event_date: "2024-06-20", source: "release_from_early_access_date" },
+      { event_type: "patch", event_date: "2024-03-10", source: "original_release_date" },
+    ]);
+    expect(secondEvents.results).toEqual(firstEvents.results);
   });
 
   test("release week loader fetches its client-safe API", async () => {

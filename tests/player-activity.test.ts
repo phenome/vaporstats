@@ -50,6 +50,7 @@ const migrationFiles = [
   "0004_related_apps.sql",
   "0005_prices.sql",
   "0006_releases.sql",
+  "0007_release_lifecycle.sql",
 ];
 const allMigrationsSql = migrationFiles
   .map((file) => readFileSync(resolve(import.meta.dir, `../migrations/${file}`), "utf8"))

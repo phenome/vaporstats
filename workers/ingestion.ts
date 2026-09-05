@@ -23,7 +23,7 @@ import {
   runBoundedCatalogImport,
   type SeedResult,
 } from "./catalog-seed";
-import { syncReleaseFactsFromApps, type SyncReleaseFactsResult } from "./release-facts";
+import { syncReleaseFactsFromApps } from "./release-facts";
 
 export interface IngestionEnv {
   DB: D1Database;
@@ -131,12 +131,14 @@ export default {
             anchorTime,
           });
         }
+        if (priceResult && priceResult.successful > 0) {
+          await syncReleaseFactsFromApps(db);
+        }
         const catalogRefreshResult = await refreshCatalogBatch(db, {
           checkpointKey: CATALOG_REFRESH_CHECKPOINT_KEY,
           fetchFn: customFetch,
         });
         const { records: _catalogRefreshRecords, ...catalogRefresh } = catalogRefreshResult;
-        const releaseResult = await syncReleaseFactsFromApps(db, { asOfDate: anchorTime });
 
         console.log(
           JSON.stringify({
@@ -149,7 +151,6 @@ export default {
             rollups: rollupResult,
             prices: priceResult,
             catalogRefresh,
-            releaseFacts: releaseResult,
           })
         );
       } finally {
@@ -176,6 +177,61 @@ export default {
         return new Response("Unauthorized", { status: 401 });
       }
 
+      let appIds: number[] | undefined;
+      const bodyText = await request.text();
+      if (bodyText.trim()) {
+        let body: unknown;
+        try {
+          body = JSON.parse(bodyText);
+        } catch {
+          return Response.json(
+            { success: false, status: "error", error: "Invalid JSON" },
+            { status: 400 }
+          );
+        }
+
+        if (typeof body !== "object" || body === null || Array.isArray(body)) {
+          return Response.json(
+            { success: false, status: "error", error: "Invalid request body" },
+            { status: 400 }
+          );
+        }
+
+        const keys = Object.keys(body);
+        if (keys.length === 0) {
+          appIds = undefined;
+        } else if (keys.length === 1 && "appIds" in (body as object)) {
+          const input = body as { appIds?: unknown };
+          if (!Array.isArray(input.appIds)) {
+            return Response.json(
+              { success: false, status: "error", error: "appIds must be an array" },
+              { status: 400 }
+            );
+          }
+          if (
+            input.appIds.length === 0 ||
+            input.appIds.some(
+              (appid) => typeof appid !== "number" || !Number.isInteger(appid) || appid <= 0
+            )
+          ) {
+            return Response.json(
+              {
+                success: false,
+                status: "error",
+                error: "appIds must contain positive integers",
+              },
+              { status: 400 }
+            );
+          }
+          appIds = input.appIds;
+        } else {
+          return Response.json(
+            { success: false, status: "error", error: "Invalid request body" },
+            { status: 400 }
+          );
+        }
+      }
+
       const lease = await acquireIngestionLease(env.DB);
       if (!lease) {
         return Response.json({ success: false, reason: "run_in_progress" }, { status: 409 });
@@ -183,13 +239,13 @@ export default {
 
       try {
         const customFetch = env.FETCH ?? fetch;
-        const queue = await queueCatalogRefresh(env.DB, CATALOG_REFRESH_CHECKPOINT_KEY);
+        const queue = await queueCatalogRefresh(env.DB, {
+          checkpointKey: CATALOG_REFRESH_CHECKPOINT_KEY,
+          appIds,
+        });
         const refresh = await refreshCatalogBatch(env.DB, {
           checkpointKey: CATALOG_REFRESH_CHECKPOINT_KEY,
           fetchFn: customFetch,
-        });
-        const releases = await syncReleaseFactsFromApps(env.DB, {
-          apps: refresh.records.map((record) => ({ ...record, type: record.type ?? "game" })),
         });
         const { records: _records, ...refreshSummary } = refresh;
 
@@ -197,7 +253,6 @@ export default {
           success: true,
           queue,
           refresh: refreshSummary,
-          releases,
         });
       } finally {
         await releaseIngestionLease(env.DB, lease);
@@ -325,14 +380,10 @@ export default {
             fetchFn: customFetch,
           });
           const { records: _catalogRefreshRecords, ...catalogRefresh } = catalogRefreshResult;
-          const releaseResult = await syncReleaseFactsFromApps(env.DB, {
-            asOfDate: anchorTime,
-          });
           return Response.json({
             success: true,
             prices: priceResult,
             catalogRefresh,
-            releases: releaseResult,
           });
         }
 
@@ -380,9 +431,6 @@ export default {
           fetchFn: customFetch,
         });
         const { records: _catalogRefreshRecords, ...catalogRefresh } = catalogRefreshResult;
-        const releaseResult = await syncReleaseFactsFromApps(env.DB, {
-          asOfDate: anchorTime,
-        });
 
         return Response.json({
           success: true,
@@ -391,7 +439,6 @@ export default {
           rollups: rollupResult,
           prices: priceResult,
           catalogRefresh,
-          releases: releaseResult,
         });
       } finally {
         await releaseIngestionLease(env.DB, lease);

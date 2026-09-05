@@ -1,6 +1,6 @@
 import type { D1Database } from "./db";
 import { toSlug, parseGameSlug } from "./slug";
-import type { CatalogEntity } from "./catalog";
+import type { CatalogEntity, ReleaseDateSource } from "./catalog";
 import { getLiveApiCacheHeaders, CACHE_POLICIES } from "./cache";
 
 export type RelatedAppType =
@@ -83,6 +83,12 @@ interface RawRelatedRow {
   is_playable: number;
   parent_appid: number | null;
   release_date: string | null;
+  steam_release_date: string | null;
+  original_release_date: string | null;
+  original_steam_release_date: string | null;
+  release_from_early_access_date: string | null;
+  release_date_source: ReleaseDateSource;
+  is_early_access: number | boolean | null;
   release_status: string;
   description: string;
   header_image: string;
@@ -329,7 +335,18 @@ export async function getChildApp(
     is_eligible: parentRow.is_eligible === 1,
     is_playable: parentRow.is_playable === 1,
     parent_appid: null,
-    release_date: parentRow.release_date,
+    release_date: parentRow.release_date ?? null,
+    steam_release_date: parentRow.steam_release_date ?? null,
+    original_release_date: parentRow.original_release_date ?? null,
+    original_steam_release_date: parentRow.original_steam_release_date ?? null,
+    release_from_early_access_date: parentRow.release_from_early_access_date ?? null,
+    release_date_source: parentRow.release_date_source ?? null,
+    is_early_access:
+      parentRow.is_early_access == null
+        ? null
+        : typeof parentRow.is_early_access === "boolean"
+          ? parentRow.is_early_access
+          : parentRow.is_early_access === 1,
     release_status: (parentRow.release_status as CatalogEntity["release_status"]) || "released",
     description: parentRow.description || "",
     header_image: parentRow.header_image || "",
@@ -438,7 +455,18 @@ export async function searchCatalog(
       is_eligible: row.is_eligible === 1,
       is_playable: row.is_playable === 1,
       parent_appid: null,
-      release_date: row.release_date,
+      release_date: row.release_date ?? null,
+      steam_release_date: row.steam_release_date ?? null,
+      original_release_date: row.original_release_date ?? null,
+      original_steam_release_date: row.original_steam_release_date ?? null,
+      release_from_early_access_date: row.release_from_early_access_date ?? null,
+      release_date_source: row.release_date_source ?? null,
+      is_early_access:
+        row.is_early_access == null
+          ? null
+          : typeof row.is_early_access === "boolean"
+            ? row.is_early_access
+            : row.is_early_access === 1,
       release_status: (row.release_status as CatalogEntity["release_status"]) || "released",
       description: row.description || "",
       header_image: row.header_image || "",
@@ -494,7 +522,18 @@ export async function searchCatalog(
         is_eligible: parentRow.is_eligible === 1,
         is_playable: parentRow.is_playable === 1,
         parent_appid: null,
-        release_date: parentRow.release_date,
+        release_date: parentRow.release_date ?? null,
+        steam_release_date: parentRow.steam_release_date ?? null,
+        original_release_date: parentRow.original_release_date ?? null,
+        original_steam_release_date: parentRow.original_steam_release_date ?? null,
+        release_from_early_access_date: parentRow.release_from_early_access_date ?? null,
+        release_date_source: parentRow.release_date_source ?? null,
+        is_early_access:
+          parentRow.is_early_access == null
+            ? null
+            : typeof parentRow.is_early_access === "boolean"
+              ? parentRow.is_early_access
+              : parentRow.is_early_access === 1,
         release_status: (parentRow.release_status as CatalogEntity["release_status"]) || "released",
         description: parentRow.description || "",
         header_image: parentRow.header_image || "",

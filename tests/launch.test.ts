@@ -38,6 +38,7 @@ const migration0003 = readFileSync(resolve(import.meta.dir, "../migrations/0003_
 const migration0004 = readFileSync(resolve(import.meta.dir, "../migrations/0004_related_apps.sql"), "utf8");
 const migration0005 = readFileSync(resolve(import.meta.dir, "../migrations/0005_prices.sql"), "utf8");
 const migration0006 = readFileSync(resolve(import.meta.dir, "../migrations/0006_releases.sql"), "utf8");
+const migration0007 = readFileSync(resolve(import.meta.dir, "../migrations/0007_release_lifecycle.sql"), "utf8");
 
 function createSqliteD1Adapter(db: Database): D1Database {
   return {
@@ -167,6 +168,7 @@ describe("public worker launch contract", () => {
     sqliteDb.exec(migration0004);
     sqliteDb.exec(migration0005);
     sqliteDb.exec(migration0006);
+    sqliteDb.exec(migration0007);
     d1 = createSqliteD1Adapter(sqliteDb);
 
     // Seed test playable game and child expansion
@@ -429,6 +431,7 @@ describe("operating triggers", () => {
     sqliteDb.exec(migration0004);
     sqliteDb.exec(migration0005);
     sqliteDb.exec(migration0006);
+    sqliteDb.exec(migration0007);
     d1 = createSqliteD1Adapter(sqliteDb);
   });
 
