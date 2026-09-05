@@ -131,12 +131,12 @@ snapshot_ready=1
 # The migration image must see a coherent pre-migration database.
 check_database_integrity() {
   [[ -e "$DATABASE_PATH" ]] || return 0
-  compose run --no-build --rm --no-deps -T vaporstats bun -e 'const { Database } = require("bun:sqlite"); const db = new Database(process.env.DATABASE_PATH, { readonly: true }); const result = db.query("PRAGMA integrity_check").get(); if (result?.integrity_check !== "ok") { console.error(result); process.exit(1); } db.close();'
+  compose run --rm --no-deps -T vaporstats bun -e 'const { Database } = require("bun:sqlite"); const db = new Database(process.env.DATABASE_PATH, { readonly: true }); const result = db.query("PRAGMA integrity_check").get(); if (result?.integrity_check !== "ok") { console.error(result); process.exit(1); } db.close();'
 }
 
 check_database_integrity
 # Migrations are an explicit runtime artifact; generation never runs here.
-compose run --no-build --rm --no-deps -T vaporstats bun dist/migrate.js
+compose run --rm --no-deps -T vaporstats bun dist/migrate.js
 compose up -d --no-build vaporstats
 wait_for_healthy || fail 'new container did not become healthy'
 
