@@ -152,20 +152,17 @@ export async function initAnalyticsIfConsented(): Promise<boolean> {
       }
       const posthogCandidate = "default" in posthogModule ? posthogModule.default : posthogModule;
       const posthog = posthogCandidate as unknown as AnalyticsAdapter;
-      const apiKey = typeof process !== "undefined" && process.env
-        ? (process.env.VITE_POSTHOG_KEY || process.env.POSTHOG_KEY || "")
-        : "";
-      const apiHost = typeof process !== "undefined" && process.env
-        ? (process.env.VITE_POSTHOG_HOST || process.env.POSTHOG_HOST || "https://us.i.posthog.com")
-        : "https://us.i.posthog.com";
+      const apiKey =
+        (typeof process !== "undefined" && process.env && (process.env.VITE_POSTHOG_KEY || process.env.POSTHOG_KEY)) ||
+        "phc_tGnmyQZyk2BGREJFjCRv9H6N9nAtpDtMqft9wt5vdJeY";
+      const apiHost =
+        (typeof process !== "undefined" && process.env && (process.env.VITE_POSTHOG_HOST || process.env.POSTHOG_HOST)) ||
+        "https://us.i.posthog.com";
 
-      if (apiKey && typeof posthog.init === "function") {
+      if (typeof posthog.init === "function") {
         posthog.init(apiKey, {
           api_host: apiHost,
-          autocapture: false,
-          capture_pageview: false,
-          persistence: "memory",
-          disable_session_recording: true,
+          defaults: "2026-05-30",
         });
       }
       adapter = posthog;

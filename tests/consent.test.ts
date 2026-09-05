@@ -278,6 +278,17 @@ describe("Analytics Consent and Privacy Foundation", () => {
     console.log("consent persistence");
   });
 
+  test("posthog initializes with project key when consented", async () => {
+    resetAnalyticsState();
+    setStorageAdapter(memoryStorage);
+    memoryStorage.setItem(CONSENT_STORAGE_KEY, "accepted");
+
+    // Uses default dynamic import loader (real posthog-js)
+    const loaded = await initAnalyticsIfConsented();
+    expect(loaded).toBe(true);
+    expect(isAnalyticsLoaded()).toBe(true);
+  });
+
   test("consent withdrawal", async () => {
     let optOutCalled = false;
     let resetCalled = false;
