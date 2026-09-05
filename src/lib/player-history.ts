@@ -459,7 +459,7 @@ export async function getMostPlayedRankings(
        a.name,
        a.slug,
        t.latest_players,
-       t.last_successful_at as last_observed_at
+       COALESCE(t.last_successful_at, (SELECT MAX(observed_at) FROM observations WHERE appid = a.appid)) as last_observed_at
      FROM apps a
      JOIN tracked_games t ON t.appid = a.appid
      WHERE a.is_playable = 1 

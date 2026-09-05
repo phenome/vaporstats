@@ -398,6 +398,7 @@ export async function runDailyDiscoveryAndReRanking(
   for (const outcome of probeOutcomes) {
     const { appid, players } = outcome;
     const isOfficial = officialEntrantSet.has(appid);
+    const observedAtIso = players !== null ? anchorTime.toISOString() : null;
 
     if (players !== null) {
       initialObservations++;
@@ -411,16 +412,18 @@ export async function runDailyDiscoveryAndReRanking(
       stmts.push(
         db
           .prepare(
-            `INSERT INTO tracked_games (appid, tier, slot, next_due_at, latest_players)
-             VALUES (?, 'daily', ?, ?, ?)
+            `INSERT INTO tracked_games (appid, tier, slot, next_due_at, latest_players, last_successful_at, last_attempted_at)
+             VALUES (?, 'daily', ?, ?, ?, ?, ?)
              ON CONFLICT(appid) DO UPDATE SET
                tier = excluded.tier,
                slot = excluded.slot,
                next_due_at = excluded.next_due_at,
                latest_players = COALESCE(excluded.latest_players, tracked_games.latest_players),
+               last_successful_at = COALESCE(excluded.last_successful_at, tracked_games.last_successful_at),
+               last_attempted_at = COALESCE(excluded.last_attempted_at, tracked_games.last_attempted_at),
                updated_at = CURRENT_TIMESTAMP`
           )
-          .bind(appid, slot, nextDue, players)
+          .bind(appid, slot, nextDue, players, observedAtIso, observedAtIso)
       );
       trackedSnapshot.push({ appid, latest_players: players });
       sortTracked();
@@ -441,10 +444,10 @@ export async function runDailyDiscoveryAndReRanking(
           stmts.push(
             db
               .prepare(
-                `INSERT INTO tracked_games (appid, tier, slot, next_due_at, latest_players)
-                 VALUES (?, 'daily', ?, ?, ?)`
+                `INSERT INTO tracked_games (appid, tier, slot, next_due_at, latest_players, last_successful_at, last_attempted_at)
+                 VALUES (?, 'daily', ?, ?, ?, ?, ?)`
               )
-              .bind(appid, slot, nextDue, players)
+              .bind(appid, slot, nextDue, players, observedAtIso, observedAtIso)
           );
 
           // Replace victim in tracked snapshot with entrant

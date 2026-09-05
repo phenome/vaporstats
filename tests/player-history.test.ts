@@ -435,9 +435,14 @@ describe("Player History and Rankings", () => {
     await db.prepare("INSERT INTO tracked_games (appid, latest_players, last_successful_at, next_due_at) VALUES (10, 100, ?, '2026-09-04T13:00:00Z')").bind(obsLow).run();
     await db.prepare("INSERT INTO tracked_games (appid, latest_players, last_successful_at, next_due_at) VALUES (20, 5000, ?, '2026-09-04T13:00:00Z')").bind(obsHigh).run();
     await db.prepare("INSERT INTO tracked_games (appid, latest_players, last_successful_at, next_due_at) VALUES (30, 2500, ?, '2026-09-04T13:00:00Z')").bind(obsMid).run();
+    // Tracked game 60 has observations in observations table, but last_successful_at is null in tracked_games
+    await db.prepare("INSERT INTO apps (appid, name, slug) VALUES (60, 'Fallback Game', 'fallback-game')").run();
+    await db.prepare("INSERT INTO observations (appid, current_players, observed_at) VALUES (60, 1500, ?)").bind(obsMid).run();
+    await db.prepare("INSERT INTO tracked_games (appid, latest_players, last_successful_at, next_due_at) VALUES (60, 1500, NULL, '2026-09-04T13:00:00Z')").run();
+
 
     const rankings = await getMostPlayedRankings(db, { now });
-    expect(rankings.length).toBe(3);
+    expect(rankings.length).toBe(4);
 
     // Order check: High (5000) -> Mid (2500) -> Low (100)
     expect(rankings[0].appid).toBe(20);
@@ -451,10 +456,16 @@ describe("Player History and Rankings", () => {
     expect(rankings[1].current_players).toBe(2500);
     expect(rankings[1].relative_age).toBe("2h ago");
 
-    expect(rankings[2].appid).toBe(10);
+    expect(rankings[2].appid).toBe(60);
     expect(rankings[2].rank).toBe(3);
-    expect(rankings[2].current_players).toBe(100);
-    expect(rankings[2].relative_age).toBe("1d ago");
+    expect(rankings[2].current_players).toBe(1500);
+    expect(rankings[2].relative_age).toBe("2h ago");
+    expect(rankings[2].exact_utc).toBe(formatExactUtc(obsMid));
+
+    expect(rankings[3].appid).toBe(10);
+    expect(rankings[3].rank).toBe(4);
+    expect(rankings[3].current_players).toBe(100);
+    expect(rankings[3].relative_age).toBe("1d ago");
 
     // Page view rendering check
     const pageHtml = renderToString(React.createElement(RankingsPageView, { games: rankings }));
