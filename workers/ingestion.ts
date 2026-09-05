@@ -119,13 +119,19 @@ async function performIngestionTick(options: IngestionTickOptions): Promise<Inge
   let rollups: RollupJobResult | undefined;
   const targetDate = previousUtcDate(anchorTime);
   const dailyCheckpoint = await getCheckpoint(options.db, INGESTION_DAILY_CHECKPOINT_KEY);
-  if (dailyCheckpoint?.value !== targetDate) {
+  const trackedGame = await options.db
+    .prepare("SELECT appid FROM tracked_games LIMIT 1")
+    .first<{ appid: number }>();
+  const dailyCycleDue = dailyCheckpoint?.value !== targetDate;
+  if (dailyCycleDue || !trackedGame) {
     discovery = await runDailyDiscoveryAndReRanking(options.db, {
       anchorTime,
       budgetTime: anchorTime,
       customFetch,
       alreadyAttemptedInTick: tick.attempted,
     });
+  }
+  if (dailyCycleDue) {
     rollups = await runDailyRollupJob(options.db, { anchorTime, targetDate });
     await setCheckpoint(options.db, INGESTION_DAILY_CHECKPOINT_KEY, targetDate);
   }

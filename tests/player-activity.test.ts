@@ -108,6 +108,22 @@ describe("Bun ingestion scheduling and player rollups", () => {
 
     expect(calls).toEqual([{ expression: "*/10 * * * *", options: { tz: "UTC" } }]);
   });
+  test("bootstraps player tracking after an empty daily discovery", async () => {
+    const db = createAppDatabase();
+    const anchorTime = new Date("2026-09-05T03:10:00.000Z");
+    await setDailyCheckpoint(db, "2026-09-04");
+    await db
+      .prepare("INSERT INTO apps (appid, name, slug) VALUES (?, ?, ?)")
+      .bind(730, "Counter-Strike 2", "counter-strike-2")
+      .run();
+
+    const customFetch = (async () => successfulSteamResponse()) as unknown as typeof fetch;
+    const result = await runIngestionTick({ db, anchorTime, customFetch });
+
+    expect(result.discovery?.initialObservations).toBe(1);
+    expect(await db.prepare("SELECT COUNT(*) AS count FROM tracked_games").first<number>("count")).toBe(1);
+    expect(await db.prepare("SELECT COUNT(*) AS count FROM observations").first<number>("count")).toBe(1);
+  });
 
   test("skips overlapping ticks, including a blocked startup run", async () => {
     const db = createAppDatabase();
