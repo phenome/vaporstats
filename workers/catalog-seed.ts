@@ -107,6 +107,17 @@ interface SteamAppDetailsResponse {
 }
 
 /**
+ * Obtains the storefront's displayed original release date.
+ * Steam's appdetails endpoint can expose a later re-release date instead.
+ */
+function parseStorefrontReleaseDate(html: string): string | null {
+  const match = html.match(
+    /<div class="subtitle column">\s*Release Date:\s*<\/div>\s*<div class="date">\s*([^<]+?)\s*<\/div>/i
+  );
+  return match?.[1]?.trim() || null;
+}
+
+/**
  * Obtains Steam-derived app record for a specific AppID via Steam store API.
  * Supports injectable fetchFn for tests and worker runtime.
  */
@@ -128,17 +139,28 @@ export async function fetchSteamAppDetails(
   }
 
   const details = appData.data;
-  const isPlayable = details.type === "game";
   const releaseStatus = details.release_date?.coming_soon ? "upcoming" : "released";
+  let releaseDate = details.release_date?.date ?? null;
+
+  try {
+    const storefrontResponse = await customFetch(
+      `https://store.steampowered.com/app/${appid}/?cc=us&l=english`
+    );
+    if (storefrontResponse.ok) {
+      releaseDate = parseStorefrontReleaseDate(await storefrontResponse.text()) ?? releaseDate;
+    }
+  } catch {
+    // Keep the API date when the storefront request is unavailable.
+  }
 
   return {
     appid: details.steam_appid,
     name: details.name,
     type: details.type,
     is_eligible: true,
-    is_playable: isPlayable,
+    is_playable: details.type === "game",
     parent_appid: null,
-    release_date: details.release_date?.date ?? null,
+    release_date: releaseDate,
     release_status: releaseStatus,
     description: details.short_description ?? "",
     header_image: details.header_image ?? "",

@@ -225,6 +225,46 @@ describe("Catalog Foundation", () => {
 
     console.log("bounded catalog seed");
   });
+  test("prefers storefront release date over API metadata", async () => {
+    const mockFetch = (async (url: string | URL | Request) => {
+      const urlStr = url.toString();
+      if (urlStr.includes("/api/appdetails?")) {
+        return new Response(
+          JSON.stringify({
+            "339820": {
+              success: true,
+              data: {
+                type: "game",
+                name: "Starwalker",
+                steam_appid: 339820,
+                short_description: "A space-exploration survival RPG.",
+                header_image: "https://example.com/339820.jpg",
+                developers: ["MP Game Studios"],
+                publishers: ["MP Game Studios"],
+                release_date: {
+                  coming_soon: false,
+                  date: "Aug 31, 2026",
+                },
+              },
+            },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+
+      return new Response(
+        `
+          <div class="subtitle column">Release Date:</div>
+          <div class="date">Jun 30, 2018</div>
+        `,
+        { status: 200, headers: { "Content-Type": "text/html" } }
+      );
+    }) as unknown as typeof fetch;
+
+    const app = await fetchSteamAppDetails(339820, mockFetch);
+
+    expect(app?.release_date).toBe("Jun 30, 2018");
+  });
 
   test("playable catalog only", async () => {
     const freshDb = createFreshDb();
