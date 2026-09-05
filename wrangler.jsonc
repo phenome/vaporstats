@@ -31,6 +31,16 @@
       "migrations_dir": "migrations"
     }
   ],
+  "ratelimits": [
+    {
+      "name": "API_RATE_LIMITER",
+      "namespace_id": "1001",
+      "simple": {
+        "limit": 30,
+        "period": 10
+      }
+    }
+  ],
   "observability": {
     "enabled": true
   },
@@ -46,6 +56,16 @@
           "database_name": "vaporstats-staging-d1",
           "database_id": "bddcda15-1f29-4d2b-980e-37e5b4a74bf3",
           "migrations_dir": "migrations"
+        }
+      ],
+      "ratelimits": [
+        {
+          "name": "API_RATE_LIMITER",
+          "namespace_id": "1002",
+          "simple": {
+            "limit": 30,
+            "period": 10
+          }
         }
       ]
     }
