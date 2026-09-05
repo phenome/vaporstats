@@ -492,9 +492,6 @@ describe("operating triggers", () => {
   });
 
   it("runs the price feed on every ten-minute scheduled invocation", async () => {
-    sqliteDb.exec(
-      "INSERT INTO apps (appid, name, slug, type, is_playable, is_eligible) VALUES (570, 'Dota 2', '570-dota-2', 'game', 1, 1)"
-    );
     const logs: string[] = [];
     const originalLog = console.log;
     console.log = (...args: unknown[]) => {
@@ -515,7 +512,13 @@ describe("operating triggers", () => {
         return Response.json({
           "570": {
             success: true,
-            data: { name: "Dota 2", is_free: true },
+            data: {
+              name: "Dota 2",
+              steam_appid: 570,
+              type: "game",
+              is_free: true,
+              release_date: { coming_soon: false, date: "Jul 9, 2013" },
+            },
           },
         });
       }
@@ -543,6 +546,11 @@ describe("operating triggers", () => {
         prices: { executed: boolean; successful: number } | null;
       };
       expect(parsed.prices).toMatchObject({ executed: true, successful: 1 });
+      const releaseFact = await d1
+        .prepare("SELECT release_date FROM release_facts WHERE appid = ?")
+        .bind(570)
+        .first<{ release_date: string }>();
+      expect(releaseFact?.release_date).toBe("2013-07-09");
     } finally {
       console.log = originalLog;
     }

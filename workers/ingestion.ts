@@ -121,6 +121,7 @@ export default {
             anchorTime,
           });
         }
+        const releaseResult = await syncReleaseFactsFromApps(db, { asOfDate: anchorTime });
 
         console.log(
           JSON.stringify({
@@ -132,6 +133,7 @@ export default {
             discovery: discoveryResult,
             rollups: rollupResult,
             prices: priceResult,
+            releaseFacts: releaseResult,
           })
         );
       } finally {
@@ -273,9 +275,13 @@ export default {
             customFetch,
             anchorTime,
           });
+          const releaseResult = await syncReleaseFactsFromApps(env.DB, {
+            asOfDate: anchorTime,
+          });
           return Response.json({
             success: true,
             prices: priceResult,
+            releases: releaseResult,
           });
         }
 
@@ -318,6 +324,9 @@ export default {
               anchorTime,
             })
           : null;
+        const releaseResult = await syncReleaseFactsFromApps(env.DB, {
+          asOfDate: anchorTime,
+        });
 
         return Response.json({
           success: true,
@@ -325,6 +334,7 @@ export default {
           discovery: discoveryResult,
           rollups: rollupResult,
           prices: priceResult,
+          releases: releaseResult,
         });
       } finally {
         await releaseIngestionLease(env.DB, lease);
