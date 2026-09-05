@@ -1,4 +1,11 @@
 import React, { useState, useEffect, useCallback, useMemo } from "react";
+import { LineChart, Line, XAxis, YAxis, CartesianGrid } from "recharts";
+import {
+  ChartContainer,
+  ChartTooltip,
+  ChartTooltipContent,
+  type ChartConfig,
+} from "./ui/chart";
 import {
   type PriceHistoryRange,
   type PriceHistoryResult,
@@ -7,6 +14,13 @@ import {
   formatPriceCents,
   formatPriceUtc,
 } from "../lib/prices";
+
+const priceChartConfig = {
+  price: {
+    label: "Price",
+    color: "#22c55e",
+  },
+} satisfies ChartConfig;
 export interface PriceHistoryChartProps {
   appid: number;
   initialRange?: PriceHistoryRange;
@@ -31,6 +45,11 @@ export function PriceHistoryChart({
     initialData ? "success" : "idle"
   );
   const [showTable, setShowTable] = useState(false);
+  const [isMounted, setIsMounted] = useState(false);
+
+  useEffect(() => {
+    setIsMounted(true);
+  }, []);
   useEffect(() => {
     let cancelled = false;
     const fetchFn = customFetch ?? fetch;
@@ -115,6 +134,31 @@ export function PriceHistoryChart({
     };
   }, [historyEntries, currentPrice]);
 
+  const rechartsPriceData = useMemo(() => {
+    return historyEntries.map((entry) => {
+      const d = new Date(entry.observed_at);
+      const formattedDate = isNaN(d.getTime())
+        ? ""
+        : d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+      const fullDate = isNaN(d.getTime())
+        ? ""
+        : d.toISOString().replace("T", " ").replace(/\.\d+Z$/, " UTC");
+      const priceDollars =
+        entry.is_free ? 0 : entry.final_price !== null ? entry.final_price / 100 : null;
+      return {
+        observed_at: entry.observed_at,
+        formattedDate,
+        fullDate,
+        price: priceDollars,
+        finalPriceCents: entry.final_price,
+        initialPriceCents: entry.initial_price,
+        discountPercent: entry.discount_percent,
+        isFree: entry.is_free,
+        isAvailable: entry.is_available,
+        currency: entry.currency,
+      };
+    });
+  }, [historyEntries]);
   return (
     <div
       className="border border-zinc-800 bg-zinc-950 p-5 space-y-4 w-full"
@@ -155,6 +199,7 @@ export function PriceHistoryChart({
           })}
         </div>
       </div>
+
 
       {/* Metric summary bar */}
       {stats && (
@@ -230,12 +275,83 @@ export function PriceHistoryChart({
 
         {status === "success" && (historyEntries.length > 0 || currentPrice) && (
           <div className="space-y-4">
-            {/* SVG Visual Step-Chart */}
-            <div
-              className="w-full bg-zinc-900/20 border border-zinc-900 p-4"
-              role="img"
-              aria-label="Price history chart showing recorded price changes over time"
-            >
+            {isMounted ? (
+              <div className="space-y-2">
+                <div className="flex flex-wrap justify-between items-center text-[10px] font-mono text-zinc-500 px-1 gap-1">
+                  <span>
+                    {data?.earliest_observation
+                      ? `First observed: ${formatPriceUtc(data.earliest_observation)}`
+                      : "Observation start"}
+                  </span>
+                  <span>Range: {range.toUpperCase()}</span>
+                  <span>Latest: {formatPriceUtc(data?.source_timestamp)}</span>
+                </div>
+                <ChartContainer
+                  config={priceChartConfig}
+                  className="w-full h-[200px] aspect-auto bg-zinc-900/20 border border-zinc-900 p-2"
+                >
+                  <LineChart
+                    data={rechartsPriceData}
+                    margin={{ top: 15, right: 20, left: 10, bottom: 5 }}
+                  >
+                    <CartesianGrid strokeDasharray="3 3" stroke="#27272a" vertical={false} />
+                    <XAxis
+                      dataKey="formattedDate"
+                      stroke="#71717a"
+                      fontSize={10}
+                      tickLine={false}
+                      axisLine={false}
+                      minTickGap={30}
+                    />
+                    <YAxis
+                      stroke="#71717a"
+                      fontSize={10}
+                      tickLine={false}
+                      axisLine={false}
+                      tickFormatter={(v: number) => `$${v.toFixed(0)}`}
+                      domain={["auto", "auto"]}
+                    />
+                    <ChartTooltip
+                      content={
+                        <ChartTooltipContent
+                          labelFormatter={(_, payload) => {
+                            const item = payload?.[0]?.payload;
+                            return item?.fullDate ?? "";
+                          }}
+                          formatter={(value, name, item) => {
+                            const p = item.payload;
+                            if (p.isFree) return ["Free", "Price"];
+                            if (!p.isAvailable) return ["Unavailable", "Price"];
+                            return [
+                              `$${Number(value).toFixed(2)}${
+                                p.discountPercent > 0 ? ` (-${p.discountPercent}%)` : ""
+                              }`,
+                              "Price",
+                            ];
+                          }}
+                        />
+                      }
+                    />
+                    <Line
+                      type="stepAfter"
+                      dataKey="price"
+                      stroke="#22c55e"
+                      strokeWidth={2}
+                      dot={{ fill: "#22c55e", r: 3, stroke: "#18181b", strokeWidth: 1 }}
+                      activeDot={{ r: 5, fill: "#22c55e", stroke: "#18181b", strokeWidth: 2 }}
+                      connectNulls={false}
+                      isAnimationActive={false}
+                    />
+                  </LineChart>
+                </ChartContainer>
+              </div>
+            ) : (
+              /* SVG Visual Step-Chart (SSR Fallback) */
+              <div
+                className="w-full bg-zinc-900/20 border border-zinc-900 p-4"
+                role="img"
+                aria-label="Price history chart showing recorded price changes over time"
+              >
               <div className="flex flex-wrap justify-between items-center text-[10px] font-mono text-zinc-500 mb-2 border-b border-zinc-900 pb-1 gap-1">
                 <span>
                   {data?.earliest_observation
@@ -293,6 +409,7 @@ export function PriceHistoryChart({
                 })}
               </div>
             </div>
+            )}
 
             {/* Accessible Table Equivalent Toggle */}
             <div className="pt-2 border-t border-zinc-900">

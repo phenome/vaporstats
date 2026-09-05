@@ -1,4 +1,11 @@
 import React, { useState, useEffect, useCallback, useMemo } from "react";
+import { AreaChart, Area, XAxis, YAxis, CartesianGrid } from "recharts";
+import {
+  ChartContainer,
+  ChartTooltip,
+  ChartTooltipContent,
+  type ChartConfig,
+} from "./ui/chart";
 import {
   type HistoryRange,
   type PlayerHistoryResult,
@@ -14,6 +21,13 @@ export interface PlayerHistoryChartProps {
   initialData?: PlayerHistoryResult;
   customFetch?: typeof fetch;
 }
+
+const playerChartConfig = {
+  players: {
+    label: "Players",
+    color: "#f97316",
+  },
+} satisfies ChartConfig;
 
 /**
  * Accessible, gap-preserving player history chart and tabular equivalent.
@@ -37,6 +51,11 @@ export function PlayerHistoryChart({
     initialData && initialData.appid === appid ? "success" : "loading"
   );
   const [showTable, setShowTable] = useState(false);
+  const [isMounted, setIsMounted] = useState(false);
+
+  useEffect(() => {
+    setIsMounted(true);
+  }, []);
 
   // Keep initial display synced if initialData / appid changes
   useEffect(() => {
@@ -160,6 +179,27 @@ export function PlayerHistoryChart({
     return segments;
   }, [points, stats, plotWidth, plotHeight, padLeft, padTop]);
 
+  const rechartsData = useMemo(() => {
+    return points.map((p) => {
+      const d = new Date(p.timestamp);
+      const is24h = range === "24h";
+      const formattedDate = isNaN(d.getTime())
+        ? ""
+        : is24h
+        ? d.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false })
+        : d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+      const fullDate = isNaN(d.getTime())
+        ? ""
+        : d.toISOString().replace("T", " ").replace(/\.\d+Z$/, " UTC");
+      return {
+        timestamp: p.timestamp,
+        formattedDate,
+        fullDate,
+        players: p.players,
+      };
+    });
+  }, [points, range]);
+
   return (
     <div
       className="border border-zinc-800 bg-zinc-950 p-5 space-y-4 w-full"
@@ -257,7 +297,73 @@ export function PlayerHistoryChart({
 
         {status === "success" && points.length > 0 && stats && (
           <div className="w-full overflow-hidden" data-testid="chart-viewport">
-            <svg
+            {isMounted ? (
+              <ChartContainer
+                config={playerChartConfig}
+                className="w-full h-[220px] aspect-auto"
+              >
+                <AreaChart
+                  data={rechartsData}
+                  margin={{ top: 10, right: 15, left: 10, bottom: 0 }}
+                >
+                  <defs>
+                    <linearGradient id="playerGradient" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="5%" stopColor="#f97316" stopOpacity={0.4} />
+                      <stop offset="95%" stopColor="#f97316" stopOpacity={0.0} />
+                    </linearGradient>
+                  </defs>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#27272a" vertical={false} />
+                  <XAxis
+                    dataKey="formattedDate"
+                    stroke="#71717a"
+                    fontSize={10}
+                    tickLine={false}
+                    axisLine={false}
+                    minTickGap={25}
+                  />
+                  <YAxis
+                    stroke="#71717a"
+                    fontSize={10}
+                    tickLine={false}
+                    axisLine={false}
+                    tickFormatter={(v: number) =>
+                      v >= 1000000
+                        ? `${(v / 1000000).toFixed(1)}M`
+                        : v >= 1000
+                        ? `${(v / 1000).toFixed(0)}k`
+                        : `${v}`
+                    }
+                    domain={["auto", "auto"]}
+                  />
+                  <ChartTooltip
+                    content={
+                      <ChartTooltipContent
+                        labelFormatter={(_, payload) => {
+                          const item = payload?.[0]?.payload;
+                          return item?.fullDate ?? "";
+                        }}
+                        formatter={(value) => [
+                          typeof value === "number"
+                            ? value.toLocaleString("en-US")
+                            : "No data",
+                          "Players",
+                        ]}
+                      />
+                    }
+                  />
+                  <Area
+                    type="monotone"
+                    dataKey="players"
+                    stroke="#f97316"
+                    strokeWidth={2}
+                    fill="url(#playerGradient)"
+                    connectNulls={false}
+                    isAnimationActive={false}
+                  />
+                </AreaChart>
+              </ChartContainer>
+            ) : (
+              <svg
               viewBox={`0 0 ${width} ${height}`}
               className="w-full h-auto block select-none"
               role="img"
@@ -404,6 +510,7 @@ export function PlayerHistoryChart({
                 />
               )}
             </svg>
+            )}
           </div>
         )}
       </div>

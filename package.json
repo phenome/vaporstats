@@ -21,9 +21,11 @@
     "@tanstack/react-router": "^1.170.32",
     "@tanstack/react-start": "^1.168.49",
     "clsx": "^2.1.1",
+    "lucide-react": "^1.41.0",
     "posthog-js": "^1.427.1",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
+    "recharts": "2.15.4",
     "tailwind-merge": "^3.6.0"
   },
   "devDependencies": {
