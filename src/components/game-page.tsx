@@ -8,6 +8,7 @@ import {
   formatPriceCents,
   formatPriceUtc,
 } from "../lib/prices";
+import { getCanonicalPublisherPath } from "../lib/slug";
 import { PlayerPanel } from "./player-panel";
 import { PlayerHistoryChart } from "./player-history";
 import { PriceHistoryChart } from "./price-history";
@@ -74,11 +75,33 @@ export function GamePageView({
             <div className="grid grid-cols-2 gap-3 pt-2 text-xs font-mono">
               <div className="border border-zinc-900 bg-zinc-900/40 p-2.5">
                 <div className="text-zinc-500 text-[10px] uppercase">Developer</div>
-                <div className="text-zinc-200 font-medium truncate">{game.developer || "Unknown"}</div>
+                <div className="text-zinc-200 font-medium truncate">
+                  {game.developer ? (
+                    <a
+                      href={getCanonicalPublisherPath(game.developer)}
+                      className="hover:text-orange-400 hover:underline transition-colors"
+                    >
+                      {game.developer}
+                    </a>
+                  ) : (
+                    "Unknown"
+                  )}
+                </div>
               </div>
               <div className="border border-zinc-900 bg-zinc-900/40 p-2.5">
                 <div className="text-zinc-500 text-[10px] uppercase">Publisher</div>
-                <div className="text-zinc-200 font-medium truncate">{game.publisher || "Unknown"}</div>
+                <div className="text-zinc-200 font-medium truncate">
+                  {game.publisher ? (
+                    <a
+                      href={getCanonicalPublisherPath(game.publisher)}
+                      className="hover:text-orange-400 hover:underline transition-colors"
+                    >
+                      {game.publisher}
+                    </a>
+                  ) : (
+                    "Unknown"
+                  )}
+                </div>
               </div>
             </div>
           </div>

@@ -9,7 +9,7 @@ import {
   type RelatedAppEntity,
   getCanonicalChildPath,
 } from "../lib/related";
-import { getCanonicalGamePath, toSlug } from "../lib/slug";
+import { getCanonicalGamePath, getCanonicalPublisherPath, toSlug } from "../lib/slug";
 import { CACHE_POLICIES, getLiveApiCacheHeaders, getPageCacheHeaders } from "../lib/cache";
 import { SearchForm } from "../components/search-form";
 
@@ -153,7 +153,13 @@ function SearchResultCard({ item }: { item: SearchItem }) {
             )}
             {item.game.developer && (
               <div>
-                DEV: <span className="text-zinc-300">{item.game.developer}</span>
+                DEV:{" "}
+                <a
+                  href={getCanonicalPublisherPath(item.game.developer)}
+                  className="text-zinc-300 hover:text-orange-400 hover:underline transition-colors"
+                >
+                  {item.game.developer}
+                </a>
               </div>
             )}
           </div>

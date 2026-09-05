@@ -2,7 +2,7 @@ import React from "react";
 import { createFileRoute } from "@tanstack/react-router";
 import { listPlayableGames, type CatalogEntity } from "../lib/catalog";
 import { getDb } from "../lib/db";
-import { getCanonicalGamePath } from "../lib/slug";
+import { getCanonicalGamePath, getCanonicalPublisherPath } from "../lib/slug";
 import { getPageCacheHeaders } from "../lib/cache";
 import { RouteDataError, RouteLoading } from "../components/route-state";
 
@@ -87,7 +87,16 @@ export function GamesIndexComponent({ games: propGames }: { games?: CatalogEntit
                       </a>
                     </td>
                     <td className="py-3 px-4 text-zinc-400 hidden sm:table-cell truncate max-w-xs">
-                      {game.developer || "—"}
+                      {game.developer ? (
+                        <a
+                          href={getCanonicalPublisherPath(game.developer)}
+                          className="hover:text-orange-400 hover:underline transition-colors"
+                        >
+                          {game.developer}
+                        </a>
+                      ) : (
+                        "—"
+                      )}
                     </td>
                     <td className="py-3 px-4 text-zinc-500 hidden md:table-cell">
                       {game.release_date || "—"}

@@ -17,7 +17,7 @@ import {
   type PriceHistoryResult,
 } from "../lib/prices";
 import { PriceHistoryChart } from "../components/price-history";
-import { parseGameSlug, toSlug, getCanonicalGamePath } from "../lib/slug";
+import { parseGameSlug, toSlug, getCanonicalGamePath, getCanonicalPublisherPath } from "../lib/slug";
 import { CACHE_POLICIES, getEntityCacheHeaders } from "../lib/cache";
 
 export const Route = createFileRoute("/games/$game_/$child")({
@@ -188,11 +188,33 @@ export function ChildAppPageView({
               </div>
               <div>
                 <div className="text-zinc-600 text-[10px] uppercase">Developer</div>
-                <div className="text-zinc-200 truncate">{child.developer || "Unknown"}</div>
+                <div className="text-zinc-200 truncate">
+                  {child.developer ? (
+                    <a
+                      href={getCanonicalPublisherPath(child.developer)}
+                      className="hover:text-orange-400 hover:underline transition-colors"
+                    >
+                      {child.developer}
+                    </a>
+                  ) : (
+                    "Unknown"
+                  )}
+                </div>
               </div>
               <div>
                 <div className="text-zinc-600 text-[10px] uppercase">Publisher</div>
-                <div className="text-zinc-200 truncate">{child.publisher || "Unknown"}</div>
+                <div className="text-zinc-200 truncate">
+                  {child.publisher ? (
+                    <a
+                      href={getCanonicalPublisherPath(child.publisher)}
+                      className="hover:text-orange-400 hover:underline transition-colors"
+                    >
+                      {child.publisher}
+                    </a>
+                  ) : (
+                    "Unknown"
+                  )}
+                </div>
               </div>
             </div>
           </div>

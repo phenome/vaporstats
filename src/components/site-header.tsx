@@ -41,6 +41,12 @@ export function SiteHeader() {
             >
               Releases
             </a>
+            <a
+              href="/publishers"
+              className="min-h-[44px] px-3 py-1.5 inline-flex items-center text-xs font-mono uppercase tracking-wider text-zinc-300 hover:text-white hover:bg-zinc-900 border border-transparent hover:border-zinc-800 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-orange-500"
+            >
+              Publishers
+            </a>
           </nav>
         </div>
 
@@ -64,6 +70,9 @@ export function SiteHeader() {
         </a>
         <a href="/releases" className="inline-flex min-h-[44px] shrink-0 items-center px-3 text-xs font-mono uppercase tracking-wider text-zinc-300 hover:bg-zinc-900 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-orange-500">
           Releases
+        </a>
+        <a href="/publishers" className="inline-flex min-h-[44px] shrink-0 items-center px-3 text-xs font-mono uppercase tracking-wider text-zinc-300 hover:bg-zinc-900 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-orange-500">
+          Publishers
         </a>
       </nav>
     </header>

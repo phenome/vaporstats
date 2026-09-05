@@ -18,8 +18,13 @@ import { Route as ApiDealsRouteImport } from './routes/api.deals'
 import { Route as ApiRankingsRouteImport } from './routes/api.rankings'
 import { Route as ApiReleasesRouteImport } from './routes/api.releases'
 import { Route as ApiSearchRouteImport } from './routes/api.search'
+import { Route as DeveloperDeveloperRouteImport } from './routes/developer.$developer'
+import { Route as DevelopersIndexRouteImport } from './routes/developers.index'
 import { Route as GamesIndexRouteImport } from './routes/games.index'
 import { Route as GamesGameRouteImport } from './routes/games.$game'
+import { Route as PublisherIndexRouteImport } from './routes/publisher.index'
+import { Route as PublisherPublisherRouteImport } from './routes/publisher.$publisher'
+import { Route as PublishersIndexRouteImport } from './routes/publishers.index'
 import { Route as RankingsIndexRouteImport } from './routes/rankings.index'
 import { Route as RankingsPeakRouteImport } from './routes/rankings.peak'
 import { Route as ReleasesIndexRouteImport } from './routes/releases.index'
@@ -74,6 +79,16 @@ const ApiSearchRoute = ApiSearchRouteImport.update({
   path: '/api/search',
   getParentRoute: () => rootRouteImport,
 } as any)
+const DeveloperDeveloperRoute = DeveloperDeveloperRouteImport.update({
+  id: '/developer/$developer',
+  path: '/developer/$developer',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const DevelopersIndexRoute = DevelopersIndexRouteImport.update({
+  id: '/developers/',
+  path: '/developers/',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const GamesIndexRoute = GamesIndexRouteImport.update({
   id: '/games/',
   path: '/games/',
@@ -82,6 +97,21 @@ const GamesIndexRoute = GamesIndexRouteImport.update({
 const GamesGameRoute = GamesGameRouteImport.update({
   id: '/games/$game',
   path: '/games/$game',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const PublisherIndexRoute = PublisherIndexRouteImport.update({
+  id: '/publisher/',
+  path: '/publisher/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const PublisherPublisherRoute = PublisherPublisherRouteImport.update({
+  id: '/publisher/$publisher',
+  path: '/publisher/$publisher',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const PublishersIndexRoute = PublishersIndexRouteImport.update({
+  id: '/publishers/',
+  path: '/publishers/',
   getParentRoute: () => rootRouteImport,
 } as any)
 const RankingsIndexRoute = RankingsIndexRouteImport.update({
@@ -135,10 +165,15 @@ export interface FileRoutesByFullPath {
   '/api/rankings': typeof ApiRankingsRoute
   '/api/releases': typeof ApiReleasesRoute
   '/api/search': typeof ApiSearchRoute
+  '/developer/$developer': typeof DeveloperDeveloperRoute
   '/games/$game': typeof GamesGameRoute
+  '/publisher/$publisher': typeof PublisherPublisherRoute
   '/rankings/peak': typeof RankingsPeakRoute
   '/releases/$week': typeof ReleasesWeekRoute
+  '/developers/': typeof DevelopersIndexRoute
   '/games/': typeof GamesIndexRoute
+  '/publisher/': typeof PublisherIndexRoute
+  '/publishers/': typeof PublishersIndexRoute
   '/rankings/': typeof RankingsIndexRoute
   '/releases/': typeof ReleasesIndexRoute
   '/api/players/history': typeof ApiPlayersHistoryRoute
@@ -156,10 +191,15 @@ export interface FileRoutesByTo {
   '/api/rankings': typeof ApiRankingsRoute
   '/api/releases': typeof ApiReleasesRoute
   '/api/search': typeof ApiSearchRoute
+  '/developer/$developer': typeof DeveloperDeveloperRoute
   '/games/$game': typeof GamesGameRoute
+  '/publisher/$publisher': typeof PublisherPublisherRoute
   '/rankings/peak': typeof RankingsPeakRoute
   '/releases/$week': typeof ReleasesWeekRoute
+  '/developers': typeof DevelopersIndexRoute
   '/games': typeof GamesIndexRoute
+  '/publisher': typeof PublisherIndexRoute
+  '/publishers': typeof PublishersIndexRoute
   '/rankings': typeof RankingsIndexRoute
   '/releases': typeof ReleasesIndexRoute
   '/api/players/history': typeof ApiPlayersHistoryRoute
@@ -178,10 +218,15 @@ export interface FileRoutesById {
   '/api/rankings': typeof ApiRankingsRoute
   '/api/releases': typeof ApiReleasesRoute
   '/api/search': typeof ApiSearchRoute
+  '/developer/$developer': typeof DeveloperDeveloperRoute
   '/games/$game': typeof GamesGameRoute
+  '/publisher/$publisher': typeof PublisherPublisherRoute
   '/rankings/peak': typeof RankingsPeakRoute
   '/releases/$week': typeof ReleasesWeekRoute
+  '/developers/': typeof DevelopersIndexRoute
   '/games/': typeof GamesIndexRoute
+  '/publisher/': typeof PublisherIndexRoute
+  '/publishers/': typeof PublishersIndexRoute
   '/rankings/': typeof RankingsIndexRoute
   '/releases/': typeof ReleasesIndexRoute
   '/api/players/history': typeof ApiPlayersHistoryRoute
@@ -201,10 +246,15 @@ export interface FileRouteTypes {
     | '/api/rankings'
     | '/api/releases'
     | '/api/search'
+    | '/developer/$developer'
     | '/games/$game'
+    | '/publisher/$publisher'
     | '/rankings/peak'
     | '/releases/$week'
+    | '/developers/'
     | '/games/'
+    | '/publisher/'
+    | '/publishers/'
     | '/rankings/'
     | '/releases/'
     | '/api/players/history'
@@ -222,10 +272,15 @@ export interface FileRouteTypes {
     | '/api/rankings'
     | '/api/releases'
     | '/api/search'
+    | '/developer/$developer'
     | '/games/$game'
+    | '/publisher/$publisher'
     | '/rankings/peak'
     | '/releases/$week'
+    | '/developers'
     | '/games'
+    | '/publisher'
+    | '/publishers'
     | '/rankings'
     | '/releases'
     | '/api/players/history'
@@ -243,10 +298,15 @@ export interface FileRouteTypes {
     | '/api/rankings'
     | '/api/releases'
     | '/api/search'
+    | '/developer/$developer'
     | '/games/$game'
+    | '/publisher/$publisher'
     | '/rankings/peak'
     | '/releases/$week'
+    | '/developers/'
     | '/games/'
+    | '/publisher/'
+    | '/publishers/'
     | '/rankings/'
     | '/releases/'
     | '/api/players/history'
@@ -265,10 +325,15 @@ export interface RootRouteChildren {
   ApiRankingsRoute: typeof ApiRankingsRoute
   ApiReleasesRoute: typeof ApiReleasesRoute
   ApiSearchRoute: typeof ApiSearchRoute
+  DeveloperDeveloperRoute: typeof DeveloperDeveloperRoute
   GamesGameRoute: typeof GamesGameRoute
+  PublisherPublisherRoute: typeof PublisherPublisherRoute
   RankingsPeakRoute: typeof RankingsPeakRoute
   ReleasesWeekRoute: typeof ReleasesWeekRoute
+  DevelopersIndexRoute: typeof DevelopersIndexRoute
   GamesIndexRoute: typeof GamesIndexRoute
+  PublisherIndexRoute: typeof PublisherIndexRoute
+  PublishersIndexRoute: typeof PublishersIndexRoute
   RankingsIndexRoute: typeof RankingsIndexRoute
   ReleasesIndexRoute: typeof ReleasesIndexRoute
   ApiPlayersHistoryRoute: typeof ApiPlayersHistoryRoute
@@ -342,6 +407,20 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ApiSearchRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/developer/$developer': {
+      id: '/developer/$developer'
+      path: '/developer/$developer'
+      fullPath: '/developer/$developer'
+      preLoaderRoute: typeof DeveloperDeveloperRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/developers/': {
+      id: '/developers/'
+      path: '/developers'
+      fullPath: '/developers/'
+      preLoaderRoute: typeof DevelopersIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/games/': {
       id: '/games/'
       path: '/games'
@@ -354,6 +433,27 @@ declare module '@tanstack/react-router' {
       path: '/games/$game'
       fullPath: '/games/$game'
       preLoaderRoute: typeof GamesGameRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/publisher/': {
+      id: '/publisher/'
+      path: '/publisher'
+      fullPath: '/publisher/'
+      preLoaderRoute: typeof PublisherIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/publisher/$publisher': {
+      id: '/publisher/$publisher'
+      path: '/publisher/$publisher'
+      fullPath: '/publisher/$publisher'
+      preLoaderRoute: typeof PublisherPublisherRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/publishers/': {
+      id: '/publishers/'
+      path: '/publishers'
+      fullPath: '/publishers/'
+      preLoaderRoute: typeof PublishersIndexRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/rankings/': {
@@ -425,10 +525,15 @@ const rootRouteChildren: RootRouteChildren = {
   ApiRankingsRoute: ApiRankingsRoute,
   ApiReleasesRoute: ApiReleasesRoute,
   ApiSearchRoute: ApiSearchRoute,
+  DeveloperDeveloperRoute: DeveloperDeveloperRoute,
   GamesGameRoute: GamesGameRoute,
+  PublisherPublisherRoute: PublisherPublisherRoute,
   RankingsPeakRoute: RankingsPeakRoute,
   ReleasesWeekRoute: ReleasesWeekRoute,
+  DevelopersIndexRoute: DevelopersIndexRoute,
   GamesIndexRoute: GamesIndexRoute,
+  PublisherIndexRoute: PublisherIndexRoute,
+  PublishersIndexRoute: PublishersIndexRoute,
   RankingsIndexRoute: RankingsIndexRoute,
   ReleasesIndexRoute: ReleasesIndexRoute,
   ApiPlayersHistoryRoute: ApiPlayersHistoryRoute,
