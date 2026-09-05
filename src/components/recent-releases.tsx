@@ -1,4 +1,5 @@
 import React from "react";
+import { AppLink } from "./app-link";
 import type { ReleaseEntity } from "../lib/releases";
 
 export interface RecentReleasesProps {
@@ -46,14 +47,14 @@ export function RecentReleases({
           </div>
 
           {isHomeSection && (
-            <a
+            <AppLink
               href="/releases"
               data-testid="recent-view-all-link"
               className="min-h-[44px] min-w-[44px] inline-flex items-center justify-center px-2 text-xs font-mono text-orange-400 hover:text-orange-300 transition-colors"
             >
               <span>All Releases</span>
               <span>&rarr;</span>
-            </a>
+            </AppLink>
           )}
         </div>
       </div>
@@ -97,7 +98,7 @@ export function RecentReleases({
                     </td>
 
                     <td className="py-2.5 px-3">
-                      <a
+                      <AppLink
                         href={release.canonical_path}
                         className="min-h-[44px] inline-flex items-center text-zinc-200 group-hover:text-orange-400 transition-colors font-medium gap-2"
                       >
@@ -110,7 +111,7 @@ export function RecentReleases({
                           />
                         )}
                         <span className="line-clamp-1">{release.name}</span>
-                      </a>
+                      </AppLink>
                       {release.parent_name && (
                         <div className="text-[10px] text-zinc-500 truncate ml-12">
                           for {release.parent_name}

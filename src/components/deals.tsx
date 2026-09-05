@@ -1,4 +1,5 @@
 import React from "react";
+import { AppLink } from "./app-link";
 import { type DealItem, formatPriceUtc } from "../lib/prices";
 import { getCanonicalGamePath } from "../lib/slug";
 import { getCanonicalChildPath } from "../lib/related";
@@ -49,7 +50,7 @@ export function DealsList({
               const active = currentType === t.id;
               const href = t.id === "all" ? "/deals" : `/deals?type=${t.id}`;
               return (
-                <a
+                <AppLink
                   key={t.id}
                   href={href}
                   aria-current={active ? "page" : undefined}
@@ -60,7 +61,7 @@ export function DealsList({
                   }`}
                 >
                   {t.label}
-                </a>
+                </AppLink>
               );
             })}
           </div>
@@ -78,7 +79,7 @@ export function DealsList({
               const typeParam = currentType !== "all" ? `type=${currentType}&` : "";
               const href = `/deals?${typeParam}sort=${s.id}`;
               return (
-                <a
+                <AppLink
                   key={s.id}
                   href={href}
                   className={`min-h-[44px] min-w-[44px] inline-flex items-center justify-center px-3 py-1 text-[11px] uppercase tracking-wider transition-colors ${
@@ -88,7 +89,7 @@ export function DealsList({
                   }`}
                 >
                   {s.label}
-                </a>
+                </AppLink>
               );
             })}
           </div>
@@ -171,21 +172,21 @@ export function DealsList({
                           />
                         )}
                         <div>
-                          <a
+                          <AppLink
                             href={canonicalPath}
                             className="font-bold text-zinc-100 hover:text-emerald-400 hover:underline transition-colors inline-flex min-h-[44px] min-w-[44px] items-center"
                           >
                             {deal.name}
-                          </a>
+                          </AppLink>
                           {isChild && deal.parent_name && parentCanonicalPath && (
                             <span className="text-[10px] text-zinc-500 block">
                               Base:{" "}
-                              <a
+                              <AppLink
                                 href={parentCanonicalPath}
                                 className="hover:text-zinc-300 inline-flex min-h-[44px] min-w-[44px] items-center"
                               >
                                 {deal.parent_name}
-                              </a>
+                              </AppLink>
                             </span>
                           )}
                         </div>

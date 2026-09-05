@@ -1,9 +1,11 @@
 import React from "react";
+import { CatalogSkeleton } from "./route-skeletons";
 
 export function RouteLoading({ label = "Loading live data..." }: { label?: string }) {
   return (
-    <div className="mx-auto flex min-h-[50vh] max-w-7xl items-center justify-center px-4 py-16 text-center font-mono text-sm text-zinc-500">
-      {label}
+    <div role="status" aria-live="polite">
+      <span className="sr-only">{label}</span>
+      <CatalogSkeleton />
     </div>
   );
 }

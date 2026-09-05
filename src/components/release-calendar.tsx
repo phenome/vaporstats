@@ -1,4 +1,5 @@
 import React from "react";
+import { AppLink } from "./app-link";
 import type { WeeklyReleasesResult, ReleaseEntity } from "../lib/releases";
 
 export interface ReleaseCalendarProps {
@@ -58,42 +59,42 @@ export function ReleaseCalendar({
               className="flex items-center space-x-1.5"
               data-testid="week-navigation"
             >
-              <a
+              <AppLink
                 href={`/releases/${data.prevWeek}`}
                 aria-label={`Previous week (${data.prevWeek})`}
                 data-testid="prev-week-link"
                 className="min-h-[44px] min-w-[44px] inline-flex items-center justify-center px-3 py-2 text-xs font-mono border border-zinc-800 bg-zinc-900 text-zinc-300 hover:text-zinc-100 hover:border-zinc-700 transition-colors"
               >
                 &larr; {data.prevWeek}
-              </a>
-              <a
+              </AppLink>
+              <AppLink
                 href="/releases"
                 aria-label="Current week"
                 data-testid="current-week-link"
                 className="min-h-[44px] min-w-[44px] inline-flex items-center justify-center px-3 py-2 text-xs font-mono border border-zinc-800 bg-zinc-900 text-zinc-300 hover:text-zinc-100 hover:border-zinc-700 transition-colors"
               >
                 Today
-              </a>
-              <a
+              </AppLink>
+              <AppLink
                 href={`/releases/${data.nextWeek}`}
                 aria-label={`Next week (${data.nextWeek})`}
                 data-testid="next-week-link"
                 className="min-h-[44px] min-w-[44px] inline-flex items-center justify-center px-3 py-2 text-xs font-mono border border-zinc-800 bg-zinc-900 text-zinc-300 hover:text-zinc-100 hover:border-zinc-700 transition-colors"
               >
                 {data.nextWeek} &rarr;
-              </a>
+              </AppLink>
             </nav>
           )}
 
           {isHomeSection && (
-            <a
+            <AppLink
               href="/releases"
               data-testid="view-full-calendar-link"
               className="min-h-[44px] min-w-[44px] inline-flex items-center justify-center text-xs font-mono text-orange-400 hover:text-orange-300 transition-colors px-2 ml-2"
             >
               <span>Calendar</span>
               <span>&rarr;</span>
-            </a>
+            </AppLink>
           )}
 
         </div>
@@ -174,7 +175,7 @@ export function ReleaseCard({ entity }: ReleaseCardProps) {
   const isDlcOrExpansion = entity.type === "dlc" || entity.type === "expansion";
 
   return (
-    <a
+    <AppLink
       href={entity.canonical_path}
       data-testid="release-card"
       data-appid={entity.appid}
@@ -216,7 +217,7 @@ export function ReleaseCard({ entity }: ReleaseCardProps) {
           </div>
         )}
       </div>
-    </a>
+    </AppLink>
   );
 }
 

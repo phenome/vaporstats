@@ -1,6 +1,7 @@
 import React from "react";
 import type { PublisherDetail, PublisherSummary, PublisherGameItem } from "../lib/publishers";
 import { getCanonicalGamePath } from "../lib/slug";
+import { AppLink } from "./app-link";
 
 export function PublisherPageView({ publisher }: { publisher: PublisherDetail }) {
   const roleBadges = [];
@@ -69,9 +70,9 @@ export function PublisherPageView({ publisher }: { publisher: PublisherDetail })
                   <tr key={game.appid} className="hover:bg-zinc-900/40 transition-colors group">
                     <td className="py-3 px-4 text-zinc-500 tabular-nums">{game.appid}</td>
                     <td className="py-3 px-4 font-medium text-zinc-200 group-hover:text-orange-400 transition-colors">
-                      <a href={canonicalUrl} className="hover:underline">
+                      <AppLink href={canonicalUrl} className="hover:underline">
                         {game.name}
-                      </a>
+                      </AppLink>
                     </td>
                     <td className="py-3 px-4 text-zinc-400 hidden sm:table-cell">
                       <span className="px-1.5 py-0.5 bg-zinc-900 border border-zinc-800 text-[10px] text-zinc-300">
@@ -82,12 +83,12 @@ export function PublisherPageView({ publisher }: { publisher: PublisherDetail })
                       {game.release_date || "—"}
                     </td>
                     <td className="py-3 px-4 text-right">
-                      <a
+                      <AppLink
                         href={canonicalUrl}
                         className="px-2.5 py-1 text-[11px] bg-zinc-900 hover:bg-orange-500 hover:text-white border border-zinc-800 text-zinc-300 transition-colors"
                       >
                         View Game
-                      </a>
+                      </AppLink>
                     </td>
                   </tr>
                 );
@@ -152,9 +153,9 @@ export function PublishersIndexView({ publishers }: { publishers: PublisherSumma
                 return (
                   <tr key={pub.slug} className="hover:bg-zinc-900/40 transition-colors group">
                     <td className="py-3 px-4 font-medium text-zinc-200 group-hover:text-orange-400 transition-colors">
-                      <a href={pub.path} className="hover:underline">
+                      <AppLink href={pub.path} className="hover:underline">
                         {pub.name}
-                      </a>
+                      </AppLink>
                     </td>
                     <td className="py-3 px-4 text-zinc-400 hidden sm:table-cell">
                       <div className="flex gap-1.5">
@@ -172,12 +173,12 @@ export function PublishersIndexView({ publishers }: { publishers: PublisherSumma
                       {pub.gameCount}
                     </td>
                     <td className="py-3 px-4 text-right">
-                      <a
+                      <AppLink
                         href={pub.path}
                         className="px-2.5 py-1 text-[11px] bg-zinc-900 hover:bg-orange-500 hover:text-white border border-zinc-800 text-zinc-300 transition-colors"
                       >
                         View Games
-                      </a>
+                      </AppLink>
                     </td>
                   </tr>
                 );

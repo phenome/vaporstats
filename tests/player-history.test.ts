@@ -29,16 +29,12 @@ import {
   type PlayerHistoryChartProps,
 } from "../src/components/player-history";
 import { TrendingBlock } from "../src/components/trending";
-import {
-  RankingsPageView,
-  handleRankingsHttpRequest,
-} from "../src/routes/rankings.index";
-import {
-  PeakRankingsPageView,
-  handlePeakRankingsHttpRequest,
-} from "../src/routes/rankings.peak";
+import { RankingsPageView } from "../src/components/rankings-page";
+import { handleRankingsHttpRequest } from "../src/routes/rankings.index";
+import { PeakRankingsPageView } from "../src/components/peak-rankings-page";
+import { handlePeakRankingsHttpRequest } from "../src/routes/rankings.peak";
 import { CACHE_POLICIES } from "../src/lib/cache";
-import { HomeComponent, type HomeComponentProps } from "../src/routes/index";
+import { HomeComponent, type HomeComponentProps } from "../src/components/home-page";
 import { GamePageView, type GamePageProps } from "../src/components/game-page";
 import { handleGameHttpRequest } from "../src/routes/games.$game";
 import * as rollupsWorkerModule from "../workers/player-rollups";
@@ -275,17 +271,23 @@ describe("Player History and Rankings", () => {
     // 24h range: only 2h observation
     const res24h = await getPlayerHistory(db, 10, "24h", anchor);
     expect(res24h.range).toBe("24h");
+    expect(res24h.range_start).toBe(new Date(anchor.getTime() - 24 * 60 * 60 * 1000).toISOString());
+    expect(res24h.range_end).toBe(anchor.toISOString());
     expect(res24h.points.filter((p) => !p.is_gap).length).toBe(1);
     expect(res24h.points.find((p) => !p.is_gap)?.players).toBe(1000);
 
     // 7d range: 2h and 3d
     const res7d = await getPlayerHistory(db, 10, "7d", anchor);
     expect(res7d.range).toBe("7d");
+    expect(res7d.range_start).toBe(new Date(anchor.getTime() - 7 * 24 * 60 * 60 * 1000).toISOString());
+    expect(res7d.range_end).toBe(anchor.toISOString());
     expect(res7d.points.filter((p) => !p.is_gap).length).toBe(2);
 
     // 30d range (default): 2h, 3d, 15d
     const res30d = await getPlayerHistory(db, 10, "30d", anchor);
     expect(res30d.range).toBe("30d");
+    expect(res30d.range_start).toBe(new Date(anchor.getTime() - 30 * 24 * 60 * 60 * 1000).toISOString());
+    expect(res30d.range_end).toBe(anchor.toISOString());
     expect(res30d.points.filter((p) => !p.is_gap).length).toBe(3);
 
     // Default range when omitted or invalid
@@ -295,6 +297,8 @@ describe("Player History and Rankings", () => {
     // 90d range: 2h, 3d, 15d, 45d
     const res90d = await getPlayerHistory(db, 10, "90d", anchor);
     expect(res90d.range).toBe("90d");
+    expect(res90d.range_start).toBe(new Date(anchor.getTime() - 90 * 24 * 60 * 60 * 1000).toISOString());
+    expect(res90d.range_end).toBe(anchor.toISOString());
     expect(res90d.points.filter((p) => !p.is_gap).length).toBe(4);
     const cleanedHistory = await cleanExpiredRawObservations(db, anchor);
     expect(cleanedHistory).toBe(2);
@@ -317,31 +321,35 @@ describe("Player History and Rankings", () => {
     expect(earliestGame10).toContain("2025-01-01"); // Game 10's own earliest
     expect(earliestGame10).not.toContain("2024-01-01");
 
-    // All range: starts at this game's first observation (2025-01-01) and bounds to anchorTime
+    // All range starts at this game's first record and ends at its latest record.
     const resAll = await getPlayerHistory(db, 10, "all", anchor);
     expect(resAll.range).toBe("all");
     expect(resAll.earliest_observation).toContain("2025-01-01");
+    expect(resAll.range_start).toBe("2025-01-01T00:00:00.000Z");
     expect(resAll.points.some((p) => p.is_rollup)).toBe(true);
     // Future observation after anchorTime is bounded out
     expect(resAll.points.some((p) => p.players === 9999)).toBe(false);
-    // source_timestamp reflects latest real observation time (t2h), not request anchor
+    // source_timestamp and the All-domain end reflect the latest real record.
     expect(resAll.source_timestamp).toBe(t2h);
+    expect(resAll.range_end).toBe(t2h);
     console.log("player history ranges");
   });
 
-  // G4: player charts expose labels, values, gaps, and a table equivalent
+  // G4: player charts expose labels, values, gaps, and a numeric time domain
   test("accessible gap-preserving chart", async () => {
     // 1. Render chart with valid points and an explicit gap
     const mockResult: PlayerHistoryResult = {
       appid: 10,
       range: "30d",
       earliest_observation: "2026-08-01T00:00:00.000Z",
+      range_start: "2026-08-05T12:00:00.000Z",
+      range_end: "2026-09-04T12:00:00.000Z",
       points: [
-        { timestamp: "2026-08-10T10:00:00.000Z", players: 1500 },
+        { timestamp: "2026-08-10T12:00:00.000Z", players: 1500 },
         { timestamp: "2026-08-15T12:00:00.000Z", players: null, is_gap: true }, // Gap
-        { timestamp: "2026-08-20T14:00:00.000Z", players: 2500 },
+        { timestamp: "2026-08-20T12:00:00.000Z", players: 2500 },
       ],
-      source_timestamp: "2026-09-04T12:00:00.000Z",
+      source_timestamp: "2026-08-20T12:00:00.000Z",
     };
 
     const html = renderToString(
@@ -362,14 +370,19 @@ describe("Player History and Rankings", () => {
     expect(html).toContain("1,500");
     expect(html).toContain("2,500");
 
-    // Missing sample is NEVER converted to zero
-    // In our SVG or stats, 0 should NOT be the minimum
+    // Missing sample is NEVER converted to zero or bridged by the fallback SVG.
     expect(html).not.toContain(">0</text>");
     expect(html).toContain("1,500");
 
-    // Table equivalent toggle present
-    expect(html).toContain("table");
-    expect(html).toContain("data table equivalent");
+    // The sparse observations retain their positions across the complete fixed window.
+    expect(html).toContain('cx="180"');
+    expect(html).toContain('cx="420"');
+    expect(html).toContain(">Aug 5</text>");
+    expect(html).toContain(">Sep 4</text>");
+
+    // No secondary text view is rendered alongside the chart.
+    expect(html).not.toContain("<table");
+    expect(html).not.toContain("data table equivalent");
 
     // Range buttons present with aria-pressed
     expect(html).toContain("24h");
@@ -383,8 +396,10 @@ describe("Player History and Rankings", () => {
       appid: 20,
       range: "30d",
       earliest_observation: null,
+      range_start: "2026-08-05T12:00:00.000Z",
+      range_end: "2026-09-04T12:00:00.000Z",
       points: [],
-      source_timestamp: "2026-09-04T12:00:00.000Z",
+      source_timestamp: null,
     };
     const emptyHtml = renderToString(
       React.createElement(PlayerHistoryChart, {
@@ -401,12 +416,14 @@ describe("Player History and Rankings", () => {
       appid: 30,
       range: "30d",
       earliest_observation: "2026-08-01T00:00:00.000Z",
+      range_start: "2026-08-05T12:00:00.000Z",
+      range_end: "2026-09-04T12:00:00.000Z",
       points: [
-        { timestamp: "2026-08-10T10:00:00.000Z", players: 500 },
+        { timestamp: "2026-08-10T12:00:00.000Z", players: 500 },
         { timestamp: "2026-08-15T12:00:00.000Z", players: 500 },
-        { timestamp: "2026-08-20T14:00:00.000Z", players: 500 },
+        { timestamp: "2026-08-20T12:00:00.000Z", players: 500 },
       ],
-      source_timestamp: "2026-09-04T12:00:00.000Z",
+      source_timestamp: "2026-08-20T12:00:00.000Z",
     };
     const constHtml = renderToString(
       React.createElement(PlayerHistoryChart, {
@@ -647,9 +664,15 @@ describe("Player History and Rankings", () => {
     const histRes = await handlePlayerHistoryRequest(histReq, db);
     expect(histRes.status).toBe(200);
     expect(histRes.headers.get("Cache-Control")).toBe(CACHE_POLICIES.liveApi);
-    const histJson = (await histRes.json()) as { status: string; data: { appid: number }; source_timestamp: string };
+    const histJson = (await histRes.json()) as {
+      status: string;
+      data: { appid: number; range_start: string; range_end: string };
+      source_timestamp: string;
+    };
     expect(histJson.status).toBe("data");
     expect(histJson.data.appid).toBe(10);
+    expect(typeof histJson.data.range_start).toBe("string");
+    expect(typeof histJson.data.range_end).toBe("string");
     expect(typeof histJson.source_timestamp).toBe("string");
 
     // 2. Bad request on invalid appid (never cached as successful data)
@@ -760,8 +783,10 @@ describe("Player History and Rankings", () => {
           appid: 10,
           range: "30d",
           earliest_observation: "2026-08-01T00:00:00.000Z",
+          range_start: "2026-08-05T12:00:00.000Z",
+          range_end: "2026-09-04T12:00:00.000Z",
           points: [{ timestamp: "2026-08-10T00:00:00.000Z", players: 100 }],
-          source_timestamp: "2026-09-04T12:00:00.000Z",
+          source_timestamp: "2026-08-10T00:00:00.000Z",
         },
       })
     );

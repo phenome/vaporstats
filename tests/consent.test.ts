@@ -20,7 +20,8 @@ import {
   type AnalyticsAdapter,
 } from "../src/lib/analytics";
 import { ConsentBanner, FooterPrivacyControl } from "../src/components/consent-banner";
-import { PrivacyNoticeView, handlePrivacyHttpRequest } from "../src/routes/privacy";
+import { PrivacyNoticeView } from "../src/components/privacy-notice";
+import { handlePrivacyHttpRequest } from "../src/routes/privacy";
 import { CACHE_POLICIES } from "../src/lib/cache";
 
 /**

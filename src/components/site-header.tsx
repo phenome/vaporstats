@@ -1,4 +1,5 @@
 import React from "react";
+import { AppLink } from "./app-link";
 import { SearchForm } from "./search-form";
 
 export function SiteHeader() {
@@ -7,7 +8,7 @@ export function SiteHeader() {
       <div className="max-w-7xl mx-auto px-4 h-14 flex items-center justify-between gap-4">
         {/* Brand identity */}
         <div className="flex items-center gap-6">
-          <a
+          <AppLink
             href="/"
             className="min-h-[44px] min-w-[44px] inline-flex items-center gap-2 font-mono font-bold text-lg tracking-wider text-zinc-100 hover:opacity-90 transition-opacity focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-orange-500"
             aria-label="VAPORSTATS Home"
@@ -22,40 +23,40 @@ export function SiteHeader() {
                 className="h-8 w-auto object-contain"
               />
             </picture>
-          </a>
+          </AppLink>
 
           {/* Navigation Links */}
           <nav aria-label="Primary navigation" className="hidden md:flex items-center space-x-1">
-            <a
+            <AppLink
               href="/games"
               className="min-h-[44px] px-3 py-1.5 inline-flex items-center text-xs font-mono uppercase tracking-wider text-zinc-300 hover:text-white hover:bg-zinc-900 border border-transparent hover:border-zinc-800 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-orange-500"
             >
               Games
-            </a>
-            <a
+            </AppLink>
+            <AppLink
               href="/rankings"
               className="min-h-[44px] px-3 py-1.5 inline-flex items-center text-xs font-mono uppercase tracking-wider text-zinc-300 hover:text-white hover:bg-zinc-900 border border-transparent hover:border-zinc-800 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-orange-500"
             >
               Rankings
-            </a>
-            <a
+            </AppLink>
+            <AppLink
               href="/deals"
               className="min-h-[44px] px-3 py-1.5 inline-flex items-center text-xs font-mono uppercase tracking-wider text-zinc-300 hover:text-white hover:bg-zinc-900 border border-transparent hover:border-zinc-800 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-orange-500"
             >
               Deals
-            </a>
-            <a
+            </AppLink>
+            <AppLink
               href="/releases"
               className="min-h-[44px] px-3 py-1.5 inline-flex items-center text-xs font-mono uppercase tracking-wider text-zinc-300 hover:text-white hover:bg-zinc-900 border border-transparent hover:border-zinc-800 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-orange-500"
             >
               Releases
-            </a>
-            <a
+            </AppLink>
+            <AppLink
               href="/publishers"
               className="min-h-[44px] px-3 py-1.5 inline-flex items-center text-xs font-mono uppercase tracking-wider text-zinc-300 hover:text-white hover:bg-zinc-900 border border-transparent hover:border-zinc-800 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-orange-500"
             >
               Publishers
-            </a>
+            </AppLink>
           </nav>
         </div>
 
@@ -68,21 +69,21 @@ export function SiteHeader() {
         aria-label="Primary navigation"
         className="flex min-h-[44px] items-center overflow-x-auto border-t border-zinc-900 px-4 md:hidden"
       >
-        <a href="/games" className="inline-flex min-h-[44px] shrink-0 items-center px-3 text-xs font-mono uppercase tracking-wider text-zinc-300 hover:bg-zinc-900 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-orange-500">
+        <AppLink href="/games" className="inline-flex min-h-[44px] shrink-0 items-center px-3 text-xs font-mono uppercase tracking-wider text-zinc-300 hover:bg-zinc-900 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-orange-500">
           Games
-        </a>
-        <a href="/rankings" className="inline-flex min-h-[44px] shrink-0 items-center px-3 text-xs font-mono uppercase tracking-wider text-zinc-300 hover:bg-zinc-900 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-orange-500">
+        </AppLink>
+        <AppLink href="/rankings" className="inline-flex min-h-[44px] shrink-0 items-center px-3 text-xs font-mono uppercase tracking-wider text-zinc-300 hover:bg-zinc-900 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-orange-500">
           Rankings
-        </a>
-        <a href="/deals" className="inline-flex min-h-[44px] shrink-0 items-center px-3 text-xs font-mono uppercase tracking-wider text-zinc-300 hover:bg-zinc-900 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-orange-500">
+        </AppLink>
+        <AppLink href="/deals" className="inline-flex min-h-[44px] shrink-0 items-center px-3 text-xs font-mono uppercase tracking-wider text-zinc-300 hover:bg-zinc-900 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-orange-500">
           Deals
-        </a>
-        <a href="/releases" className="inline-flex min-h-[44px] shrink-0 items-center px-3 text-xs font-mono uppercase tracking-wider text-zinc-300 hover:bg-zinc-900 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-orange-500">
+        </AppLink>
+        <AppLink href="/releases" className="inline-flex min-h-[44px] shrink-0 items-center px-3 text-xs font-mono uppercase tracking-wider text-zinc-300 hover:bg-zinc-900 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-orange-500">
           Releases
-        </a>
-        <a href="/publishers" className="inline-flex min-h-[44px] shrink-0 items-center px-3 text-xs font-mono uppercase tracking-wider text-zinc-300 hover:bg-zinc-900 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-orange-500">
+        </AppLink>
+        <AppLink href="/publishers" className="inline-flex min-h-[44px] shrink-0 items-center px-3 text-xs font-mono uppercase tracking-wider text-zinc-300 hover:bg-zinc-900 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-orange-500">
           Publishers
-        </a>
+        </AppLink>
       </nav>
     </header>
   );

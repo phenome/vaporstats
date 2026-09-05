@@ -1,6 +1,7 @@
 import React from "react";
 import { renderToString } from "react-dom/server";
 import { createFileRoute, notFound } from "@tanstack/react-router";
+import { useQuery } from "@tanstack/react-query";
 import { getDb } from "../lib/db-access";
 import type { AppDatabase } from "../lib/db";
 import {
@@ -9,44 +10,9 @@ import {
   type IsoWeekBounds,
   type WeeklyReleasesResult,
 } from "../lib/releases";
-import { ReleaseCalendar } from "../components/release-calendar";
+import { ReleasesWeekPageView, ReleaseWeekNotFoundView } from "../components/release-week-page";
 import { CACHE_POLICIES, getEntityCacheHeaders, getPageCacheHeaders } from "../lib/cache";
-
-export interface ReleasesWeekPageViewProps {
-  data: WeeklyReleasesResult;
-}
-
-export function ReleasesWeekPageView({ data }: ReleasesWeekPageViewProps) {
-  return (
-    <div className="max-w-7xl mx-auto px-4 py-8 space-y-6">
-      <ReleaseCalendar
-        data={data}
-        showNavigation={true}
-        title={`Release Calendar: Week ${data.weekNumber}`}
-        description={`${data.startDate} through ${data.endDate} (UTC)`}
-      />
-    </div>
-  );
-}
-
-export function ReleaseWeekNotFoundView({ week }: { week: string }) {
-  return (
-    <div className="max-w-7xl mx-auto px-4 py-16 text-center space-y-4 font-mono">
-      <div className="text-2xl font-bold text-zinc-100">Invalid Release Week</div>
-      <p className="text-sm text-zinc-400 max-w-md mx-auto">
-        The requested week <span className="text-orange-400 font-bold">"{week}"</span> is not a valid ISO-8601 calendar week format (expected YYYY-Www).
-      </p>
-      <div className="pt-4">
-        <a
-          href="/releases"
-          className="px-4 py-2 text-xs uppercase tracking-wider font-semibold border border-orange-500 text-orange-400 bg-orange-950/40 hover:bg-orange-900/40 transition-colors inline-block"
-        >
-          Go to Current Week
-        </a>
-      </div>
-    </div>
-  );
-}
+import { RouteDataError, RouteLoading } from "../components/route-state";
 
 
 function createEmptyWeekResult(
@@ -107,6 +73,13 @@ export async function loadReleaseWeekData(
   };
 }
 
+export function releaseWeekQueryOptions(week: string) {
+  return {
+    queryKey: ["release-week", week],
+    queryFn: () => loadReleaseWeekData(week),
+  };
+}
+
 /**
  * Pure HTTP request handler for /releases/$week.
  * Validates ISO-week parameter strictly and renders weekly discovery calendar.
@@ -133,8 +106,6 @@ export async function handleWeekReleasesHttpRequest(
 
   const db = await getDb(explicitDb);
   const data = await getReleasesForWeek(db, bounds.week, { asOfDate: asOf });
-
-  // If week exists in calendar, render calendar (even if 0 releases, it shows the 7 days)
   const fallbackData = data || createEmptyWeekResult(bounds, asOf);
 
   const appHtml = renderToString(<ReleasesWeekPageView data={fallbackData} />);
@@ -167,13 +138,23 @@ function wrapHtml(title: string, bodyContent: string): string {
 export const Route = createFileRoute("/releases/$week")({
   ssr: false,
   headers: () => getPageCacheHeaders(),
-  loader: async ({ params }) => loadReleaseWeekData(params.week),
+  loader: ({ params, context }) => {
+    if (!parseIsoWeek(params.week)) throw notFound();
+    void context.queryClient.prefetchQuery(releaseWeekQueryOptions(params.week));
+    return { week: params.week };
+  },
+  errorComponent: RouteDataError,
+  pendingComponent: () => <RouteLoading label="Loading release calendar..." />,
   component: ReleasesWeekRouteComponent,
 });
 
 function ReleasesWeekRouteComponent() {
-  const loaderData = Route.useLoaderData();
-  return <ReleasesWeekPageView data={loaderData.data!} />;
+  const { week } = Route.useLoaderData();
+  const { data, isLoading, isError } = useQuery(releaseWeekQueryOptions(week));
+
+  if (isError) return <RouteDataError />;
+  if (isLoading || !data) return <RouteLoading label="Loading release calendar..." />;
+
+  return <ReleasesWeekPageView data={data.data} />;
 }
 
-export default ReleasesWeekPageView;

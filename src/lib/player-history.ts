@@ -46,6 +46,8 @@ export interface PlayerHistoryResult {
   appid: number;
   range: HistoryRange;
   earliest_observation: string | null;
+  range_start: string | null;
+  range_end: string | null;
   points: PlayerHistoryPoint[];
   source_timestamp: string | null;
 }
@@ -454,11 +456,15 @@ export async function getPlayerHistory(
   // Derive latest real non-gap point timestamp for truthful source freshness
   const realPoints = pointsWithGaps.filter((p) => p.players !== null && !p.is_gap);
   const sourceTimestamp = realPoints.length > 0 ? realPoints[realPoints.length - 1].timestamp : null;
+  // Fixed ranges use the exact query window; All spans its actual records.
+  const rangeEnd = range === "all" ? sourceTimestamp : anchorTimeIso;
 
   return {
     appid,
     range,
     earliest_observation: earliestObservation,
+    range_start: cutoffIso,
+    range_end: rangeEnd,
     points: pointsWithGaps,
     source_timestamp: sourceTimestamp,
   };

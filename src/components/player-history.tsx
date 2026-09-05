@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useMemo } from "react";
+import React, { useState, useEffect, useMemo } from "react";
 import { AreaChart, Area, XAxis, YAxis, CartesianGrid } from "recharts";
 import {
   ChartContainer,
@@ -10,9 +10,7 @@ import {
   type HistoryRange,
   type PlayerHistoryResult,
   type PlayerHistoryPoint,
-  VALID_HISTORY_RANGES,
   DEFAULT_HISTORY_RANGE,
-  formatExactUtc,
 } from "../lib/player-history";
 
 export interface PlayerHistoryChartProps {
@@ -30,11 +28,10 @@ const playerChartConfig = {
 } satisfies ChartConfig;
 
 /**
- * Accessible, gap-preserving player history chart and tabular equivalent.
+ * Accessible, gap-preserving player history chart.
  * Enforces:
  * - Missing samples remain gaps/null/absent, never interpolated or converted to zero.
  * - Visible labels, min/max metrics, and observation timestamps.
- * - Tabular / text representation for screen readers and comprehensive review.
  * - Zero-radius Lyra design with responsive container.
  */
 export function PlayerHistoryChart({
@@ -45,12 +42,15 @@ export function PlayerHistoryChart({
 }: PlayerHistoryChartProps) {
   const [range, setRange] = useState<HistoryRange>(initialRange);
   const [data, setData] = useState<PlayerHistoryResult | null>(
-    initialData && initialData.appid === appid ? initialData : null
+    initialData && initialData.appid === appid && initialData.range === initialRange
+      ? initialData
+      : null
   );
   const [status, setStatus] = useState<"idle" | "loading" | "success" | "error">(
-    initialData && initialData.appid === appid ? "success" : "loading"
+    initialData && initialData.appid === appid && initialData.range === initialRange
+      ? "success"
+      : "loading"
   );
-  const [showTable, setShowTable] = useState(false);
   const [isMounted, setIsMounted] = useState(false);
 
   useEffect(() => {
@@ -59,17 +59,23 @@ export function PlayerHistoryChart({
 
   // Keep initial display synced if initialData / appid changes
   useEffect(() => {
-    if (initialData && initialData.appid === appid) {
+    if (initialData && initialData.appid === appid && initialData.range === range) {
       setData(initialData);
       setStatus("success");
     }
-  }, [appid, initialData]);
+  }, [appid, initialData, range]);
 
   // Exactly one fetch per mount / appid / range change.
   // Never depends on data, avoiding infinite re-triggering upon success.
   useEffect(() => {
     let cancelled = false;
 
+    // SSR game detail already supplies this exact range. Avoid requesting it again on mount.
+    if (initialData && initialData.appid === appid && initialData.range === range) {
+      return () => {
+        cancelled = true;
+      };
+    }
     async function load() {
       const fetchFn = customFetch ?? fetch;
       try {
@@ -100,11 +106,11 @@ export function PlayerHistoryChart({
     return () => {
       cancelled = true;
     };
-  }, [appid, range, customFetch]);
+  }, [appid, range, customFetch, initialData]);
 
   const points = data?.points ?? [];
   const validPoints = useMemo(
-    () => points.filter((p) => p.players !== null && p.players !== undefined),
+    () => points.filter((p) => p.players !== null && p.players !== undefined && !p.is_gap),
     [points]
   );
 
@@ -135,14 +141,30 @@ export function PlayerHistoryChart({
   const plotWidth = width - padLeft - padRight;
   const plotHeight = height - padTop - padBottom;
 
+  const chartDomain = useMemo(() => {
+    const recordedTimes = points
+      .filter((point) => point.players !== null && !point.is_gap)
+      .map((point) => new Date(point.timestamp).getTime())
+      .filter((timestamp) => Number.isFinite(timestamp));
+    const firstRecordedTime = recordedTimes[0] ?? 0;
+    const lastRecordedTime = recordedTimes[recordedTimes.length - 1] ?? firstRecordedTime;
+    const metadataStart = data?.range_start ? new Date(data.range_start).getTime() : NaN;
+    const metadataEnd = data?.range_end ? new Date(data.range_end).getTime() : NaN;
+    const startTime = Number.isFinite(metadataStart) ? metadataStart : firstRecordedTime;
+    const endTime = Number.isFinite(metadataEnd) ? metadataEnd : lastRecordedTime;
+
+    return {
+      startTime,
+      endTime,
+      timeSpan: Math.max(endTime - startTime, 1),
+    };
+  }, [data, points]);
+
   const chartSegments = useMemo(() => {
     if (points.length === 0 || !stats) {
       return [];
     }
 
-    const startTime = new Date(points[0].timestamp).getTime();
-    const endTime = new Date(points[points.length - 1].timestamp).getTime();
-    const timeSpan = endTime - startTime || 1;
     const isConstantValue = stats.max === stats.min;
     const valueSpan = isConstantValue ? 1 : stats.max - stats.min;
 
@@ -161,10 +183,13 @@ export function PlayerHistoryChart({
       }
 
       const t = new Date(pt.timestamp).getTime();
+      if (!Number.isFinite(t)) {
+        continue;
+      }
       const x =
-        points.length === 1 || timeSpan === 0
+        chartDomain.timeSpan === 1 && chartDomain.startTime === chartDomain.endTime
           ? padLeft + plotWidth / 2
-          : padLeft + ((t - startTime) / timeSpan) * plotWidth;
+          : padLeft + ((t - chartDomain.startTime) / chartDomain.timeSpan) * plotWidth;
       const y = isConstantValue
         ? padTop + plotHeight / 2
         : padTop + plotHeight - ((pt.players - stats.min) / valueSpan) * plotHeight;
@@ -177,28 +202,39 @@ export function PlayerHistoryChart({
     }
 
     return segments;
-  }, [points, stats, plotWidth, plotHeight, padLeft, padTop]);
+  }, [points, stats, chartDomain, plotWidth, plotHeight, padLeft, padTop]);
 
   const rechartsData = useMemo(() => {
     return points.map((p) => {
       const d = new Date(p.timestamp);
-      const is24h = range === "24h";
-      const formattedDate = isNaN(d.getTime())
-        ? ""
-        : is24h
-        ? d.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false })
-        : d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
       const fullDate = isNaN(d.getTime())
         ? ""
         : d.toISOString().replace("T", " ").replace(/\.\d+Z$/, " UTC");
       return {
         timestamp: p.timestamp,
-        formattedDate,
+        timestampMs: d.getTime(),
         fullDate,
         players: p.players,
       };
     });
-  }, [points, range]);
+  }, [points]);
+
+  const formatAxisLabel = (timestamp: number) => {
+    const date = new Date(timestamp);
+    if (!Number.isFinite(date.getTime())) return "";
+    return range === "24h"
+      ? date.toLocaleTimeString("en-US", {
+          hour: "2-digit",
+          minute: "2-digit",
+          hour12: false,
+          timeZone: "UTC",
+        })
+      : date.toLocaleDateString("en-US", {
+          month: "short",
+          day: "numeric",
+          timeZone: "UTC",
+        });
+  };
 
   return (
     <div
@@ -314,12 +350,16 @@ export function PlayerHistoryChart({
                   </defs>
                   <CartesianGrid strokeDasharray="3 3" stroke="#27272a" vertical={false} />
                   <XAxis
-                    dataKey="formattedDate"
+                    dataKey="timestampMs"
+                    type="number"
+                    domain={[chartDomain.startTime, chartDomain.endTime]}
+                    tickFormatter={formatAxisLabel}
                     stroke="#71717a"
                     fontSize={10}
                     tickLine={false}
                     axisLine={false}
                     minTickGap={25}
+                    allowDataOverflow
                   />
                   <YAxis
                     stroke="#71717a"
@@ -445,7 +485,7 @@ export function PlayerHistoryChart({
                   </text>
                 </>
               )}
-              {/* X-axis start and end date labels */}
+              {/* X-axis start and end labels */}
               <text
                 x={padLeft}
                 y={height - 12}
@@ -454,7 +494,7 @@ export function PlayerHistoryChart({
                 fontFamily="monospace"
                 textAnchor="start"
               >
-                {points[0].timestamp.substring(0, 10)}
+                {formatAxisLabel(chartDomain.startTime)}
               </text>
               <text
                 x={width - padRight}
@@ -464,7 +504,7 @@ export function PlayerHistoryChart({
                 fontFamily="monospace"
                 textAnchor="end"
               >
-                {points[points.length - 1].timestamp.substring(0, 10)}
+                {formatAxisLabel(chartDomain.endTime)}
               </text>
 
               {/* Gap-preserving Polyline Segments */}
@@ -515,74 +555,6 @@ export function PlayerHistoryChart({
         )}
       </div>
 
-      {/* Accessible Table / Text Equivalent Toggle */}
-      <div className="pt-2 border-t border-zinc-900">
-        <div className="flex items-center justify-between mb-2">
-          <button
-            type="button"
-            onClick={() => setShowTable((prev) => !prev)}
-            className="min-h-[44px] inline-flex items-center text-[11px] font-mono text-zinc-400 hover:text-zinc-200 underline decoration-zinc-700 underline-offset-4 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-orange-500"
-            aria-expanded={showTable}
-          >
-            {showTable ? "Hide data table equivalent" : "Show accessible data table equivalent"}
-          </button>
-          <span className="text-[10px] font-mono text-zinc-500">
-            {points.length} recorded points • gaps preserved
-          </span>
-        </div>
-
-        {showTable && (
-          <div className="border border-zinc-800 bg-zinc-900/60 overflow-x-auto max-h-64 mt-2">
-            <table
-              className="w-full text-left text-xs font-mono"
-              aria-label="Player count observation history"
-            >
-              <caption className="sr-only">Player history observations</caption>
-              <thead className="bg-zinc-900 text-zinc-400 uppercase text-[10px] border-b border-zinc-800">
-                <tr>
-                  <th scope="col" className="px-3 py-2">Timestamp (UTC)</th>
-                  <th scope="col" className="px-3 py-2">Player Count</th>
-                  <th scope="col" className="px-3 py-2">Type</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-zinc-800/60 text-zinc-300">
-                {points.length === 0 ? (
-                  <tr>
-                    <td colSpan={3} className="px-3 py-3 text-center text-zinc-500">
-                      No observations recorded for this range.
-                    </td>
-                  </tr>
-                ) : (
-                  points.map((pt, idx) => (
-                    <tr
-                      key={`${pt.timestamp}-${idx}`}
-                      className={pt.players === null ? "bg-zinc-950/60 text-zinc-500 italic" : ""}
-                    >
-                      <td className="px-3 py-1.5 whitespace-nowrap">
-                        {formatExactUtc(pt.timestamp)}
-                      </td>
-                      <td className="px-3 py-1.5 tabular-nums">
-                        {pt.players !== null ? (
-                          pt.players.toLocaleString("en-US")
-                        ) : (
-                          <span className="text-zinc-500 not-italic">— (Observation Gap)</span>
-                        )}
-                      </td>
-                      <td className="px-3 py-1.5 text-[10px] uppercase">
-                        {pt.players === null
-                          ? "Gap"
-                          : pt.is_rollup
-                            ? "Daily Rollup"
-                            : "Raw Observation"}
-                      </td>
-                    </tr>
-                  ))
-                )}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </div>
     </div>
   );
 }

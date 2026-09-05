@@ -1,4 +1,5 @@
 import React from "react";
+import { useRouter } from "@tanstack/react-router";
 
 export interface SearchFormProps {
   initialQuery?: string;
@@ -15,11 +16,27 @@ export function SearchForm({
 }: SearchFormProps) {
   const isLarge = size === "large";
   const inputId = React.useId();
+  const router = useRouter({ warn: false });
+
+  const handleSubmit = React.useCallback(
+    (event: React.FormEvent<HTMLFormElement>) => {
+      if (!router) return;
+
+      event.preventDefault();
+      const query = new FormData(event.currentTarget).get("q");
+      void router.navigate({
+        to: "/search",
+        search: { q: typeof query === "string" ? query : "" },
+      });
+    },
+    [router],
+  );
 
   return (
     <form
       action="/search"
       method="GET"
+      onSubmit={handleSubmit}
       role="search"
       aria-label="Steam catalog search"
       className={`relative flex items-center min-w-0 w-full ${className}`}

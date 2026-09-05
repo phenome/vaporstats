@@ -40,14 +40,10 @@ import {
   handleReleasesIndexHttpRequest,
   resolveCurrentReleaseWeek,
 } from "../src/routes/releases.index";
-import {
-  handleWeekReleasesHttpRequest,
-  loadReleaseWeekData,
-  ReleasesWeekPageView,
-  ReleaseWeekNotFoundView,
-} from "../src/routes/releases.$week";
+import { handleWeekReleasesHttpRequest, loadReleaseWeekData } from "../src/routes/releases.$week";
+import { ReleasesWeekPageView, ReleaseWeekNotFoundView } from "../src/components/release-week-page";
 import { handleReleasesApiRequest } from "../src/routes/api.releases";
-import { HomeComponent, type HomeComponentProps } from "../src/routes/index";
+import { HomeComponent, type HomeComponentProps } from "../src/components/home-page";
 import { runBoundedCatalogImport } from "../workers/catalog-seed";
 import { CACHE_POLICIES } from "../src/lib/cache";
 const migration0001 = readFileSync(

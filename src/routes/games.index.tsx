@@ -6,6 +6,7 @@ import { getCanonicalGamePath, getCanonicalPublisherPath } from "../lib/slug";
 import { getPageCacheHeaders } from "../lib/cache";
 import { RouteDataError } from "../components/route-state";
 import { CatalogSkeleton } from "../components/route-skeletons";
+import { AppLink } from "../components/app-link";
 
 export async function fetchCatalogGames(): Promise<CatalogEntity[]> {
   const response = await fetch("/api/catalog?limit=500");
@@ -34,18 +35,18 @@ export const Route = createFileRoute("/games/")({
   component: GamesRouteView,
 });
 
-export function GamesIndexComponent({ games: propGames }: { games?: CatalogEntity[] }) {
+function GamesIndexComponent({ games: propGames }: { games?: CatalogEntity[] }) {
   const { data: queryGames, isLoading, isError } = useQuery({
     ...catalogQueryOptions,
     enabled: !propGames,
   });
 
-  if (!propGames && (isLoading || !queryGames)) {
-    return <CatalogSkeleton />;
-  }
-
   if (!propGames && isError) {
     return <RouteDataError />;
+  }
+
+  if (!propGames && (isLoading || !queryGames)) {
+    return <CatalogSkeleton />;
   }
 
   const games = propGames ?? queryGames ?? [];
@@ -103,18 +104,18 @@ export function GamesIndexComponent({ games: propGames }: { games?: CatalogEntit
                       {game.appid}
                     </td>
                     <td className="py-3 px-4 font-medium text-zinc-200 group-hover:text-orange-400 transition-colors">
-                      <a href={canonicalUrl} className="hover:underline">
+                      <AppLink href={canonicalUrl} className="hover:underline">
                         {game.name}
-                      </a>
+                      </AppLink>
                     </td>
                     <td className="py-3 px-4 text-zinc-400 hidden sm:table-cell truncate max-w-xs">
                       {game.developer ? (
-                        <a
+                        <AppLink
                           href={getCanonicalPublisherPath(game.developer)}
                           className="hover:text-orange-400 hover:underline transition-colors"
                         >
                           {game.developer}
-                        </a>
+                        </AppLink>
                       ) : (
                         "—"
                       )}
@@ -123,12 +124,12 @@ export function GamesIndexComponent({ games: propGames }: { games?: CatalogEntit
                       {game.release_date || "—"}
                     </td>
                     <td className="py-3 px-4 text-right">
-                      <a
+                      <AppLink
                         href={canonicalUrl}
                         className="px-2.5 py-1 text-[11px] bg-zinc-900 hover:bg-orange-500 hover:text-white border border-zinc-800 text-zinc-300 transition-colors"
                       >
                         View Game
-                      </a>
+                      </AppLink>
                     </td>
                   </tr>
                 );

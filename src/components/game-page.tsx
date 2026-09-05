@@ -12,6 +12,7 @@ import { PlayerPanel } from "./player-panel";
 import { PlayerHistoryChart } from "./player-history";
 import { PriceHistoryChart } from "./price-history";
 import { RelatedApps } from "./related-apps";
+import { AppLink } from "./app-link";
 
 export interface GamePageProps {
   game: GameDetail;
@@ -85,12 +86,12 @@ export function GamePageView({
                 <div className="text-zinc-500 text-[10px] uppercase">Developer</div>
                 <div className="text-zinc-200 font-medium truncate">
                   {game.developer ? (
-                    <a
+                    <AppLink
                       href={getCanonicalPublisherPath(game.developer)}
                       className="hover:text-orange-400 hover:underline transition-colors"
                     >
                       {game.developer}
-                    </a>
+                    </AppLink>
                   ) : (
                     "Unknown"
                   )}
@@ -100,12 +101,12 @@ export function GamePageView({
                 <div className="text-zinc-500 text-[10px] uppercase">Publisher</div>
                 <div className="text-zinc-200 font-medium truncate">
                   {game.publisher ? (
-                    <a
+                    <AppLink
                       href={getCanonicalPublisherPath(game.publisher)}
                       className="hover:text-orange-400 hover:underline transition-colors"
                     >
                       {game.publisher}
-                    </a>
+                    </AppLink>
                   ) : (
                     "Unknown"
                   )}

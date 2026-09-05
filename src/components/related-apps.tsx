@@ -1,4 +1,5 @@
 import React from "react";
+import { AppLink } from "./app-link";
 import type { CatalogEntity } from "../lib/catalog";
 import type { GroupedRelatedApps, RelatedAppEntity } from "../lib/related";
 import { getCanonicalChildPath } from "../lib/related";
@@ -69,7 +70,7 @@ export function RelatedApps({ parent, grouped, className = "" }: RelatedAppsProp
               const childSlug = child.slug || toSlug(child.name);
               const href = getCanonicalChildPath(parent.appid, parent.name, child.appid, child.name);
               return (
-                <a
+                <AppLink
                   key={child.appid}
                   href={href}
                   className="group block border-2 border-orange-500/60 hover:border-orange-500 bg-zinc-900/80 p-4 transition-colors"
@@ -102,7 +103,7 @@ export function RelatedApps({ parent, grouped, className = "" }: RelatedAppsProp
                       />
                     )}
                   </div>
-                </a>
+                </AppLink>
               );
             })}
           </div>
@@ -215,7 +216,7 @@ function RelatedSection({
         {items.map((child) => {
           const href = getCanonicalChildPath(parent.appid, parent.name, child.appid, child.name);
           return (
-            <a
+            <AppLink
               key={child.appid}
               href={href}
               className="group flex items-center justify-between gap-2 border border-zinc-800 hover:border-zinc-700 bg-zinc-900/50 p-2.5 transition-colors"
@@ -238,7 +239,7 @@ function RelatedSection({
                   {child.release_date}
                 </div>
               )}
-            </a>
+            </AppLink>
           );
         })}
       </div>

@@ -6,6 +6,7 @@ import {
   subscribeConsentChange,
   type ConsentStatus,
 } from "../lib/analytics";
+import { AppLink } from "./app-link";
 
 export function ConsentBanner(): React.JSX.Element | null {
   const [status, setStatus] = useState<ConsentStatus>("unset");
@@ -19,21 +20,16 @@ export function ConsentBanner(): React.JSX.Element | null {
     });
   }, []);
 
-  // Handle escape key to close tooltip
   useEffect(() => {
     if (!tooltipOpen) return;
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        setTooltipOpen(false);
-      }
+      if (e.key === "Escape") setTooltipOpen(false);
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [tooltipOpen]);
 
-  if (status !== "unset") {
-    return null;
-  }
+  if (status !== "unset") return null;
 
   const handleAccept = async () => {
     await setConsentStatus("accepted");
@@ -89,17 +85,16 @@ export function ConsentBanner(): React.JSX.Element | null {
           <p className="text-xs text-zinc-400 leading-relaxed">
             We use optional analytics to understand aggregate platform traffic and improve game discovery.
             Essential storage is used only to preserve your preferences. Read our{" "}
-            <a
+            <AppLink
               href="/privacy"
               className="text-zinc-200 underline hover:text-white decoration-zinc-600 underline-offset-2"
             >
               Privacy Notice
-            </a>{" "}
+            </AppLink>{" "}
             for full details.
           </p>
         </div>
 
-        {/* Equal-weight Accept and Reject choices */}
         <div className="flex items-center gap-3 w-full md:w-auto">
           <button
             type="button"

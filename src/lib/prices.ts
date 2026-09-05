@@ -76,6 +76,7 @@ export interface PriceHistoryResult {
   current_price: PriceState | null;
   history: PriceHistoryEntry[];
   source_timestamp: string;
+  anchor_timestamp?: string;
 }
 
 export interface DealsResult {
@@ -539,6 +540,7 @@ export async function getPriceHistory(
     current_price: current,
     history: historyRows,
     source_timestamp: sourceTimestamp,
+    anchor_timestamp: anchorIso,
   };
 }
 

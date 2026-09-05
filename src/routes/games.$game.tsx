@@ -1,6 +1,6 @@
 import React from "react";
 import { renderToString } from "react-dom/server";
-import { createFileRoute, notFound } from "@tanstack/react-router";
+import { Navigate, createFileRoute, notFound } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
 import { getGameByAppId } from "../lib/catalog";
 import { getRelatedApps } from "../lib/related";
@@ -12,6 +12,7 @@ import { parseGameSlug, toSlug, getCanonicalGamePath } from "../lib/slug";
 import { CACHE_POLICIES, getEntityCacheHeaders } from "../lib/cache";
 import { GamePageView } from "../components/game-page";
 import { GamePageSkeleton } from "../components/route-skeletons";
+import { AppLink } from "../components/app-link";
 import type { GameDetailResponseData } from "./api.games.$appid.detail";
 
 export async function fetchGameDetail(appid: number): Promise<GameDetailResponseData> {
@@ -52,19 +53,24 @@ function GameRouteComponent() {
   const { appid, slug } = Route.useLoaderData();
   const { data, isLoading, isError } = useQuery(gameDetailQueryOptions(appid));
 
-  if (isLoading || !data) {
-    return <GamePageSkeleton />;
-  }
-
   if (isError) {
     return <GameNotFoundComponent />;
   }
 
+  if (isLoading || !data) {
+    return <GamePageSkeleton />;
+  }
+
   const { game, related, playerHistory, price, priceHistory } = data;
   const canonicalSlug = toSlug(game.name);
-  if (slug !== canonicalSlug && typeof window !== "undefined") {
-    const canonicalPath = getCanonicalGamePath(game.appid, game.name);
-    window.location.replace(canonicalPath);
+  if (slug !== canonicalSlug) {
+    return (
+      <Navigate
+        to="/games/$game"
+        params={{ game: `${game.appid}-${canonicalSlug}` }}
+        replace
+      />
+    );
   }
 
   return (
@@ -86,12 +92,12 @@ function GameNotFoundComponent() {
         The requested AppID does not exist in the catalog or is an ineligible entity.
       </p>
       <div className="pt-4">
-        <a
+        <AppLink
           href="/games"
           className="px-4 py-2 bg-zinc-900 border border-zinc-800 text-zinc-300 text-xs hover:border-orange-500 transition-colors"
         >
           Return to Games Catalog
-        </a>
+        </AppLink>
       </div>
     </div>
   );

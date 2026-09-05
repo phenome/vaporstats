@@ -28,12 +28,14 @@ import { handlePriceHistoryRequest } from "../src/routes/api.prices.history";
 import { handleDealsRequest } from "../src/routes/api.deals";
 import { PriceHistoryChart } from "../src/components/price-history";
 import { DealsList } from "../src/components/deals";
-import { DealsPageView, handleDealsHttpRequest } from "../src/routes/deals";
+import { handleDealsHttpRequest } from "../src/routes/deals";
+import { DealsPageView } from "../src/components/deals-page";
 import { getCheckpoint, setCheckpoint } from "../src/lib/catalog";
 import { CACHE_POLICIES } from "../src/lib/cache";
 import { handleGameHttpRequest } from "../src/routes/games.$game";
-import { handleChildHttpRequest, ChildAppPageView } from "../src/routes/games.$game_.$child";
-import { HomeComponent, type HomeComponentProps } from "../src/routes/index";
+import { handleChildHttpRequest } from "../src/routes/games.$game_.$child";
+import { ChildAppPageView } from "../src/components/child-app-page";
+import { HomeComponent, type HomeComponentProps } from "../src/components/home-page";
 import { GamePageView } from "../src/components/game-page";
 const migration0001 = readFileSync(
   resolve(import.meta.dir, "../migrations/0001_catalog.sql"),
@@ -53,6 +55,10 @@ const migration0004 = readFileSync(
 );
 const migration0005 = readFileSync(
   resolve(import.meta.dir, "../migrations/0005_prices.sql"),
+  "utf8"
+);
+const migration0006 = readFileSync(
+  resolve(import.meta.dir, "../migrations/0006_releases.sql"),
   "utf8"
 );
 const migration0007 = readFileSync(
@@ -138,6 +144,7 @@ describe("VaporStats Steam Prices and Deals", () => {
     sqliteDb.exec(migration0003);
     sqliteDb.exec(migration0004);
     sqliteDb.exec(migration0005);
+    sqliteDb.exec(migration0006);
     sqliteDb.exec(migration0007);
     appDb = createSqliteAppAdapter(sqliteDb);
 
@@ -182,6 +189,9 @@ describe("VaporStats Steam Prices and Deals", () => {
           }),
           { status: 200, headers: { "Content-Type": "application/json" } }
         );
+      }
+      if (url.includes("IStoreBrowseService/GetItems")) {
+        return Response.json({ response: { store_items: [] } });
       }
       if (url.includes("api/appdetails")) {
         return new Response(
@@ -440,6 +450,9 @@ describe("VaporStats Steam Prices and Deals", () => {
       apiKey: "test_key",
       anchorTime: new Date("2026-09-04T14:20:00.000Z"),
       customFetch: (async (input: unknown) => {
+        if (String(input).includes("IStoreBrowseService/GetItems")) {
+          return Response.json({ response: { store_items: [] } });
+        }
         if (String(input).includes("IStoreService/GetAppList")) {
           feedCalls++;
           return new Response("unexpected feed call", { status: 500 });
@@ -521,6 +534,9 @@ describe("VaporStats Steam Prices and Deals", () => {
         });
       }
 
+      if (url.pathname.includes("IStoreBrowseService/GetItems")) {
+        return Response.json({ response: { store_items: [] } });
+      }
       const appid = Number(url.searchParams.get("appids"));
       return Response.json({
         [appid]: {
@@ -805,6 +821,9 @@ describe("VaporStats Steam Prices and Deals", () => {
 
     const mockFetch = (async (input: unknown) => {
       const url = String(input);
+      if (url.includes("IStoreBrowseService/GetItems")) {
+        return Response.json({ response: { store_items: [] } });
+      }
       if (url.includes("api/appdetails?appids=")) {
         const match = url.match(/appids=(\d+)/);
         if (match) {
@@ -962,15 +981,28 @@ describe("VaporStats Steam Prices and Deals", () => {
     expect(history30d.history[0].final_price).toBe(4999);
     expect(history30d.history[1].final_price).toBe(2999);
     expect(history30d.history.every((h) => h.observed_at <= anchor.toISOString())).toBe(true);
+    expect(history30d.anchor_timestamp).toBe(anchor.toISOString());
+    await recordPriceObservation(appDb, {
+      appid: 730,
+      initial_price: 999,
+      final_price: 999,
+      discount_percent: 0,
+      is_free: false,
+      is_available: true,
+      observed_at: tThird,
+    });
+    const sparse30d = await getPriceHistory(appDb, 730, "30d", { anchorTime: anchor });
+    expect(sparse30d.history).toHaveLength(1);
+    expect(sparse30d.history[0].observed_at).toBe(tThird);
 
     console.log("price history ranges");
   });
-  // G7: price charts expose labels, values, gaps, and a table equivalent
-  test("accessible price history - exposes labels, values, gaps, and a table equivalent", async () => {
+  // G7: price charts preserve sparse observations and fixed time domains
+  test("accessible price history - preserves sparse points and numeric domains", async () => {
     const historyResult = {
       appid: 1086940,
-      range: "all" as PriceHistoryRange,
-      earliest_observation: "2026-01-01T00:00:00.000Z",
+      range: "30d" as PriceHistoryRange,
+      earliest_observation: "2026-08-20T12:00:00.000Z",
       current_price: {
         appid: 1086940,
         currency: "USD",
@@ -981,7 +1013,7 @@ describe("VaporStats Steam Prices and Deals", () => {
         is_available: true,
         formatted_initial: "$59.99",
         formatted_final: "$29.99",
-        observed_at: "2026-09-04T12:00:00.000Z",
+        observed_at: "2026-08-31T12:00:00.000Z",
       },
       history: [
         {
@@ -994,28 +1026,29 @@ describe("VaporStats Steam Prices and Deals", () => {
           is_free: false,
           is_available: true,
           formatted_price: "$59.99",
-          observed_at: "2026-01-01T00:00:00.000Z",
+          observed_at: "2026-08-20T12:00:00.000Z",
         },
         {
           id: 2,
           appid: 1086940,
           currency: "USD",
           initial_price: 5999,
-          final_price: 2999,
-          discount_percent: 50,
+          final_price: null,
+          discount_percent: 0,
           is_free: false,
-          is_available: true,
-          formatted_price: "$29.99",
-          observed_at: "2026-09-04T12:00:00.000Z",
+          is_available: false,
+          formatted_price: null,
+          observed_at: "2026-08-30T12:00:00.000Z",
         },
       ],
-      source_timestamp: "2026-09-04T12:00:00.000Z",
+      source_timestamp: "2026-08-31T12:00:00.000Z",
+      anchor_timestamp: "2026-09-04T12:00:00.000Z",
     };
 
     const html = renderToString(
       React.createElement(PriceHistoryChart, {
         appid: 1086940,
-        initialRange: "all",
+        initialRange: "30d",
         initialData: historyResult,
       })
     );
@@ -1027,13 +1060,21 @@ describe("VaporStats Steam Prices and Deals", () => {
     expect(html).toContain("Base Price");
     expect(html).toContain("$29.99");
     expect(html).toContain("-50%");
-    expect(html).toContain("role=\"img\"");
-    expect(html).toContain("View accessible price history table");
+    expect(html).toContain('role="img"');
+    const expectedDomainStart = getPriceRangeCutoffDate(
+      "30d",
+      new Date("2026-09-04T12:00:00.000Z")
+    )!.getTime();
+    const expectedDomainEnd = new Date("2026-09-04T12:00:00.000Z").getTime();
+    expect(html).toContain('data-testid="price-history-ssr"');
+    expect(html).toContain(`data-x-domain-start="${expectedDomainStart}"`);
+    expect(html).toContain(`data-x-domain-end="${expectedDomainEnd}"`);
+    expect((html.match(/data-testid="price-chart-point"/g) ?? []).length).toBe(2);
+    expect(html).not.toContain("<table");
+    expect(html).not.toContain("table");
     // Verify touch target minimums: min-h-[44px] and min-w-[44px] on controls
     expect(html).toContain("min-h-[44px]");
     expect(html).toContain("min-w-[44px]");
-    // Verify table toggle has stable aria-label
-    expect(html).toContain('aria-label="Toggle accessible price history data table"');
     // Verify explicit UTC display
     expect(html).toContain("UTC");
 
@@ -1046,10 +1087,23 @@ describe("VaporStats Steam Prices and Deals", () => {
     renderToString(
       React.createElement(PriceHistoryChart, {
         appid: 1086940,
-        initialRange: "all",
+        initialRange: "30d",
         initialData: historyResult,
         customFetch: trackingFetch,
       })
+    );
+    const allHtml = renderToString(
+      React.createElement(PriceHistoryChart, {
+        appid: 1086940,
+        initialRange: "all",
+        initialData: { ...historyResult, range: "all" as PriceHistoryRange },
+      })
+    );
+    expect(allHtml).toContain(
+      `data-x-domain-start="${new Date("2026-08-20T12:00:00.000Z").getTime()}"`
+    );
+    expect(allHtml).toContain(
+      `data-x-domain-end="${new Date("2026-08-31T12:00:00.000Z").getTime()}"`
     );
     expect(ssrFetchCount).toBe(0);
 

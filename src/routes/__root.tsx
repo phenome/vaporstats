@@ -1,10 +1,10 @@
-import { HeadContent, Link, Outlet, Scripts, createRootRouteWithContext } from "@tanstack/react-router";
+import { HeadContent, Outlet, Scripts, createRootRouteWithContext } from "@tanstack/react-router";
 import { QueryClientProvider, type QueryClient } from "@tanstack/react-query";
 import * as React from "react";
 import { SiteHeader } from "../components/site-header";
+import { AppLink } from "../components/app-link";
 import { ConsentBanner, FooterPrivacyControl } from "../components/consent-banner";
 import { initAnalyticsIfConsented } from "../lib/analytics";
-import { queryClient as defaultQueryClient } from "../lib/query-client";
 import "../styles.css";
 
 export interface RootRouterContext {
@@ -30,14 +30,13 @@ export const Route = createRootRouteWithContext<RootRouterContext>()({
 });
 
 function RootComponent() {
-  const context = Route.useRouteContext();
-  const client = context?.queryClient ?? defaultQueryClient;
+  const { queryClient } = Route.useRouteContext();
   return (
-    <RootDocument>
-      <QueryClientProvider client={client}>
+    <QueryClientProvider client={queryClient}>
+      <RootDocument>
         <Outlet />
-      </QueryClientProvider>
-    </RootDocument>
+      </RootDocument>
+    </QueryClientProvider>
   );
 }
 
@@ -49,12 +48,12 @@ function RootNotFoundComponent() {
       <p className="max-w-md text-sm text-zinc-500">
         VaporStats could not find this page.
       </p>
-      <Link
-        to="/"
+      <AppLink
+        href="/"
         className="inline-flex min-h-[44px] items-center justify-center bg-orange-600 px-4 text-xs font-semibold uppercase tracking-wider text-white transition-colors hover:bg-orange-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-orange-500"
       >
         Return home
-      </Link>
+      </AppLink>
     </section>
   );
 }
@@ -79,12 +78,12 @@ function RootDocument({ children }: { children: React.ReactNode }) {
           <div className="max-w-7xl mx-auto px-4 flex flex-col sm:flex-row items-center justify-between gap-3">
             <div>VAPORSTATS © 2026 — AGPL-3.0</div>
             <div className="flex items-center gap-4">
-              <a
+              <AppLink
                 href="/privacy"
                 className="text-zinc-500 hover:text-zinc-300 transition-colors underline decoration-zinc-800 underline-offset-4 min-h-[44px] inline-flex items-center focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-orange-500"
               >
                 Privacy Notice
-              </a>
+              </AppLink>
               <FooterPrivacyControl />
             </div>
           </div>

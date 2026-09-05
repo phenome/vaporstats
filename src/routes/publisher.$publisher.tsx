@@ -1,13 +1,16 @@
 import React from "react";
 import { renderToString } from "react-dom/server";
-import { createFileRoute, notFound, redirect } from "@tanstack/react-router";
+import { createFileRoute, notFound } from "@tanstack/react-router";
+import { useQuery } from "@tanstack/react-query";
 import { createServerFn } from "@tanstack/react-start";
-import { getPublisherGames, type PublisherDetail } from "../lib/publishers";
+import { getPublisherGames } from "../lib/publishers";
 import { getDb } from "../lib/db-access";
 import type { AppDatabase } from "../lib/db";
 import { parsePublisherSlug, getCanonicalPublisherPath } from "../lib/slug";
 import { CACHE_POLICIES, getEntityCacheHeaders } from "../lib/cache";
 import { PublisherPageView } from "../components/publisher-page";
+import { AppLink } from "../components/app-link";
+import { RouteDataError, RouteLoading } from "../components/route-state";
 const getPublisher = createServerFn({ method: "GET" })
   .validator((data: { slug: string }) => {
     if (!data || typeof data.slug !== "string") {
@@ -20,36 +23,59 @@ const getPublisher = createServerFn({ method: "GET" })
     return getPublisherGames(db, data.slug);
   });
 
+export function publisherQueryOptions(slug: string) {
+  return {
+    queryKey: ["publisher", slug],
+    queryFn: () => getPublisher({ data: { slug } }),
+  };
+}
+
 export const Route = createFileRoute("/publisher/$publisher")({
   headers: () => getEntityCacheHeaders(),
-  loader: async ({ params }) => {
+  loader: ({ params, context }) => {
     const parsed = parsePublisherSlug(params.publisher);
     if (!parsed || !parsed.slug) {
       throw notFound();
     }
 
-    const publisher = await getPublisher({ data: { slug: parsed.slug } });
-    if (!publisher) {
-      throw notFound();
-    }
-
-    const canonicalPath = getCanonicalPublisherPath(publisher.name);
-    const requestPath = `/publisher/${params.publisher}`;
-    if (requestPath !== canonicalPath) {
-      throw redirect({
-        href: canonicalPath,
-        statusCode: 301,
-      });
-    }
-
-    return { publisher };
+    void context.queryClient.prefetchQuery(publisherQueryOptions(parsed.slug));
+    return {
+      slug: parsed.slug,
+      requestPath: "/publisher/" + params.publisher,
+    };
   },
   component: PublisherRouteComponent,
   notFoundComponent: PublisherNotFoundComponent,
 });
 
 function PublisherRouteComponent() {
-  const { publisher } = Route.useLoaderData();
+  const { slug, requestPath } = Route.useLoaderData();
+  const { data: publisher, isLoading, isError } = useQuery(publisherQueryOptions(slug));
+  const navigate = Route.useNavigate();
+
+  React.useEffect(() => {
+    if (!publisher) return;
+    const canonicalPath = getCanonicalPublisherPath(publisher.name);
+    if (requestPath !== canonicalPath) {
+      void navigate({ to: canonicalPath, replace: true });
+    }
+  }, [navigate, publisher, requestPath]);
+
+  if (isLoading) {
+    return <RouteLoading label="Loading publisher data..." />;
+  }
+  if (isError) {
+    return <RouteDataError />;
+  }
+  if (!publisher) {
+    return <PublisherNotFoundComponent />;
+  }
+
+  const canonicalPath = getCanonicalPublisherPath(publisher.name);
+  if (requestPath !== canonicalPath) {
+    return <RouteLoading label="Redirecting to the canonical publisher page..." />;
+  }
+
   return <PublisherPageView publisher={publisher} />;
 }
 
@@ -62,12 +88,12 @@ function PublisherNotFoundComponent() {
         The requested publisher or developer does not exist in the catalog or has no eligible games.
       </p>
       <div className="pt-4">
-        <a
+        <AppLink
           href="/publishers"
           className="px-4 py-2 bg-zinc-900 border border-zinc-800 text-zinc-300 text-xs hover:border-orange-500 transition-colors"
         >
           View All Publishers
-        </a>
+        </AppLink>
       </div>
     </div>
   );

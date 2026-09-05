@@ -5,7 +5,7 @@ import { useQuery } from "@tanstack/react-query";
 import { getDb } from "../lib/db-access";
 import type { AppDatabase } from "../lib/db";
 import { getDeals, type DealItem } from "../lib/prices";
-import { DealsList } from "../components/deals";
+import { DealsPageView } from "../components/deals-page";
 import { getLiveApiCacheHeaders, getPageCacheHeaders } from "../lib/cache";
 import { RouteDataError } from "../components/route-state";
 import { DealsSkeleton } from "../components/route-skeletons";
@@ -37,16 +37,23 @@ export function dealsQueryOptions(type: string, sort: string) {
   };
 }
 
+type DealFilters = {
+  type: "all" | "game" | "dlc" | "expansion";
+  sort: "discount" | "price" | "recent";
+};
+
 export const Route = createFileRoute("/deals")({
   ssr: false,
   headers: () => getPageCacheHeaders(),
-  loader: ({ location, context }) => {
-    const search = location.search as {
-      type?: "game" | "dlc" | "expansion" | "all";
-      sort?: "discount" | "price" | "recent";
-    };
-    const type = search.type ?? "all";
-    const sort = search.sort ?? "discount";
+  validateSearch: (search: Record<string, unknown>): DealFilters => ({
+    type:
+      search.type === "game" || search.type === "dlc" || search.type === "expansion"
+        ? search.type
+        : "all",
+    sort: search.sort === "price" || search.sort === "recent" ? search.sort : "discount",
+  }),
+  loaderDeps: ({ search: { type, sort } }) => ({ type, sort }),
+  loader: ({ deps: { type, sort }, context }) => {
     // Start unawaited prefetch so navigation/hover proceeds immediately
     void context.queryClient.prefetchQuery(dealsQueryOptions(type, sort));
     return { type, sort };
@@ -59,12 +66,12 @@ function DealsRouteComponent() {
   const { type, sort } = Route.useLoaderData();
   const { data, isLoading, isError } = useQuery(dealsQueryOptions(type, sort));
 
-  if (isLoading || !data) {
-    return <DealsSkeleton />;
-  }
-
   if (isError) {
     return <RouteDataError />;
+  }
+
+  if (isLoading || !data) {
+    return <DealsSkeleton />;
   }
 
   return (
@@ -74,62 +81,6 @@ function DealsRouteComponent() {
       currentType={type}
       currentSort={sort}
     />
-  );
-}
-
-export interface DealsPageViewProps {
-  deals?: DealItem[];
-  total?: number;
-  currentType?: "all" | "game" | "dlc" | "expansion";
-  currentSort?: "discount" | "price" | "recent";
-}
-
-/**
- * Public deals page presenting discounted playable games, consumer DLC, and expansions.
- * Accessories are excluded from top-level discovery.
- */
-export function DealsPageView({
-  deals = [],
-  total,
-  currentType = "all",
-  currentSort = "discount",
-}: DealsPageViewProps) {
-  const count = total ?? deals.length;
-
-  return (
-    <div className="max-w-7xl mx-auto px-4 py-8 space-y-6">
-      {/* Top Banner */}
-      <div className="border border-zinc-800 bg-zinc-950 p-6 space-y-3">
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-zinc-900 pb-4">
-          <div>
-            <div className="flex items-center gap-2 mb-1">
-              <span className="w-2.5 h-2.5 bg-emerald-500 inline-block"></span>
-              <span className="text-xs font-mono uppercase tracking-wider text-emerald-400">
-                Steam Store Discounts
-              </span>
-            </div>
-            <h1 className="text-2xl sm:text-3xl font-mono font-bold text-zinc-100 tracking-tight">
-              Steam Deals & Price Cuts
-            </h1>
-            <p className="text-xs text-zinc-400 mt-1 font-mono">
-              Live discount tracker for playable games, official expansions, and consumer DLC.
-            </p>
-          </div>
-
-          <div className="text-xs font-mono text-zinc-400 bg-zinc-900 border border-zinc-800 px-3 py-2">
-            ACTIVE DEALS: <span className="text-emerald-400 font-bold tabular-nums">{count}</span>
-          </div>
-        </div>
-      </div>
-
-      {/* Deals Listing */}
-      <DealsList
-        deals={deals}
-        total={count}
-        currentType={currentType}
-        currentSort={currentSort}
-      />
-    </div>
   );
 }
 
@@ -189,4 +140,3 @@ export async function handleDealsHttpRequest(
   });
 }
 
-export default DealsPageView;

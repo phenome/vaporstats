@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from "react";
+import { AppLink } from "./app-link";
 import type { RankedGame } from "../lib/player-history";
 import { getCanonicalGamePath } from "../lib/slug";
 
@@ -63,14 +64,14 @@ export function TrendingBlock({ initialGames, customFetch }: TrendingProps) {
         </div>
 
         <div>
-          <a
+          <AppLink
             href="/rankings"
             data-testid="trending-rankings-link"
             className="text-xs font-mono text-orange-400 hover:text-orange-300 font-medium transition-colors inline-flex items-center gap-1 min-h-[44px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-orange-500"
           >
             <span>View Full Rankings</span>
             <span>&rarr;</span>
-          </a>
+          </AppLink>
         </div>
       </div>
 
@@ -111,12 +112,12 @@ export function TrendingBlock({ initialGames, customFetch }: TrendingProps) {
                     <span className="font-mono text-xs font-bold text-zinc-500 tabular-nums w-6">
                       {rankDisplay}
                     </span>
-                    <a
+                    <AppLink
                       href={canonicalUrl}
                       className="font-mono text-xs text-zinc-200 hover:text-orange-400 font-medium truncate transition-colors min-h-[44px] inline-flex items-center focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-orange-500"
                     >
                       {game.name}
-                    </a>
+                    </AppLink>
                   </div>
 
                   {/* Player Count and Freshness */}

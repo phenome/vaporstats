@@ -2,7 +2,7 @@ import { Navigate, createFileRoute } from "@tanstack/react-router";
 import { getDb } from "../lib/db-access";
 import type { AppDatabase } from "../lib/db";
 import { getCurrentIsoWeek, parseIsoWeek } from "../lib/releases";
-import { handleWeekReleasesHttpRequest } from "./releases.$week";
+import { handleWeekReleasesHttpRequest, releaseWeekQueryOptions } from "./releases.$week";
 import { getLiveApiCacheHeaders, getPageCacheHeaders } from "../lib/cache";
 import { RouteLoading } from "../components/route-state";
 
@@ -61,7 +61,11 @@ export async function handleReleasesIndexHttpRequest(
 export const Route = createFileRoute("/releases/")({
   ssr: false,
   headers: () => getPageCacheHeaders(),
-  loader: async () => ({ currentWeek: getCurrentIsoWeek() }),
+  loader: ({ context }) => {
+    const currentWeek = getCurrentIsoWeek();
+    void context.queryClient.prefetchQuery(releaseWeekQueryOptions(currentWeek));
+    return { currentWeek };
+  },
   pendingComponent: () => <RouteLoading label="Opening the current release week..." />,
   component: ReleasesIndexRoute,
 });

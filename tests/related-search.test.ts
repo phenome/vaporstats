@@ -32,8 +32,10 @@ import { RelatedApps } from "../src/components/related-apps";
 import { SearchForm } from "../src/components/search-form";
 import { SiteHeader } from "../src/components/site-header";
 import { handleGameHttpRequest } from "../src/routes/games.$game";
-import { handleChildHttpRequest, ChildAppPageView } from "../src/routes/games.$game_.$child";
-import { handleSearchHttpRequest, SearchResultsPageView } from "../src/routes/search";
+import { ChildAppPageView } from "../src/components/child-app-page";
+import { handleChildHttpRequest } from "../src/routes/games.$game_.$child";
+import { SearchResultsPageView } from "../src/components/search-page";
+import { handleSearchHttpRequest } from "../src/routes/search";
 import { handleSearchApiRequest } from "../src/routes/api.search";
 const migrationsDir = resolve(import.meta.dir, "../migrations");
 const migrationsSql = readdirSync(migrationsDir)
