@@ -1,4 +1,4 @@
-import type { D1Database } from "./db";
+import type { AppDatabase } from "./db";
 import { toSlug } from "./slug";
 
 export type ReleaseDateSource =
@@ -113,7 +113,7 @@ function mapRowToEntity(row: RawAppRow): CatalogEntity {
  * Excludes accessory apps (DLC, soundtracks, expansions, tools, demos) and subordinate apps.
  */
 export async function listPlayableGames(
-  db: D1Database,
+  db: AppDatabase,
   options: { limit?: number; offset?: number } = {}
 ): Promise<CatalogEntity[]> {
   const limit = options.limit ?? 50;
@@ -141,7 +141,7 @@ export async function listPlayableGames(
  * Observations query failure propagates; missing data is successful absence (null).
  */
 export async function getGameByAppId(
-  db: D1Database,
+  db: AppDatabase,
   appid: number
 ): Promise<GameDetail | null> {
   const appStmt = db
@@ -165,44 +165,29 @@ export async function getGameByAppId(
   let peak_players: number | null = null;
   let last_observed_at: string | null = null;
 
-  // Check if observations table exists in D1 schema
-  const tableCheck = await db
-    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='observations'")
-    .first<{ name: string }>();
-
-  if (tableCheck) {
-    // Observations table exists: query it directly.
-    // D1 failure is not swallowed; missing data is a successful null result.
-    const obsStmt = db
-      .prepare(
-        `SELECT current_players, observed_at FROM observations 
-         WHERE appid = ? 
-         ORDER BY observed_at DESC 
-         LIMIT 1`
-      )
-      .bind(appid);
-    const obs = await obsStmt.first<{ current_players: number; observed_at: string }>();
-    if (obs && typeof obs.current_players === "number") {
-      latest_players = obs.current_players;
-      last_observed_at = obs.observed_at;
-    }
+  const obsStmt = db
+    .prepare(
+      `SELECT current_players, observed_at FROM observations
+       WHERE appid = ?
+       ORDER BY observed_at DESC
+       LIMIT 1`
+    )
+    .bind(appid);
+  const obs = await obsStmt.first<{ current_players: number; observed_at: string }>();
+  if (obs && typeof obs.current_players === "number") {
+    latest_players = obs.current_players;
+    last_observed_at = obs.observed_at;
   }
   let release_events: GameReleaseEvent[] = [];
 
-  const releaseEventsTable = await db
-    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='app_release_events'")
-    .first<{ name: string }>();
-
-  if (releaseEventsTable) {
-    const eventResult = await db
-      .prepare(`SELECT event_type, event_date, source
-       FROM app_release_events
-       WHERE appid = ?
-       ORDER BY event_date DESC, event_type ASC`)
-      .bind(appid)
-      .all<GameReleaseEvent>();
-    release_events = eventResult.results ?? [];
-  }
+  const eventResult = await db
+    .prepare(`SELECT event_type, event_date, source
+     FROM app_release_events
+     WHERE appid = ?
+     ORDER BY event_date DESC, event_type ASC`)
+    .bind(appid)
+    .all<GameReleaseEvent>();
+  release_events = eventResult.results ?? [];
 
   return {
     ...entity,
@@ -214,10 +199,10 @@ export async function getGameByAppId(
 }
 
 /**
- * Persists or updates a catalog entity in D1.
+ * Persists or updates a catalog entity in the application database.
  */
 export async function upsertApp(
-  db: D1Database,
+  db: AppDatabase,
   app: {
     appid: number;
     name: string;
@@ -315,10 +300,10 @@ export async function upsertApp(
 }
 
 /**
- * Reads a checkpoint from D1.
+ * Reads a checkpoint from the application database.
  */
 export async function getCheckpoint(
-  db: D1Database,
+  db: AppDatabase,
   key: string
 ): Promise<{ value: string; cursor: number | null; updated_at: string } | null> {
   const stmt = db
@@ -328,10 +313,10 @@ export async function getCheckpoint(
 }
 
 /**
- * Records or updates a checkpoint in D1.
+ * Records or updates a checkpoint in the application database.
  */
 export async function setCheckpoint(
-  db: D1Database,
+  db: AppDatabase,
   key: string,
   value: string,
   cursor: number | null = null

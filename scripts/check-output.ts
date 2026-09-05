@@ -1,18 +1,10 @@
-import { readdirSync, existsSync } from "node:fs";
+import { existsSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 
 const DIST_DIR = join(process.cwd(), "dist");
+const CLIENT_DIR = join(DIST_DIR, "client");
+const SERVER_ENTRY = join(DIST_DIR, "server", "server.js");
 const MAX_THRESHOLD = 90_000;
-const FIXED_ROUTE_SHELLS = [
-  "index.html",
-  "games/index.html",
-  "search/index.html",
-  "rankings/index.html",
-  "rankings/peak/index.html",
-  "deals/index.html",
-  "releases/index.html",
-  "privacy/index.html",
-];
 
 if (!existsSync(DIST_DIR)) {
   console.error("ERROR: dist directory does not exist. Run production build first.");
@@ -34,21 +26,31 @@ function countFiles(dir: string): number {
 }
 
 const totalFiles = countFiles(DIST_DIR);
-console.log(`Dist output file count: ${totalFiles} (threshold: < ${MAX_THRESHOLD})`);
+console.log("Dist output file count: " + totalFiles + " (threshold: < " + MAX_THRESHOLD + ")");
 
 if (totalFiles >= MAX_THRESHOLD) {
-  console.error(`ERROR: dist output count ${totalFiles} reached or exceeded threshold ${MAX_THRESHOLD}`);
+  console.error("ERROR: dist output count " + totalFiles + " reached or exceeded threshold " + MAX_THRESHOLD);
   process.exit(1);
 }
 
-const missingShells = FIXED_ROUTE_SHELLS.filter(
-  (path) => !existsSync(join(DIST_DIR, "client", path))
-);
-if (missingShells.length > 0) {
-  console.error(`ERROR: missing fixed route shells: ${missingShells.join(", ")}`);
+if (!existsSync(CLIENT_DIR) || !statSync(CLIENT_DIR).isDirectory()) {
+  console.error("ERROR: client output directory is missing.");
   process.exit(1);
 }
-console.log(`Static route shells: ${FIXED_ROUTE_SHELLS.length}`);
-console.log("STATIC SHELLS OK");
+
+const clientFiles = countFiles(CLIENT_DIR);
+if (clientFiles === 0) {
+  console.error("ERROR: client output directory is empty.");
+  process.exit(1);
+}
+
+if (!existsSync(SERVER_ENTRY) || !statSync(SERVER_ENTRY).isFile() || statSync(SERVER_ENTRY).size === 0) {
+  console.error("ERROR: SSR server entry is missing or empty: " + SERVER_ENTRY);
+  process.exit(1);
+}
+
+console.log("Client output files: " + clientFiles);
+console.log("SSR server entry: " + SERVER_ENTRY);
+console.log("SSR/CLIENT OUTPUT OK");
 
 console.log("OUTPUT COUNT OK");

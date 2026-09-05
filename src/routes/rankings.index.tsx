@@ -2,7 +2,7 @@ import React from "react";
 import { renderToString } from "react-dom/server";
 import { createFileRoute } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
-import { getDb, type D1Database } from "../lib/db";
+import { getDb, type AppDatabase } from "../lib/db";
 import {
   getMostPlayedRankings,
   type RankedGame,
@@ -170,7 +170,7 @@ export function RankingsPageView({ games = [] }: RankingsPageViewProps) {
  */
 export async function handleRankingsHttpRequest(
   request: Request,
-  explicitDb?: D1Database
+  explicitDb?: AppDatabase
 ): Promise<Response> {
   const db = await getDb(explicitDb);
   const games = await getMostPlayedRankings(db, { limit: 100 });

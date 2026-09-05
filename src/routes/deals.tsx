@@ -2,7 +2,7 @@ import React from "react";
 import { renderToString } from "react-dom/server";
 import { createFileRoute } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
-import { getDb, type D1Database } from "../lib/db";
+import { getDb, type AppDatabase } from "../lib/db";
 import { getDeals, type DealItem } from "../lib/prices";
 import { DealsList } from "../components/deals";
 import { getLiveApiCacheHeaders, getPageCacheHeaders } from "../lib/cache";
@@ -137,7 +137,7 @@ export function DealsPageView({
  */
 export async function handleDealsHttpRequest(
   request: Request,
-  explicitDb?: D1Database
+  explicitDb?: AppDatabase
 ): Promise<Response> {
   const url = new URL(request.url);
   const rawType = url.searchParams.get("type");

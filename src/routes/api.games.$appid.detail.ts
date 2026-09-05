@@ -1,5 +1,5 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { getDb, type D1Database } from "../lib/db";
+import { getDb, type AppDatabase } from "../lib/db";
 import { getGameByAppId, type GameDetail } from "../lib/catalog";
 import { getRelatedApps, type GroupedRelatedApps } from "../lib/related";
 import { getPlayerHistory, type PlayerHistoryResult } from "../lib/player-history";
@@ -16,7 +16,7 @@ export interface GameDetailResponseData {
 
 export async function handleGameDetailRequest(
   request: Request,
-  db: D1Database,
+  db: AppDatabase,
   explicitAppid?: number
 ): Promise<Response> {
   let appid = explicitAppid;
@@ -55,18 +55,18 @@ export async function handleGameDetailRequest(
     );
   }
 
-  const [related, playerHistory, price, priceHistory] = await Promise.all([
+  const [related, playerHistory, currentPrice] = await Promise.all([
     getRelatedApps(db, game.appid),
     getPlayerHistory(db, game.appid, "30d"),
     getCurrentPrice(db, game.appid),
-    getPriceHistory(db, game.appid, "all"),
   ]);
+  const priceHistory = await getPriceHistory(db, game.appid, "all", { currentPrice });
 
   const responseData: GameDetailResponseData = {
     game,
     related,
     playerHistory,
-    price,
+    price: currentPrice,
     priceHistory,
   };
 

@@ -1,5 +1,5 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { getDb, type D1Database } from "../lib/db";
+import { getDb, type AppDatabase } from "../lib/db";
 import {
   getReleasesForWeek,
   getRecentReleases,
@@ -24,7 +24,7 @@ import {
  */
 export async function handleReleasesApiRequest(
   request: Request,
-  explicitDb?: D1Database
+  explicitDb?: AppDatabase
 ): Promise<Response> {
   const url = new URL(request.url);
   const typeParam = (url.searchParams.get("type") || "week").toLowerCase();

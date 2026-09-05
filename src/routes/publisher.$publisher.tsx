@@ -2,7 +2,7 @@ import React from "react";
 import { renderToString } from "react-dom/server";
 import { createFileRoute, notFound, redirect } from "@tanstack/react-router";
 import { getPublisherGames, type PublisherDetail } from "../lib/publishers";
-import { getDb, type D1Database } from "../lib/db";
+import { getDb, type AppDatabase } from "../lib/db";
 import { parsePublisherSlug, getCanonicalPublisherPath } from "../lib/slug";
 import { CACHE_POLICIES, getEntityCacheHeaders } from "../lib/cache";
 import { PublisherPageView } from "../components/publisher-page";
@@ -81,7 +81,7 @@ function wrapHtml(title: string, bodyContent: string): string {
  */
 export async function handlePublisherHttpRequest(
   request: Request,
-  db: D1Database
+  db: AppDatabase
 ): Promise<Response> {
   const url = new URL(request.url);
   const match = url.pathname.match(/^\/publisher\/([^/]+)$/);

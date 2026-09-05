@@ -1,4 +1,4 @@
-import type { D1Database } from "./db";
+import type { AppDatabase } from "./db";
 import { toPublisherSlug, parsePublisherSlug, getCanonicalPublisherPath } from "./slug";
 
 export interface PublisherGameItem {
@@ -44,12 +44,30 @@ interface RawAppPublisherRow {
   header_image: string;
 }
 
+interface RawPublisherNameRow {
+  entity_name: string;
+}
+
+interface RawPublisherSummaryRow {
+  entity_name: string;
+  is_publisher: number;
+  is_developer: number;
+  game_count: number;
+}
+
+const eligiblePublisherEntitiesSql =
+  "SELECT appid, TRIM(publisher) AS entity_name, 1 AS is_publisher, 0 AS is_developer " +
+  "FROM apps WHERE is_playable = 1 AND is_eligible = 1 AND parent_appid IS NULL AND TRIM(publisher) <> '' " +
+  "UNION ALL " +
+  "SELECT appid, TRIM(developer) AS entity_name, 0 AS is_publisher, 1 AS is_developer " +
+  "FROM apps WHERE is_playable = 1 AND is_eligible = 1 AND parent_appid IS NULL AND TRIM(developer) <> ''";
+
 /**
  * Retrieves games published or developed by the specified entity.
  * Accepts a name or a URL slug (with or without numeric id prefix).
  */
 export async function getPublisherGames(
-  db: D1Database,
+  db: AppDatabase,
   slugOrParam: string
 ): Promise<PublisherDetail | null> {
   const parsed = parsePublisherSlug(slugOrParam);
@@ -58,18 +76,33 @@ export async function getPublisherGames(
   }
 
   const targetSlug = toPublisherSlug(parsed.slug);
+  const namesResult = await db
+    .prepare(
+      "SELECT DISTINCT entity_name FROM (" + eligiblePublisherEntitiesSql + ") AS publisher_entities " +
+        "ORDER BY entity_name ASC"
+    )
+    .all<RawPublisherNameRow>();
+  const matchingNames = (namesResult.results ?? [])
+    .map((row) => row.entity_name.trim())
+    .filter((name, index, names) =>
+      name !== "" && toPublisherSlug(name) === targetSlug && names.indexOf(name) === index
+    );
 
-  const stmt = db.prepare(
-    `SELECT appid, name, slug, developer, publisher, release_date, release_status, header_image
-     FROM apps
-     WHERE is_playable = 1 
-       AND is_eligible = 1 
-       AND parent_appid IS NULL
-     ORDER BY name ASC`
-  );
+  if (matchingNames.length === 0) {
+    return null;
+  }
 
+  const placeholders = matchingNames.map(() => "?").join(", ");
+  const stmt = db
+    .prepare(
+      "SELECT appid, name, slug, developer, publisher, release_date, release_status, header_image " +
+        "FROM apps WHERE is_playable = 1 AND is_eligible = 1 AND parent_appid IS NULL " +
+        "AND (TRIM(publisher) IN (" + placeholders + ") OR TRIM(developer) IN (" + placeholders + ")) " +
+        "ORDER BY name ASC"
+    )
+    .bind(...matchingNames, ...matchingNames);
   const result = await stmt.all<RawAppPublisherRow>();
-  const rows = result.results || [];
+  const rows = result.results ?? [];
 
   const matchingGames: PublisherGameItem[] = [];
   let canonicalName = "";
@@ -79,44 +112,39 @@ export async function getPublisherGames(
   for (const row of rows) {
     const pub = (row.publisher || "").trim();
     const dev = (row.developer || "").trim();
-
     const pubMatch = pub !== "" && toPublisherSlug(pub) === targetSlug;
     const devMatch = dev !== "" && toPublisherSlug(dev) === targetSlug;
 
-    if (pubMatch || devMatch) {
-      if (pubMatch) {
-        isPublisher = true;
-        if (!canonicalName) canonicalName = pub;
-      }
-      if (devMatch) {
-        isDeveloper = true;
-        if (!canonicalName) canonicalName = dev;
-      }
-
-      matchingGames.push({
-        appid: row.appid,
-        name: row.name,
-        slug: row.slug,
-        developer: row.developer || "",
-        publisher: row.publisher || "",
-        release_date: row.release_date,
-        release_status: row.release_status || "released",
-        header_image: row.header_image || "",
-        isPublisher: pubMatch,
-        isDeveloper: devMatch,
-      });
+    if (!pubMatch && !devMatch) continue;
+    if (pubMatch) {
+      isPublisher = true;
+      if (!canonicalName) canonicalName = pub;
     }
+    if (devMatch) {
+      isDeveloper = true;
+      if (!canonicalName) canonicalName = dev;
+    }
+    matchingGames.push({
+      appid: row.appid,
+      name: row.name,
+      slug: row.slug,
+      developer: row.developer || "",
+      publisher: row.publisher || "",
+      release_date: row.release_date,
+      release_status: row.release_status || "released",
+      header_image: row.header_image || "",
+      isPublisher: pubMatch,
+      isDeveloper: devMatch,
+    });
   }
 
   if (matchingGames.length === 0 || !canonicalName) {
     return null;
   }
 
-  const canonicalSlug = toPublisherSlug(canonicalName);
-
   return {
     name: canonicalName,
-    slug: canonicalSlug,
+    slug: toPublisherSlug(canonicalName),
     canonicalPath: getCanonicalPublisherPath(canonicalName),
     isPublisher,
     isDeveloper,
@@ -129,73 +157,39 @@ export async function getPublisherGames(
  * Lists all distinct publishers and developers across eligible playable games.
  * Returns sorted summaries with game counts and links.
  */
-export async function listPublishers(db: D1Database): Promise<PublisherSummary[]> {
-  const stmt = db.prepare(
-    `SELECT appid, name, slug, developer, publisher
-     FROM apps
-     WHERE is_playable = 1 
-       AND is_eligible = 1 
-       AND parent_appid IS NULL`
-  );
+export async function listPublishers(db: AppDatabase): Promise<PublisherSummary[]> {
+  const result = await db
+    .prepare(
+      "SELECT entity_name, MAX(is_publisher) AS is_publisher, MAX(is_developer) AS is_developer, " +
+        "COUNT(DISTINCT appid) AS game_count FROM (" +
+        eligiblePublisherEntitiesSql +
+        ") AS publisher_entities GROUP BY entity_name ORDER BY entity_name ASC"
+    )
+    .all<RawPublisherSummaryRow>();
 
-  const result = await stmt.all<RawAppPublisherRow>();
-  const rows = result.results || [];
-
-  const map = new Map<
-    string,
-    {
-      name: string;
-      slug: string;
-      isPublisher: boolean;
-      isDeveloper: boolean;
-      appids: Set<number>;
+  const map = new Map<string, PublisherSummary>();
+  for (const row of result.results ?? []) {
+    const name = row.entity_name.trim();
+    if (!name) continue;
+    const slug = toPublisherSlug(name);
+    const existing = map.get(slug);
+    if (existing) {
+      existing.isPublisher ||= row.is_publisher === 1;
+      existing.isDeveloper ||= row.is_developer === 1;
+      existing.gameCount += row.game_count;
+      continue;
     }
-  >();
-
-  for (const row of rows) {
-    const pub = (row.publisher || "").trim();
-    const dev = (row.developer || "").trim();
-
-    if (pub) {
-      const slug = toPublisherSlug(pub);
-      const existing = map.get(slug) || {
-        name: pub,
-        slug,
-        isPublisher: false,
-        isDeveloper: false,
-        appids: new Set<number>(),
-      };
-      existing.isPublisher = true;
-      existing.appids.add(row.appid);
-      map.set(slug, existing);
-    }
-
-    if (dev) {
-      const slug = toPublisherSlug(dev);
-      const existing = map.get(slug) || {
-        name: dev,
-        slug,
-        isPublisher: false,
-        isDeveloper: false,
-        appids: new Set<number>(),
-      };
-      existing.isDeveloper = true;
-      existing.appids.add(row.appid);
-      map.set(slug, existing);
-    }
-  }
-
-  const summaries: PublisherSummary[] = [];
-  for (const entry of map.values()) {
-    summaries.push({
-      name: entry.name,
-      slug: entry.slug,
-      path: getCanonicalPublisherPath(entry.name),
-      isPublisher: entry.isPublisher,
-      isDeveloper: entry.isDeveloper,
-      gameCount: entry.appids.size,
+    map.set(slug, {
+      name,
+      slug,
+      path: getCanonicalPublisherPath(name),
+      isPublisher: row.is_publisher === 1,
+      isDeveloper: row.is_developer === 1,
+      gameCount: row.game_count,
     });
   }
 
-  return summaries.sort((a, b) => b.gameCount - a.gameCount || a.name.localeCompare(b.name));
+  return Array.from(map.values()).sort(
+    (a, b) => b.gameCount - a.gameCount || a.name.localeCompare(b.name)
+  );
 }

@@ -4,7 +4,7 @@ import { readFileSync, readdirSync, existsSync } from "node:fs";
 import { resolve } from "node:path";
 import React from "react";
 import { renderToString } from "react-dom/server";
-import { type D1Database, type D1PreparedStatement } from "../src/lib/db";
+import { type AppDatabase, type AppPreparedStatement } from "../src/lib/db";
 import * as playerHistoryModule from "../src/lib/player-history";
 import {
   type HistoryRange,
@@ -49,13 +49,13 @@ const migrationsSql = readdirSync(migrationsDir)
   .sort()
   .map((name) => readFileSync(resolve(migrationsDir, name), "utf8"));
 
-function createSqliteD1Adapter(db: Database): D1Database {
+function createSqliteAppAdapter(db: Database): AppDatabase {
   return {
-    prepare(query: string): D1PreparedStatement {
+    prepare(query: string): AppPreparedStatement {
       let boundValues: unknown[] = [];
 
       const statement = {
-        bind(...values: unknown[]): D1PreparedStatement {
+        bind(...values: unknown[]): AppPreparedStatement {
           boundValues = values;
           return statement;
         },
@@ -100,7 +100,7 @@ function createSqliteD1Adapter(db: Database): D1Database {
 
       return statement;
     },
-    async batch<T = unknown>(statements: D1PreparedStatement[]) {
+    async batch<T = unknown>(statements: AppPreparedStatement[]) {
       const results: { success: boolean; results?: T[] }[] = [];
       db.run("BEGIN TRANSACTION;");
       try {
@@ -122,9 +122,9 @@ function createSqliteD1Adapter(db: Database): D1Database {
   };
 }
 
-async function createFreshDb(): Promise<D1Database> {
+async function createFreshDb(): Promise<AppDatabase> {
   const sqlite = new Database(":memory:");
-  const db = createSqliteD1Adapter(sqlite);
+  const db = createSqliteAppAdapter(sqlite);
   for (const sql of migrationsSql) {
     await db.exec(sql);
   }
@@ -136,44 +136,36 @@ describe("Player History and Rankings", () => {
     console.log("player history suite complete");
   });
 
-  // G1: raw successful player observations remain queryable for ninety days
+  // G1: raw successful player observations remain queryable for seven days
   test("raw retention", async () => {
     const db = await createFreshDb();
     const anchor = new Date("2026-09-04T12:00:00.000Z");
 
-    // Insert apps
     await db
       .prepare("INSERT INTO apps (appid, name, slug) VALUES (10, 'Counter-Strike', 'counter-strike')")
       .run();
 
-    // Insert observations at various ages:
-    // 10 days ago (within 90d)
+    // Keep observations inside the seven-day window and at its inclusive boundary.
+    const t6d = new Date(anchor.getTime() - 6 * 24 * 60 * 60 * 1000).toISOString();
+    const t7d = new Date(anchor.getTime() - 7 * 24 * 60 * 60 * 1000).toISOString();
+    const t8d = new Date(anchor.getTime() - 8 * 24 * 60 * 60 * 1000).toISOString();
     const t10d = new Date(anchor.getTime() - 10 * 24 * 60 * 60 * 1000).toISOString();
-    // 89 days ago (within 90d)
-    const t89d = new Date(anchor.getTime() - 89 * 24 * 60 * 60 * 1000).toISOString();
-    // 91 days ago (expired)
-    const t91d = new Date(anchor.getTime() - 91 * 24 * 60 * 60 * 1000).toISOString();
-    // 120 days ago (expired)
-    const t120d = new Date(anchor.getTime() - 120 * 24 * 60 * 60 * 1000).toISOString();
 
-    await db.prepare("INSERT INTO observations (appid, current_players, observed_at) VALUES (10, 100, ?)").bind(t10d).run();
-    await db.prepare("INSERT INTO observations (appid, current_players, observed_at) VALUES (10, 200, ?)").bind(t89d).run();
-    await db.prepare("INSERT INTO observations (appid, current_players, observed_at) VALUES (10, 300, ?)").bind(t91d).run();
-    await db.prepare("INSERT INTO observations (appid, current_players, observed_at) VALUES (10, 400, ?)").bind(t120d).run();
+    await db.prepare("INSERT INTO observations (appid, current_players, observed_at) VALUES (10, 100, ?)").bind(t6d).run();
+    await db.prepare("INSERT INTO observations (appid, current_players, observed_at) VALUES (10, 200, ?)").bind(t7d).run();
+    await db.prepare("INSERT INTO observations (appid, current_players, observed_at) VALUES (10, 300, ?)").bind(t8d).run();
+    await db.prepare("INSERT INTO observations (appid, current_players, observed_at) VALUES (10, 400, ?)").bind(t10d).run();
 
-    // Verify all 4 are queryable prior to cleanup
     const beforeCount = await db.prepare("SELECT COUNT(*) as count FROM observations").first<number>("count");
     expect(beforeCount).toBe(4);
 
-    // Clean expired observations beyond 90 days
-    const cleaned = await cleanExpiredRawObservations(db, anchor, 90);
+    const cleaned = await cleanExpiredRawObservations(db, anchor);
     expect(cleaned).toBe(2);
 
-    // Verify 90-day observations remain queryable
     const remaining = await db.prepare("SELECT current_players, observed_at FROM observations ORDER BY observed_at ASC").all<{ current_players: number; observed_at: string }>();
     expect(remaining.results.length).toBe(2);
-    expect(remaining.results[0].current_players).toBe(200); // 89 days ago
-    expect(remaining.results[1].current_players).toBe(100); // 10 days ago
+    expect(remaining.results[0].current_players).toBe(200); // exactly seven days old
+    expect(remaining.results[1].current_players).toBe(100); // six days old
 
     console.log("raw retention");
   });
@@ -214,15 +206,40 @@ describe("Player History and Rankings", () => {
     expect(rerun.rolledUpCount).toBe(1);
     expect(rerun.records[0].min_players).toBe(50);
     expect(rerun.records[0].sample_count).toBe(5);
-    // Default rollup must process completed UTC days only (never current partial day)
+    // The scheduled default targets only the previous completed UTC day.
+    await db.prepare("INSERT INTO observations (appid, current_players, observed_at) VALUES (10, 700, '2026-09-03T23:30:00.000Z')").run();
     await db.prepare("INSERT INTO observations (appid, current_players, observed_at) VALUES (10, 999, '2026-09-04T10:00:00.000Z')").run();
-    await computeDailyRollups(db, { anchorTime: anchor });
+    await db.prepare("INSERT INTO player_rollups (appid, date, min_players, max_players, avg_players, close_players, sample_count) VALUES (11, '2026-09-01', 1, 2, 1.5, 2, 1)").run();
+
+    const tracedQueries: string[] = [];
+    const tracedDb: AppDatabase = {
+      prepare(query) {
+        tracedQueries.push(query);
+        return db.prepare(query);
+      },
+      batch(statements) {
+        return db.batch(statements);
+      },
+      exec(query) {
+        return db.exec(query);
+      },
+    };
+    const bounded = await computeDailyRollups(tracedDb, { anchorTime: anchor });
+    expect(bounded.records.map((record) => record.date)).toEqual(["2026-09-03"]);
+    expect(tracedQueries.some((query) => query.includes("observed_at >= ? AND observed_at < ?"))).toBe(true);
+    expect(tracedQueries.some((query) => query.includes("substr(observed_at"))).toBe(false);
+    expect(tracedQueries.some((query) => query.includes("FROM player_rollups") && query.includes("WHERE date = ?"))).toBe(true);
+
     const todayRollup = await db.prepare("SELECT * FROM player_rollups WHERE date = '2026-09-04'").first();
     expect(todayRollup).toBeNull(); // Current partial day is not rolled up
 
     // Test worker coordinator helper (runs rollups before raw cleanup)
-    const jobRes = await runDailyRollupJob(db, { anchorTime: anchor, retentionDays: 90 });
-    expect(jobRes.rolledUpCount).toBeGreaterThanOrEqual(1);
+    const jobRes = await runDailyRollupJob(db, {
+      anchorTime: anchor,
+      retentionDays: 90,
+      snapshot: async () => "test-snapshot.sqlite",
+    });
+    expect(jobRes.rolledUpCount).toBe(1);
     console.log("daily rollup continuity");
   });
 
@@ -250,6 +267,10 @@ describe("Player History and Rankings", () => {
     await db.prepare("INSERT INTO observations (appid, current_players, observed_at) VALUES (10, 800, ?)").bind(t3d).run();
     await db.prepare("INSERT INTO observations (appid, current_players, observed_at) VALUES (10, 600, ?)").bind(t15d).run();
     await db.prepare("INSERT INTO observations (appid, current_players, observed_at) VALUES (10, 400, ?)").bind(t45d).run();
+    const t15dDate = t15d.substring(0, 10);
+    const t45dDate = t45d.substring(0, 10);
+    await db.prepare("INSERT INTO player_rollups (appid, date, min_players, max_players, avg_players, close_players, sample_count) VALUES (10, ?, 600, 600, 600, 600, 1)").bind(t15dDate).run();
+    await db.prepare("INSERT INTO player_rollups (appid, date, min_players, max_players, avg_players, close_players, sample_count) VALUES (10, ?, 400, 400, 400, 400, 1)").bind(t45dDate).run();
 
     // 24h range: only 2h observation
     const res24h = await getPlayerHistory(db, 10, "24h", anchor);
@@ -275,6 +296,12 @@ describe("Player History and Rankings", () => {
     const res90d = await getPlayerHistory(db, 10, "90d", anchor);
     expect(res90d.range).toBe("90d");
     expect(res90d.points.filter((p) => !p.is_gap).length).toBe(4);
+    const cleanedHistory = await cleanExpiredRawObservations(db, anchor);
+    expect(cleanedHistory).toBe(2);
+    const retained30d = await getPlayerHistory(db, 10, "30d", anchor);
+    const retained90d = await getPlayerHistory(db, 10, "90d", anchor);
+    expect(retained30d.points.filter((p) => !p.is_gap).length).toBe(3);
+    expect(retained90d.points.filter((p) => !p.is_gap).length).toBe(4);
 
     // Future observations/rollups after anchorTime must be bounded out
     await db.prepare("INSERT INTO observations (appid, current_players, observed_at) VALUES (10, 9999, '2026-09-05T00:00:00.000Z')").run();
@@ -435,7 +462,7 @@ describe("Player History and Rankings", () => {
     await db.prepare("INSERT INTO tracked_games (appid, latest_players, last_successful_at, next_due_at) VALUES (10, 100, ?, '2026-09-04T13:00:00Z')").bind(obsLow).run();
     await db.prepare("INSERT INTO tracked_games (appid, latest_players, last_successful_at, next_due_at) VALUES (20, 5000, ?, '2026-09-04T13:00:00Z')").bind(obsHigh).run();
     await db.prepare("INSERT INTO tracked_games (appid, latest_players, last_successful_at, next_due_at) VALUES (30, 2500, ?, '2026-09-04T13:00:00Z')").bind(obsMid).run();
-    // Tracked game 60 has observations in observations table, but last_successful_at is null in tracked_games
+    // Tracked game 60 has no successful timestamp; rankings use tracked state without an observation fallback.
     await db.prepare("INSERT INTO apps (appid, name, slug) VALUES (60, 'Fallback Game', 'fallback-game')").run();
     await db.prepare("INSERT INTO observations (appid, current_players, observed_at) VALUES (60, 1500, ?)").bind(obsMid).run();
     await db.prepare("INSERT INTO tracked_games (appid, latest_players, last_successful_at, next_due_at) VALUES (60, 1500, NULL, '2026-09-04T13:00:00Z')").run();
@@ -459,8 +486,8 @@ describe("Player History and Rankings", () => {
     expect(rankings[2].appid).toBe(60);
     expect(rankings[2].rank).toBe(3);
     expect(rankings[2].current_players).toBe(1500);
-    expect(rankings[2].relative_age).toBe("2h ago");
-    expect(rankings[2].exact_utc).toBe(formatExactUtc(obsMid));
+    expect(rankings[2].relative_age).toBe("No data yet");
+    expect(rankings[2].exact_utc).toBe("No data yet");
 
     expect(rankings[3].appid).toBe(10);
     expect(rankings[3].rank).toBe(4);
@@ -665,9 +692,9 @@ describe("Player History and Rankings", () => {
     // 6. Server failure returns 500 with generic error (does not leak internal details)
     const failingDb = {
       prepare() {
-        throw new Error("D1 internal query engine failure");
+        throw new Error("SQLite internal query engine failure");
       },
-    } as unknown as D1Database;
+    } as unknown as AppDatabase;
 
     const failHistReq = new Request("https://vaporstats.com/api/players/history?appid=10");
     const failHistRes = await handlePlayerHistoryRequest(failHistReq, failingDb);
@@ -676,7 +703,7 @@ describe("Player History and Rankings", () => {
     const failHistJson = (await failHistRes.json()) as { status: string; error: string };
     expect(failHistJson.status).toBe("error");
     expect(failHistJson.error).toBe("Live data unavailable");
-    expect(failHistJson.error).not.toContain("D1 internal");
+    expect(failHistJson.error).not.toContain("SQLite internal");
 
     const failRankReq = new Request("https://vaporstats.com/api/rankings?type=most_played");
     const failRankRes = await handleRankingsRequest(failRankReq, failingDb);
@@ -684,7 +711,7 @@ describe("Player History and Rankings", () => {
     const failRankJson = (await failRankRes.json()) as { status: string; error: string };
     expect(failRankJson.status).toBe("error");
     expect(failRankJson.error).toBe("Live data unavailable");
-    expect(failRankJson.error).not.toContain("D1 internal");
+    expect(failRankJson.error).not.toContain("SQLite internal");
     console.log("history api contract");
   });
   // G11: chart, rankings, and Trending pass desktop and narrow browser review without page overflow

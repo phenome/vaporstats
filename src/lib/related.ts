@@ -1,4 +1,4 @@
-import type { D1Database } from "./db";
+import type { AppDatabase } from "./db";
 import { toSlug, parseGameSlug } from "./slug";
 import type { CatalogEntity, ReleaseDateSource } from "./catalog";
 import { getLiveApiCacheHeaders, CACHE_POLICIES } from "./cache";
@@ -126,11 +126,67 @@ function mapRowToRelatedEntity(row: RawRelatedRow): RelatedAppEntity {
   };
 }
 
+
+function mapRowToCatalogEntity(row: RawRelatedRow): CatalogEntity {
+  return {
+    appid: row.appid,
+    name: row.name,
+    slug: row.slug || toSlug(row.name),
+    type: row.type,
+    is_eligible: row.is_eligible === 1,
+    is_playable: row.is_playable === 1,
+    parent_appid: row.parent_appid,
+    release_date: row.release_date ?? null,
+    steam_release_date: row.steam_release_date ?? null,
+    original_release_date: row.original_release_date ?? null,
+    original_steam_release_date: row.original_steam_release_date ?? null,
+    release_from_early_access_date: row.release_from_early_access_date ?? null,
+    release_date_source: row.release_date_source ?? null,
+    is_early_access:
+      row.is_early_access == null
+        ? null
+        : typeof row.is_early_access === "boolean"
+          ? row.is_early_access
+          : row.is_early_access === 1,
+    release_status: (row.release_status as CatalogEntity["release_status"]) || "released",
+    description: row.description || "",
+    header_image: row.header_image || "",
+    developer: row.developer || "",
+    publisher: row.publisher || "",
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+  };
+}
+
+const SEARCH_PARENT_COLUMNS = [
+  "p.appid AS parent_search_appid",
+  "p.name AS parent_search_name",
+  "p.slug AS parent_search_slug",
+  "p.type AS parent_search_type",
+  "p.is_eligible AS parent_search_is_eligible",
+  "p.is_playable AS parent_search_is_playable",
+  "p.parent_appid AS parent_search_parent_appid",
+  "p.release_date AS parent_search_release_date",
+  "p.steam_release_date AS parent_search_steam_release_date",
+  "p.original_release_date AS parent_search_original_release_date",
+  "p.original_steam_release_date AS parent_search_original_steam_release_date",
+  "p.release_from_early_access_date AS parent_search_release_from_early_access_date",
+  "p.release_date_source AS parent_search_release_date_source",
+  "p.is_early_access AS parent_search_is_early_access",
+  "p.release_status AS parent_search_release_status",
+  "p.description AS parent_search_description",
+  "p.header_image AS parent_search_header_image",
+  "p.developer AS parent_search_developer",
+  "p.publisher AS parent_search_publisher",
+  "p.created_at AS parent_search_created_at",
+  "p.updated_at AS parent_search_updated_at",
+].join(", ");
+
 /**
  * Persists a normalized relationship between parent game and child app.
  */
 export async function upsertAppRelationship(
-  db: D1Database,
+  db: AppDatabase,
   rel: {
     parent_appid: number;
     child_appid: number;
@@ -178,7 +234,7 @@ export async function upsertAppRelationship(
  * Promotes major expansions above standard DLC.
  */
 export async function getRelatedApps(
-  db: D1Database,
+  db: AppDatabase,
   parentAppId: number
 ): Promise<GroupedRelatedApps> {
   const tableCheck = await db
@@ -186,32 +242,37 @@ export async function getRelatedApps(
     .first<{ name: string }>();
 
   let rows: RawRelatedRow[] = [];
-
   if (tableCheck) {
+    // Keep each relationship source indexable: the direct-parent branch uses
+    // idx_apps_parent and the relationship branch starts at the parent key.
     const stmt = db
       .prepare(
-        `SELECT a.*, r.relationship_type as rel_type, r.prominence
-         FROM apps a
-         LEFT JOIN app_relationships r ON a.appid = r.child_appid AND r.parent_appid = ?
-         WHERE (a.parent_appid = ? OR r.parent_appid = ?)
-           AND a.is_eligible = 1
-         ORDER BY r.prominence DESC, a.release_date DESC, a.name ASC`
+        "SELECT * FROM (" +
+          "SELECT a.*, r.relationship_type AS rel_type, COALESCE(r.prominence, 0) AS prominence " +
+          "FROM apps a LEFT JOIN app_relationships r " +
+          "ON r.parent_appid = ? AND r.child_appid = a.appid " +
+          "WHERE a.parent_appid = ? AND a.is_eligible = 1 " +
+          "UNION ALL " +
+          "SELECT a.*, r.relationship_type AS rel_type, r.prominence " +
+          "FROM app_relationships r JOIN apps a ON a.appid = r.child_appid " +
+          "WHERE r.parent_appid = ? AND a.is_eligible = 1 " +
+          "AND NOT EXISTS (SELECT 1 FROM apps direct " +
+          "WHERE direct.appid = a.appid AND direct.parent_appid = ?)" +
+          ") AS related ORDER BY prominence DESC, release_date DESC, name ASC"
       )
-      .bind(parentAppId, parentAppId, parentAppId);
+      .bind(parentAppId, parentAppId, parentAppId, parentAppId);
     const res = await stmt.all<RawRelatedRow>();
-    rows = res.results || [];
+    rows = res.results ?? [];
   } else {
     const stmt = db
       .prepare(
-        `SELECT a.*, NULL as rel_type, 0 as prominence
-         FROM apps a
-         WHERE a.parent_appid = ?
-           AND a.is_eligible = 1
-         ORDER BY a.release_date DESC, a.name ASC`
+        "SELECT a.*, NULL AS rel_type, 0 AS prominence FROM apps a " +
+          "WHERE a.parent_appid = ? AND a.is_eligible = 1 " +
+          "ORDER BY a.release_date DESC, a.name ASC"
       )
       .bind(parentAppId);
     const res = await stmt.all<RawRelatedRow>();
-    rows = res.results || [];
+    rows = res.results ?? [];
   }
 
   const grouped: GroupedRelatedApps = {
@@ -228,14 +289,12 @@ export async function getRelatedApps(
   };
 
   const seen = new Set<number>();
-
   for (const row of rows) {
     if (seen.has(row.appid)) continue;
     seen.add(row.appid);
 
     const entity = mapRowToRelatedEntity(row);
     grouped.total_count++;
-
     switch (entity.type) {
       case "expansion":
         grouped.expansions.push(entity);
@@ -272,93 +331,57 @@ export async function getRelatedApps(
  * Rejects mismatched parent-child pairs or ineligible apps (returns null -> 404).
  */
 export async function getChildApp(
-  db: D1Database,
+  db: AppDatabase,
   parentAppId: number,
   childAppId: number
 ): Promise<{ parent: CatalogEntity; child: RelatedAppEntity } | null> {
-  // 1. Authoritative parent must be an eligible playable root game
-  const parentStmt = db
+  const parentRow = await db
     .prepare(
-      `SELECT * FROM apps 
-       WHERE appid = ? 
-         AND is_playable = 1 
-         AND is_eligible = 1 
-         AND parent_appid IS NULL`
+      "SELECT * FROM apps WHERE appid = ? AND is_playable = 1 AND is_eligible = 1 " +
+        "AND parent_appid IS NULL"
     )
-    .bind(parentAppId);
-  const parentRow = await parentStmt.first<RawRelatedRow>();
-  if (!parentRow) {
-    return null;
-  }
+    .bind(parentAppId)
+    .first<RawRelatedRow>();
+  if (!parentRow) return null;
 
-  // 2. Child app must exist, be eligible, and have relationship with parentAppId
   const tableCheck = await db
     .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='app_relationships'")
     .first<{ name: string }>();
 
   let childRow: RawRelatedRow | null = null;
-
   if (tableCheck) {
     const childStmt = db
       .prepare(
-        `SELECT a.*, r.relationship_type as rel_type, r.prominence
-         FROM apps a
-         LEFT JOIN app_relationships r ON a.appid = r.child_appid AND r.parent_appid = ?
-         WHERE a.appid = ? 
-           AND a.is_eligible = 1
-           AND (a.parent_appid = ? OR r.parent_appid = ?)`
+        "SELECT * FROM (" +
+          "SELECT a.*, r.relationship_type AS rel_type, COALESCE(r.prominence, 0) AS prominence " +
+          "FROM apps a LEFT JOIN app_relationships r " +
+          "ON r.parent_appid = ? AND r.child_appid = a.appid " +
+          "WHERE a.appid = ? AND a.parent_appid = ? AND a.is_eligible = 1 " +
+          "UNION ALL " +
+          "SELECT a.*, r.relationship_type AS rel_type, r.prominence " +
+          "FROM app_relationships r JOIN apps a ON a.appid = r.child_appid " +
+          "WHERE r.parent_appid = ? AND r.child_appid = ? AND a.is_eligible = 1 " +
+          "AND NOT EXISTS (SELECT 1 FROM apps direct " +
+          "WHERE direct.appid = a.appid AND direct.parent_appid = ?)" +
+          ") AS child LIMIT 1"
       )
-      .bind(parentAppId, childAppId, parentAppId, parentAppId);
+      .bind(parentAppId, childAppId, parentAppId, parentAppId, childAppId, parentAppId);
     childRow = await childStmt.first<RawRelatedRow>();
   } else {
-    const childStmt = db
+    childRow = await db
       .prepare(
-        `SELECT a.*, NULL as rel_type, 0 as prominence
-         FROM apps a
-         WHERE a.appid = ? 
-           AND a.is_eligible = 1
-           AND a.parent_appid = ?`
+        "SELECT a.*, NULL AS rel_type, 0 AS prominence FROM apps a " +
+          "WHERE a.appid = ? AND a.is_eligible = 1 AND a.parent_appid = ?"
       )
-      .bind(childAppId, parentAppId);
-    childRow = await childStmt.first<RawRelatedRow>();
+      .bind(childAppId, parentAppId)
+      .first<RawRelatedRow>();
   }
 
-  if (!childRow) {
-    return null;
-  }
-
-  const parent: CatalogEntity = {
-    appid: parentRow.appid,
-    name: parentRow.name,
-    slug: parentRow.slug || toSlug(parentRow.name),
-    type: parentRow.type,
-    is_eligible: parentRow.is_eligible === 1,
-    is_playable: parentRow.is_playable === 1,
-    parent_appid: null,
-    release_date: parentRow.release_date ?? null,
-    steam_release_date: parentRow.steam_release_date ?? null,
-    original_release_date: parentRow.original_release_date ?? null,
-    original_steam_release_date: parentRow.original_steam_release_date ?? null,
-    release_from_early_access_date: parentRow.release_from_early_access_date ?? null,
-    release_date_source: parentRow.release_date_source ?? null,
-    is_early_access:
-      parentRow.is_early_access == null
-        ? null
-        : typeof parentRow.is_early_access === "boolean"
-          ? parentRow.is_early_access
-          : parentRow.is_early_access === 1,
-    release_status: (parentRow.release_status as CatalogEntity["release_status"]) || "released",
-    description: parentRow.description || "",
-    header_image: parentRow.header_image || "",
-    developer: parentRow.developer || "",
-    publisher: parentRow.publisher || "",
-    created_at: parentRow.created_at,
-    updated_at: parentRow.updated_at,
+  if (!childRow) return null;
+  return {
+    parent: mapRowToCatalogEntity(parentRow),
+    child: mapRowToRelatedEntity(childRow),
   };
-
-  const child = mapRowToRelatedEntity(childRow);
-
-  return { parent, child };
 }
 
 export function getCanonicalChildPath(
@@ -405,163 +428,117 @@ export interface SearchCatalogResult {
  * never presented as top-level peers.
  */
 export async function searchCatalog(
-  db: D1Database,
+  db: AppDatabase,
   query: string,
   options: { limit?: number; offset?: number } = {}
 ): Promise<SearchCatalogResult> {
   const trimmed = query.trim();
-  if (!trimmed) {
-    return { query: trimmed, items: [], total: 0 };
-  }
+  if (!trimmed) return { query: trimmed, items: [], total: 0 };
 
   const limit = options.limit ?? 25;
   const offset = options.offset ?? 0;
-  const searchPattern = `%${trimmed.toLowerCase()}%`;
-  const numericAppId = parseInt(trimmed, 10);
-  const isNumeric = !isNaN(numericAppId) && numericAppId > 0;
+  const searchPattern = "%" + trimmed.toLowerCase() + "%";
+  const numericAppId = /^\d+$/.test(trimmed) ? Number(trimmed) : 0;
+  const isNumeric = numericAppId > 0;
 
-  // 1. Find matching playable games
-  let playableSql = `
-    SELECT * FROM apps 
-    WHERE is_playable = 1 
-      AND is_eligible = 1 
-      AND parent_appid IS NULL
-      AND (LOWER(name) LIKE ? ${isNumeric ? "OR appid = ?" : ""})
-    ORDER BY 
-      CASE WHEN LOWER(name) = ? THEN 1
-           WHEN LOWER(name) LIKE ? THEN 2
-           ELSE 3 END,
-      name ASC
-    LIMIT ? OFFSET ?
-  `;
-
-  const bindings: unknown[] = [searchPattern];
-  if (isNumeric) bindings.push(numericAppId);
-  bindings.push(trimmed.toLowerCase(), `${trimmed.toLowerCase()}%`, limit, offset);
-
-  const playableStmt = db.prepare(playableSql).bind(...bindings);
+  const playableStmt = isNumeric
+    ? db
+        .prepare(
+          "SELECT * FROM apps WHERE appid = ? AND is_playable = 1 " +
+            "AND is_eligible = 1 AND parent_appid IS NULL LIMIT ? OFFSET ?"
+        )
+        .bind(numericAppId, limit, offset)
+    : db
+        .prepare(
+          "SELECT * FROM apps WHERE is_playable = 1 AND is_eligible = 1 " +
+            "AND parent_appid IS NULL AND LOWER(name) LIKE ? " +
+            "ORDER BY CASE WHEN LOWER(name) = ? THEN 1 " +
+            "WHEN LOWER(name) LIKE ? THEN 2 ELSE 3 END, name ASC LIMIT ? OFFSET ?"
+        )
+        .bind(searchPattern, trimmed.toLowerCase(), trimmed.toLowerCase() + "%", limit, offset);
   const playableRes = await playableStmt.all<RawRelatedRow>();
-  const playableRows = playableRes.results || [];
 
-  // Map of parentAppId -> SearchItem
   const resultMap = new Map<number, SearchItem>();
-
-  for (const row of playableRows) {
-    const parentEntity: CatalogEntity = {
-      appid: row.appid,
-      name: row.name,
-      slug: row.slug || toSlug(row.name),
-      type: row.type,
-      is_eligible: row.is_eligible === 1,
-      is_playable: row.is_playable === 1,
-      parent_appid: null,
-      release_date: row.release_date ?? null,
-      steam_release_date: row.steam_release_date ?? null,
-      original_release_date: row.original_release_date ?? null,
-      original_steam_release_date: row.original_steam_release_date ?? null,
-      release_from_early_access_date: row.release_from_early_access_date ?? null,
-      release_date_source: row.release_date_source ?? null,
-      is_early_access:
-        row.is_early_access == null
-          ? null
-          : typeof row.is_early_access === "boolean"
-            ? row.is_early_access
-            : row.is_early_access === 1,
-      release_status: (row.release_status as CatalogEntity["release_status"]) || "released",
-      description: row.description || "",
-      header_image: row.header_image || "",
-      developer: row.developer || "",
-      publisher: row.publisher || "",
-      created_at: row.created_at,
-      updated_at: row.updated_at,
-    };
-
-    resultMap.set(row.appid, {
-      game: parentEntity,
-      matching_related: [],
-    });
+  for (const row of playableRes.results ?? []) {
+    resultMap.set(row.appid, { game: mapRowToCatalogEntity(row), matching_related: [] });
   }
 
-  // 2. Find matching related/accessory apps
-  let accessorySql = `
-    SELECT a.*, NULL as rel_type, 0 as prominence
-    FROM apps a
-    WHERE (a.is_playable = 0 OR a.parent_appid IS NOT NULL)
-      AND a.is_eligible = 1
-      AND (LOWER(a.name) LIKE ? ${isNumeric ? "OR a.appid = ?" : ""})
-    LIMIT 50
-  `;
-  const accBindings: unknown[] = [searchPattern];
-  if (isNumeric) accBindings.push(numericAppId);
+  type RawSearchRelatedRow = RawRelatedRow & {
+    parent_search_appid: number;
+    parent_search_name: string;
+    parent_search_slug: string;
+    parent_search_type: string;
+    parent_search_is_eligible: number;
+    parent_search_is_playable: number;
+    parent_search_parent_appid: number | null;
+    parent_search_release_date: string | null;
+    parent_search_steam_release_date: string | null;
+    parent_search_original_release_date: string | null;
+    parent_search_original_steam_release_date: string | null;
+    parent_search_release_from_early_access_date: string | null;
+    parent_search_release_date_source: ReleaseDateSource;
+    parent_search_is_early_access: number | boolean | null;
+    parent_search_release_status: string;
+    parent_search_description: string;
+    parent_search_header_image: string;
+    parent_search_developer: string;
+    parent_search_publisher: string;
+    parent_search_created_at: string;
+    parent_search_updated_at: string;
+  };
+  const accessoryStmt = db
+    .prepare(
+      "SELECT a.*, NULL AS rel_type, 0 AS prominence, " + SEARCH_PARENT_COLUMNS + " " +
+        "FROM apps a JOIN apps p ON p.appid = a.parent_appid " +
+        "AND p.is_playable = 1 AND p.is_eligible = 1 AND p.parent_appid IS NULL " +
+        "WHERE a.parent_appid IS NOT NULL AND a.is_eligible = 1 AND " +
+        (isNumeric ? "a.appid = ?" : "LOWER(a.name) LIKE ?") +
+        " LIMIT 50"
+    )
+    .bind(isNumeric ? numericAppId : searchPattern);
+  const accRes = await accessoryStmt.all<RawSearchRelatedRow>();
 
-  const accStmt = db.prepare(accessorySql).bind(...accBindings);
-  const accRes = await accStmt.all<RawRelatedRow>();
-  const accRows = accRes.results || [];
-
-  for (const row of accRows) {
-    if (!row.parent_appid) continue;
-    const parentAppId = row.parent_appid;
-
+  for (const row of accRes.results ?? []) {
+    const parentAppId = row.parent_search_appid;
     let searchItem = resultMap.get(parentAppId);
     if (!searchItem) {
-      // Fetch parent game if not already in result map
-      const parentRow = await db
-        .prepare(
-          `SELECT * FROM apps WHERE appid = ? AND is_playable = 1 AND is_eligible = 1 AND parent_appid IS NULL`
-        )
-        .bind(parentAppId)
-        .first<RawRelatedRow>();
-
-      if (!parentRow) continue; // Ineligible or accessory parent
-
-      const parentEntity: CatalogEntity = {
-        appid: parentRow.appid,
-        name: parentRow.name,
-        slug: parentRow.slug || toSlug(parentRow.name),
-        type: parentRow.type,
-        is_eligible: parentRow.is_eligible === 1,
-        is_playable: parentRow.is_playable === 1,
-        parent_appid: null,
-        release_date: parentRow.release_date ?? null,
-        steam_release_date: parentRow.steam_release_date ?? null,
-        original_release_date: parentRow.original_release_date ?? null,
-        original_steam_release_date: parentRow.original_steam_release_date ?? null,
-        release_from_early_access_date: parentRow.release_from_early_access_date ?? null,
-        release_date_source: parentRow.release_date_source ?? null,
-        is_early_access:
-          parentRow.is_early_access == null
-            ? null
-            : typeof parentRow.is_early_access === "boolean"
-              ? parentRow.is_early_access
-              : parentRow.is_early_access === 1,
-        release_status: (parentRow.release_status as CatalogEntity["release_status"]) || "released",
-        description: parentRow.description || "",
-        header_image: parentRow.header_image || "",
-        developer: parentRow.developer || "",
-        publisher: parentRow.publisher || "",
-        created_at: parentRow.created_at,
-        updated_at: parentRow.updated_at,
+      const parentRow: RawRelatedRow = {
+        appid: row.parent_search_appid,
+        name: row.parent_search_name,
+        slug: row.parent_search_slug,
+        type: row.parent_search_type,
+        is_eligible: row.parent_search_is_eligible,
+        is_playable: row.parent_search_is_playable,
+        parent_appid: row.parent_search_parent_appid,
+        release_date: row.parent_search_release_date,
+        steam_release_date: row.parent_search_steam_release_date,
+        original_release_date: row.parent_search_original_release_date,
+        original_steam_release_date: row.parent_search_original_steam_release_date,
+        release_from_early_access_date: row.parent_search_release_from_early_access_date,
+        release_date_source: row.parent_search_release_date_source,
+        is_early_access: row.parent_search_is_early_access,
+        release_status: row.parent_search_release_status,
+        description: row.parent_search_description,
+        header_image: row.parent_search_header_image,
+        developer: row.parent_search_developer,
+        publisher: row.parent_search_publisher,
+        prominence: null,
+        rel_type: null,
+        created_at: row.parent_search_created_at,
+        updated_at: row.parent_search_updated_at,
       };
-
-      searchItem = {
-        game: parentEntity,
-        matching_related: [],
-      };
+      searchItem = { game: mapRowToCatalogEntity(parentRow), matching_related: [] };
       resultMap.set(parentAppId, searchItem);
     }
 
     const childEntity = mapRowToRelatedEntity(row);
-    if (!searchItem.matching_related.some((r) => r.appid === childEntity.appid)) {
+    if (!searchItem.matching_related.some((related) => related.appid === childEntity.appid)) {
       searchItem.matching_related.push(childEntity);
     }
   }
 
   const items = Array.from(resultMap.values());
-  return {
-    query: trimmed,
-    items,
-    total: items.length,
-  };
+  return { query: trimmed, items, total: items.length };
 }
 
 export type ApiResponse<T> =

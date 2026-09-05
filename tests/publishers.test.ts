@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { renderToString } from "react-dom/server";
 import React from "react";
-import type { D1Database, D1PreparedStatement } from "../src/lib/db";
+import type { AppDatabase, AppPreparedStatement } from "../src/lib/db";
 import { upsertApp } from "../src/lib/catalog";
 import {
   toPublisherSlug,
@@ -31,13 +31,13 @@ const migrationSql = migrationFiles
   .map((file) => readFileSync(resolve(import.meta.dir, `../migrations/${file}`), "utf8"))
   .join("\n");
 
-function createSqliteD1Adapter(db: Database): D1Database {
+function createSqliteAppAdapter(db: Database): AppDatabase {
   return {
-    prepare(query: string): D1PreparedStatement {
+    prepare(query: string): AppPreparedStatement {
       let boundValues: unknown[] = [];
 
       const statement = {
-        bind(...values: unknown[]): D1PreparedStatement {
+        bind(...values: unknown[]): AppPreparedStatement {
           boundValues = values;
           return statement;
         },
@@ -82,7 +82,7 @@ function createSqliteD1Adapter(db: Database): D1Database {
 
       return statement;
     },
-    async batch<T = unknown>(statements: D1PreparedStatement[]) {
+    async batch<T = unknown>(statements: AppPreparedStatement[]) {
       const results: { success: boolean; results?: T[] }[] = [];
       db.run("BEGIN TRANSACTION;");
       try {
@@ -123,11 +123,11 @@ describe("publisher slug and canonical path", () => {
 });
 
 describe("catalog publisher queries", () => {
-  let db: D1Database;
+  let db: AppDatabase;
 
   beforeAll(async () => {
     const sqlite = new Database(":memory:");
-    db = createSqliteD1Adapter(sqlite);
+    db = createSqliteAppAdapter(sqlite);
     await db.exec(migrationSql);
 
     // Seed test games
@@ -199,11 +199,11 @@ describe("catalog publisher queries", () => {
 });
 
 describe("publisher route handling", () => {
-  let db: D1Database;
+  let db: AppDatabase;
 
   beforeAll(async () => {
     const sqlite = new Database(":memory:");
-    db = createSqliteD1Adapter(sqlite);
+    db = createSqliteAppAdapter(sqlite);
     await db.exec(migrationSql);
 
     await upsertApp(db, {

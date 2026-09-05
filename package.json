@@ -8,15 +8,12 @@
     "dev": "vite",
     "images:optimize": "bun scripts/optimize-images.ts",
     "build": "bun scripts/optimize-images.ts && vite build",
+    "start": "bun dist/server/server.js",
     "test": "bun test",
     "check:types": "tsc --noEmit && echo TYPECHECK OK",
     "check:output": "bun scripts/check-output.ts",
     "check:migrations": "bun scripts/check-migrations.ts",
-    "verify": "tsc --noEmit && bun test && bun run build && bun run check:output && echo LAUNCH VERIFY OK",
-    "deploy:production": "wrangler deploy --config dist/server/wrangler.json --env=\"\"",
-    "deploy:staging": "wrangler deploy --config dist/server/wrangler.json --env=\"\"",
-    "deploy:ingestion:production": "wrangler d1 migrations apply vaporstats-d1 --remote --config wrangler.jsonc --env=\"\" && wrangler deploy --config wrangler.ingestion.jsonc --env=\"\"",
-    "deploy:ingestion:staging": "wrangler d1 migrations apply vaporstats-staging-d1 --remote --config wrangler.jsonc --env staging && wrangler deploy --config wrangler.ingestion.jsonc --env staging"
+    "verify": "tsc --noEmit && bun test && bun run build && bun run check:output && echo LAUNCH VERIFY OK"
   },
   "dependencies": {
     "@tanstack/react-query": "^5.102.8",
@@ -31,16 +28,14 @@
     "tailwind-merge": "^3.6.0"
   },
   "devDependencies": {
-    "@cloudflare/vite-plugin": "^1.54.4",
-    "@cloudflare/workers-types": "^5.20260904.1",
     "@tailwindcss/vite": "^4.3.3",
     "@types/bun": "^1.4.0",
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.2.7",
     "@vitejs/plugin-react": "^6.1.1",
+    "sharp": "^0.35.2",
     "tailwindcss": "^4.3.3",
     "typescript": "^7.0.2",
-    "vite": "^8.2.2",
-    "wrangler": "^4.129.0"
+    "vite": "^8.2.2"
   }
 }

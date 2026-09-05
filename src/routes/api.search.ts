@@ -1,5 +1,5 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { getDb, type D1Database } from "../lib/db";
+import { getDb, type AppDatabase } from "../lib/db";
 import {
   searchCatalog,
   createApiDataResponse,
@@ -14,7 +14,7 @@ import {
  */
 export async function handleSearchApiRequest(
   request: Request,
-  explicitDb?: D1Database
+  explicitDb?: AppDatabase
 ): Promise<Response> {
   const url = new URL(request.url);
   const q = url.searchParams.get("q") ?? "";

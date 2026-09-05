@@ -1,4 +1,4 @@
-import type { D1Database } from "../src/lib/db";
+import type { AppDatabase } from "../src/lib/db";
 import { getCheckpoint, setCheckpoint, upsertApp } from "../src/lib/catalog";
 import { recordPriceObservation, type PriceState } from "../src/lib/prices";
 
@@ -277,7 +277,7 @@ export async function fetchSteamPriceDetails(
  * Preserves prior state on failed refresh.
  */
 export async function refreshIndicatedAppPrices(
-  db: D1Database,
+  db: AppDatabase,
   appids: number[],
   options: {
     customFetch?: typeof fetch;
@@ -290,6 +290,7 @@ export async function refreshIndicatedAppPrices(
   successful: number;
   failed: number;
   changed: number;
+  changedAppIds: number[];
   rateLimited: boolean;
   pendingAppIds: number[];
 }> {
@@ -305,6 +306,7 @@ export async function refreshIndicatedAppPrices(
   let changed = 0;
   let rateLimited = false;
   const pendingAppIds: number[] = [];
+  const changedAppIds: number[] = [];
 
   let index = 0;
   for (; index < appids.length && attempted < attemptCap && successful < successTarget; index++) {
@@ -348,13 +350,14 @@ export async function refreshIndicatedAppPrices(
 
     if (recordResult.stateChanged) {
       changed++;
+      changedAppIds.push(appid);
     }
   }
   for (; index < appids.length; index++) {
     pendingAppIds.push(appids[index]);
   }
 
-  return { attempted, successful, failed, changed, rateLimited, pendingAppIds };
+  return { attempted, successful, failed, changed, changedAppIds, rateLimited, pendingAppIds };
 }
 
 interface PriceFeedCheckpointValue {
@@ -362,6 +365,8 @@ interface PriceFeedCheckpointValue {
   catalogBackfillQueued: boolean;
   continuationAppId: number | null;
   continuationLastModified: number | null;
+  orphanRecoveryCursor: number | null;
+  orphanRecoveryComplete: boolean;
 }
 
 function readPriceFeedCheckpoint(checkpoint: { value: string } | null): PriceFeedCheckpointValue {
@@ -371,6 +376,8 @@ function readPriceFeedCheckpoint(checkpoint: { value: string } | null): PriceFee
       catalogBackfillQueued: false,
       continuationAppId: null,
       continuationLastModified: null,
+      orphanRecoveryCursor: null,
+      orphanRecoveryComplete: false,
     };
   }
   try {
@@ -379,6 +386,8 @@ function readPriceFeedCheckpoint(checkpoint: { value: string } | null): PriceFee
       catalogBackfillQueued?: unknown;
       continuationAppId?: unknown;
       continuationLastModified?: unknown;
+      orphanRecoveryCursor?: unknown;
+      orphanRecoveryComplete?: unknown;
     };
     return {
       pending: Array.isArray(value.pending)
@@ -391,6 +400,9 @@ function readPriceFeedCheckpoint(checkpoint: { value: string } | null): PriceFee
         typeof value.continuationLastModified === "number"
           ? value.continuationLastModified
           : null,
+      orphanRecoveryCursor:
+        typeof value.orphanRecoveryCursor === "number" ? value.orphanRecoveryCursor : null,
+      orphanRecoveryComplete: value.orphanRecoveryComplete === true,
     };
   } catch {
     return {
@@ -398,21 +410,33 @@ function readPriceFeedCheckpoint(checkpoint: { value: string } | null): PriceFee
       catalogBackfillQueued: false,
       continuationAppId: null,
       continuationLastModified: null,
+      orphanRecoveryCursor: null,
+      orphanRecoveryComplete: false,
     };
   }
 }
 
-async function getOrphanedPriceAppIds(db: D1Database): Promise<number[]> {
+async function getOrphanedPriceAppIds(
+  db: AppDatabase,
+  afterAppId: number | null,
+  limit = 200
+): Promise<{ appids: number[]; cursor: number | null; complete: boolean }> {
+  const boundedLimit = Math.max(1, Math.min(200, Math.floor(limit)));
   const result = await db
     .prepare(
       `SELECT p.appid
        FROM app_prices p
        LEFT JOIN apps a ON a.appid = p.appid
        WHERE a.appid IS NULL
-       ORDER BY p.appid ASC`
+         AND (? IS NULL OR p.appid > ?)
+       ORDER BY p.appid ASC
+       LIMIT ?`
     )
+    .bind(afterAppId, afterAppId, boundedLimit)
     .all<{ appid: number }>();
-  return (result.results ?? []).map((row) => row.appid);
+  const appids = (result.results ?? []).map((row) => row.appid);
+  const cursor = appids.at(-1) ?? afterAppId;
+  return { appids, cursor, complete: appids.length < boundedLimit };
 }
 
 
@@ -424,6 +448,7 @@ export interface HourlyPriceFeedTickResult {
   successful: number;
   failed: number;
   changed: number;
+  changedAppIds: number[];
   rateLimited: boolean;
   pending: number;
   checkpointAdvanced: boolean;
@@ -438,7 +463,7 @@ export interface HourlyPriceFeedTickResult {
  * - Advances the feed cursor while retaining failed/unprocessed app IDs
  */
 export async function runHourlyPriceFeedTick(
-  db: D1Database,
+  db: AppDatabase,
   options: {
     apiKey?: string;
     customFetch?: typeof fetch;
@@ -459,6 +484,7 @@ export async function runHourlyPriceFeedTick(
       rateLimited: false,
       pending: 0,
       changed: 0,
+      changedAppIds: [],
       checkpointAdvanced: false,
       checkpointCursor: null,
     };
@@ -470,6 +496,8 @@ export async function runHourlyPriceFeedTick(
   const existingCheckpoint = await getCheckpoint(db, checkpointKey);
   const checkpointValue = readPriceFeedCheckpoint(existingCheckpoint);
   let pendingBeforeFeed = checkpointValue.pending;
+  let orphanRecoveryCursor = checkpointValue.orphanRecoveryCursor;
+  let orphanRecoveryComplete = checkpointValue.orphanRecoveryComplete;
   const storedCursor = existingCheckpoint?.cursor ?? null;
   const recoveryCutoff =
     Math.floor(anchorTime.getTime() / 1000) - INITIAL_CATALOG_LOOKBACK_SECONDS;
@@ -478,10 +506,31 @@ export async function runHourlyPriceFeedTick(
     (storedCursor === null || storedCursor > recoveryCutoff)
       ? recoveryCutoff
       : storedCursor;
-  if (!checkpointValue.catalogBackfillQueued) {
-    const orphanedPriceAppIds = await getOrphanedPriceAppIds(db);
-    pendingBeforeFeed = [...new Set([...orphanedPriceAppIds, ...pendingBeforeFeed])];
+
+  if (!orphanRecoveryComplete && pendingBeforeFeed.length === 0) {
+    const orphaned = await getOrphanedPriceAppIds(db, orphanRecoveryCursor);
+    pendingBeforeFeed = orphaned.appids;
+    orphanRecoveryCursor = orphaned.cursor;
+    orphanRecoveryComplete = orphaned.complete;
+    await setCheckpoint(
+      db,
+      checkpointKey,
+      JSON.stringify({
+        pending: pendingBeforeFeed,
+        catalogBackfillQueued: true,
+        orphanRecoveryCursor,
+        orphanRecoveryComplete,
+        ...(checkpointValue.continuationAppId !== null
+          ? { continuationAppId: checkpointValue.continuationAppId }
+          : {}),
+        ...(checkpointValue.continuationLastModified !== null
+          ? { continuationLastModified: checkpointValue.continuationLastModified }
+          : {}),
+      }),
+      storedCursor
+    );
   }
+
   const fetchedPage = pendingBeforeFeed.length === 0;
   const feedResult = fetchedPage
     ? await fetchSteamCatalogFeed(apiKey, {
@@ -503,6 +552,7 @@ export async function runHourlyPriceFeedTick(
       rateLimited: false,
       pending: pendingBeforeFeed.length,
       changed: 0,
+      changedAppIds: [],
       checkpointAdvanced: false,
       checkpointCursor: existingCheckpoint?.cursor ?? null,
     };
@@ -549,25 +599,19 @@ export async function runHourlyPriceFeedTick(
   }
 
   const checkpointAdvanced = cursorAdvanced && pending.length === 0;
-
-  if (
-    pending.length > 0 ||
-    pendingBeforeFeed.length > 0 ||
-    fetchedPage ||
-    !checkpointValue.catalogBackfillQueued
-  ) {
-    await setCheckpoint(
-      db,
-      checkpointKey,
-      JSON.stringify({
-        pending: [...new Set(pending)],
-        catalogBackfillQueued: true,
-        ...(continuationAppId !== null ? { continuationAppId } : {}),
-        ...(continuationLastModified !== null ? { continuationLastModified } : {}),
-      }),
-      nextCursor
-    );
-  }
+  await setCheckpoint(
+    db,
+    checkpointKey,
+    JSON.stringify({
+      pending: [...new Set(pending)],
+      catalogBackfillQueued: true,
+      orphanRecoveryCursor,
+      orphanRecoveryComplete,
+      ...(continuationAppId !== null ? { continuationAppId } : {}),
+      ...(continuationLastModified !== null ? { continuationLastModified } : {}),
+    }),
+    nextCursor
+  );
 
   return {
     executed: true,
@@ -577,6 +621,7 @@ export async function runHourlyPriceFeedTick(
     failed: refreshStats.failed,
     rateLimited: refreshStats.rateLimited,
     changed: refreshStats.changed,
+    changedAppIds: refreshStats.changedAppIds,
     pending: pending.length,
     checkpointCursor: nextCursor,
     checkpointAdvanced,

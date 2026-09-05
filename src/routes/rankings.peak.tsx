@@ -1,7 +1,7 @@
 import React from "react";
 import { renderToString } from "react-dom/server";
 import { createFileRoute } from "@tanstack/react-router";
-import { getDb, type D1Database } from "../lib/db";
+import { getDb, type AppDatabase } from "../lib/db";
 import {
   getPeakRankings,
   parseHistoryRange,
@@ -197,7 +197,7 @@ export function PeakRankingsPageView({
  */
 export async function handlePeakRankingsHttpRequest(
   request: Request,
-  explicitDb?: D1Database
+  explicitDb?: AppDatabase
 ): Promise<Response> {
   const url = new URL(request.url);
   const periodParam = url.searchParams.get("period");

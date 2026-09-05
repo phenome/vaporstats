@@ -5,7 +5,7 @@ import { useQuery } from "@tanstack/react-query";
 import { getGameByAppId } from "../lib/catalog";
 import { getRelatedApps } from "../lib/related";
 import { getPlayerHistory } from "../lib/player-history";
-import { getDb, type D1Database } from "../lib/db";
+import { getDb, type AppDatabase } from "../lib/db";
 import { getCurrentPrice, getPriceHistory } from "../lib/prices";
 import { parseGameSlug, toSlug, getCanonicalGamePath } from "../lib/slug";
 import { CACHE_POLICIES, getEntityCacheHeaders } from "../lib/cache";
@@ -103,7 +103,7 @@ function GameNotFoundComponent() {
  */
 export async function handleGameHttpRequest(
   request: Request,
-  db: D1Database
+  db: AppDatabase
 ): Promise<Response> {
   const url = new URL(request.url);
   const match = url.pathname.match(/^\/games\/([^/]+)$/);
@@ -146,18 +146,18 @@ export async function handleGameHttpRequest(
       },
     });
   }
-  const [related, playerHistory, price, priceHistory] = await Promise.all([
+  const [related, playerHistory, currentPrice] = await Promise.all([
     getRelatedApps(db, game.appid),
     getPlayerHistory(db, game.appid, "30d"),
     getCurrentPrice(db, game.appid),
-    getPriceHistory(db, game.appid, "all"),
   ]);
+  const priceHistory = await getPriceHistory(db, game.appid, "all", { currentPrice });
   const appHtml = renderToString(
     <GamePageView
       game={game}
       related={related}
       playerHistory={playerHistory}
-      price={price}
+      price={currentPrice}
       priceHistory={priceHistory}
     />
   );

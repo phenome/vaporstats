@@ -1,4 +1,4 @@
-import type { D1Database } from "../src/lib/db";
+import type { AppDatabase } from "../src/lib/db";
 import {
   parsePreciseReleaseDate,
   isReleaseEntityEligible,
@@ -10,6 +10,7 @@ import {
 export interface SyncReleaseFactsOptions {
   limit?: number;
   offset?: number;
+  appIds?: number[];
   asOfDate?: Date | string;
   apps?: Array<{
     appid: number;
@@ -59,7 +60,7 @@ interface RawCatalogAppRow {
  * Accessory apps (servers, tools, demos, tests, soundtracks) remain attached to parent pages and are excluded.
  */
 export async function syncReleaseFactsFromApps(
-  db: D1Database,
+  db: AppDatabase,
   options: SyncReleaseFactsOptions = {}
 ): Promise<SyncReleaseFactsResult> {
   const asOfDate = options.asOfDate ?? new Date();
@@ -103,6 +104,39 @@ export async function syncReleaseFactsFromApps(
   if (options.apps) {
     // Strictly bound injected apps to sanitized limit
     candidateApps = options.apps.slice(0, limit);
+  } else if (options.appIds) {
+    const appIds = Array.from(
+      new Set(options.appIds.filter((appid) => Number.isInteger(appid) && appid > 0))
+    ).slice(0, 500);
+    if (appIds.length > 0) {
+      const placeholders = appIds.map(() => "?").join(", ");
+      const stmt = db
+        .prepare(
+          "SELECT appid, name, slug, type, parent_appid, release_date, " +
+            "original_steam_release_date, release_from_early_access_date, " +
+            "original_release_date, header_image, is_eligible, is_playable, " +
+            "is_early_access FROM apps WHERE appid IN (" +
+            placeholders +
+            ") AND release_date IS NOT NULL AND is_eligible = 1 ORDER BY appid ASC"
+        )
+        .bind(...appIds);
+      const res = await stmt.all<RawCatalogAppRow>();
+      candidateApps = (res.results || []).map((r) => ({
+        appid: r.appid,
+        name: r.name,
+        slug: r.slug,
+        type: r.type,
+        parent_appid: r.parent_appid,
+        release_date: r.release_date,
+        original_steam_release_date: r.original_steam_release_date,
+        release_from_early_access_date: r.release_from_early_access_date,
+        original_release_date: r.original_release_date,
+        header_image: r.header_image,
+        is_eligible: r.is_eligible === 1,
+        is_playable: r.is_playable === 1,
+        is_early_access: r.is_early_access === null ? null : r.is_early_access === 1,
+      }));
+    }
   } else {
     const stmt = db
       .prepare(

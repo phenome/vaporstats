@@ -1,7 +1,7 @@
 import React from "react";
 import { renderToString } from "react-dom/server";
 import { createFileRoute } from "@tanstack/react-router";
-import { getDb, type D1Database } from "../lib/db";
+import { getDb, type AppDatabase } from "../lib/db";
 import {
   searchCatalog,
   type SearchCatalogResult,
@@ -245,7 +245,7 @@ function SearchResultCard({ item }: { item: SearchItem }) {
  */
 export async function handleSearchHttpRequest(
   request: Request,
-  db: D1Database
+  db: AppDatabase
 ): Promise<Response> {
   const url = new URL(request.url);
   const q = url.searchParams.get("q") ?? "";

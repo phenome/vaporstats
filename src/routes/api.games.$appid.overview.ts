@@ -1,5 +1,5 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { getDb, type D1Database } from "../lib/db";
+import { getDb, type AppDatabase } from "../lib/db";
 import { getGameOverview, type GameOverviewData } from "../lib/player";
 import { getLiveApiCacheHeaders } from "../lib/cache";
 
@@ -10,7 +10,7 @@ import { getLiveApiCacheHeaders } from "../lib/cache";
  */
 export async function handleGameOverviewRequest(
   request: Request,
-  db: D1Database,
+  db: AppDatabase,
   explicitAppid?: number
 ): Promise<Response> {
   let appid = explicitAppid;

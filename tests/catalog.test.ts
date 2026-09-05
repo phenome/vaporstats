@@ -1,8 +1,9 @@
 import { describe, test, expect, beforeAll, afterAll } from "bun:test";
 import { Database, type SQLQueryBindings } from "bun:sqlite";
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
-import { getDb, type D1Database, type D1PreparedStatement } from "../src/lib/db";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import { closeDb, getDb, type AppDatabase, type AppPreparedStatement } from "../src/lib/db";
 import {
   listPlayableGames,
   getGameByAppId,
@@ -18,7 +19,6 @@ import {
   runCatalogSeed,
   type SeedAppInput,
 } from "../workers/catalog-seed";
-import ingestionWorker from "../workers/ingestion";
 import { handleGameHttpRequest } from "../src/routes/games.$game";
 import { CACHE_POLICIES } from "../src/lib/cache";
 import { toSlug, parseGameSlug, getCanonicalGamePath } from "../src/lib/slug";
@@ -37,16 +37,16 @@ const migrationSql = migrationFiles
   .join("\n");
 
 /**
- * In-memory SQLite D1 adapter for test execution.
- * Isolated to tests to prevent bun:sqlite from bundling into Cloudflare Worker.
+ * In-memory SQLite application database adapter for test execution.
+ * Isolated to tests so the production database runtime stays behind AppDatabase.
  */
-function createSqliteD1Adapter(db: Database): D1Database {
+function createSqliteAppAdapter(db: Database): AppDatabase {
   return {
-    prepare(query: string): D1PreparedStatement {
+    prepare(query: string): AppPreparedStatement {
       let boundValues: unknown[] = [];
 
       const statement = {
-        bind(...values: unknown[]): D1PreparedStatement {
+        bind(...values: unknown[]): AppPreparedStatement {
           boundValues = values;
           return statement;
         },
@@ -91,7 +91,7 @@ function createSqliteD1Adapter(db: Database): D1Database {
 
       return statement;
     },
-    async batch<T = unknown>(statements: D1PreparedStatement[]) {
+    async batch<T = unknown>(statements: AppPreparedStatement[]) {
       const results: { success: boolean; results?: T[] }[] = [];
       db.run("BEGIN TRANSACTION;");
       try {
@@ -113,13 +113,13 @@ function createSqliteD1Adapter(db: Database): D1Database {
   };
 }
 
-function createFreshDb(): D1Database {
+function createFreshDb(): AppDatabase {
   const sqlite = new Database(":memory:");
-  return createSqliteD1Adapter(sqlite);
+  return createSqliteAppAdapter(sqlite);
 }
 
 describe("Catalog Foundation", () => {
-  let db: D1Database;
+  let db: AppDatabase;
 
   beforeAll(async () => {
     db = createFreshDb();
@@ -134,14 +134,27 @@ describe("Catalog Foundation", () => {
     const freshDb = createFreshDb();
     await freshDb.exec(migrationSql);
 
-    // Verify D1 binding requirement (fails if DB is missing)
-    let missingDbThrew = false;
+
+    const previousDatabasePath = process.env.DATABASE_PATH;
+    const tempDatabaseDir = mkdtempSync(join(tmpdir(), "vaporstats-catalog-"));
+    const tempDatabasePath = join(tempDatabaseDir, "catalog.sqlite");
+    process.env.DATABASE_PATH = tempDatabasePath;
     try {
-      await getDb();
-    } catch {
-      missingDbThrew = true;
+      const openedDb = await getDb();
+      expect(await listPlayableGames(openedDb)).toEqual([]);
+      expect(await getCheckpoint(openedDb, "nonexistent")).toBeNull();
+    } finally {
+      try {
+        await closeDb();
+      } finally {
+        if (previousDatabasePath === undefined) {
+          delete process.env.DATABASE_PATH;
+        } else {
+          process.env.DATABASE_PATH = previousDatabasePath;
+        }
+        rmSync(tempDatabaseDir, { recursive: true, force: true });
+      }
     }
-    expect(missingDbThrew).toBe(true);
 
     const obtainedDb = await getDb(freshDb);
     expect(obtainedDb).toBe(freshDb);
@@ -317,121 +330,6 @@ describe("Catalog Foundation", () => {
     expect(repeated).toMatchObject({ queued: 3, alreadyQueued: true });
     expect(JSON.parse(checkpoint?.value ?? "{}").pending).toEqual([339820, 339821, 339822]);
   });
-  test("refreshes queued catalog batches during scheduled ingestion", async () => {
-    const freshDb = createFreshDb();
-    await freshDb.exec(migrationSql);
-
-    for (const appid of [339820, 339821]) {
-      await upsertApp(freshDb, {
-        appid,
-        name: appid === 339820 ? "Starwalker" : "Refresh Test Game",
-        type: "game",
-        is_playable: true,
-        is_eligible: true,
-        release_date: "Aug 31, 2026",
-      });
-      await freshDb
-        .prepare(
-          `INSERT INTO release_facts (
-             appid, name, slug, type, release_date, release_year, release_week,
-             release_status, is_precise
-           ) VALUES (?, ?, ?, 'game', '2026-08-31', 2026, '2026-W36', 'released', 1)`
-        )
-        .bind(appid, appid === 339820 ? "Starwalker" : "Refresh Test Game", `game-${appid}`)
-        .run();
-    }
-
-    const mockFetch = (async (url: string | URL | Request) => {
-      const urlStr = url.toString();
-      if (urlStr.includes("IStoreBrowseService/GetItems")) {
-        return Response.json({
-          response: {
-            store_items: [
-              {
-                appid: 339820,
-                release: {
-                  original_release_date: "2018-06-30",
-                  steam_release_date: "2026-08-31",
-                  original_steam_release_date: "2018-06-29",
-                  release_from_early_access_date: "2018-06-30",
-                  is_coming_soon: false,
-                  is_early_access: null,
-                },
-              },
-              {
-                appid: 339821,
-                release: {
-                  original_release_date: "2018-07-01",
-                  steam_release_date: "2026-08-31",
-                  is_coming_soon: false,
-                  is_early_access: null,
-                },
-              },
-            ],
-          },
-        });
-      }
-      const appid = Number(urlStr.match(/appids=(\d+)/)?.[1]);
-      return Response.json({
-        [appid]: {
-          success: true,
-          data: {
-            type: "game",
-            name: appid === 339820 ? "Starwalker" : "Refresh Test Game",
-            steam_appid: appid,
-            release_date: { coming_soon: false, date: "Aug 31, 2026" },
-          },
-        },
-      });
-    }) as unknown as typeof fetch;
-
-    const queue = await queueCatalogRefresh(freshDb);
-    expect(queue).toMatchObject({ queued: 2, alreadyQueued: false });
-
-    const firstBatch = await refreshCatalogBatch(freshDb, {
-      successTarget: 1,
-      attemptCap: 1,
-      fetchFn: mockFetch,
-    });
-    expect(firstBatch).toMatchObject({ successful: 1, pending: 1, active: true });
-
-    const firstApp = await freshDb
-      .prepare("SELECT release_date FROM apps WHERE appid = ?")
-      .bind(339820)
-      .first<{ release_date: string }>();
-    expect(firstApp?.release_date).toBe("2018-06-30");
-
-    await ingestionWorker.scheduled(
-      {
-        cron: "*/10 * * * *",
-        scheduledTime: new Date("2026-09-05T02:00:00.000Z").getTime(),
-        type: "scheduled",
-      },
-      { DB: freshDb, FETCH: mockFetch }
-    );
-
-    const secondApp = await freshDb
-      .prepare("SELECT release_date FROM apps WHERE appid = ?")
-      .bind(339821)
-      .first<{ release_date: string }>();
-    const releaseFact = await freshDb
-      .prepare("SELECT release_date, release_week FROM release_facts WHERE appid = ?")
-      .bind(339820)
-      .first<{ release_date: string; release_week: string }>();
-    const lifecycleEvents = await freshDb
-      .prepare("SELECT event_type, event_date, source FROM app_release_events WHERE appid = ? ORDER BY event_type")
-      .bind(339820)
-      .all<{ event_type: string; event_date: string; source: string }>();
-    const checkpoint = await getCheckpoint(freshDb, CATALOG_REFRESH_CHECKPOINT_KEY);
-
-    expect(secondApp?.release_date).toBe("2018-07-01");
-    expect(releaseFact).toMatchObject({ release_date: "2018-06-30", release_week: "2018-W26" });
-    expect(lifecycleEvents.results).toEqual([
-      { event_type: "early_access", event_date: "2018-06-29", source: "original_steam_release_date" },
-      { event_type: "full_release", event_date: "2018-06-30", source: "release_from_early_access_date" },
-    ]);
-    expect(JSON.parse(checkpoint?.value ?? "{}").pending).toEqual([]);
-  });
   test("ordinary refresh failures remain pending", async () => {
     const freshDb = createFreshDb();
     await freshDb.exec(migrationSql);
@@ -490,112 +388,6 @@ describe("Catalog Foundation", () => {
     expect(refresh).toMatchObject({ attempted: 2, successful: 1, failed: 1, pending: 1, active: true });
     expect(successfulApp?.release_date).toBe("2024-02-02");
     expect(JSON.parse(checkpoint?.value ?? "{}").pending).toEqual([339824]);
-  });
-  test("catalog refresh accepts targeted IDs and rejects malformed IDs", async () => {
-    const freshDb = createFreshDb();
-    await freshDb.exec(migrationSql);
-    await upsertApp(freshDb, {
-      appid: 339822,
-      name: "Refresh Endpoint Game",
-      type: "game",
-      is_playable: true,
-      is_eligible: true,
-      release_date: "Aug 31, 2026",
-    });
-
-    const mockFetch = (async (url: string | URL | Request) => {
-      const urlStr = url.toString();
-      if (urlStr.includes("IStoreBrowseService/GetItems")) {
-        return Response.json({
-          response: {
-            store_items: [
-              {
-                appid: 339822,
-                release: {
-                  original_release_date: "2018-06-30",
-                  steam_release_date: "2026-08-31",
-                  original_steam_release_date: "2018-06-29",
-                  release_from_early_access_date: "2018-06-30",
-                  is_coming_soon: false,
-                  is_early_access: null,
-                },
-              },
-            ],
-          },
-        });
-      }
-      return Response.json({
-        "339822": {
-          success: true,
-          data: {
-            type: "game",
-            name: "Refresh Endpoint Game",
-            steam_appid: 339822,
-            release_date: { coming_soon: false, date: "Aug 31, 2026" },
-          },
-        },
-      });
-    }) as unknown as typeof fetch;
-
-    const unauthorized = await ingestionWorker.fetch(
-      new Request("https://vaporstats-ingestion.local/api/catalog/refresh", { method: "POST" }),
-      { DB: freshDb, INGESTION_TRIGGER_SECRET: "refresh-secret", FETCH: mockFetch }
-    );
-    expect(unauthorized.status).toBe(401);
-
-    const malformed = await ingestionWorker.fetch(
-      new Request("https://vaporstats-ingestion.local/api/catalog/refresh", {
-        method: "POST",
-        headers: {
-          Authorization: "Bearer refresh-secret",
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ appIds: [339822, "not-an-appid"] }),
-      }),
-      { DB: freshDb, INGESTION_TRIGGER_SECRET: "refresh-secret", FETCH: mockFetch }
-    );
-    expect(malformed.status).toBe(400);
-
-    const authorized = await ingestionWorker.fetch(
-      new Request("https://vaporstats-ingestion.local/api/catalog/refresh", {
-        method: "POST",
-        headers: {
-          Authorization: "Bearer refresh-secret",
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ appIds: [339822] }),
-      }),
-      { DB: freshDb, INGESTION_TRIGGER_SECRET: "refresh-secret", FETCH: mockFetch }
-    );
-    const body = (await authorized.json()) as {
-      success: boolean;
-      queue: { queued: number; alreadyQueued: boolean };
-      refresh: { successful: number; pending: number };
-    };
-    const app = await freshDb
-      .prepare("SELECT release_date FROM apps WHERE appid = ?")
-      .bind(339822)
-      .first<{ release_date: string }>();
-    const releaseFact = await freshDb
-      .prepare("SELECT release_date, release_week FROM release_facts WHERE appid = ?")
-      .bind(339822)
-      .first<{ release_date: string; release_week: string }>();
-    const lifecycleEvents = await freshDb
-      .prepare("SELECT event_type, event_date, source FROM app_release_events WHERE appid = ? ORDER BY event_type")
-      .bind(339822)
-      .all<{ event_type: string; event_date: string; source: string }>();
-    expect(authorized.status).toBe(200);
-    expect(body).toMatchObject({
-      success: true,
-      queue: { queued: 1, alreadyQueued: false },
-      refresh: { successful: 1, pending: 0 },
-    });
-    expect(app?.release_date).toBe("2018-06-30");
-    expect(releaseFact).toMatchObject({ release_date: "2018-06-30", release_week: "2018-W26" });
-    expect(lifecycleEvents.results).toEqual([
-      { event_type: "early_access", event_date: "2018-06-29", source: "original_steam_release_date" },
-      { event_type: "full_release", event_date: "2018-06-30", source: "release_from_early_access_date" },
-    ]);
   });
   test("catalog refresh preserves current and unattempted IDs after a Steam rate limit", async () => {
     const freshDb = createFreshDb();
@@ -808,7 +600,7 @@ describe("Catalog Foundation", () => {
 
     const game = await getGameByAppId(freshDb, 1086940);
     expect(game).not.toBeNull();
-    // In D1/catalog, unobserved entity has latest_players as null, not zero
+    // In the catalog, an unobserved entity has latest_players as null, not zero
     expect(game?.latest_players).toBeNull();
 
     const req = new Request("https://vaporstats.com/games/1086940-baldurs-gate-3");

@@ -1,5 +1,5 @@
 import { Navigate, createFileRoute } from "@tanstack/react-router";
-import { getDb, type D1Database } from "../lib/db";
+import { getDb, type AppDatabase } from "../lib/db";
 import { getCurrentIsoWeek, parseIsoWeek } from "../lib/releases";
 import { handleWeekReleasesHttpRequest } from "./releases.$week";
 import { getLiveApiCacheHeaders, getPageCacheHeaders } from "../lib/cache";
@@ -33,7 +33,7 @@ export function resolveCurrentReleaseWeek(asOfDate?: Date | string): ResolvedRel
  */
 export async function handleReleasesIndexHttpRequest(
   request: Request,
-  explicitDb?: D1Database
+  explicitDb?: AppDatabase
 ): Promise<Response> {
   const url = new URL(request.url);
   const asOf = url.searchParams.get("as_of") || undefined;

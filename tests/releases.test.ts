@@ -4,7 +4,7 @@ import { readFileSync, existsSync } from "node:fs";
 import { resolve } from "node:path";
 import React from "react";
 import { renderToString } from "react-dom/server";
-import { type D1Database, type D1PreparedStatement } from "../src/lib/db";
+import { type AppDatabase, type AppPreparedStatement } from "../src/lib/db";
 import { upsertApp, type CatalogEntity } from "../src/lib/catalog";
 import {
   parsePreciseReleaseDate,
@@ -48,9 +48,7 @@ import {
 } from "../src/routes/releases.$week";
 import { handleReleasesApiRequest } from "../src/routes/api.releases";
 import { HomeComponent, type HomeComponentProps } from "../src/routes/index";
-import ingestionWorker from "../workers/ingestion";
-import { runBoundedCatalogImport, CURATED_SEED_CHILDREN } from "../workers/catalog-seed";
-import { refreshIndicatedAppPrices } from "../workers/price-collector";
+import { runBoundedCatalogImport } from "../workers/catalog-seed";
 import { CACHE_POLICIES } from "../src/lib/cache";
 const migration0001 = readFileSync(
   resolve(import.meta.dir, "../migrations/0001_catalog.sql"),
@@ -73,13 +71,13 @@ const migration0007 = readFileSync(
   "utf8"
 );
 
-function createSqliteD1Adapter(db: Database): D1Database {
+function createSqliteAppAdapter(db: Database): AppDatabase {
   return {
-    prepare(query: string): D1PreparedStatement {
+    prepare(query: string): AppPreparedStatement {
       let boundValues: unknown[] = [];
 
       const statement = {
-        bind(...values: unknown[]): D1PreparedStatement {
+        bind(...values: unknown[]): AppPreparedStatement {
           boundValues = values;
           return statement;
         },
@@ -96,7 +94,7 @@ function createSqliteD1Adapter(db: Database): D1Database {
           const stmt = db.prepare(query);
           const info = stmt.run(...(boundValues as SQLQueryBindings[]));
           return {
-            success: true,
+            success: true as const,
             meta: {
               changes: info.changes,
               duration: 0,
@@ -107,7 +105,7 @@ function createSqliteD1Adapter(db: Database): D1Database {
           const stmt = db.prepare(query);
           const results = stmt.all(...(boundValues as SQLQueryBindings[])) as T[];
           return {
-            success: true,
+            success: true as const,
             results,
             meta: {
               changes: 0,
@@ -123,7 +121,7 @@ function createSqliteD1Adapter(db: Database): D1Database {
 
       return statement;
     },
-    async batch<T = unknown>(statements: D1PreparedStatement[]) {
+    async batch<T = unknown>(statements: AppPreparedStatement[]) {
       const results = [];
       for (const s of statements) {
         results.push(await s.all<T>());
@@ -137,7 +135,7 @@ function createSqliteD1Adapter(db: Database): D1Database {
   };
 }
 
-async function initTestDb(): Promise<D1Database> {
+async function initTestDb(): Promise<AppDatabase> {
   const sqlite = new Database(":memory:");
   sqlite.run("PRAGMA foreign_keys = ON;");
   sqlite.run(migration0001);
@@ -150,7 +148,7 @@ async function initTestDb(): Promise<D1Database> {
   }
   sqlite.run(migration0006);
   sqlite.run(migration0007);
-  return createSqliteD1Adapter(sqlite);
+  return createSqliteAppAdapter(sqlite);
 }
 
 describe("Releases Discovery and Calendar", () => {
@@ -339,206 +337,6 @@ describe("Releases Discovery and Calendar", () => {
     expect(seedCustomChild.records.length).toBeLessThanOrEqual(3);
     expect(seedCustomChild.seededCount).toBeLessThanOrEqual(3);
 
-
-    // 3. Behavioral verification of authenticated POST /api/catalog/seed
-    // 3a. Unauthorized seed is rejected with 401
-    const unauthReq = new Request("https://vaporstats.com/api/catalog/seed", {
-      method: "POST",
-    });
-    const unauthRes = await ingestionWorker.fetch(unauthReq, {
-      DB: db,
-      INGESTION_TRIGGER_SECRET: "secret-token-xyz",
-    });
-    expect(unauthRes.status).toBe(401);
-
-    // 3b. Authenticated seed imports roots, curated children (server & expansion),
-    // persists precise release facts, rejects imprecise dates, and refreshes storefront prices
-    const mockFetch: typeof fetch = (async (url: string | URL | Request) => {
-      const urlStr = url.toString();
-      // Steam Storefront API appdetails
-      if (urlStr.includes("store.steampowered.com/api/appdetails")) {
-        const match = urlStr.match(/appids=(\d+)/);
-        const aid = match ? parseInt(match[1], 10) : 0;
-        if (aid === 730) {
-          return new Response(JSON.stringify({
-            "730": {
-              success: true,
-              data: {
-                type: "game",
-                name: "Counter-Strike 2",
-                steam_appid: 730,
-                is_free: true,
-                release_date: { coming_soon: false, date: "Aug 21, 2012" },
-              },
-            },
-          }));
-        }
-        if (aid === 1091500) {
-          return new Response(JSON.stringify({
-            "1091500": {
-              success: true,
-              data: {
-                type: "game",
-                name: "Cyberpunk 2077",
-                steam_appid: 1091500,
-                is_free: false,
-                release_date: { coming_soon: false, date: "Dec 10, 2020" },
-              },
-            },
-          }));
-        }
-        if (aid === 740) {
-          return new Response(JSON.stringify({
-            "740": {
-              success: true,
-              data: {
-                type: "server",
-                name: "Counter-Strike Dedicated Server",
-                steam_appid: 740,
-                is_free: false,
-                release_date: { coming_soon: false, date: "Oct 7, 2004" },
-              },
-            },
-          }));
-        }
-        if (aid === 2138330) {
-          return new Response(JSON.stringify({
-            "2138330": {
-              success: true,
-              data: {
-                type: "expansion",
-                name: "Cyberpunk 2077: Phantom Liberty",
-                steam_appid: 2138330,
-                is_free: false,
-                release_date: { coming_soon: false, date: "Sep 26, 2023" },
-              },
-            },
-          }));
-        }
-        return new Response(JSON.stringify({
-          [aid]: {
-            success: true,
-            data: {
-              type: "game",
-              name: `Steam App ${aid}`,
-              steam_appid: aid,
-              is_free: false,
-              release_date: { coming_soon: false, date: "2024-01-01" },
-            },
-          },
-        }));
-      }
-
-      // Steam Storefront API appuserdetails (prices)
-      if (urlStr.includes("store.steampowered.com/api/appuserdetails")) {
-        const match = urlStr.match(/appids=(\d+)/);
-        const aid = match ? match[1] : "1091500";
-        return new Response(JSON.stringify({
-          [aid]: {
-            success: true,
-            data: {
-              price: {
-                initial_price: 5999,
-                final_price: 2999,
-                discount_percent: 50,
-                currency: "USD",
-                formatted_initial_price: "$59.99",
-                formatted_final_price: "$29.99",
-              },
-            },
-          },
-        }));
-      }
-
-      return new Response("Not Found", { status: 404 });
-    }) as typeof fetch;
-
-    const authSeedDb = await initTestDb();
-    const authReq = new Request("https://vaporstats.com/api/catalog/seed?limit=5", {
-      method: "POST",
-      headers: {
-        Authorization: "Bearer secret-token-xyz",
-      },
-    });
-
-    const authRes = await ingestionWorker.fetch(authReq, {
-      DB: authSeedDb,
-      INGESTION_TRIGGER_SECRET: "secret-token-xyz",
-      FETCH: mockFetch,
-    });
-
-    expect(authRes.status).toBe(200);
-    const seedBody = (await authRes.json()) as {
-      success: boolean;
-      seed: unknown;
-      releases: unknown;
-      tracking: { registered: number };
-      prices: { attempted: number };
-    };
-    expect(seedBody.success).toBe(true);
-    expect(seedBody.seed).toBeDefined();
-    expect(seedBody.releases).toBeDefined();
-    expect(seedBody.tracking.registered).toBeGreaterThan(0);
-    expect(seedBody.prices).toBeDefined();
-
-    const trackedRoots = await authSeedDb
-      .prepare("SELECT COUNT(*) AS count FROM tracked_games")
-      .first<{ count: number }>();
-    expect(trackedRoots?.count).toBe(seedBody.tracking.registered);
-
-    // Check relationships in app_relationships
-    const relServer = await authSeedDb
-      .prepare("SELECT * FROM app_relationships WHERE parent_appid = ? AND child_appid = ?")
-      .bind(730, 740)
-      .first<{ relationship_type: string; prominence: number }>();
-    expect(relServer).not.toBeNull();
-    expect(relServer?.relationship_type).toBe("server");
-    expect(relServer?.prominence).toBe(0);
-
-    const relExpansion = await authSeedDb
-      .prepare("SELECT * FROM app_relationships WHERE parent_appid = ? AND child_appid = ?")
-      .bind(1091500, 2138330)
-      .first<{ relationship_type: string; prominence: number }>();
-    expect(relExpansion).not.toBeNull();
-    expect(relExpansion?.relationship_type).toBe("expansion");
-    expect(relExpansion?.prominence).toBe(1);
-
-    // Verify child apps are forced non-playable
-    const childServer = await authSeedDb
-      .prepare("SELECT is_playable, parent_appid FROM apps WHERE appid = ?")
-      .bind(740)
-      .first<{ is_playable: number; parent_appid: number }>();
-    expect(childServer?.is_playable).toBe(0);
-    expect(childServer?.parent_appid).toBe(730);
-
-    const childExpansion = await authSeedDb
-      .prepare("SELECT is_playable, parent_appid FROM apps WHERE appid = ?")
-      .bind(2138330)
-      .first<{ is_playable: number; parent_appid: number }>();
-    expect(childExpansion?.is_playable).toBe(0);
-    expect(childExpansion?.parent_appid).toBe(1091500);
-
-    // Verify release facts: roots and expansions persisted, server accessory excluded
-    const csFact = await authSeedDb
-      .prepare("SELECT * FROM release_facts WHERE appid = ?")
-      .bind(730)
-      .first();
-    expect(csFact).not.toBeNull();
-
-    const expFact = await authSeedDb
-      .prepare("SELECT * FROM release_facts WHERE appid = ?")
-      .bind(2138330)
-      .first();
-    expect(expFact).not.toBeNull();
-
-    const serverFact = await authSeedDb
-      .prepare("SELECT * FROM release_facts WHERE appid = ?")
-      .bind(740)
-      .first();
-    expect(serverFact).toBeNull(); // Accessory server never becomes independent release fact
-
-    // Verify prices refreshed without Steam Web API key
-    expect(seedBody.prices.attempted).toBeGreaterThan(0);
 
     console.log("precise release facts");
   });

@@ -1,5 +1,5 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { getDb, type D1Database } from "../lib/db";
+import { getDb, type AppDatabase } from "../lib/db";
 import {
   getPriceHistory,
   parsePriceRange,
@@ -15,7 +15,7 @@ import { CACHE_POLICIES, getLiveApiCacheHeaders } from "../lib/cache";
  */
 export async function handlePriceHistoryRequest(
   request: Request,
-  explicitDb?: D1Database
+  explicitDb?: AppDatabase
 ): Promise<Response> {
   const url = new URL(request.url);
   const rawAppid = url.searchParams.get("appid");

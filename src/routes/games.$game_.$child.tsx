@@ -1,7 +1,7 @@
 import React from "react";
 import { renderToString } from "react-dom/server";
 import { createFileRoute, notFound, redirect } from "@tanstack/react-router";
-import { getDb, type D1Database } from "../lib/db";
+import { getDb, type AppDatabase } from "../lib/db";
 import type { CatalogEntity } from "../lib/catalog";
 import {
   getChildApp,
@@ -51,12 +51,10 @@ export const Route = createFileRoute("/games/$game_/$child")({
       });
     }
 
-    const [price, priceHistory] = await Promise.all([
-      getCurrentPrice(db, result.child.appid),
-      getPriceHistory(db, result.child.appid, "all"),
-    ]);
+    const currentPrice = await getCurrentPrice(db, result.child.appid);
+    const priceHistory = await getPriceHistory(db, result.child.appid, "all", { currentPrice });
 
-    return { parent: result.parent, child: result.child, price, priceHistory };
+    return { parent: result.parent, child: result.child, price: currentPrice, priceHistory };
   },
   component: ChildRouteComponent,
   notFoundComponent: ChildNotFoundComponent,
@@ -267,7 +265,7 @@ export function ChildAppPageView({
  */
 export async function handleChildHttpRequest(
   request: Request,
-  db: D1Database
+  db: AppDatabase
 ): Promise<Response> {
   const url = new URL(request.url);
   const match = url.pathname.match(/^\/games\/([^/]+)\/([^/]+)$/);
@@ -321,12 +319,10 @@ export async function handleChildHttpRequest(
     });
   }
 
-  const [price, priceHistory] = await Promise.all([
-    getCurrentPrice(db, result.child.appid),
-    getPriceHistory(db, result.child.appid, "all"),
-  ]);
+  const currentPrice = await getCurrentPrice(db, result.child.appid);
+  const priceHistory = await getPriceHistory(db, result.child.appid, "all", { currentPrice });
   const appHtml = renderToString(
-    <ChildAppPageView parent={result.parent} child={result.child} price={price} priceHistory={priceHistory} />
+    <ChildAppPageView parent={result.parent} child={result.child} price={currentPrice} priceHistory={priceHistory} />
   );
   return new Response(wrapHtml(`${result.child.name} - ${result.parent.name} - VaporStats`, appHtml), {
     status: 200,

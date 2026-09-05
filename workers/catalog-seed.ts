@@ -1,4 +1,4 @@
-import type { D1Database } from "../src/lib/db";
+import type { AppDatabase } from "../src/lib/db";
 import { getCheckpoint, setCheckpoint, upsertApp, type ReleaseDateSource } from "../src/lib/catalog";
 import { toSlug } from "../src/lib/slug";
 import { upsertAppRelationship } from "../src/lib/related";
@@ -440,7 +440,7 @@ export interface CatalogRefreshQueueOptions {
 
 /** Queues selected AppIDs, or the whole eligible catalog when appIds is omitted. */
 export async function queueCatalogRefresh(
-  db: D1Database,
+  db: AppDatabase,
   options: CatalogRefreshQueueOptions | string = {}
 ): Promise<CatalogRefreshQueueResult> {
   const normalizedOptions = typeof options === "string" ? { checkpointKey: options } : options;
@@ -486,7 +486,7 @@ export interface CatalogRefreshBatchResult {
  * target; ordinary failures rotate to the tail and 429 stops immediately.
  */
 export async function refreshCatalogBatch(
-  db: D1Database,
+  db: AppDatabase,
   options: CatalogRefreshBatchOptions = {}
 ): Promise<CatalogRefreshBatchResult> {
   const checkpointKey = options.checkpointKey ?? CATALOG_REFRESH_CHECKPOINT_KEY;
@@ -642,7 +642,7 @@ export async function refreshCatalogBatch(
 
 /** Runs bounded initial catalog seeding with Steam-derived records. */
 export async function runBoundedCatalogImport(
-  db: D1Database,
+  db: AppDatabase,
   options: SeedOptions = {}
 ): Promise<SeedResult> {
   let limit = DEFAULT_SEED_LIMIT;

@@ -1,7 +1,7 @@
 import React from "react";
 import { renderToString } from "react-dom/server";
 import { createFileRoute, notFound } from "@tanstack/react-router";
-import { getDb, type D1Database } from "../lib/db";
+import { getDb, type AppDatabase } from "../lib/db";
 import {
   getReleasesForWeek,
   parseIsoWeek,
@@ -113,7 +113,7 @@ export async function loadReleaseWeekData(
 export async function handleWeekReleasesHttpRequest(
   request: Request,
   weekParam: string,
-  explicitDb?: D1Database
+  explicitDb?: AppDatabase
 ): Promise<Response> {
   const url = new URL(request.url);
   const asOf = url.searchParams.get("as_of") || undefined;

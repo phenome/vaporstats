@@ -1,11 +1,11 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { listPlayableGames } from "../lib/catalog";
-import { getDb, type D1Database } from "../lib/db";
+import { getDb, type AppDatabase } from "../lib/db";
 import { CACHE_POLICIES, getLiveApiCacheHeaders } from "../lib/cache";
 
 export async function handleCatalogRequest(
   request: Request,
-  explicitDb?: D1Database
+  explicitDb?: AppDatabase
 ): Promise<Response> {
   const rawLimit = new URL(request.url).searchParams.get("limit");
   const limit = rawLimit

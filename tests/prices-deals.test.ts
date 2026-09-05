@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import React from "react";
 import { renderToString } from "react-dom/server";
-import { type D1Database, type D1PreparedStatement } from "../src/lib/db";
+import { type AppDatabase, type AppPreparedStatement } from "../src/lib/db";
 import {
   recordPriceObservation,
   getCurrentPrice,
@@ -60,13 +60,13 @@ const migration0007 = readFileSync(
   "utf8"
 );
 
-function createSqliteD1Adapter(db: Database): D1Database {
+function createSqliteAppAdapter(db: Database): AppDatabase {
   return {
-    prepare(query: string): D1PreparedStatement {
+    prepare(query: string): AppPreparedStatement {
       let boundValues: unknown[] = [];
 
       const statement = {
-        bind(...values: unknown[]): D1PreparedStatement {
+        bind(...values: unknown[]): AppPreparedStatement {
           boundValues = values;
           return statement;
         },
@@ -83,7 +83,7 @@ function createSqliteD1Adapter(db: Database): D1Database {
           const stmt = db.prepare(query);
           const info = stmt.run(...(boundValues as SQLQueryBindings[]));
           return {
-            success: true,
+            success: true as const,
             meta: {
               changes: info.changes,
               duration: 0,
@@ -94,7 +94,7 @@ function createSqliteD1Adapter(db: Database): D1Database {
           const stmt = db.prepare(query);
           const results = stmt.all(...(boundValues as SQLQueryBindings[])) as T[];
           return {
-            success: true,
+            success: true as const,
             results,
             meta: {
               changes: results.length,
@@ -111,7 +111,7 @@ function createSqliteD1Adapter(db: Database): D1Database {
       return statement;
     },
 
-    async batch<T = unknown>(statements: D1PreparedStatement[]) {
+    async batch<T = unknown>(statements: AppPreparedStatement[]) {
       const results: { success: boolean; results?: T[] }[] = [];
       for (const statement of statements) {
         const res = await statement.all<T>();
@@ -129,7 +129,7 @@ function createSqliteD1Adapter(db: Database): D1Database {
 
 describe("VaporStats Steam Prices and Deals", () => {
   let sqliteDb: Database;
-  let d1: D1Database;
+  let appDb: AppDatabase;
 
   beforeEach(() => {
     sqliteDb = new Database(":memory:");
@@ -139,7 +139,7 @@ describe("VaporStats Steam Prices and Deals", () => {
     sqliteDb.exec(migration0004);
     sqliteDb.exec(migration0005);
     sqliteDb.exec(migration0007);
-    d1 = createSqliteD1Adapter(sqliteDb);
+    appDb = createSqliteAppAdapter(sqliteDb);
 
     // Seed test apps
     sqliteDb.exec(`
@@ -187,7 +187,7 @@ describe("VaporStats Steam Prices and Deals", () => {
         return new Response(
           JSON.stringify({
             "1086940": {
-              success: true,
+              success: true as const,
               data: {
                 name: "Baldurs Gate 3",
                 is_free: false,
@@ -202,7 +202,7 @@ describe("VaporStats Steam Prices and Deals", () => {
               },
             },
             "1245620": {
-              success: true,
+              success: true as const,
               data: {
                 name: "ELDEN RING",
                 is_free: false,
@@ -224,16 +224,16 @@ describe("VaporStats Steam Prices and Deals", () => {
     }) as unknown as typeof fetch;
 
     // Run tick without API key -> not executed, checkpoint remains empty
-    const noKeyResult = await runHourlyPriceFeedTick(d1, {
+    const noKeyResult = await runHourlyPriceFeedTick(appDb, {
       customFetch: mockFeedFetchSuccess,
     });
     expect(noKeyResult.executed).toBe(false);
     expect(noKeyResult.checkpointAdvanced).toBe(false);
-    const noKeyCheckpoint = await getCheckpoint(d1, DEFAULT_PRICE_CHECKPOINT_KEY);
+    const noKeyCheckpoint = await getCheckpoint(appDb, DEFAULT_PRICE_CHECKPOINT_KEY);
     expect(noKeyCheckpoint).toBeNull();
 
     // Run tick with API key and successful fetch -> advances checkpoint to 1700005000
-    const successResult = await runHourlyPriceFeedTick(d1, {
+    const successResult = await runHourlyPriceFeedTick(appDb, {
       apiKey: "test_steam_key",
       customFetch: mockFeedFetchSuccess,
       anchorTime: feedAnchor,
@@ -256,7 +256,7 @@ describe("VaporStats Steam Prices and Deals", () => {
         { status: 200, headers: { "Content-Type": "application/json" } }
       );
     }) as unknown as typeof fetch;
-    const emptyFeedResult = await runHourlyPriceFeedTick(d1, {
+    const emptyFeedResult = await runHourlyPriceFeedTick(appDb, {
       apiKey: "test_key",
       maxAppsToProcess: 50,
       customFetch: mockFeedTrackingFetch,
@@ -270,8 +270,8 @@ describe("VaporStats Steam Prices and Deals", () => {
     freshMemoryDb.exec(migration0004);
     freshMemoryDb.exec(migration0005);
     freshMemoryDb.exec(migration0007);
-    const freshD1 = createSqliteD1Adapter(freshMemoryDb);
-    const initialEmptyResult = await runHourlyPriceFeedTick(freshD1, {
+    const freshAppDb = createSqliteAppAdapter(freshMemoryDb);
+    const initialEmptyResult = await runHourlyPriceFeedTick(freshAppDb, {
       apiKey: "test_key",
       customFetch: mockFeedTrackingFetch,
       anchorTime: feedAnchor,
@@ -301,7 +301,7 @@ describe("VaporStats Steam Prices and Deals", () => {
       return new Response("Store error", { status: 500 });
     }) as unknown as typeof fetch;
 
-    const partialFailResult = await runHourlyPriceFeedTick(d1, {
+    const partialFailResult = await runHourlyPriceFeedTick(appDb, {
       apiKey: "test_key",
       customFetch: mockPartialFailureFetch,
     });
@@ -317,7 +317,7 @@ describe("VaporStats Steam Prices and Deals", () => {
       return new Response("Internal Server Error", { status: 500 });
     }) as unknown as typeof fetch;
 
-    const failResult = await runHourlyPriceFeedTick(d1, {
+    const failResult = await runHourlyPriceFeedTick(appDb, {
       apiKey: "test_steam_key",
       customFetch: mockPendingFailureFetch,
     });
@@ -332,7 +332,7 @@ describe("VaporStats Steam Prices and Deals", () => {
     expect(failedFeedFetches).toBe(0);
 
     // Cursor advances safely while the failed AppID is retained for retry.
-    const preservedCheckpoint = await getCheckpoint(d1, DEFAULT_PRICE_CHECKPOINT_KEY);
+    const preservedCheckpoint = await getCheckpoint(appDb, DEFAULT_PRICE_CHECKPOINT_KEY);
     expect(preservedCheckpoint?.cursor).toBe(1700009999);
     expect(JSON.parse(preservedCheckpoint?.value ?? "{}").pending).toContain(1086940);
 
@@ -345,7 +345,7 @@ describe("VaporStats Steam Prices and Deals", () => {
       new Response(
         JSON.stringify({
           [appid]: {
-            success: true,
+            success: true as const,
             data: { name: `Game ${appid}`, is_free: true },
           },
         }),
@@ -357,7 +357,7 @@ describe("VaporStats Steam Prices and Deals", () => {
       return appid === 1 ? new Response("Store error", { status: 500 }) : successResponse(appid);
     }) as unknown as typeof fetch;
 
-    const filled = await refreshIndicatedAppPrices(d1, [1, 2, 3, 4], {
+    const filled = await refreshIndicatedAppPrices(appDb, [1, 2, 3, 4], {
       customFetch: continueAfterFailure,
       successTarget: 2,
       attemptCap: 4,
@@ -371,7 +371,7 @@ describe("VaporStats Steam Prices and Deals", () => {
     expect(calledAppIds).toEqual([1, 2, 3]);
 
     const targetFill = await refreshIndicatedAppPrices(
-      d1,
+      appDb,
       Array.from({ length: 102 }, (_, index) => index + 10),
       { customFetch: (async (input: unknown) => {
         const appid = Number(new URL(String(input)).searchParams.get("appids"));
@@ -390,7 +390,7 @@ describe("VaporStats Steam Prices and Deals", () => {
         : successResponse(appid);
     }) as unknown as typeof fetch;
 
-    const rateLimited = await refreshIndicatedAppPrices(d1, [1, 2, 3, 4], {
+    const rateLimited = await refreshIndicatedAppPrices(appDb, [1, 2, 3, 4], {
       customFetch: stopOnRateLimit,
       successTarget: 3,
       attemptCap: 4,
@@ -411,14 +411,14 @@ describe("VaporStats Steam Prices and Deals", () => {
         })) as unknown as typeof fetch,
     });
     expect(unavailable).toMatchObject({
-      success: true,
+      success: true as const,
       is_available: false,
       rateLimited: false,
     });
   });
 
   test("price feed recovers catalog rows from prior price-only ingestion", async () => {
-    await recordPriceObservation(d1, {
+    await recordPriceObservation(appDb, {
       appid: 999,
       currency: "USD",
       initial_price: 2999,
@@ -429,14 +429,14 @@ describe("VaporStats Steam Prices and Deals", () => {
       observed_at: "2026-09-04T12:00:00.000Z",
     });
     await setCheckpoint(
-      d1,
+      appDb,
       DEFAULT_PRICE_CHECKPOINT_KEY,
       JSON.stringify({ pending: [] }),
       1788562121
     );
 
     let feedCalls = 0;
-    const result = await runHourlyPriceFeedTick(d1, {
+    const result = await runHourlyPriceFeedTick(appDb, {
       apiKey: "test_key",
       anchorTime: new Date("2026-09-04T14:20:00.000Z"),
       customFetch: (async (input: unknown) => {
@@ -446,7 +446,7 @@ describe("VaporStats Steam Prices and Deals", () => {
         }
         return Response.json({
           "999": {
-            success: true,
+            success: true as const,
             data: {
               type: "game",
               name: "New Release",
@@ -475,7 +475,7 @@ describe("VaporStats Steam Prices and Deals", () => {
          FROM apps WHERE appid = 999`
       )
       .get() as Record<string, unknown> | null;
-    const checkpoint = await getCheckpoint(d1, DEFAULT_PRICE_CHECKPOINT_KEY);
+    const checkpoint = await getCheckpoint(appDb, DEFAULT_PRICE_CHECKPOINT_KEY);
 
     expect(result).toMatchObject({ successful: 1, pending: 0 });
     expect(feedCalls).toBe(0);
@@ -495,7 +495,7 @@ describe("VaporStats Steam Prices and Deals", () => {
 
   test("catalog feed continues every page before advancing its timestamp", async () => {
     await setCheckpoint(
-      d1,
+      appDb,
       DEFAULT_PRICE_CHECKPOINT_KEY,
       JSON.stringify({ pending: [], catalogBackfillQueued: true }),
       100
@@ -524,7 +524,7 @@ describe("VaporStats Steam Prices and Deals", () => {
       const appid = Number(url.searchParams.get("appids"));
       return Response.json({
         [appid]: {
-          success: true,
+          success: true as const,
           data: {
             type: "game",
             name: `Game ${appid}`,
@@ -535,12 +535,12 @@ describe("VaporStats Steam Prices and Deals", () => {
       });
     }) as unknown as typeof fetch;
 
-    const first = await runHourlyPriceFeedTick(d1, {
+    const first = await runHourlyPriceFeedTick(appDb, {
       apiKey: "test_key",
       customFetch: fetcher,
       maxAppsToProcess: 2,
     });
-    const firstCheckpoint = await getCheckpoint(d1, DEFAULT_PRICE_CHECKPOINT_KEY);
+    const firstCheckpoint = await getCheckpoint(appDb, DEFAULT_PRICE_CHECKPOINT_KEY);
     const firstValue = JSON.parse(firstCheckpoint?.value ?? "{}");
 
     expect(first.checkpointAdvanced).toBe(false);
@@ -550,12 +550,12 @@ describe("VaporStats Steam Prices and Deals", () => {
       continuationLastModified: 150,
     });
 
-    const second = await runHourlyPriceFeedTick(d1, {
+    const second = await runHourlyPriceFeedTick(appDb, {
       apiKey: "test_key",
       customFetch: fetcher,
       maxAppsToProcess: 2,
     });
-    const secondCheckpoint = await getCheckpoint(d1, DEFAULT_PRICE_CHECKPOINT_KEY);
+    const secondCheckpoint = await getCheckpoint(appDb, DEFAULT_PRICE_CHECKPOINT_KEY);
     const secondValue = JSON.parse(secondCheckpoint?.value ?? "{}");
 
     expect(feedUrls[1].searchParams.get("if_modified_since")).toBe("100");
@@ -599,7 +599,7 @@ describe("VaporStats Steam Prices and Deals", () => {
       );
     }) as unknown as typeof fetch;
 
-    const first = await runHourlyPriceFeedTick(d1, {
+    const first = await runHourlyPriceFeedTick(appDb, {
       apiKey: "test_key",
       customFetch: fetcher,
       anchorTime,
@@ -613,11 +613,11 @@ describe("VaporStats Steam Prices and Deals", () => {
       checkpointAdvanced: false,
       checkpointCursor: 100,
     });
-    const pendingCheckpoint = await getCheckpoint(d1, DEFAULT_PRICE_CHECKPOINT_KEY);
+    const pendingCheckpoint = await getCheckpoint(appDb, DEFAULT_PRICE_CHECKPOINT_KEY);
     expect(pendingCheckpoint?.cursor).toBe(100);
     expect(JSON.parse(pendingCheckpoint?.value ?? "{}").pending).toEqual([2, 3]);
 
-    const second = await runHourlyPriceFeedTick(d1, {
+    const second = await runHourlyPriceFeedTick(appDb, {
       apiKey: "test_key",
       customFetch: fetcher,
       anchorTime,
@@ -633,7 +633,7 @@ describe("VaporStats Steam Prices and Deals", () => {
     });
     expect(feedRuns).toBe(1);
 
-    const third = await runHourlyPriceFeedTick(d1, {
+    const third = await runHourlyPriceFeedTick(appDb, {
       apiKey: "test_key",
       customFetch: fetcher,
       anchorTime,
@@ -655,7 +655,7 @@ describe("VaporStats Steam Prices and Deals", () => {
     const observedAt = "2026-09-04T12:00:00.000Z";
 
     // Playable Game with discount
-    await recordPriceObservation(d1, {
+    await recordPriceObservation(appDb, {
       appid: 1086940,
       currency: "USD",
       initial_price: 5999,
@@ -668,7 +668,7 @@ describe("VaporStats Steam Prices and Deals", () => {
       observed_at: observedAt,
     });
 
-    const gamePrice = await getCurrentPrice(d1, 1086940);
+    const gamePrice = await getCurrentPrice(appDb, 1086940);
     expect(gamePrice).not.toBeNull();
     expect(gamePrice?.currency).toBe("USD");
     expect(gamePrice?.initial_price).toBe(5999);
@@ -680,7 +680,7 @@ describe("VaporStats Steam Prices and Deals", () => {
     expect(gamePrice?.observed_at).toBe(observedAt);
 
     // Free to play game
-    await recordPriceObservation(d1, {
+    await recordPriceObservation(appDb, {
       appid: 730,
       currency: "USD",
       initial_price: 0,
@@ -693,13 +693,13 @@ describe("VaporStats Steam Prices and Deals", () => {
       observed_at: observedAt,
     });
 
-    const freePrice = await getCurrentPrice(d1, 730);
+    const freePrice = await getCurrentPrice(appDb, 730);
     expect(freePrice?.is_free).toBe(true);
     expect(freePrice?.final_price).toBe(0);
     expect(freePrice?.formatted_final).toBe("Free");
 
     // Eligible Expansion
-    await recordPriceObservation(d1, {
+    await recordPriceObservation(appDb, {
       appid: 2778580,
       currency: "USD",
       initial_price: 3999,
@@ -712,7 +712,7 @@ describe("VaporStats Steam Prices and Deals", () => {
       observed_at: observedAt,
     });
 
-    const expansionPrice = await getCurrentPrice(d1, 2778580);
+    const expansionPrice = await getCurrentPrice(appDb, 2778580);
     expect(expansionPrice?.final_price).toBe(3999);
     expect(expansionPrice?.discount_percent).toBe(0);
 
@@ -726,7 +726,7 @@ describe("VaporStats Steam Prices and Deals", () => {
     const t3 = "2026-08-10T10:00:00.000Z";
 
     // 1. Initial price: $59.99 (State 1) -> Adds to history
-    const res1 = await recordPriceObservation(d1, {
+    const res1 = await recordPriceObservation(appDb, {
       appid: 1245620,
       currency: "USD",
       initial_price: 5999,
@@ -738,12 +738,12 @@ describe("VaporStats Steam Prices and Deals", () => {
     });
     expect(res1.stateChanged).toBe(true);
 
-    const history1 = await getPriceHistory(d1, 1245620, "all");
+    const history1 = await getPriceHistory(appDb, 1245620, "all");
     expect(history1.history.length).toBe(1);
     expect(history1.history[0].final_price).toBe(5999);
 
     // 2. Second observation with identical state at t2 -> Does NOT add to history
-    const res2 = await recordPriceObservation(d1, {
+    const res2 = await recordPriceObservation(appDb, {
       appid: 1245620,
       currency: "USD",
       initial_price: 5999,
@@ -755,15 +755,15 @@ describe("VaporStats Steam Prices and Deals", () => {
     });
     expect(res2.stateChanged).toBe(false);
 
-    const history2 = await getPriceHistory(d1, 1245620, "all");
+    const history2 = await getPriceHistory(appDb, 1245620, "all");
     expect(history2.history.length).toBe(1); // Still 1
 
     // Current price observation timestamp was updated
-    const current2 = await getCurrentPrice(d1, 1245620);
+    const current2 = await getCurrentPrice(appDb, 1245620);
     expect(current2?.observed_at).toBe(t2);
 
     // 3. Price drops to $39.99 (State 2) -> Adds to history
-    const res3 = await recordPriceObservation(d1, {
+    const res3 = await recordPriceObservation(appDb, {
       appid: 1245620,
       currency: "USD",
       initial_price: 5999,
@@ -775,14 +775,26 @@ describe("VaporStats Steam Prices and Deals", () => {
     });
     expect(res3.stateChanged).toBe(true);
 
-    const history3 = await getPriceHistory(d1, 1245620, "all");
+    const history3 = await getPriceHistory(appDb, 1245620, "all");
     expect(history3.history.length).toBe(2);
     expect(history3.history[0].final_price).toBe(5999);
     expect(history3.history[1].final_price).toBe(3999);
     // Verify atomic batch execution: both tables updated together
-    const priceRow = await getCurrentPrice(d1, 1245620);
+    const priceRow = await getCurrentPrice(appDb, 1245620);
     expect(priceRow?.final_price).toBe(3999);
     expect(history3.history[1].final_price).toBe(3999);
+
+    // Supplying the already-read current state avoids a second app_prices read at the helper boundary.
+    const prefetchedCurrent = await getCurrentPrice(appDb, 1245620);
+    await appDb
+      .prepare("UPDATE app_prices SET observed_at = ? WHERE appid = ?")
+      .bind("2026-08-11T10:00:00.000Z", 1245620)
+      .run();
+    const reusedCurrentHistory = await getPriceHistory(appDb, 1245620, "all", {
+      currentPrice: prefetchedCurrent,
+    });
+    expect(reusedCurrentHistory.current_price?.observed_at).toBe(t3);
+    expect(reusedCurrentHistory.current_price?.final_price).toBe(3999);
 
     console.log("changed only price history");
   });
@@ -801,7 +813,7 @@ describe("VaporStats Steam Prices and Deals", () => {
           return new Response(
             JSON.stringify({
               [String(appid)]: {
-                success: true,
+                success: true as const,
                 data: {
                   is_free: false,
                   price_overview: {
@@ -821,7 +833,7 @@ describe("VaporStats Steam Prices and Deals", () => {
     }) as unknown as typeof fetch;
 
     // Feed indicates only AppID 1086940, while catalog contains 730, 1086940, 1245620, etc.
-    const result = await refreshIndicatedAppPrices(d1, [1086940], {
+    const result = await refreshIndicatedAppPrices(appDb, [1086940], {
       customFetch: mockFetch,
     });
 
@@ -830,7 +842,7 @@ describe("VaporStats Steam Prices and Deals", () => {
     expect(fetchedAppIds).toEqual([1086940]);
 
     // Other catalog games were NOT touched or swept
-    const untouchedGame = await getCurrentPrice(d1, 1245620);
+    const untouchedGame = await getCurrentPrice(appDb, 1245620);
     expect(untouchedGame).toBeNull();
 
     console.log("incremental collection only");
@@ -839,7 +851,7 @@ describe("VaporStats Steam Prices and Deals", () => {
   // G5: a failed refresh preserves prior price and never renders free or zero
   test("failed price refresh - preserves prior price and never confuses with free or zero", async () => {
     // 1. Establish an existing price of $59.99
-    await recordPriceObservation(d1, {
+    await recordPriceObservation(appDb, {
       appid: 1086940,
       currency: "USD",
       initial_price: 5999,
@@ -860,12 +872,12 @@ describe("VaporStats Steam Prices and Deals", () => {
     expect(details.success).toBe(false);
 
     // Refresh indicated apps skips the failed refresh
-    const stats = await refreshIndicatedAppPrices(d1, [1086940], { customFetch: mockFailingFetch });
+    const stats = await refreshIndicatedAppPrices(appDb, [1086940], { customFetch: mockFailingFetch });
     expect(stats.failed).toBe(1);
     expect(stats.successful).toBe(0);
 
     // Verify DB still holds the prior $59.99 price, NOT 0 or free
-    const priceAfterFailure = await getCurrentPrice(d1, 1086940);
+    const priceAfterFailure = await getCurrentPrice(appDb, 1086940);
     expect(priceAfterFailure).not.toBeNull();
     expect(priceAfterFailure?.final_price).toBe(5999);
     expect(priceAfterFailure?.is_free).toBe(false);
@@ -899,7 +911,7 @@ describe("VaporStats Steam Prices and Deals", () => {
     // Third observation: 10 days ago ($29.99)
     const tThird = new Date(anchor.getTime() - 10 * 24 * 60 * 60 * 1000).toISOString();
 
-    await recordPriceObservation(d1, {
+    await recordPriceObservation(appDb, {
       appid: 1086940,
       initial_price: 6999,
       final_price: 6999,
@@ -908,7 +920,7 @@ describe("VaporStats Steam Prices and Deals", () => {
       is_available: true,
       observed_at: tFirst,
     });
-    await recordPriceObservation(d1, {
+    await recordPriceObservation(appDb, {
       appid: 1086940,
       initial_price: 6999,
       final_price: 4999,
@@ -917,7 +929,7 @@ describe("VaporStats Steam Prices and Deals", () => {
       is_available: true,
       observed_at: tSecond,
     });
-    await recordPriceObservation(d1, {
+    await recordPriceObservation(appDb, {
       appid: 1086940,
       initial_price: 6999,
       final_price: 2999,
@@ -929,7 +941,7 @@ describe("VaporStats Steam Prices and Deals", () => {
     // 3. Regression: future observation after anchorTime cannot leak into history
     const tFuture = new Date(anchor.getTime() + 24 * 60 * 60 * 1000).toISOString();
     // Manually insert a future record into price_history
-    await d1
+    await appDb
       .prepare(
         `INSERT INTO price_history (appid, currency, initial_price, final_price, discount_percent, is_free, is_available, formatted_price, observed_at)
          VALUES (?, 'USD', 6999, 1999, 71, 0, 1, '$19.99', ?)`
@@ -938,14 +950,14 @@ describe("VaporStats Steam Prices and Deals", () => {
       .run();
 
     // Test 'all': begins at the first observation (tFirst) and bounded by anchorTime (excludes tFuture)
-    const historyAll = await getPriceHistory(d1, 1086940, "all", { anchorTime: anchor });
+    const historyAll = await getPriceHistory(appDb, 1086940, "all", { anchorTime: anchor });
     expect(historyAll.earliest_observation).toBe(tFirst);
     expect(historyAll.history.length).toBe(3);
     expect(historyAll.history[0].observed_at).toBe(tFirst);
     expect(historyAll.history.every((h) => h.observed_at <= anchor.toISOString())).toBe(true);
 
     // Test '30d': anchor captures state going into window ($49.99) + observation in window ($29.99), excludes future
-    const history30d = await getPriceHistory(d1, 1086940, "30d", { anchorTime: anchor });
+    const history30d = await getPriceHistory(appDb, 1086940, "30d", { anchorTime: anchor });
     expect(history30d.history.length).toBe(2);
     expect(history30d.history[0].final_price).toBe(4999);
     expect(history30d.history[1].final_price).toBe(2999);
@@ -1062,7 +1074,7 @@ describe("VaporStats Steam Prices and Deals", () => {
     expect(isDealEligible({ type: "soundtrack", is_playable: 0, parent_appid: 1086940 }, "soundtrack")).toBe(false);
     // Database query checks with getDeals:
     // 1. Add discount to playable game (Baldur's Gate 3)
-    await recordPriceObservation(d1, {
+    await recordPriceObservation(appDb, {
       appid: 1086940,
       initial_price: 5999,
       final_price: 2999,
@@ -1073,7 +1085,7 @@ describe("VaporStats Steam Prices and Deals", () => {
     });
 
     // 2. Add discount to expansion (Shadow of the Erdtree)
-    await recordPriceObservation(d1, {
+    await recordPriceObservation(appDb, {
       appid: 2778580,
       initial_price: 3999,
       final_price: 2999,
@@ -1084,7 +1096,7 @@ describe("VaporStats Steam Prices and Deals", () => {
     });
 
     // 3. Add discount to soundtrack (accessory - should be EXCLUDED)
-    await recordPriceObservation(d1, {
+    await recordPriceObservation(appDb, {
       appid: 999002,
       initial_price: 999,
       final_price: 499,
@@ -1095,7 +1107,7 @@ describe("VaporStats Steam Prices and Deals", () => {
     });
 
     // 4. Add discount to dedicated server (accessory - should be EXCLUDED)
-    await recordPriceObservation(d1, {
+    await recordPriceObservation(appDb, {
       appid: 999001,
       initial_price: 1999,
       final_price: 999,
@@ -1105,8 +1117,17 @@ describe("VaporStats Steam Prices and Deals", () => {
       observed_at: "2026-09-04T12:00:00.000Z",
     });
 
-    const dealsResult = await getDeals(d1);
+    const dealsResult = await getDeals(appDb);
     const dealAppIds = dealsResult.deals.map((d) => d.appid);
+
+    // Totals remain exact on both populated and empty pages.
+    expect(dealsResult.total).toBe(2);
+    const secondDealPage = await getDeals(appDb, { limit: 1, offset: 1 });
+    expect(secondDealPage.total).toBe(2);
+    expect(secondDealPage.deals).toHaveLength(1);
+    const emptyDealPage = await getDeals(appDb, { limit: 1, offset: 10 });
+    expect(emptyDealPage.total).toBe(2);
+    expect(emptyDealPage.deals).toHaveLength(0);
 
     // Included
     expect(dealAppIds).toContain(1086940); // Playable game
@@ -1134,7 +1155,7 @@ describe("VaporStats Steam Prices and Deals", () => {
   // G9: price and deal responses expose source times and live caching
   test("price api contract - exposes source times and live caching policy", async () => {
     // Add test price
-    await recordPriceObservation(d1, {
+    await recordPriceObservation(appDb, {
       appid: 1086940,
       initial_price: 5999,
       final_price: 2999,
@@ -1146,7 +1167,7 @@ describe("VaporStats Steam Prices and Deals", () => {
 
     // 1. Price History API Request
     const priceReq = new Request("http://localhost/api/prices/history?appid=1086940&range=all");
-    const priceRes = await handlePriceHistoryRequest(priceReq, d1);
+    const priceRes = await handlePriceHistoryRequest(priceReq, appDb);
 
     expect(priceRes.status).toBe(200);
     expect(priceRes.headers.get("Cache-Control")).toBe(CACHE_POLICIES.liveApi);
@@ -1163,7 +1184,7 @@ describe("VaporStats Steam Prices and Deals", () => {
 
     // 2. Deals API Request
     const dealsReq = new Request("http://localhost/api/deals");
-    const dealsRes = await handleDealsRequest(dealsReq, d1);
+    const dealsRes = await handleDealsRequest(dealsReq, appDb);
 
     expect(dealsRes.status).toBe(200);
     expect(dealsRes.headers.get("Cache-Control")).toBe(CACHE_POLICIES.liveApi);
@@ -1180,7 +1201,7 @@ describe("VaporStats Steam Prices and Deals", () => {
 
     // 3. 404 / Error caching policy check (no-store)
     const errorReq = new Request("http://localhost/api/prices/history?appid=99999999");
-    const errorRes = await handlePriceHistoryRequest(errorReq, d1);
+    const errorRes = await handlePriceHistoryRequest(errorReq, appDb);
     expect(errorRes.status).toBe(404);
     expect(errorRes.headers.get("Cache-Control")).toBe(CACHE_POLICIES.noStore);
 
@@ -1191,7 +1212,7 @@ describe("VaporStats Steam Prices and Deals", () => {
   test("end-to-end integration: game page, child page, and home deals sections", async () => {
     // 1. Seed prices:
     // Game: Baldur's Gate 3 ($59.99 initial, $29.99 final, 50% discount)
-    await recordPriceObservation(d1, {
+    await recordPriceObservation(appDb, {
       appid: 1086940,
       initial_price: 5999,
       final_price: 2999,
@@ -1202,7 +1223,7 @@ describe("VaporStats Steam Prices and Deals", () => {
     });
 
     // Expansion: Shadow of the Erdtree ($39.99 initial, $29.99 final, 25% discount)
-    await recordPriceObservation(d1, {
+    await recordPriceObservation(appDb, {
       appid: 2778580,
       initial_price: 3999,
       final_price: 2999,
@@ -1215,7 +1236,7 @@ describe("VaporStats Steam Prices and Deals", () => {
     // 1. Game Route Integration: handleGameHttpRequest
     const gameRes = await handleGameHttpRequest(
       new Request("http://localhost/games/1086940-baldurs-gate-3"),
-      d1
+      appDb
     );
     expect(gameRes.status).toBe(200);
     const gameHtml = await gameRes.text();
@@ -1232,7 +1253,7 @@ describe("VaporStats Steam Prices and Deals", () => {
     // 2. Child Route Integration: handleChildHttpRequest
     const childRes = await handleChildHttpRequest(
       new Request("http://localhost/games/1245620-elden-ring/2778580-elden-ring-shadow-of-the-erdtree"),
-      d1
+      appDb
     );
     expect(childRes.status).toBe(200);
     const childHtml = await childRes.text();
@@ -1247,14 +1268,14 @@ describe("VaporStats Steam Prices and Deals", () => {
     // Dedicated server page truthfully displays unavailable/no data yet
     const serverRes = await handleChildHttpRequest(
       new Request("http://localhost/games/730-counter-strike-2/999001-dedicated-server-tool"),
-      d1
+      appDb
     );
     expect(serverRes.status).toBe(200);
     const serverHtml = await serverRes.text();
     expect(serverHtml).toContain("No data yet");
 
     // 3. Home Route Integration: HomeComponent with direct Deals section
-    const dealsResult = await getDeals(d1, { limit: 10, sort: "discount" });
+    const dealsResult = await getDeals(appDb, { limit: 10, sort: "discount" });
     const homeHtml = renderToString(
       React.createElement<HomeComponentProps>(HomeComponent, {
         initialTrending: [],

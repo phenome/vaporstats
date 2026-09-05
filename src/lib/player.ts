@@ -1,5 +1,5 @@
 import { getCurrentPrice, type PriceState } from "./prices";
-import type { D1Database, D1PreparedStatement } from "./db";
+import type { AppDatabase, AppPreparedStatement } from "./db";
 
 /**
  * Player activity collection limits and tier configurations.
@@ -116,7 +116,7 @@ export function calculateNextDueAt(
  * Retrieves latest observation for a specific game.
  */
 export async function getLatestPlayerObservation(
-  db: D1Database,
+  db: AppDatabase,
   appid: number
 ): Promise<{ current_players: number; observed_at: string } | null> {
   const stmt = db
@@ -135,7 +135,7 @@ export async function getLatestPlayerObservation(
  * Orders by tier priority (fast -> hourly -> daily), then oldest due work, then appid.
  */
 export async function getDueTrackedGames(
-  db: D1Database,
+  db: AppDatabase,
   anchorTime: Date,
   limit: number
 ): Promise<TrackedGame[]> {
@@ -166,7 +166,7 @@ export async function getDueTrackedGames(
  * Retrieves current daily request count for a given UTC date.
  */
 export async function getDailyRequestCount(
-  db: D1Database,
+  db: AppDatabase,
   dateStr: string
 ): Promise<number> {
   const stmt = db
@@ -180,11 +180,11 @@ export async function getDailyRequestCount(
  * Prepares statement to insert a successful observation.
  */
 export function prepareObservationInsert(
-  db: D1Database,
+  db: AppDatabase,
   appid: number,
   current_players: number,
   observed_at: string
-): D1PreparedStatement {
+): AppPreparedStatement {
   return db
     .prepare(
       `INSERT INTO observations (appid, current_players, observed_at)
@@ -197,12 +197,12 @@ export function prepareObservationInsert(
  * Prepares statement to advance tracking state upon success.
  */
 export function prepareSuccessTrackingUpdate(
-  db: D1Database,
+  db: AppDatabase,
   appid: number,
   next_due_at: string,
   latest_players: number,
   observed_at: string
-): D1PreparedStatement {
+): AppPreparedStatement {
   return db
     .prepare(
       `UPDATE tracked_games 
@@ -223,11 +223,11 @@ export function prepareSuccessTrackingUpdate(
  * Advances next_due_at to next normal cadence without 10-min retry loop.
  */
 export function prepareFailureTrackingUpdate(
-  db: D1Database,
+  db: AppDatabase,
   appid: number,
   next_due_at: string,
   attempted_at: string
-): D1PreparedStatement {
+): AppPreparedStatement {
   return db
     .prepare(
       `UPDATE tracked_games 
@@ -244,10 +244,10 @@ export function prepareFailureTrackingUpdate(
  * Prepares statement to atomically increment daily request count.
  */
 export function prepareIncrementDailyCount(
-  db: D1Database,
+  db: AppDatabase,
   dateStr: string,
   count: number
-): D1PreparedStatement {
+): AppPreparedStatement {
   return db
     .prepare(
       `INSERT INTO player_daily_requests (date, count, updated_at)
@@ -263,7 +263,7 @@ export function prepareIncrementDailyCount(
  * Registers or updates a tracked game.
  */
 export async function registerTrackedGame(
-  db: D1Database,
+  db: AppDatabase,
   appid: number,
   tier: PlayerTier = "daily",
   initialDueAt?: Date,
@@ -294,7 +294,7 @@ export async function registerTrackedGame(
  * Enforces at most 1,000 tracked games.
  */
 export async function reRankTrackedTiers(
-  db: D1Database,
+  db: AppDatabase,
   anchorTime: Date = new Date()
 ): Promise<{ fastCount: number; hourlyCount: number; dailyCount: number }> {
   // Query all tracked games ordered by latest_players DESC (nulls last), then appid ASC
@@ -316,7 +316,7 @@ export async function reRankTrackedTiers(
   let hourlyCount = 0;
   let dailyCount = 0;
 
-  const stmts: D1PreparedStatement[] = [];
+  const stmts: AppPreparedStatement[] = [];
 
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i];
@@ -359,7 +359,7 @@ export async function reRankTrackedTiers(
  * Returns null if game does not exist or is not playable/eligible.
  */
 export async function getGameOverview(
-  db: D1Database,
+  db: AppDatabase,
   appid: number
 ): Promise<GameOverviewData | null> {
   const appStmt = db

@@ -1,4 +1,4 @@
-import type { D1Database } from "./db";
+import type { AppDatabase } from "./db";
 import { toSlug } from "./slug";
 
 export type HistoryRange = "24h" | "7d" | "30d" | "90d" | "all";
@@ -12,6 +12,12 @@ export const VALID_HISTORY_RANGES: Record<string, true> = {
 };
 
 export const DEFAULT_HISTORY_RANGE: HistoryRange = "30d";
+function formatUtcDateKey(date: Date): string {
+  const year = date.getUTCFullYear();
+  const month = String(date.getUTCMonth() + 1).padStart(2, "0");
+  const day = String(date.getUTCDate()).padStart(2, "0");
+  return year + "-" + month + "-" + day;
+}
 
 export interface RollupRecord {
   appid: number;
@@ -154,7 +160,7 @@ export function getRangeCutoffDate(
  * the observations table and player_rollups table.
  */
 export async function getEarliestObservationDate(
-  db: D1Database,
+  db: AppDatabase,
   appid?: number
 ): Promise<string | null> {
   let obsRow: { earliest: string | null } | null;
@@ -188,103 +194,71 @@ export async function getEarliestObservationDate(
 }
 
 /**
- * Idempotently computes and persists UTC daily rollups for player counts.
- * Calculates min, max, average, closing value, and sample count for each appid and date.
- * If targetDate is provided, rolls up that specific date (YYYY-MM-DD);
- * otherwise rolls up all dates up to anchorDate.
+ * Idempotently computes and persists one UTC daily rollup for player counts.
+ * The scheduled default targets the previous completed UTC day. Explicit targets
+ * are still useful for backfills and retries.
  */
 export async function computeDailyRollups(
-  db: D1Database,
+  db: AppDatabase,
   options: { targetDate?: string; anchorTime?: Date } = {}
 ): Promise<{ rolledUpCount: number; records: RollupRecord[] }> {
   const anchorTime = options.anchorTime ?? new Date();
-  const currentUtcDate = anchorTime.toISOString().substring(0, 10);
-  const targetDate = options.targetDate ?? null;
+  const targetDate = options.targetDate ?? formatUtcDateKey(new Date(anchorTime.getTime() - 24 * 60 * 60 * 1000));
+  const targetStart = new Date(`${targetDate}T00:00:00.000Z`);
+  const targetEnd = new Date(targetStart.getTime() + 24 * 60 * 60 * 1000);
+  const targetStartIso = targetStart.toISOString();
+  const targetEndIso = targetEnd.toISOString();
 
-  if (targetDate) {
-    const upsertSql = `
-      INSERT INTO player_rollups (appid, date, min_players, max_players, avg_players, close_players, sample_count)
-      SELECT 
-        agg.appid,
-        agg.date,
-        agg.min_players,
-        agg.max_players,
-        agg.avg_players,
-        latest.current_players as close_players,
-        agg.sample_count
-      FROM (
-        SELECT 
-          appid,
-          substr(observed_at, 1, 10) as date,
-          MIN(current_players) as min_players,
-          MAX(current_players) as max_players,
-          ROUND(AVG(current_players), 2) as avg_players,
-          COUNT(*) as sample_count,
-          MAX(observed_at) as max_observed_at
-        FROM observations
-        WHERE substr(observed_at, 1, 10) = ?
-        GROUP BY appid, substr(observed_at, 1, 10)
-      ) agg
-      JOIN observations latest 
-        ON latest.appid = agg.appid 
-       AND latest.observed_at = agg.max_observed_at
-      GROUP BY agg.appid, agg.date
-      ON CONFLICT(appid, date) DO UPDATE SET
-        min_players = excluded.min_players,
-        max_players = excluded.max_players,
-        avg_players = excluded.avg_players,
-        close_players = excluded.close_players,
-        sample_count = excluded.sample_count;
-    `;
-    await db.prepare(upsertSql).bind(targetDate).run();
-  } else {
-    // Default: process completed UTC days only (strictly before current UTC date)
-    const upsertSql = `
-      INSERT INTO player_rollups (appid, date, min_players, max_players, avg_players, close_players, sample_count)
-      SELECT 
-        agg.appid,
-        agg.date,
-        agg.min_players,
-        agg.max_players,
-        agg.avg_players,
-        latest.current_players as close_players,
-        agg.sample_count
-      FROM (
-        SELECT 
-          appid,
-          substr(observed_at, 1, 10) as date,
-          MIN(current_players) as min_players,
-          MAX(current_players) as max_players,
-          ROUND(AVG(current_players), 2) as avg_players,
-          COUNT(*) as sample_count,
-          MAX(observed_at) as max_observed_at
-        FROM observations
-        WHERE substr(observed_at, 1, 10) < ?
-        GROUP BY appid, substr(observed_at, 1, 10)
-      ) agg
-      JOIN observations latest 
-        ON latest.appid = agg.appid 
-       AND latest.observed_at = agg.max_observed_at
-      GROUP BY agg.appid, agg.date
-      ON CONFLICT(appid, date) DO UPDATE SET
-        min_players = excluded.min_players,
-        max_players = excluded.max_players,
-        avg_players = excluded.avg_players,
-        close_players = excluded.close_players,
-        sample_count = excluded.sample_count;
-    `;
-    await db.prepare(upsertSql).bind(currentUtcDate).run();
-  }
-
-  let selectSql = `
-    SELECT appid, date, min_players, max_players, avg_players, close_players, sample_count, created_at
-    FROM player_rollups
+  const upsertSql = `
+    INSERT INTO player_rollups (
+      appid, date, min_players, max_players, avg_players, close_players, sample_count
+    )
+    SELECT
+      daily.appid,
+      ?,
+      daily.min_players,
+      daily.max_players,
+      daily.avg_players,
+      (
+        SELECT latest.current_players
+        FROM observations latest
+        WHERE latest.appid = daily.appid
+          AND latest.observed_at = daily.max_observed_at
+        ORDER BY latest.id DESC
+        LIMIT 1
+      ),
+      daily.sample_count
+    FROM (
+      SELECT
+        appid,
+        MIN(current_players) AS min_players,
+        MAX(current_players) AS max_players,
+        ROUND(AVG(current_players), 2) AS avg_players,
+        COUNT(*) AS sample_count,
+        MAX(observed_at) AS max_observed_at
+      FROM observations
+      WHERE observed_at >= ? AND observed_at < ?
+      GROUP BY appid
+    ) daily
+    WHERE true
+    ON CONFLICT(appid, date) DO UPDATE SET
+      min_players = excluded.min_players,
+      max_players = excluded.max_players,
+      avg_players = excluded.avg_players,
+      close_players = excluded.close_players,
+      sample_count = excluded.sample_count
   `;
-  const selectStmt = targetDate
-    ? db.prepare(`${selectSql} WHERE date = ? ORDER BY appid`).bind(targetDate)
-    : db.prepare(`${selectSql} ORDER BY date DESC, appid ASC`);
+  await db.prepare(upsertSql).bind(targetDate, targetStartIso, targetEndIso).run();
 
-  const results = await selectStmt.all<RollupRecord>();
+  const results = await db
+    .prepare(
+      `SELECT appid, date, min_players, max_players, avg_players, close_players, sample_count, created_at
+       FROM player_rollups
+       WHERE date = ?
+       ORDER BY appid`
+    )
+    .bind(targetDate)
+    .all<RollupRecord>();
   const records = results.results ?? [];
 
   return {
@@ -293,19 +267,21 @@ export async function computeDailyRollups(
   };
 }
 
+export const RAW_OBSERVATION_RETENTION_DAYS = 7;
+
 /**
- * Cleans up raw observations older than retention period (default 90 days).
+ * Cleans up raw observations older than the configured seven-day retention period.
  * Must be executed after or alongside daily rollups to ensure no data loss.
  */
 export async function cleanExpiredRawObservations(
-  db: D1Database,
+  db: AppDatabase,
   anchorTime: Date = new Date(),
-  retentionDays = 90
+  retentionDays = RAW_OBSERVATION_RETENTION_DAYS
 ): Promise<number> {
   const cutoffDate = new Date(anchorTime.getTime() - retentionDays * 24 * 60 * 60 * 1000);
   const cutoffIso = cutoffDate.toISOString();
 
-  const stmt = db.prepare("DELETE FROM observations WHERE observed_at < ?").bind(cutoffIso);
+  const stmt = db.prepare(`DELETE FROM observations WHERE observed_at < ?`).bind(cutoffIso);
   const res = await stmt.run();
   return res.meta.changes;
 }
@@ -316,7 +292,7 @@ export async function cleanExpiredRawObservations(
  * and defines All as beginning at the first successful observation.
  */
 export async function getPlayerHistory(
-  db: D1Database,
+  db: AppDatabase,
   appid: number,
   rangeInput: unknown = "30d",
   anchorTime: Date = new Date()
@@ -380,23 +356,65 @@ export async function getPlayerHistory(
     // Chronologically sort merged points before gap detection
     points.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
   } else {
-    // For 24h, 7d, 30d, 90d query raw observations within range bounded to anchorTime
-    const rawStmt = db.prepare(
-      `SELECT current_players, observed_at
-       FROM observations
-       WHERE appid = ? 
-         AND observed_at >= ?
-         AND observed_at <= ?
-       ORDER BY observed_at ASC`
-    ).bind(appid, cutoffIso!, anchorTimeIso);
-    const rawRows = await rawStmt.all<{ current_players: number; observed_at: string }>();
+    if (range === "24h") {
+      const rawRows = await db
+        .prepare(
+          `SELECT current_players, observed_at
+           FROM observations
+           WHERE appid = ?
+             AND observed_at >= ?
+             AND observed_at <= ?
+           ORDER BY observed_at ASC`
+        )
+        .bind(appid, cutoffIso!, anchorTimeIso)
+        .all<{ current_players: number; observed_at: string }>();
+      for (const raw of rawRows.results ?? []) {
+        points.push({ timestamp: raw.observed_at, players: raw.current_players, is_rollup: false });
+      }
+    } else {
+      // Older days are represented by durable rollups; the cutoff day remains raw
+      // so the range boundary stays exact instead of broadening to midnight.
+      const rollupRows = await db
+        .prepare(
+          `SELECT date, min_players, max_players, avg_players, close_players, sample_count
+           FROM player_rollups
+           WHERE appid = ? AND date > ? AND date <= ?
+           ORDER BY date ASC`
+        )
+        .bind(appid, cutoffIso!.substring(0, 10), anchorDateStr)
+        .all<RollupRecord>();
+      const rollupDates = new Set((rollupRows.results ?? []).map((row) => row.date));
 
-    for (const raw of rawRows.results ?? []) {
-      points.push({
-        timestamp: raw.observed_at,
-        players: raw.current_players,
-        is_rollup: false,
-      });
+      for (const row of rollupRows.results ?? []) {
+        points.push({
+          timestamp: row.date + "T00:00:00.000Z",
+          players: row.close_players,
+          min: row.min_players,
+          max: row.max_players,
+          avg: row.avg_players,
+          close: row.close_players,
+          sample_count: row.sample_count,
+          is_rollup: true,
+        });
+      }
+
+      const rawRows = await db
+        .prepare(
+          `SELECT current_players, observed_at
+           FROM observations
+           WHERE appid = ?
+             AND observed_at >= ?
+             AND observed_at <= ?
+           ORDER BY observed_at ASC`
+        )
+        .bind(appid, cutoffIso!, anchorTimeIso)
+        .all<{ current_players: number; observed_at: string }>();
+      for (const raw of rawRows.results ?? []) {
+        if (!rollupDates.has(raw.observed_at.substring(0, 10))) {
+          points.push({ timestamp: raw.observed_at, players: raw.current_players, is_rollup: false });
+        }
+      }
+      points.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
     }
   }
   // Gap detection: insert gap marker when interval between consecutive points exceeds cadence
@@ -447,7 +465,7 @@ export async function getPlayerHistory(
 }
 
 export async function getMostPlayedRankings(
-  db: D1Database,
+  db: AppDatabase,
   options: { limit?: number; now?: Date } = {}
 ): Promise<RankedGame[]> {
   const limit = options.limit ?? 100;
@@ -459,7 +477,7 @@ export async function getMostPlayedRankings(
        a.name,
        a.slug,
        t.latest_players,
-       COALESCE(t.last_successful_at, (SELECT MAX(observed_at) FROM observations WHERE appid = a.appid)) as last_observed_at
+       t.last_successful_at AS last_observed_at
      FROM apps a
      JOIN tracked_games t ON t.appid = a.appid
      WHERE a.is_playable = 1 
@@ -502,57 +520,81 @@ export async function getMostPlayedRankings(
  * Evaluates the specified period (24h, 7d, 30d, 90d, all).
  */
 export async function getPeakRankings(
-  db: D1Database,
+  db: AppDatabase,
   periodInput: unknown = "all",
   options: { limit?: number; anchorTime?: Date } = {}
 ): Promise<PeakRankedGame[]> {
   const period = parseHistoryRange(periodInput);
   const limit = options.limit ?? 100;
   const anchorTime = options.anchorTime ?? new Date();
-
-  const earliestObservation = await getEarliestObservationDate(db);
+  const earliestObservation = period === "all" ? await getEarliestObservationDate(db) : null;
   const cutoff = getRangeCutoffDate(period, anchorTime, earliestObservation);
   const cutoffIso = cutoff ? cutoff.toISOString() : null;
-  const cutoffDate = cutoff ? cutoffIso!.substring(0, 10) : null;
+  const cutoffDate = cutoffIso ? cutoffIso.substring(0, 10) : null;
+  const anchorTimeIso = anchorTime.toISOString();
+  const anchorDateStr = anchorTimeIso.substring(0, 10);
 
   let query: string;
   let stmt;
 
   if (period !== "all" && cutoffIso) {
-    // For exact 24h, 7d, 30d, 90d periods: use retained raw observations only.
-    // Do not union whole-day rollups which broaden the cutoff boundary.
-    query = `
-      SELECT 
-        a.appid,
-        a.name,
-        a.slug,
-        MAX(o.current_players) as peak_players
-      FROM apps a
-      JOIN observations o ON o.appid = a.appid
-      WHERE a.is_playable = 1 
-        AND a.is_eligible = 1
-        AND o.observed_at >= ? 
-        AND o.observed_at <= ?
-      GROUP BY a.appid
-      ORDER BY peak_players DESC, a.appid ASC
-      LIMIT ?
-    `;
-    stmt = db.prepare(query).bind(cutoffIso, anchorTime.toISOString(), limit);
+    if (period === "24h") {
+      // The exact 24-hour window must use raw observations only.
+      query = `
+        SELECT
+          a.appid,
+          a.name,
+          a.slug,
+          MAX(o.current_players) AS peak_players
+        FROM apps a
+        JOIN observations o ON o.appid = a.appid
+        WHERE a.is_playable = 1
+          AND a.is_eligible = 1
+          AND o.observed_at >= ?
+          AND o.observed_at <= ?
+        GROUP BY a.appid
+        ORDER BY peak_players DESC, a.appid ASC
+        LIMIT ?
+      `;
+      stmt = db.prepare(query).bind(cutoffIso, anchorTimeIso, limit);
+    } else {
+      // Use raw observations for the exact cutoff day and durable rollups for older days.
+      query = `
+        SELECT
+          a.appid,
+          a.name,
+          a.slug,
+          MAX(combined.players) AS peak_players
+        FROM apps a
+        JOIN (
+          SELECT appid, current_players AS players
+          FROM observations
+          WHERE observed_at >= ? AND observed_at <= ?
+          UNION ALL
+          SELECT appid, max_players AS players
+          FROM player_rollups
+          WHERE date > ? AND date <= ?
+        ) combined ON combined.appid = a.appid
+        WHERE a.is_playable = 1 AND a.is_eligible = 1
+        GROUP BY a.appid
+        ORDER BY peak_players DESC, a.appid ASC
+        LIMIT ?
+      `;
+      stmt = db.prepare(query).bind(cutoffIso, anchorTimeIso, cutoffDate!, anchorDateStr, limit);
+    }
   } else {
-    // For All: combine raw observations and historical daily rollups bounded to anchorTime
-    const anchorTimeIso = anchorTime.toISOString();
-    const anchorDateStr = anchorTimeIso.substring(0, 10);
+    // For All: combine raw observations and historical daily rollups bounded to anchorTime.
     query = `
-      SELECT 
+      SELECT
         a.appid,
         a.name,
         a.slug,
-        MAX(combined.players) as peak_players
+        MAX(combined.players) AS peak_players
       FROM apps a
       JOIN (
-        SELECT appid, current_players as players FROM observations WHERE observed_at <= ?
+        SELECT appid, current_players AS players FROM observations WHERE observed_at <= ?
         UNION ALL
-        SELECT appid, max_players as players FROM player_rollups WHERE date <= ?
+        SELECT appid, max_players AS players FROM player_rollups WHERE date <= ?
       ) combined ON combined.appid = a.appid
       WHERE a.is_playable = 1 AND a.is_eligible = 1
       GROUP BY a.appid
@@ -585,14 +627,13 @@ export async function getPeakRankings(
 
   return peaks;
 }
-
 /**
  * Retrieves Trending games: exactly the top 10 tracked playable games
  * ordered by latest successful current player count.
  * Never uses momentum scores or player count floors.
  */
 export async function getTrendingGames(
-  db: D1Database,
+  db: AppDatabase,
   options: { now?: Date } = {}
 ): Promise<RankedGame[]> {
   return getMostPlayedRankings(db, { limit: 10, now: options.now });

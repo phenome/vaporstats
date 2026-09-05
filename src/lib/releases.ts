@@ -1,4 +1,4 @@
-import type { D1Database } from "./db";
+import type { AppDatabase } from "./db";
 import { toSlug, getCanonicalGamePath } from "./slug";
 import { normalizeAppType, getCanonicalChildPath } from "./related";
 import { getLiveApiCacheHeaders, CACHE_POLICIES } from "./cache";
@@ -384,7 +384,7 @@ function mapRowToReleaseEntity(
  * Rejects entities without precise dates or ineligible types.
  */
 export async function upsertReleaseFact(
-  db: D1Database,
+  db: AppDatabase,
   app: {
     appid: number;
     name: string;
@@ -458,7 +458,7 @@ export async function upsertReleaseFact(
  * Retrieves release facts grouped by day for a given ISO week.
  */
 export async function getReleasesForWeek(
-  db: D1Database,
+  db: AppDatabase,
   weekStr: string,
   options: { asOfDate?: Date | string } = {}
 ): Promise<WeeklyReleasesResult | null> {
@@ -522,7 +522,7 @@ export async function getReleasesForWeek(
  * Retrieves recent releases (on or before current UTC date).
  */
 export async function getRecentReleases(
-  db: D1Database,
+  db: AppDatabase,
   options: { limit?: number; asOfDate?: Date | string } = {}
 ): Promise<ReleaseEntity[]> {
   const limit = options.limit ?? 20;
@@ -553,7 +553,7 @@ export async function getRecentReleases(
  * Retrieves releases for current ISO week.
  */
 export async function getCurrentWeekReleases(
-  db: D1Database,
+  db: AppDatabase,
   options: { asOfDate?: Date | string } = {}
 ): Promise<WeeklyReleasesResult | null> {
   const currentWeek = getCurrentIsoWeek(options.asOfDate);

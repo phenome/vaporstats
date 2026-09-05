@@ -1,4 +1,4 @@
-import type { D1Database } from "../src/lib/db";
+import { createDailySnapshot, type AppDatabase } from "../src/lib/db";
 import {
   computeDailyRollups,
   cleanExpiredRawObservations,
@@ -7,44 +7,53 @@ import {
 
 export interface RollupJobResult {
   anchorTime: string;
+  targetDate: string;
   rolledUpCount: number;
   cleanedObservationsCount: number;
+  snapshotPath: string;
   records: RollupRecord[];
 }
 
 /**
- * Executes daily player rollup computation and 90-day raw observation cleanup.
- * 1. Computes min, max, avg, closing, and sample count for completed raw observation days.
- * 2. Purges raw observations older than retention period (default 90 days).
- *
- * Boring helper designed for the scheduled ingestion worker to invoke daily.
+ * Executes the UTC daily player rollup cycle. The prior UTC day is rolled up,
+ * then seven-day raw observations are removed, and one dated snapshot is made.
+ * Cleanup and snapshot are reached only after rollup persistence succeeds.
  */
 export async function runDailyRollupJob(
-  db: D1Database,
+  db: AppDatabase,
   options: {
     anchorTime?: Date;
     targetDate?: string;
     retentionDays?: number;
+    snapshot?: (db: AppDatabase, date: string) => Promise<string>;
   } = {}
 ): Promise<RollupJobResult> {
   const anchorTime = options.anchorTime ?? new Date();
-  const retentionDays = options.retentionDays ?? 90;
+  const targetDate = options.targetDate ?? previousUtcDate(anchorTime);
+  const retentionDays = options.retentionDays ?? 7;
 
-  // 1. Idempotently persist rollups before purging raw observations
   const rollupResult = await computeDailyRollups(db, {
-    targetDate: options.targetDate,
+    targetDate,
     anchorTime,
   });
-
-  // 2. Clean expired raw observations (retained for 90 days)
   const cleanedCount = await cleanExpiredRawObservations(db, anchorTime, retentionDays);
+  const snapshotPath = await (options.snapshot ?? createDailySnapshot)(db, targetDate);
 
   return {
     anchorTime: anchorTime.toISOString(),
+    targetDate,
     rolledUpCount: rollupResult.rolledUpCount,
     cleanedObservationsCount: cleanedCount,
+    snapshotPath,
     records: rollupResult.records,
   };
+}
+
+function previousUtcDate(anchorTime: Date): string {
+  const date = new Date(
+    Date.UTC(anchorTime.getUTCFullYear(), anchorTime.getUTCMonth(), anchorTime.getUTCDate() - 1)
+  );
+  return date.toISOString().slice(0, 10);
 }
 
 export { computeDailyRollups, cleanExpiredRawObservations };

@@ -1,5 +1,5 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { getDb, type D1Database } from "../lib/db";
+import { getDb, type AppDatabase } from "../lib/db";
 import { getDeals } from "../lib/prices";
 import { CACHE_POLICIES, getLiveApiCacheHeaders } from "../lib/cache";
 
@@ -11,7 +11,7 @@ import { CACHE_POLICIES, getLiveApiCacheHeaders } from "../lib/cache";
  */
 export async function handleDealsRequest(
   request: Request,
-  explicitDb?: D1Database
+  explicitDb?: AppDatabase
 ): Promise<Response> {
   const url = new URL(request.url);
   const rawLimit = url.searchParams.get("limit");

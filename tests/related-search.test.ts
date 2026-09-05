@@ -4,7 +4,7 @@ import { readFileSync, readdirSync } from "node:fs";
 import { resolve } from "node:path";
 import React from "react";
 import { renderToString } from "react-dom/server";
-import { type D1Database, type D1PreparedStatement } from "../src/lib/db";
+import { type AppDatabase, type AppPreparedStatement } from "../src/lib/db";
 import {
   listPlayableGames,
   getGameByAppId,
@@ -41,17 +41,18 @@ const migrationsSql = readdirSync(migrationsDir)
   .sort()
   .map((name) => readFileSync(resolve(migrationsDir, name), "utf8"));
 
-function createSqliteD1Adapter(db: Database): D1Database {
+function createSqliteAppAdapter(db: Database, stats?: { firstCalls: number }): AppDatabase {
   return {
-    prepare(query: string): D1PreparedStatement {
+    prepare(query: string): AppPreparedStatement {
       let boundValues: unknown[] = [];
 
       const statement = {
-        bind(...values: unknown[]): D1PreparedStatement {
+        bind(...values: unknown[]): AppPreparedStatement {
           boundValues = values;
           return statement;
         },
         async first<T = unknown>(colName?: string): Promise<T | null> {
+          if (stats) stats.firstCalls++;
           const stmt = db.prepare(query);
           const row = stmt.get(...(boundValues as SQLQueryBindings[])) as Record<string, unknown> | null;
           if (!row) return null;
@@ -92,7 +93,7 @@ function createSqliteD1Adapter(db: Database): D1Database {
 
       return statement;
     },
-    async batch<T = unknown>(statements: D1PreparedStatement[]) {
+    async batch<T = unknown>(statements: AppPreparedStatement[]) {
       const results: { success: boolean; results?: T[] }[] = [];
       db.run("BEGIN TRANSACTION;");
       try {
@@ -114,18 +115,18 @@ function createSqliteD1Adapter(db: Database): D1Database {
   };
 }
 
-function createFreshDb(): D1Database {
+function createFreshDb(): AppDatabase {
   const sqlite = new Database(":memory:");
-  const d1 = createSqliteD1Adapter(sqlite);
-  return d1;
+  const appDb = createSqliteAppAdapter(sqlite);
+  return appDb;
 }
 
-async function initDb(): Promise<D1Database> {
-  const d1 = createFreshDb();
+async function initDb(): Promise<AppDatabase> {
+  const appDb = createFreshDb();
   for (const sql of migrationsSql) {
-    await d1.exec(sql);
+    await appDb.exec(sql);
   }
-  return d1;
+  return appDb;
 }
 
 describe("Related Apps and Search", () => {
@@ -648,6 +649,48 @@ describe("Related Apps and Search", () => {
     expect(searchHtml).toContain("Matching Related Content");
 
     console.log("playable first search");
+  });
+
+  test("groups matching accessories under each parent without parent fetches", async () => {
+    const sqlite = new Database(":memory:");
+    const stats = { firstCalls: 0 };
+    const db = createSqliteAppAdapter(sqlite, stats);
+    for (const sql of migrationsSql) await db.exec(sql);
+
+    await upsertApp(db, {
+      appid: 100,
+      name: "Alpha Game",
+      type: "game",
+      is_playable: true,
+      is_eligible: true,
+    });
+    await upsertApp(db, {
+      appid: 200,
+      name: "Beta Game",
+      type: "game",
+      is_playable: true,
+      is_eligible: true,
+    });
+    for (const app of [
+      { appid: 101, name: "Alpha Dedicated Server", parent_appid: 100 },
+      { appid: 102, name: "Alpha Dedicated Server Tools", parent_appid: 100 },
+      { appid: 201, name: "Beta Dedicated Server", parent_appid: 200 },
+    ]) {
+      await upsertApp(db, {
+        ...app,
+        type: "server",
+        is_playable: false,
+        is_eligible: true,
+      });
+    }
+
+    const result = await searchCatalog(db, "dedicated server");
+    expect(result.items).toHaveLength(2);
+    const alpha = result.items.find((item) => item.game.appid === 100);
+    const beta = result.items.find((item) => item.game.appid === 200);
+    expect(alpha?.matching_related.map((child) => child.appid).sort()).toEqual([101, 102]);
+    expect(beta?.matching_related.map((child) => child.appid)).toEqual([201]);
+    expect(stats.firstCalls).toBe(0);
   });
 
   test("search response outcomes", async () => {

@@ -1,8 +1,5 @@
-import type { D1Database, D1PreparedStatement } from "../src/lib/db";
+import type { AppDatabase, AppPreparedStatement } from "../src/lib/db";
 import {
-  TIER_FAST_MAX,
-  TIER_HOURLY_MAX,
-  TIER_DAILY_MAX,
   MAX_TRACKED_GAMES,
   DAILY_REQUEST_CAP,
   TICK_REQUEST_CAP,
@@ -17,8 +14,6 @@ import {
   prepareFailureTrackingUpdate,
   prepareIncrementDailyCount,
   reRankTrackedTiers,
-  registerTrackedGame,
-  type PlayerTier,
   type TrackedGame,
 } from "../src/lib/player";
 
@@ -139,11 +134,11 @@ export interface CollectionTickResult {
 }
 
 /**
- * Runs a single 10-minute player collection tick anchored to the scheduled event time.
+ * Runs a single ten-minute player collection tick anchored to the supplied UTC time.
  * Enforces daily cap (5,000), tick cap (100), 6-connection pool, and atomic batch commit.
  */
 export async function runPlayerCollectionTick(
-  db: D1Database,
+  db: AppDatabase,
   options: CollectionTickOptions = {}
 ): Promise<CollectionTickResult> {
   const anchorTime = options.anchorTime ?? new Date();
@@ -204,7 +199,7 @@ export async function runPlayerCollectionTick(
 
   let succeeded = 0;
   let failed = 0;
-  const stmts: D1PreparedStatement[] = [];
+  const stmts: AppPreparedStatement[] = [];
   const observedAtIso = anchorTime.toISOString();
 
   for (const outcome of outcomes) {
@@ -217,8 +212,8 @@ export async function runPlayerCollectionTick(
       stmts.push(prepareSuccessTrackingUpdate(db, game.appid, nextDueIso, count, observedAtIso));
     } else {
       failed++;
-      console.error(`Individual Steam failure for AppID ${game.appid}; preserving latest value and advancing cadence to ${nextDueIso}`);
-      // G7: One Steam failure preserves the valid value and advances normal cadence without 10-min retry
+      console.error("Individual Steam failure for AppID " + game.appid + "; preserving latest value and advancing cadence to " + nextDueIso);
+      // One Steam failure preserves the valid value and advances normal cadence without retry loops.
       stmts.push(prepareFailureTrackingUpdate(db, game.appid, nextDueIso, observedAtIso));
     }
   }
@@ -227,7 +222,7 @@ export async function runPlayerCollectionTick(
   stmts.push(prepareIncrementDailyCount(db, dateKey, outcomes.length));
 
   if (options.simulateCommitFailure) {
-    throw new Error("Simulated D1 commit failure");
+    throw new Error("Simulated database commit failure");
   }
 
   // Commit atomically in single transaction
@@ -272,7 +267,7 @@ export interface DiscoveryResult {
  * and re-ranks tiers.
  */
 export async function runDailyDiscoveryAndReRanking(
-  db: D1Database,
+  db: AppDatabase,
   options: DiscoveryOptions = {}
 ): Promise<DiscoveryResult> {
   const anchorTime = options.anchorTime ?? new Date();
@@ -393,7 +388,7 @@ export async function runDailyDiscoveryAndReRanking(
   sortTracked();
 
   const chosenVictimAppIds = new Set<number>();
-  const stmts: D1PreparedStatement[] = [];
+  const stmts: AppPreparedStatement[] = [];
 
   for (const outcome of probeOutcomes) {
     const { appid, players } = outcome;

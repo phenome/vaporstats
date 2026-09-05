@@ -1,124 +1,91 @@
 import { describe, expect, it } from "bun:test";
-import server, { enforceApiRateLimit, type ServerEnv } from "../src/server";
+import {
+  enforceApiRateLimit,
+  InMemoryRateLimiter,
+  type ApiRateLimiter,
+} from "../src/server";
 import { CACHE_POLICIES } from "../src/lib/cache";
 
-class MockRateLimiter implements RateLimit {
-  private limitCount: number;
-  private currentRequests = new Map<string, number>();
-  public calls: { key: string }[] = [];
-  public shouldThrow = false;
-
-  constructor(limitCount: number = 30) {
-    this.limitCount = limitCount;
-  }
-
-  async limit(options: { key: string }): Promise<{ success: boolean }> {
-    this.calls.push(options);
-    if (this.shouldThrow) {
-      throw new Error("Internal Cloudflare rate limiting service failure");
-    }
-
-    const count = (this.currentRequests.get(options.key) ?? 0) + 1;
-    this.currentRequests.set(options.key, count);
-
-    return {
-      success: count <= this.limitCount,
-    };
-  }
-
-  reset() {
-    this.currentRequests.clear();
-    this.calls = [];
-    this.shouldThrow = false;
-  }
+function apiRequest(ip?: string): Request {
+  return new Request("https://vaporstats.com/api/catalog", {
+    headers: ip ? { "cf-connecting-ip": ip } : undefined,
+  });
 }
 
 describe("API rate limiting", () => {
   it("ignores non-API requests", async () => {
-    const limiter = new MockRateLimiter(30);
-    const req = new Request("https://vaporstats.com/", {
-      headers: { "cf-connecting-ip": "1.2.3.4" },
+    const limiter = new InMemoryRateLimiter();
+    const request = new Request("https://vaporstats.com/", {
+      headers: { "cf-connecting-ip": "198.51.100.1" },
     });
-    const res = await enforceApiRateLimit(req, limiter);
-    expect(res).toBeNull();
-    expect(limiter.calls.length).toBe(0);
+
+    expect(await enforceApiRateLimit(request, limiter)).toBeNull();
+    expect(limiter.size).toBe(0);
   });
 
-  it("skips rate limiting when IP header is absent", async () => {
-    const limiter = new MockRateLimiter(30);
-    const req = new Request("https://vaporstats.com/api/catalog");
-    const res = await enforceApiRateLimit(req, limiter);
-    expect(res).toBeNull();
-    expect(limiter.calls.length).toBe(0);
+  it("skips rate limiting when the trusted IP header is absent", async () => {
+    const calls: string[] = [];
+    const limiter: ApiRateLimiter = {
+      limit(ip) {
+        calls.push(ip);
+        return false;
+      },
+    };
+
+    expect(await enforceApiRateLimit(apiRequest(), limiter)).toBeNull();
+    expect(calls).toEqual([]);
   });
 
-  it("fails open when limiter binding is missing", async () => {
-    const req = new Request("https://vaporstats.com/api/catalog", {
-      headers: { "cf-connecting-ip": "1.2.3.4" },
-    });
-    const res = await enforceApiRateLimit(req, undefined);
-    expect(res).toBeNull();
+  it("fails open when the in-memory limiter cannot evaluate a request", async () => {
+    const limiter: ApiRateLimiter = {
+      limit() {
+        throw new Error("internal limiter failure");
+      },
+    };
+
+    expect(await enforceApiRateLimit(apiRequest("203.0.113.1"), limiter)).toBeNull();
   });
 
-  it("fails open when limiter service throws an error", async () => {
-    const limiter = new MockRateLimiter(30);
-    limiter.shouldThrow = true;
-    const req = new Request("https://vaporstats.com/api/catalog", {
-      headers: { "cf-connecting-ip": "1.2.3.4" },
-    });
-    const res = await enforceApiRateLimit(req, limiter);
-    expect(res).toBeNull();
-    expect(limiter.calls.length).toBe(1);
-  });
-
-  it("allows 30 requests and rejects 31st with 429 and Retry-After 10", async () => {
-    const limiter = new MockRateLimiter(30);
+  it("allows 30 requests and rejects the 31st with 429 and Retry-After 10", async () => {
+    const limiter = new InMemoryRateLimiter();
     const ip = "198.51.100.42";
 
-    for (let i = 1; i <= 30; i++) {
-      const req = new Request(`https://vaporstats.com/api/deals?i=${i}`, {
-        headers: { "cf-connecting-ip": ip },
-      });
-      const res = await enforceApiRateLimit(req, limiter);
-      expect(res).toBeNull();
+    for (let requestNumber = 1; requestNumber <= 30; requestNumber += 1) {
+      expect(await enforceApiRateLimit(apiRequest(ip), limiter)).toBeNull();
     }
 
-    const req31 = new Request("https://vaporstats.com/api/deals?i=31", {
-      headers: { "cf-connecting-ip": ip },
-    });
-    const res31 = await enforceApiRateLimit(req31, limiter);
-    expect(res31).not.toBeNull();
-    expect(res31?.status).toBe(429);
-    expect(res31?.headers.get("retry-after")).toBe("10");
-    expect(res31?.headers.get("cache-control")).toBe(CACHE_POLICIES.noStore);
-    expect(res31?.headers.get("content-type")).toBe("application/json; charset=utf-8");
-
-    const body = (await res31?.json()) as { status: string; error: string };
-    expect(body.status).toBe("error");
-    expect(body.error).toBe("Too many requests. Please retry shortly.");
+    const response = await enforceApiRateLimit(apiRequest(ip), limiter);
+    expect(response?.status).toBe(429);
+    expect(response?.headers.get("retry-after")).toBe("10");
+    expect(response?.headers.get("cache-control")).toBe(CACHE_POLICIES.noStore);
+    expect(response?.headers.get("content-type")).toBe("application/json; charset=utf-8");
+    const body = (await response?.json()) as { status: string; error: string } | undefined;
+    expect(body?.status).toBe("error");
+    expect(body?.error).toBe("Too many requests. Please retry shortly.");
   });
 
-  it("worker fetch entrypoint returns 429 directly on rate limit", async () => {
-    const blockedLimiter: RateLimit = {
-      limit: async () => ({ success: false }),
-    };
+  it("keeps independent allowances for different IPs and resets after 10 seconds", async () => {
+    let now = 0;
+    const limiter = new InMemoryRateLimiter({ now: () => now });
+    const firstIp = "192.0.2.10";
 
-    const env: ServerEnv = {
-      ASSETS: {
-        fetch: async () => new Response("asset"),
-        connect: () => {
-          throw new Error("unimplemented");
-        },
-      },
-      API_RATE_LIMITER: blockedLimiter,
-    };
+    for (let requestNumber = 1; requestNumber <= 30; requestNumber += 1) {
+      expect(await enforceApiRateLimit(apiRequest(firstIp), limiter)).toBeNull();
+    }
+    expect((await enforceApiRateLimit(apiRequest(firstIp), limiter))?.status).toBe(429);
+    expect(await enforceApiRateLimit(apiRequest("192.0.2.11"), limiter)).toBeNull();
 
-    const req = new Request("https://vaporstats.com/api/rankings", {
-      headers: { "cf-connecting-ip": "203.0.113.1" },
-    });
+    now = 10_000;
+    expect(await enforceApiRateLimit(apiRequest(firstIp), limiter)).toBeNull();
+  });
 
-    const res = await server.fetch(req, env);
-    expect(res.status).toBe(429);
-    expect(res.headers.get("retry-after")).toBe("10");
+  it("bounds retained IP buckets", async () => {
+    const limiter = new InMemoryRateLimiter({ maxEntries: 2 });
+
+    await enforceApiRateLimit(apiRequest("192.0.2.20"), limiter);
+    await enforceApiRateLimit(apiRequest("192.0.2.21"), limiter);
+    await enforceApiRateLimit(apiRequest("192.0.2.22"), limiter);
+
+    expect(limiter.size).toBeLessThanOrEqual(2);
   });
 });

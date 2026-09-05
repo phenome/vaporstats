@@ -1,4 +1,4 @@
-import type { D1Database } from "./db";
+import type { AppDatabase } from "./db";
 import { toSlug } from "./slug";
 
 export type PriceHistoryRange = "30d" | "6m" | "1y" | "all";
@@ -251,6 +251,8 @@ interface RawDealRow {
   formatted_initial: string | null;
   formatted_final: string | null;
   observed_at: string;
+  total_count: number;
+  total_only: number;
 }
 interface RawPriceRow {
   appid: number;
@@ -288,7 +290,7 @@ function mapRowToPriceState(row: RawPriceRow): PriceState {
  * Reads the current price state for an app.
  */
 export async function getCurrentPrice(
-  db: D1Database,
+  db: AppDatabase,
   appid: number
 ): Promise<PriceState | null> {
   const stmt = db
@@ -306,13 +308,13 @@ export async function getCurrentPrice(
 }
 
 /**
- * Persists an observed price state in D1:
+ * Persists an observed price state in the app database:
  * - Upserts app_prices with latest observation
  * - Appends to price_history ONLY when price state changed
  * - Retains sparse changes indefinitely without rollups
  */
 export async function recordPriceObservation(
-  db: D1Database,
+  db: AppDatabase,
   observation: {
     appid: number;
     currency?: string;
@@ -426,14 +428,16 @@ export async function recordPriceObservation(
  * Preserves step changes and gaps, and defines 'all' as beginning at first observation.
  */
 export async function getPriceHistory(
-  db: D1Database,
+  db: AppDatabase,
   appid: number,
   range: PriceHistoryRange = DEFAULT_PRICE_RANGE,
-  options: { anchorTime?: Date } = {}
+  options: { anchorTime?: Date; currentPrice?: PriceState | null } = {}
 ): Promise<PriceHistoryResult> {
   const anchorTime = options.anchorTime ?? new Date();
   const anchorIso = anchorTime.toISOString();
-  const current = await getCurrentPrice(db, appid);
+  const current = options.currentPrice === undefined
+    ? await getCurrentPrice(db, appid)
+    : options.currentPrice;
 
   // Find earliest observation date bounded by anchorTime
   const earliestStmt = db
@@ -544,7 +548,7 @@ export async function getPriceHistory(
  * Strictly excludes dedicated servers, tools, demos, tests, and soundtracks.
  */
 export async function getDeals(
-  db: D1Database,
+  db: AppDatabase,
   options: {
     limit?: number;
     offset?: number;
@@ -576,63 +580,69 @@ export async function getDeals(
       AND ar.relationship_type IN ('server', 'tool', 'demo', 'test', 'soundtrack')
   )`;
 
-  let orderClause = `p.discount_percent DESC, p.final_price ASC`;
+  let orderClause = `discount_percent DESC, final_price ASC`;
   if (sort === "price") {
-    orderClause = `p.final_price ASC, p.discount_percent DESC`;
+    orderClause = `final_price ASC, discount_percent DESC`;
   } else if (sort === "recent") {
-    orderClause = `p.observed_at DESC, p.discount_percent DESC`;
+    orderClause = `observed_at DESC, discount_percent DESC`;
   }
 
-  const countQuery = `
-    SELECT COUNT(*) as total
-    FROM app_prices p
-    JOIN apps a ON p.appid = a.appid
-    WHERE p.discount_percent > 0
-      AND p.is_available = 1
-      AND p.final_price IS NOT NULL
-      AND p.initial_price IS NOT NULL
-      AND ${typeCondition}
-      AND ${accessoryExclusion}
-  `;
-
-  const totalRow = await db.prepare(countQuery).first<{ total: number }>();
-  const total = totalRow?.total ?? 0;
-
-  const dataQuery = `
+  // One candidate CTE supplies both the bounded page and its total.
+  const dealsQuery = `
+    WITH eligible_deals AS MATERIALIZED (
+      SELECT
+        a.appid,
+        a.name,
+        a.slug,
+        a.type,
+        a.parent_appid,
+        a.header_image,
+        parent.name as parent_name,
+        parent.slug as parent_slug,
+        p.initial_price,
+        p.final_price,
+        p.discount_percent,
+        p.currency,
+        p.is_free,
+        p.formatted_initial,
+        p.formatted_final,
+        p.observed_at
+      FROM app_prices p
+      JOIN apps a ON p.appid = a.appid
+      LEFT JOIN apps parent ON a.parent_appid = parent.appid
+      WHERE p.discount_percent > 0
+        AND p.is_available = 1
+        AND p.final_price IS NOT NULL
+        AND p.initial_price IS NOT NULL
+        AND ${typeCondition}
+        AND ${accessoryExclusion}
+    ),
+    page AS (
+      SELECT *
+      FROM eligible_deals
+      ORDER BY ${orderClause}
+      LIMIT ? OFFSET ?
+    ),
+    total AS (
+      SELECT COUNT(*) AS total_count
+      FROM eligible_deals
+    )
+    SELECT page.*, total.total_count, 0 AS total_only
+    FROM page CROSS JOIN total
+    UNION ALL
     SELECT
-      a.appid,
-      a.name,
-      a.slug,
-      a.type,
-      a.parent_appid,
-      a.header_image,
-      parent.name as parent_name,
-      parent.slug as parent_slug,
-      p.initial_price,
-      p.final_price,
-      p.discount_percent,
-      p.currency,
-      p.is_free,
-      p.formatted_initial,
-      p.formatted_final,
-      p.observed_at
-    FROM app_prices p
-    JOIN apps a ON p.appid = a.appid
-    LEFT JOIN apps parent ON a.parent_appid = parent.appid
-    WHERE p.discount_percent > 0
-      AND p.is_available = 1
-      AND p.final_price IS NOT NULL
-      AND p.initial_price IS NOT NULL
-      AND ${typeCondition}
-      AND ${accessoryExclusion}
-    ORDER BY ${orderClause}
-    LIMIT ? OFFSET ?
+      NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+      NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+      total.total_count, 1
+    FROM total
+    WHERE NOT EXISTS (SELECT 1 FROM page)
   `;
 
-  const { results } = await db.prepare(dataQuery).bind(limit, offset).all<RawDealRow>();
-
+  const { results } = await db.prepare(dealsQuery).bind(limit, offset).all<RawDealRow>();
+  const rows = results || [];
+  const total = rows.find((row) => row.total_count !== undefined)?.total_count ?? 0;
   let maxObservedTime: string | null = null;
-  const deals: DealItem[] = (results || []).map((row) => {
+  const deals: DealItem[] = rows.filter((row) => !row.total_only).map((row) => {
     if (!maxObservedTime || row.observed_at > maxObservedTime) {
       maxObservedTime = row.observed_at;
     }

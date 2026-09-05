@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach } from "bun:test";
 import { readFileSync, readdirSync } from "node:fs";
 import { resolve } from "node:path";
 import { Database, type SQLQueryBindings } from "bun:sqlite";
-import type { D1Database, D1PreparedStatement } from "../src/lib/db";
+import type { AppDatabase, AppPreparedStatement } from "../src/lib/db";
 import {
   CACHE_POLICIES,
   getHomeCacheHeaders,
@@ -28,10 +28,11 @@ import { handleCatalogRequest } from "../src/routes/api.catalog";
 import { handleGameHttpRequest } from "../src/routes/games.$game";
 import { handleChildHttpRequest } from "../src/routes/games.$game_.$child";
 import { handlePrivacyHttpRequest } from "../src/routes/privacy";
-import ingestionWorker, { type IngestionEnv } from "../workers/ingestion";
-import publicWorker from "../src/server";
+import { runBoundedCatalogImport, INITIAL_SEED_APP_IDS } from "../workers/catalog-seed";
+import { runHourlyPriceFeedTick } from "../workers/price-collector";
+import { syncReleaseFactsFromApps } from "../workers/release-facts";
 
-// Load SQL migrations for in-memory D1 test database
+// Load SQL migrations for in-memory SQLite test database
 const migration0001 = readFileSync(resolve(import.meta.dir, "../migrations/0001_catalog.sql"), "utf8");
 const migration0002 = readFileSync(resolve(import.meta.dir, "../migrations/0002_player_activity.sql"), "utf8");
 const migration0003 = readFileSync(resolve(import.meta.dir, "../migrations/0003_player_rollups.sql"), "utf8");
@@ -40,13 +41,13 @@ const migration0005 = readFileSync(resolve(import.meta.dir, "../migrations/0005_
 const migration0006 = readFileSync(resolve(import.meta.dir, "../migrations/0006_releases.sql"), "utf8");
 const migration0007 = readFileSync(resolve(import.meta.dir, "../migrations/0007_release_lifecycle.sql"), "utf8");
 
-function createSqliteD1Adapter(db: Database): D1Database {
+function createSqliteAdapter(db: Database): AppDatabase {
   return {
-    prepare(query: string): D1PreparedStatement {
+    prepare(query: string): AppPreparedStatement {
       let boundValues: unknown[] = [];
 
       const statement = {
-        bind(...values: unknown[]): D1PreparedStatement {
+        bind(...values: unknown[]): AppPreparedStatement {
           boundValues = values;
           return statement;
         },
@@ -91,7 +92,7 @@ function createSqliteD1Adapter(db: Database): D1Database {
       return statement;
     },
 
-    async batch<T = unknown>(statements: D1PreparedStatement[]) {
+    async batch<T = unknown>(statements: AppPreparedStatement[]) {
       const results: { success: boolean; results?: T[] }[] = [];
       for (const statement of statements) {
         const res = await statement.all<T>();
@@ -107,58 +108,9 @@ function createSqliteD1Adapter(db: Database): D1Database {
   };
 }
 
-function parseJsonc(content: string): Record<string, unknown> {
-  const cleaned = content
-    .replace(/\/\*[\s\S]*?\*\//g, "")
-    .replace(/\/\/.*/g, "")
-    .replace(/,\s*([\]}])/g, "$1");
-  return JSON.parse(cleaned);
-}
-
-describe("public worker asset routing", () => {
-  it("serves built assets through the ASSETS binding", async () => {
-    const assetRequest = new Request("https://vaporstats.com/assets/site.css");
-    const response = await publicWorker.fetch(assetRequest, {
-      ASSETS: {
-        fetch(request: Request) {
-          expect(request).toBe(assetRequest);
-          return Promise.resolve(
-            new Response("body {}", {
-              headers: { "Content-Type": "text/css" },
-            }),
-          );
-        },
-      } as Fetcher,
-    });
-
-    expect(response.status).toBe(200);
-    expect(response.headers.get("Content-Type")).toBe("text/css");
-  });
-
-  it("serves root static assets (favicon, logo) through the ASSETS binding", async () => {
-    const iconRequest = new Request("https://vaporstats.com/favicon.ico");
-    const response = await publicWorker.fetch(iconRequest, {
-      ASSETS: {
-        fetch(request: Request) {
-          expect(request).toBe(iconRequest);
-          return Promise.resolve(
-            new Response("ico-bytes", {
-              headers: { "Content-Type": "image/x-icon" },
-            }),
-          );
-        },
-      } as Fetcher,
-    });
-
-    expect(response.status).toBe(200);
-    expect(response.headers.get("Content-Type")).toBe("image/x-icon");
-    expect(response.headers.get("Cache-Control")).toBe("public, max-age=86400");
-  });
-});
-
-describe("public worker launch contract", () => {
+describe("public API launch contract", () => {
   let sqliteDb: Database;
-  let d1: D1Database;
+  let d1: AppDatabase;
 
   beforeEach(async () => {
     sqliteDb = new Database(":memory:");
@@ -169,7 +121,7 @@ describe("public worker launch contract", () => {
     sqliteDb.exec(migration0005);
     sqliteDb.exec(migration0006);
     sqliteDb.exec(migration0007);
-    d1 = createSqliteD1Adapter(sqliteDb);
+    d1 = createSqliteAdapter(sqliteDb);
 
     // Seed test playable game and child expansion
     sqliteDb.exec(`
@@ -337,75 +289,6 @@ describe("public worker launch contract", () => {
 });
 
 describe("launch scope exclusions", () => {
-  it("verifies both workers share D1 configuration and database identity", () => {
-    const publicConfig = parseJsonc(readFileSync(resolve(import.meta.dir, "../wrangler.jsonc"), "utf8")) as {
-      name: string;
-      d1_databases: Array<{ binding: string; database_name: string; database_id: string }>;
-    };
-
-    const ingestionConfig = parseJsonc(readFileSync(resolve(import.meta.dir, "../wrangler.ingestion.jsonc"), "utf8")) as {
-      name: string;
-      d1_databases: Array<{ binding: string; database_name: string; database_id: string }>;
-    };
-
-    expect(publicConfig.d1_databases).toBeDefined();
-    expect(ingestionConfig.d1_databases).toBeDefined();
-    expect(publicConfig.d1_databases.length).toBe(1);
-    expect(ingestionConfig.d1_databases.length).toBe(1);
-
-    const publicD1 = publicConfig.d1_databases[0];
-    const ingestionD1 = ingestionConfig.d1_databases[0];
-
-    expect(publicD1.binding).toBe("DB");
-    expect(ingestionD1.binding).toBe("DB");
-    expect(publicD1.database_name).toBe("vaporstats-d1");
-    expect(ingestionD1.database_name).toBe("vaporstats-d1");
-    expect(publicD1.database_id).toBe(ingestionD1.database_id);
-    expect(publicD1.database_id).toMatch(
-      /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
-    );
-  });
-
-  it("verifies observability is enabled on both workers", () => {
-    const publicConfig = parseJsonc(readFileSync(resolve(import.meta.dir, "../wrangler.jsonc"), "utf8")) as {
-      observability?: { enabled: boolean };
-    };
-    const ingestionConfig = parseJsonc(readFileSync(resolve(import.meta.dir, "../wrangler.ingestion.jsonc"), "utf8")) as {
-      observability?: { enabled: boolean };
-    };
-
-    expect(publicConfig.observability?.enabled).toBe(true);
-    expect(ingestionConfig.observability?.enabled).toBe(true);
-  });
-
-  it("verifies only single approved 10-minute cron exists and no queues/services/workflows exist", () => {
-    const publicConfig = parseJsonc(readFileSync(resolve(import.meta.dir, "../wrangler.jsonc"), "utf8")) as Record<string, unknown>;
-    const ingestionConfig = parseJsonc(readFileSync(resolve(import.meta.dir, "../wrangler.ingestion.jsonc"), "utf8")) as Record<string, unknown>;
-
-    // 1. Cron triggers: public has none, ingestion has exactly ["*/10 * * * *"]
-    expect(publicConfig.triggers).toBeUndefined();
-    const triggers = ingestionConfig.triggers as { crons?: string[] } | undefined;
-    expect(triggers?.crons).toEqual(["*/10 * * * *"]);
-
-    // 2. Disallowed Cloudflare architecture features
-    const disallowedKeys = [
-      "queues",
-      "services",
-      "workflows",
-      "kv_namespaces",
-      "r2_buckets",
-      "durable_objects",
-      "ai",
-      "vectorize",
-      "hyperdrive",
-    ];
-
-    for (const key of disallowedKeys) {
-      expect(publicConfig[key]).toBeUndefined();
-      expect(ingestionConfig[key]).toBeUndefined();
-    }
-  });
-
   it("verifies no admin or debug routes exist in public routing tree", () => {
     const routesDir = resolve(import.meta.dir, "../src/routes");
     const routeFiles = readdirSync(routesDir);
@@ -421,7 +304,7 @@ describe("launch scope exclusions", () => {
 
 describe("operating triggers", () => {
   let sqliteDb: Database;
-  let d1: D1Database;
+  let d1: AppDatabase;
 
   beforeEach(() => {
     sqliteDb = new Database(":memory:");
@@ -432,170 +315,7 @@ describe("operating triggers", () => {
     sqliteDb.exec(migration0005);
     sqliteDb.exec(migration0006);
     sqliteDb.exec(migration0007);
-    d1 = createSqliteD1Adapter(sqliteDb);
-  });
-
-  it("emits structured completion log and honors ctx.waitUntil during scheduled invocation", async () => {
-    const logs: string[] = [];
-    const originalLog = console.log;
-    console.log = (...args: unknown[]) => {
-      logs.push(args.map(String).join(" "));
-    };
-
-    let waitedPromise: Promise<unknown> | null = null;
-    const ctx = {
-      waitUntil: (p: Promise<unknown>) => {
-        waitedPromise = p;
-      },
-    };
-
-    const env: IngestionEnv = {
-      DB: d1,
-      FETCH: (async () => Response.json({})) as unknown as typeof fetch,
-    };
-
-    try {
-      await ingestionWorker.scheduled(
-        {
-          cron: "*/10 * * * *",
-          scheduledTime: Date.now(),
-          type: "scheduled",
-        },
-        env,
-        ctx
-      );
-
-      // Verify ctx.waitUntil was passed a promise
-      expect(waitedPromise).not.toBeNull();
-      await waitedPromise;
-
-      // Verify structured JSON completion log was emitted
-      const completionLog = logs.find((l) => l.includes('"event":"ingestion_completion"'));
-      expect(completionLog).toBeDefined();
-
-      const parsed = JSON.parse(completionLog!) as {
-        event: string;
-        cron: string;
-        durationMs: number;
-        tick: { attempted: number; successful: number; failed: number };
-        discovery: unknown;
-        rollups: unknown;
-        prices: unknown;
-      };
-
-      expect(parsed.event).toBe("ingestion_completion");
-      expect(parsed.cron).toBe("*/10 * * * *");
-      expect(typeof parsed.durationMs).toBe("number");
-      expect(parsed.durationMs).toBeGreaterThanOrEqual(0);
-      expect(parsed.tick).toBeDefined();
-      expect(typeof parsed.tick.attempted).toBe("number");
-    } finally {
-      console.log = originalLog;
-    }
-  });
-
-  it("runs the price feed on every ten-minute scheduled invocation", async () => {
-    const logs: string[] = [];
-    const originalLog = console.log;
-    console.log = (...args: unknown[]) => {
-      logs.push(args.map(String).join(" "));
-    };
-
-    const customFetch = (async (input: unknown) => {
-      const url = String(input);
-      if (url.includes("IStoreService/GetAppList")) {
-        return Response.json({
-          response: {
-            apps: [{ appid: 570, last_modified: 100 }],
-            have_more_results: false,
-          },
-        });
-      }
-      if (url.includes("api/appdetails")) {
-        return Response.json({
-          "570": {
-            success: true,
-            data: {
-              name: "Dota 2",
-              steam_appid: 570,
-              type: "game",
-              is_free: true,
-              release_date: { coming_soon: false, date: "Jul 9, 2013" },
-            },
-          },
-        });
-      }
-      return Response.json({});
-    }) as unknown as typeof fetch;
-
-    try {
-      await ingestionWorker.scheduled(
-        {
-          cron: "*/10 * * * *",
-          scheduledTime: new Date("2026-09-04T14:20:00.000Z").getTime(),
-          type: "scheduled",
-        },
-        {
-          DB: d1,
-          STEAM_API_KEY: "test_key",
-          FETCH: customFetch,
-        }
-      );
-
-      const completionLog = logs.find((line) =>
-        line.includes('"event":"ingestion_completion"')
-      );
-      const parsed = JSON.parse(completionLog!) as {
-        prices: { executed: boolean; successful: number } | null;
-      };
-      expect(parsed.prices).toMatchObject({ executed: true, successful: 1 });
-      const releaseFact = await d1
-        .prepare("SELECT release_date FROM release_facts WHERE appid = ?")
-        .bind(570)
-        .first<{ release_date: string }>();
-      expect(releaseFact?.release_date).toBe("2013-07-09");
-    } finally {
-      console.log = originalLog;
-    }
-  });
-
-  it("promotes newly observed leaders before the next scheduled tick", async () => {
-    sqliteDb.exec(`
-      INSERT INTO apps (appid, name, slug, type, is_playable, is_eligible)
-      VALUES (570, 'Dota 2', '570-dota-2', 'game', 1, 1);
-      INSERT INTO tracked_games (
-        appid, tier, slot, next_due_at, latest_players, last_successful_at
-      )
-      VALUES (
-        570, 'daily', 138, '2026-09-05T23:00:00.000Z', 500000, '2026-09-04T14:00:00.000Z'
-      );
-    `);
-
-    await ingestionWorker.scheduled(
-      {
-        cron: "*/10 * * * *",
-        scheduledTime: new Date("2026-09-04T14:20:00.000Z").getTime(),
-        type: "scheduled",
-      },
-      { DB: d1 }
-    );
-
-    const tracked = await d1
-      .prepare(
-        "SELECT tier, slot, next_due_at, last_successful_at FROM tracked_games WHERE appid = 570"
-      )
-      .first<{
-        tier: string;
-        slot: number;
-        next_due_at: string;
-        last_successful_at: string;
-      }>();
-    expect(tracked).toMatchObject({
-      tier: "fast",
-      slot: 0,
-      next_due_at: "2026-09-04T14:30:00.000Z",
-      last_successful_at: "2026-09-04T14:00:00.000Z",
-    });
+    d1 = createSqliteAdapter(sqliteDb);
   });
 
   it("verifies hard ingestion constants are bounded and inspectable", () => {
@@ -624,47 +344,88 @@ describe("operating triggers", () => {
     }
   });
 
-  it("sanitizes authenticated manual numeric caps to finite positive integers within existing hard maxima", async () => {
-    const env: IngestionEnv = {
-      DB: d1,
-      INGESTION_TRIGGER_SECRET: "test-secret-123",
-      FETCH: (async () => Response.json({})) as unknown as typeof fetch,
-    };
+  it("bootstraps an empty catalog from the finite initial seed list", async () => {
+    sqliteDb.exec("DELETE FROM apps");
+    const detailCalls: number[] = [];
+    const fetchFn = (async (input: unknown) => {
+      const url = String(input);
+      if (url.includes("IStoreBrowseService/GetItems")) {
+        return Response.json({ response: { store_items: [] } });
+      }
+      const appid = Number(new URL(url).searchParams.get("appids"));
+      detailCalls.push(appid);
+      return Response.json({
+        [String(appid)]: {
+          success: true,
+          data: {
+            type: "game",
+            name: "Seeded " + appid,
+            steam_appid: appid,
+            release_date: { coming_soon: false, date: "Jan 1, 2020" },
+          },
+        },
+      });
+    }) as unknown as typeof fetch;
 
-    // 1. Unauthorized request returns 401
-    const unauthReq = new Request("https://vaporstats-ingestion.local/api/ingest/scheduled", {
-      method: "POST",
-    });
-    const unauthRes = await ingestionWorker.fetch(unauthReq, env);
-    expect(unauthRes.status).toBe(401);
+    const result = await runBoundedCatalogImport(d1, { limit: 3, children: [], fetchFn });
+    expect(result.seededCount).toBe(3);
+    expect(result.importedAppIds).toEqual(INITIAL_SEED_APP_IDS.slice(0, 3));
+    expect(detailCalls).toEqual(INITIAL_SEED_APP_IDS.slice(0, 3));
+    expect(
+      sqliteDb.query("SELECT COUNT(*) AS count FROM apps").get() as { count: number }
+    ).toEqual({ count: 3 });
+  });
 
-    // 2. Health check endpoint returns 200 without auth
-    const healthReq = new Request("https://vaporstats-ingestion.local/health", {
-      method: "GET",
-    });
-    const healthRes = await ingestionWorker.fetch(healthReq, env);
-    expect(healthRes.status).toBe(200);
-    const healthBody = await healthRes.json() as { status: string; worker: string };
-    expect(healthBody.status).toBe("ok");
-    expect(healthBody.worker).toBe("vaporstats-ingestion");
-
-    // 3. Authenticated manual trigger with malformed/excessive caps
-    const authReq = new Request("https://vaporstats-ingestion.local/api/ingest/scheduled", {
-      method: "POST",
-      headers: {
-        Authorization: "Bearer test-secret-123",
-        "Content-Type": "application/json",
+  it("persists bounded orphan retry state instead of rescanning prices each tick", async () => {
+    sqliteDb.exec(
+      "INSERT INTO app_prices (appid, observed_at) VALUES (999001, '2026-09-04T12:00:00.000Z')"
+    );
+    const queries: string[] = [];
+    const observedDb: AppDatabase = {
+      ...d1,
+      prepare(query: string) {
+        queries.push(query);
+        return d1.prepare(query);
       },
-      body: JSON.stringify({
-        tickCap: -50,
-        dailyCap: 99999999,
-      }),
+    };
+    const failingFetch = (async () => new Response("unavailable", { status: 503 })) as unknown as typeof fetch;
+
+    const first = await runHourlyPriceFeedTick(observedDb, {
+      apiKey: "test-key",
+      anchorTime: new Date("2026-09-04T14:20:00.000Z"),
+      customFetch: failingFetch,
+    });
+    const orphanQueriesAfterFirst = queries.filter((query) => query.includes("FROM app_prices"));
+    const second = await runHourlyPriceFeedTick(observedDb, {
+      apiKey: "test-key",
+      anchorTime: new Date("2026-09-04T14:30:00.000Z"),
+      customFetch: failingFetch,
     });
 
-    const authRes = await ingestionWorker.fetch(authReq, env);
-    expect(authRes.status).toBe(200);
-    const body = await authRes.json() as { success: boolean; tick: unknown };
-    expect(body.success).toBe(true);
-    expect(body.tick).toBeDefined();
+    expect(first.pending).toBe(1);
+    expect(second.pending).toBe(1);
+    expect(queries.filter((query) => query.includes("FROM app_prices"))).toHaveLength(
+      orphanQueriesAfterFirst.length
+    );
+  });
+
+  it("limits release synchronization to changed app IDs", async () => {
+    sqliteDb.exec(
+      "INSERT INTO apps (appid, name, slug, type, is_playable, is_eligible, release_date, release_status) VALUES (910001, 'Changed Game', '910001-changed-game', 'game', 1, 1, '2020-01-01', 'released'), (910002, 'Unchanged Game', '910002-unchanged-game', 'game', 1, 1, '2020-01-02', 'released')"
+    );
+
+    const result = await syncReleaseFactsFromApps(d1, { appIds: [910001] });
+    const changed = await d1
+      .prepare("SELECT appid FROM release_facts WHERE appid = ?")
+      .bind(910001)
+      .first<{ appid: number }>();
+    const unchanged = await d1
+      .prepare("SELECT appid FROM release_facts WHERE appid = ?")
+      .bind(910002)
+      .first<{ appid: number }>();
+
+    expect(result.processedCount).toBe(1);
+    expect(changed?.appid).toBe(910001);
+    expect(unchanged).toBeNull();
   });
 });
