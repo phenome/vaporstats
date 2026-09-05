@@ -6,6 +6,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "prototype:game-detail": "bun run build && wrangler dev --config dist/server/wrangler.json --port 8788",
     "images:optimize": "bun scripts/optimize-images.ts",
     "build": "bun scripts/optimize-images.ts && vite build",
     "test": "bun test",

@@ -20,6 +20,9 @@ export interface GamePageProps {
   playerHistory?: PlayerHistoryResult;
   price?: PriceState | null;
   priceHistory?: PriceHistoryResult | null;
+  releasePresentation?: React.ReactNode;
+  releaseSummary?: React.ReactNode;
+  releasePresentationPlacement?: "body" | "hero-float";
 }
 
 export function GamePageView({
@@ -28,6 +31,9 @@ export function GamePageView({
   playerHistory,
   price,
   priceHistory,
+  releasePresentation,
+  releaseSummary,
+  releasePresentationPlacement = "body",
 }: GamePageProps) {
   return (
     <div className="max-w-7xl mx-auto px-4 py-8 space-y-6">
@@ -38,16 +44,9 @@ export function GamePageView({
             <span className="px-2 py-0.5 bg-orange-500/10 text-orange-400 border border-orange-500/30 text-[10px] font-mono uppercase tracking-widest">
               {game.type}
             </span>
-            <span className="text-xs font-mono text-zinc-500">
-              APPID <strong className="text-zinc-300 tabular-nums">{game.appid}</strong>
-            </span>
+            {releaseSummary}
           </div>
           <div className="flex items-center gap-4 text-xs font-mono">
-            {game.release_date && (
-              <div className="text-zinc-400">
-                RELEASED: <span className="text-zinc-200">{game.release_date}</span>
-              </div>
-            )}
             <a
               href={`https://store.steampowered.com/app/${game.appid}/`}
               target="_blank"
@@ -58,6 +57,8 @@ export function GamePageView({
             </a>
           </div>
         </div>
+
+        {releasePresentationPlacement === "body" && releasePresentation}
 
         <div className="flex flex-col md:flex-row gap-6 items-start">
           {game.header_image ? (
@@ -72,16 +73,18 @@ export function GamePageView({
             </div>
           )}
 
-          <div className="flex-1 space-y-3">
-            <h1 className="text-2xl md:text-3xl font-mono font-bold text-zinc-100 tracking-tight">
-              {game.name}
-            </h1>
-            {game.description && (
-              <p className="text-sm text-zinc-400 leading-relaxed max-w-3xl font-sans">
-                {game.description}
-              </p>
-            )}
-
+          <div className="flex-1">
+            <div className="flow-root space-y-3">
+              {releasePresentationPlacement === "hero-float" && releasePresentation}
+              <h1 className="text-2xl md:text-3xl font-mono font-bold text-zinc-100 tracking-tight">
+                {game.name}
+              </h1>
+              {game.description && (
+                <p className="text-sm text-zinc-400 leading-relaxed font-sans">
+                  {game.description}
+                </p>
+              )}
+            </div>
             <div className="grid grid-cols-2 gap-3 pt-2 text-xs font-mono">
               <div className="border border-zinc-900 bg-zinc-900/40 p-2.5">
                 <div className="text-zinc-500 text-[10px] uppercase">Developer</div>
