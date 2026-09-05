@@ -1,8 +1,9 @@
 import { describe, test, expect, beforeAll, afterAll } from "bun:test";
 import { Database, type SQLQueryBindings } from "bun:sqlite";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
+import { applyMigrations } from "../src/lib/migrations";
 import { closeDb, getDb, type AppDatabase, type AppPreparedStatement } from "../src/lib/db";
 import {
   listPlayableGames,
@@ -23,18 +24,6 @@ import { handleGameHttpRequest } from "../src/routes/games.$game";
 import { CACHE_POLICIES } from "../src/lib/cache";
 import { toSlug, parseGameSlug, getCanonicalGamePath } from "../src/lib/slug";
 
-const migrationFiles = [
-  "0001_catalog.sql",
-  "0002_player_activity.sql",
-  "0003_player_rollups.sql",
-  "0004_related_apps.sql",
-  "0005_prices.sql",
-  "0006_releases.sql",
-  "0007_release_lifecycle.sql",
-];
-const migrationSql = migrationFiles
-  .map((file) => readFileSync(resolve(import.meta.dir, `../migrations/${file}`), "utf8"))
-  .join("\n");
 
 /**
  * In-memory SQLite application database adapter for test execution.
@@ -115,6 +104,7 @@ function createSqliteAppAdapter(db: Database): AppDatabase {
 
 function createFreshDb(): AppDatabase {
   const sqlite = new Database(":memory:");
+  applyMigrations(sqlite);
   return createSqliteAppAdapter(sqlite);
 }
 
@@ -123,7 +113,6 @@ describe("Catalog Foundation", () => {
 
   beforeAll(async () => {
     db = createFreshDb();
-    await db.exec(migrationSql);
   });
 
   afterAll(() => {
@@ -132,7 +121,6 @@ describe("Catalog Foundation", () => {
 
   test("fresh catalog migration", async () => {
     const freshDb = createFreshDb();
-    await freshDb.exec(migrationSql);
 
 
     const previousDatabasePath = process.env.DATABASE_PATH;
@@ -184,7 +172,6 @@ describe("Catalog Foundation", () => {
 
   test("bounded catalog seed", async () => {
     const freshDb = createFreshDb();
-    await freshDb.exec(migrationSql);
 
     // Mock Steam store API response
     const mockFetch = (async (url: string | URL | Request) => {
@@ -255,7 +242,6 @@ describe("Catalog Foundation", () => {
   });
   test("prefers original release date over Steam release date", async () => {
     const freshDb = createFreshDb();
-    await freshDb.exec(migrationSql);
 
     const mockFetch = (async (url: string | URL | Request) => {
       const urlStr = url.toString();
@@ -268,8 +254,7 @@ describe("Catalog Foundation", () => {
                 release: {
                   original_release_date: "2018-06-30",
                   steam_release_date: "2026-08-31",
-                  original_steam_release_date: "2018-06-29",
-                  release_from_early_access_date: "2018-06-30",
+                  original_steam_release_date: "2014-12-23",
                   is_coming_soon: false,
                   is_early_access: null,
                 },
@@ -305,14 +290,211 @@ describe("Catalog Foundation", () => {
       release_date_source: "original_release_date",
       original_release_date: "2018-06-30",
       steam_release_date: "2026-08-31",
-      original_steam_release_date: "2018-06-29",
-      release_from_early_access_date: "2018-06-30",
+      original_steam_release_date: "2014-12-23",
+      release_from_early_access_date: null,
       is_early_access: null,
+    });
+  });
+
+  test("catalog refresh repairs missing release provenance on an existing row", async () => {
+    const freshDb = createFreshDb();
+    await upsertApp(freshDb, {
+      appid: 777150,
+      name: "Adventure Land",
+      type: "game",
+      is_playable: true,
+      is_eligible: true,
+      release_date: "Aug 31, 2026",
+      release_from_early_access_date: "2019-01-28",
+      has_left_early_access: false,
+    });
+    await queueCatalogRefresh(freshDb, { appIds: [777150] });
+
+    const mockFetch = (async (url: string | URL | Request) => {
+      const urlStr = url.toString();
+      if (urlStr.includes("IStoreBrowseService/GetItems")) {
+        return Response.json({
+          response: {
+            store_items: [
+              {
+                appid: 777150,
+                release: {
+                  steam_release_date: 1788226590,
+                  original_release_date: 1548662400,
+                  original_steam_release_date: 1548706361,
+                },
+              },
+            ],
+          },
+        });
+      }
+      return Response.json({
+        "777150": {
+          success: true,
+          data: {
+            type: "game",
+            name: "Adventure Land",
+            steam_appid: 777150,
+            detailed_description: "This game has left Early Access.",
+            release_date: { coming_soon: false, date: "Aug 31, 2026" },
+          },
+        },
+      });
+    }) as unknown as typeof fetch;
+
+    const refresh = await refreshCatalogBatch(freshDb, {
+      successTarget: 1,
+      attemptCap: 1,
+      fetchFn: mockFetch,
+    });
+    const app = await getGameByAppId(freshDb, 777150);
+
+    expect(refresh).toMatchObject({ attempted: 1, successful: 1, failed: 0, pending: 0 });
+    expect(app).toMatchObject({
+      release_date: "2019-01-28",
+      release_date_source: "original_release_date",
+      original_release_date: "2019-01-28",
+      steam_release_date: "2026-08-31",
+      original_steam_release_date: "2019-01-28",
+      release_from_early_access_date: null,
+      has_left_early_access: true,
+    });
+  });
+
+  test("StoreBrowse enrichment failures remain pending for retry", async () => {
+    const freshDb = createFreshDb();
+    await upsertApp(freshDb, {
+      appid: 777151,
+      name: "Adventure Land Existing",
+      type: "game",
+      is_playable: true,
+      is_eligible: true,
+      release_date: "2019-01-28",
+      release_date_source: "original_release_date",
+      original_release_date: "2019-01-28",
+      steam_release_date: "2026-08-31",
+      original_steam_release_date: "2019-01-28",
+      release_from_early_access_date: "2019-01-28",
+      has_left_early_access: false,
+      is_early_access: false,
+    });
+    await queueCatalogRefresh(freshDb, { appIds: [777151] });
+
+    let browseAttempts = 0;
+    const mockFetch = (async (url: string | URL | Request) => {
+      const urlStr = url.toString();
+      if (urlStr.includes("IStoreBrowseService/GetItems")) {
+        browseAttempts++;
+        if (browseAttempts === 1) return new Response("StoreBrowse unavailable", { status: 503 });
+        return Response.json({
+          response: {
+            store_items: [
+              {
+                appid: 777151,
+                release: {
+                  steam_release_date: 1788226590,
+                  original_release_date: 1548662400,
+                  original_steam_release_date: 1548706361,
+                  is_coming_soon: false,
+                  is_early_access: false,
+                },
+              },
+            ],
+          },
+        });
+      }
+      return Response.json({
+        "777151": {
+          success: true,
+          data: {
+            type: "game",
+            name: "Adventure Land Existing",
+            steam_appid: 777151,
+            detailed_description: "This game has left Early Access.",
+            release_date: { coming_soon: false, date: "Aug 31, 2026" },
+          },
+        },
+      });
+    }) as unknown as typeof fetch;
+
+    const failedRefresh = await refreshCatalogBatch(freshDb, {
+      successTarget: 1,
+      attemptCap: 1,
+      fetchFn: mockFetch,
+    });
+    expect(failedRefresh).toMatchObject({ attempted: 1, successful: 0, failed: 1, pending: 1, active: true });
+    expect((await getCheckpoint(freshDb, CATALOG_REFRESH_CHECKPOINT_KEY))?.value).toContain("777151");
+
+    const successfulRefresh = await refreshCatalogBatch(freshDb, {
+      successTarget: 1,
+      attemptCap: 1,
+      fetchFn: mockFetch,
+    });
+    const app = await getGameByAppId(freshDb, 777151);
+    expect(successfulRefresh).toMatchObject({ attempted: 1, successful: 1, failed: 0, pending: 0, active: false });
+    expect(browseAttempts).toBe(2);
+    expect(app).toMatchObject({
+      release_date: "2019-01-28",
+      release_date_source: "original_release_date",
+      original_release_date: "2019-01-28",
+      steam_release_date: "2026-08-31",
+      original_steam_release_date: "2019-01-28",
+      release_from_early_access_date: null,
+      has_left_early_access: true,
+    });
+  });
+
+  test("normalizes Nexus release fields and keeps Steam source distinct", async () => {
+    const freshDb = createFreshDb();
+    const mockFetch = (async (url: string | URL | Request) => {
+      if (url.toString().includes("IStoreBrowseService/GetItems")) {
+        return Response.json({
+          response: {
+            store_items: [
+              {
+                appid: 6420,
+                release: {
+                  original_release_date: 1099641600,
+                  steam_release_date: 1183446000,
+                  is_coming_soon: false,
+                  is_early_access: false,
+                },
+              },
+            ],
+          },
+        });
+      }
+      return Response.json({
+        "6420": {
+          success: true,
+          data: {
+            type: "game",
+            name: "Nexus",
+            steam_appid: 6420,
+            release_date: { coming_soon: false, date: "Jul 3, 2007" },
+          },
+        },
+      });
+    }) as unknown as typeof fetch;
+
+    await runBoundedCatalogImport(freshDb, {
+      limit: 1,
+      appIds: [6420],
+      fetchFn: mockFetch,
+    });
+    const app = await getGameByAppId(freshDb, 6420);
+
+    expect(app).toMatchObject({
+      release_date: "2004-11-05",
+      release_date_source: "original_release_date",
+      original_release_date: "2004-11-05",
+      steam_release_date: "2007-07-03",
+      original_steam_release_date: null,
+      release_from_early_access_date: null,
     });
   });
   test("targeted refresh IDs merge and dedupe in the durable queue", async () => {
     const freshDb = createFreshDb();
-    await freshDb.exec(migrationSql);
 
     const first = await queueCatalogRefresh(freshDb, {
       appIds: [339820, 339821, 339820],
@@ -328,11 +510,10 @@ describe("Catalog Foundation", () => {
     expect(first).toMatchObject({ queued: 2, alreadyQueued: false });
     expect(second).toMatchObject({ queued: 3, alreadyQueued: false });
     expect(repeated).toMatchObject({ queued: 3, alreadyQueued: true });
-    expect(JSON.parse(checkpoint?.value ?? "{}").pending).toEqual([339820, 339821, 339822]);
+    expect(JSON.parse(checkpoint?.value ?? "{}").pending).toEqual([339820, 339822, 339821]);
   });
   test("ordinary refresh failures remain pending", async () => {
     const freshDb = createFreshDb();
-    await freshDb.exec(migrationSql);
     for (const appid of [339824, 339825]) {
       await upsertApp(freshDb, {
         appid,
@@ -391,7 +572,6 @@ describe("Catalog Foundation", () => {
   });
   test("catalog refresh preserves current and unattempted IDs after a Steam rate limit", async () => {
     const freshDb = createFreshDb();
-    await freshDb.exec(migrationSql);
     for (const appid of [339823, 339824, 339825]) {
       await upsertApp(freshDb, {
         appid,
@@ -429,7 +609,6 @@ describe("Catalog Foundation", () => {
 
   test("playable catalog only", async () => {
     const freshDb = createFreshDb();
-    await freshDb.exec(migrationSql);
 
     // Seed playable games and accessory peers (DLC, server, tool, ineligible)
     await upsertApp(freshDb, {
@@ -498,7 +677,6 @@ describe("Catalog Foundation", () => {
 
   test("canonical game response", async () => {
     const freshDb = createFreshDb();
-    await freshDb.exec(migrationSql);
 
     await upsertApp(freshDb, {
       appid: 730,
@@ -525,7 +703,6 @@ describe("Catalog Foundation", () => {
 
   test("appid authoritative routing", async () => {
     const freshDb = createFreshDb();
-    await freshDb.exec(migrationSql);
 
     await upsertApp(freshDb, {
       appid: 570,
@@ -587,7 +764,6 @@ describe("Catalog Foundation", () => {
 
   test("unobserved game state", async () => {
     const freshDb = createFreshDb();
-    await freshDb.exec(migrationSql);
 
     // Eligible game with NO observations
     await upsertApp(freshDb, {
@@ -617,7 +793,6 @@ describe("Catalog Foundation", () => {
 
   test("generation and cache boundary", async () => {
     const freshDb = createFreshDb();
-    await freshDb.exec(migrationSql);
 
     await upsertApp(freshDb, {
       appid: 730,

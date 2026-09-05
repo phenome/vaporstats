@@ -89,6 +89,7 @@ interface RawRelatedRow {
   release_from_early_access_date: string | null;
   release_date_source: ReleaseDateSource;
   is_early_access: number | boolean | null;
+  has_left_early_access: number | boolean | null;
   release_status: string;
   description: string;
   header_image: string;
@@ -148,6 +149,12 @@ function mapRowToCatalogEntity(row: RawRelatedRow): CatalogEntity {
         : typeof row.is_early_access === "boolean"
           ? row.is_early_access
           : row.is_early_access === 1,
+    has_left_early_access:
+      row.has_left_early_access == null
+        ? null
+        : typeof row.has_left_early_access === "boolean"
+          ? row.has_left_early_access
+          : row.has_left_early_access === 1,
     release_status: (row.release_status as CatalogEntity["release_status"]) || "released",
     description: row.description || "",
     header_image: row.header_image || "",
@@ -173,6 +180,7 @@ const SEARCH_PARENT_COLUMNS = [
   "p.release_from_early_access_date AS parent_search_release_from_early_access_date",
   "p.release_date_source AS parent_search_release_date_source",
   "p.is_early_access AS parent_search_is_early_access",
+  "p.has_left_early_access AS parent_search_has_left_early_access",
   "p.release_status AS parent_search_release_status",
   "p.description AS parent_search_description",
   "p.header_image AS parent_search_header_image",
@@ -478,6 +486,7 @@ export async function searchCatalog(
     parent_search_release_from_early_access_date: string | null;
     parent_search_release_date_source: ReleaseDateSource;
     parent_search_is_early_access: number | boolean | null;
+    parent_search_has_left_early_access: number | boolean | null;
     parent_search_release_status: string;
     parent_search_description: string;
     parent_search_header_image: string;
@@ -518,6 +527,7 @@ export async function searchCatalog(
         release_date_source: row.parent_search_release_date_source,
         is_early_access: row.parent_search_is_early_access,
         release_status: row.parent_search_release_status,
+        has_left_early_access: row.parent_search_has_left_early_access,
         description: row.parent_search_description,
         header_image: row.parent_search_header_image,
         developer: row.parent_search_developer,

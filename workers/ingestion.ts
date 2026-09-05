@@ -152,14 +152,6 @@ async function performIngestionTick(options: IngestionTickOptions): Promise<Inge
     checkpointKey: CATALOG_REFRESH_CHECKPOINT_KEY,
     fetchFn: customFetch,
   });
-  if (catalogRefreshResult.records.length > 0) {
-    await syncReleaseFactsFromApps(options.db, {
-      apps: catalogRefreshResult.records.map((record) => ({
-        ...record,
-        type: record.type ?? "game",
-      })),
-    });
-  }
 
   const { records: _records, ...catalogRefresh } = catalogRefreshResult;
   return {

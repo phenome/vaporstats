@@ -1,10 +1,9 @@
 import { describe, test, expect, beforeAll } from "bun:test";
 import { Database, type SQLQueryBindings } from "bun:sqlite";
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
 import { renderToString } from "react-dom/server";
 import React from "react";
 import type { AppDatabase, AppPreparedStatement } from "../src/lib/db";
+import { applyMigrations } from "../src/lib/migrations";
 import { upsertApp } from "../src/lib/catalog";
 import {
   toPublisherSlug,
@@ -17,19 +16,6 @@ import {
 } from "../src/lib/publishers";
 import { handlePublisherHttpRequest } from "../src/routes/publisher.$publisher";
 import { GamePageView } from "../src/components/game-page";
-
-const migrationFiles = [
-  "0001_catalog.sql",
-  "0002_player_activity.sql",
-  "0003_player_rollups.sql",
-  "0004_related_apps.sql",
-  "0005_prices.sql",
-  "0006_releases.sql",
-  "0007_release_lifecycle.sql",
-];
-const migrationSql = migrationFiles
-  .map((file) => readFileSync(resolve(import.meta.dir, `../migrations/${file}`), "utf8"))
-  .join("\n");
 
 function createSqliteAppAdapter(db: Database): AppDatabase {
   return {
@@ -127,8 +113,8 @@ describe("catalog publisher queries", () => {
 
   beforeAll(async () => {
     const sqlite = new Database(":memory:");
+    applyMigrations(sqlite);
     db = createSqliteAppAdapter(sqlite);
-    await db.exec(migrationSql);
 
     // Seed test games
     await upsertApp(db, {
@@ -203,8 +189,8 @@ describe("publisher route handling", () => {
 
   beforeAll(async () => {
     const sqlite = new Database(":memory:");
+    applyMigrations(sqlite);
     db = createSqliteAppAdapter(sqlite);
-    await db.exec(migrationSql);
 
     await upsertApp(db, {
       appid: 730,
@@ -261,6 +247,7 @@ describe("mention link integration", () => {
           release_from_early_access_date: null,
           release_date_source: null,
           is_early_access: null,
+          has_left_early_access: null,
           release_status: "released",
           description: "An action RPG.",
           header_image: "",

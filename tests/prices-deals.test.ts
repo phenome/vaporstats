@@ -1,9 +1,8 @@
 import { describe, test, expect, beforeEach } from "bun:test";
 import { Database, type SQLQueryBindings } from "bun:sqlite";
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
 import React from "react";
 import { renderToString } from "react-dom/server";
+import { applyMigrations } from "../src/lib/migrations";
 import { type AppDatabase, type AppPreparedStatement } from "../src/lib/db";
 import {
   recordPriceObservation,
@@ -37,34 +36,6 @@ import { handleChildHttpRequest } from "../src/routes/games.$game_.$child";
 import { ChildAppPageView } from "../src/components/child-app-page";
 import { HomeComponent, type HomeComponentProps } from "../src/components/home-page";
 import { GamePageView } from "../src/components/game-page";
-const migration0001 = readFileSync(
-  resolve(import.meta.dir, "../migrations/0001_catalog.sql"),
-  "utf8"
-);
-const migration0002 = readFileSync(
-  resolve(import.meta.dir, "../migrations/0002_player_activity.sql"),
-  "utf8"
-);
-const migration0003 = readFileSync(
-  resolve(import.meta.dir, "../migrations/0003_player_rollups.sql"),
-  "utf8"
-);
-const migration0004 = readFileSync(
-  resolve(import.meta.dir, "../migrations/0004_related_apps.sql"),
-  "utf8"
-);
-const migration0005 = readFileSync(
-  resolve(import.meta.dir, "../migrations/0005_prices.sql"),
-  "utf8"
-);
-const migration0006 = readFileSync(
-  resolve(import.meta.dir, "../migrations/0006_releases.sql"),
-  "utf8"
-);
-const migration0007 = readFileSync(
-  resolve(import.meta.dir, "../migrations/0007_release_lifecycle.sql"),
-  "utf8"
-);
 
 function createSqliteAppAdapter(db: Database): AppDatabase {
   return {
@@ -139,13 +110,7 @@ describe("VaporStats Steam Prices and Deals", () => {
 
   beforeEach(() => {
     sqliteDb = new Database(":memory:");
-    sqliteDb.exec(migration0001);
-    sqliteDb.exec(migration0002);
-    sqliteDb.exec(migration0003);
-    sqliteDb.exec(migration0004);
-    sqliteDb.exec(migration0005);
-    sqliteDb.exec(migration0006);
-    sqliteDb.exec(migration0007);
+    applyMigrations(sqliteDb);
     appDb = createSqliteAppAdapter(sqliteDb);
 
     // Seed test apps
@@ -276,10 +241,7 @@ describe("VaporStats Steam Prices and Deals", () => {
     expect(emptyFeedResult.checkpointCursor).toBe(1700005000); // Truthful cursor preserves existing checkpoint when not advanced
     // Regression: On fresh DB with no prior checkpoint and empty feed, cursor remains null
     const freshMemoryDb = new Database(":memory:");
-    freshMemoryDb.exec(migration0001);
-    freshMemoryDb.exec(migration0004);
-    freshMemoryDb.exec(migration0005);
-    freshMemoryDb.exec(migration0007);
+    applyMigrations(freshMemoryDb);
     const freshAppDb = createSqliteAppAdapter(freshMemoryDb);
     const initialEmptyResult = await runHourlyPriceFeedTick(freshAppDb, {
       apiKey: "test_key",
@@ -427,6 +389,195 @@ describe("VaporStats Steam Prices and Deals", () => {
     });
   });
 
+  test("price ingestion stores StoreBrowse release facts over appdetails date", async () => {
+    const requests: string[] = [];
+    const customFetch = (async (input: unknown) => {
+      const url = new URL(String(input));
+      requests.push(url.toString());
+
+      if (url.pathname.includes("IStoreBrowseService/GetItems")) {
+        return Response.json({
+          response: {
+            store_items: [
+              {
+                appid: 777150,
+                release: {
+                  steam_release_date: 1788226590,
+                  original_release_date: 1548662400,
+                  original_steam_release_date: 1548706361,
+                },
+              },
+            ],
+          },
+        });
+      }
+
+      if (url.pathname.includes("/api/appdetails")) {
+        return Response.json({
+          "777150": {
+            success: true,
+            data: {
+              type: "game",
+              name: "Adventure Land",
+              steam_appid: 777150,
+              is_free: false,
+              release_date: { coming_soon: false, date: "Aug 31, 2026" },
+              detailed_description: "This game has left Early Access.",
+              price_overview: {
+                currency: "USD",
+                initial: 1999,
+                final: 1499,
+                discount_percent: 25,
+              },
+            },
+          },
+        });
+      }
+
+      return new Response("Unexpected Steam endpoint", { status: 404 });
+    }) as unknown as typeof fetch;
+
+    const result = await refreshIndicatedAppPrices(appDb, [777150], {
+      customFetch,
+      anchorTime: new Date("2026-09-05T00:00:00.000Z"),
+    });
+    const app = sqliteDb
+      .query(
+        `SELECT release_date, release_date_source, original_release_date,
+                steam_release_date, original_steam_release_date,
+                release_from_early_access_date, is_early_access,
+                has_left_early_access
+         FROM apps WHERE appid = 777150`
+      )
+      .get() as Record<string, unknown> | null;
+    const price = sqliteDb
+      .query("SELECT final_price FROM app_prices WHERE appid = 777150")
+      .get() as { final_price: number } | null;
+
+    expect(result).toMatchObject({ attempted: 1, successful: 1, failed: 0 });
+    expect(price).toEqual({ final_price: 1499 });
+    expect(app).toEqual({
+      release_date: "2019-01-28",
+      release_date_source: "original_release_date",
+      original_release_date: "2019-01-28",
+      steam_release_date: "2026-08-31",
+      original_steam_release_date: "2019-01-28",
+      release_from_early_access_date: null,
+      is_early_access: null,
+      has_left_early_access: 1,
+    });
+    expect(requests.some((url) => url.includes("IStoreBrowseService/GetItems"))).toBe(true);
+    expect(requests.some((url) => url.includes("/api/appdetails"))).toBe(true);
+  });
+
+  test("price ingestion repairs an existing row missing release provenance", async () => {
+    sqliteDb.exec(
+      `INSERT INTO apps (appid, name, slug, type, is_playable, is_eligible, parent_appid, release_date)
+       VALUES (777151, 'Adventure Land Existing', '777151-adventure-land-existing', 'game', 1, 1, NULL, 'Aug 31, 2026')`
+    );
+
+    const customFetch = (async (input: unknown) => {
+      const url = new URL(String(input));
+      if (url.pathname.includes("IStoreBrowseService/GetItems")) {
+        return Response.json({
+          response: {
+            store_items: [
+              {
+                appid: 777151,
+                release: {
+                  steam_release_date: 1788226590,
+                  original_release_date: 1548662400,
+                  original_steam_release_date: 1548706361,
+                },
+              },
+            ],
+          },
+        });
+      }
+      return Response.json({
+        "777151": {
+          success: true,
+          data: {
+            type: "game",
+            name: "Adventure Land Existing",
+            steam_appid: 777151,
+            is_free: false,
+            price_overview: {
+              currency: "USD",
+              initial: 1999,
+              final: 1999,
+              discount_percent: 0,
+            },
+            release_date: { coming_soon: false, date: "Aug 31, 2026" },
+          },
+        },
+      });
+    }) as unknown as typeof fetch;
+
+    const result = await refreshIndicatedAppPrices(appDb, [777151], {
+      customFetch,
+    });
+    const app = sqliteDb
+      .query(
+        `SELECT release_date, release_date_source, original_release_date,
+                steam_release_date, original_steam_release_date
+         FROM apps WHERE appid = 777151`
+      )
+      .get() as Record<string, unknown> | null;
+    expect(result).toMatchObject({ attempted: 1, successful: 1, failed: 0 });
+    expect(app).toEqual({
+      release_date: "2019-01-28",
+      release_date_source: "original_release_date",
+      original_release_date: "2019-01-28",
+      steam_release_date: "2026-08-31",
+      original_steam_release_date: "2019-01-28",
+    });
+  });
+  test("price ingestion stops before the next app on StoreBrowse HTTP429", async () => {
+    const appdetailsIds: number[] = [];
+    const customFetch = (async (input: unknown) => {
+      const url = new URL(String(input));
+      if (url.pathname.includes("IStoreBrowseService/GetItems")) {
+        return new Response("Too Many Requests", { status: 429 });
+      }
+      if (url.pathname.includes("/api/appdetails")) {
+        const appid = Number(url.searchParams.get("appids"));
+        appdetailsIds.push(appid);
+        return Response.json({
+          [String(appid)]: {
+            success: true,
+            data: {
+              type: "game",
+              name: `Adventure Land ${appid}`,
+              steam_appid: appid,
+              is_free: false,
+              price_overview: {
+                currency: "USD",
+                initial: 1999,
+                final: 1999,
+                discount_percent: 0,
+              },
+            },
+          },
+        });
+      }
+      return new Response("Unexpected Steam endpoint", { status: 404 });
+    }) as unknown as typeof fetch;
+
+    const result = await refreshIndicatedAppPrices(appDb, [777150, 777151], {
+      customFetch,
+      attemptCap: 1,
+    });
+
+    expect(result).toMatchObject({
+      attempted: 1,
+      successful: 1,
+      failed: 0,
+      rateLimited: true,
+      pendingAppIds: [777150, 777151],
+    });
+    expect(appdetailsIds).toEqual([777150]);
+  });
   test("price feed recovers catalog rows from prior price-only ingestion", async () => {
     await recordPriceObservation(appDb, {
       appid: 999,
@@ -497,7 +648,7 @@ describe("VaporStats Steam Prices and Deals", () => {
       type: "game",
       is_playable: 1,
       is_eligible: 1,
-      release_date: "Sep 4, 2026",
+      release_date: "2026-09-04",
     });
     expect(JSON.parse(checkpoint?.value ?? "{}").catalogBackfillQueued).toBe(true);
     expect(checkpoint?.cursor).toBe(

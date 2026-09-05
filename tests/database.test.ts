@@ -58,6 +58,7 @@ describe("Bun SQLite persistence", () => {
       "app_prices",
       "app_relationships",
       "app_release_events",
+      "app_release_plans",
       "apps",
       "checkpoints",
       "observations",
@@ -67,6 +68,14 @@ describe("Bun SQLite persistence", () => {
       "release_facts",
       "tracked_games",
     ]);
+    const appColumns = await db.prepare("PRAGMA table_info(apps)").all<{ name: string }>();
+    expect(appColumns.results.map((column) => column.name)).toContain("has_left_early_access");
+    const releasePlanColumns = await db
+      .prepare("PRAGMA table_info(app_release_plans)")
+      .all<{ name: string }>();
+    expect(releasePlanColumns.results.map((column) => column.name)).toEqual(
+      expect.arrayContaining(["id", "appid", "expected_date", "observed_at"]),
+    );
     expect(migrations.results).toHaveLength(migrationNames.length);
   });
 
@@ -76,14 +85,30 @@ describe("Bun SQLite persistence", () => {
       .prepare("INSERT INTO apps (appid, name, slug) VALUES (?, ?, ?)")
       .bind(10, "Persistence Test", "persistence-test")
       .run();
+    await db
+      .prepare("INSERT INTO app_release_plans (appid, expected_date, observed_at) VALUES (?, ?, ?)")
+      .bind(10, "2026-10-01", "2026-09-05T00:00:00.000Z")
+      .run();
     await closeDb();
 
     const reopened = await getDb();
-    const row = await reopened.prepare("SELECT name FROM apps WHERE appid = ?").bind(10).first<{ name: string }>();
+    const row = await reopened
+      .prepare("SELECT name FROM apps WHERE appid = ?")
+      .bind(10)
+      .first<{ name: string }>();
+    const releasePlan = await reopened
+      .prepare("SELECT appid, expected_date, observed_at FROM app_release_plans WHERE appid = ?")
+      .bind(10)
+      .first<{ appid: number; expected_date: string; observed_at: string }>();
     const migrations = await reopened
       .prepare("SELECT hash FROM __drizzle_migrations ORDER BY created_at")
       .all<{ hash: string }>();
     expect(row).toEqual({ name: "Persistence Test" });
+    expect(releasePlan).toEqual({
+      appid: 10,
+      expected_date: "2026-10-01",
+      observed_at: "2026-09-05T00:00:00.000Z",
+    });
     expect(migrations.results).toHaveLength(migrationNames.length);
   });
 
@@ -95,7 +120,10 @@ describe("Bun SQLite persistence", () => {
     legacy.close(true);
 
     const db = await getDb();
-    const row = await db.prepare("SELECT name FROM apps WHERE appid = ?").bind(11).first<{ name: string }>();
+    const row = await db
+      .prepare("SELECT name, has_left_early_access FROM apps WHERE appid = ?")
+      .bind(11)
+      .first<{ name: string; has_left_early_access: number | null }>();
     const ledger = await db
       .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?")
       .bind(MIGRATION_TABLE)
@@ -103,8 +131,7 @@ describe("Bun SQLite persistence", () => {
     const journal = await db
       .prepare("SELECT hash, created_at FROM __drizzle_migrations ORDER BY created_at")
       .all<{ hash: string; created_at: number }>();
-
-    expect(row).toEqual({ name: "Adopted Row" });
+    expect(row).toEqual({ name: "Adopted Row", has_left_early_access: null });
     expect(ledger).toBeNull();
     expect(journal.results).toHaveLength(migrationNames.length);
     expect(await db.prepare("SELECT 1 FROM app_release_events LIMIT 1").first()).toBeNull();

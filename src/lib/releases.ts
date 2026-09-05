@@ -1,4 +1,5 @@
 import type { AppDatabase } from "./db";
+import type { CatalogEntity } from "./catalog";
 import { toSlug, getCanonicalGamePath } from "./slug";
 import { normalizeAppType, getCanonicalChildPath } from "./related";
 import { getLiveApiCacheHeaders, CACHE_POLICIES } from "./cache";
@@ -395,6 +396,7 @@ export async function upsertReleaseFact(
     header_image?: string;
     is_eligible?: boolean;
     is_playable?: boolean;
+    release_status?: CatalogEntity["release_status"];
   },
   asOfDate?: Date | string
 ): Promise<boolean> {
@@ -402,21 +404,25 @@ export async function upsertReleaseFact(
   if (!preciseDate) {
     return false;
   }
+  const slug = app.slug || toSlug(app.name);
+  const headerImage = app.header_image ?? "";
 
   const isEligible = app.is_eligible !== false;
   const isPlayable = app.is_playable !== false;
   const parentAppId = app.parent_appid ?? null;
-
   if (!isReleaseEntityEligible(app.type, isEligible, isPlayable, parentAppId)) {
     return false;
   }
 
   const week = getIsoWeekString(preciseDate);
   const year = parseInt(preciseDate.slice(0, 4), 10);
-  const status = deriveReleaseStatus(preciseDate, asOfDate);
-  const slug = app.slug || toSlug(app.name);
-  const headerImage = app.header_image || `https://shared.fastly.steamstatic.com/store_item_assets/steam/apps/${app.appid}/header.jpg`;
-
+  // A source-declared state is authoritative; the clock must not turn an
+  // unchanged forecast into a historical release.
+  const status = app.release_status === "upcoming" || app.release_status === "unannounced"
+    ? "upcoming"
+    : app.release_status === "released"
+      ? "released"
+      : deriveReleaseStatus(preciseDate, asOfDate);
   const stmt = db
     .prepare(
       `INSERT INTO release_facts (

@@ -1,7 +1,6 @@
 import { describe, test, expect, beforeAll, afterAll } from "bun:test";
 import { Database, type SQLQueryBindings } from "bun:sqlite";
-import { readFileSync, existsSync } from "node:fs";
-import { resolve } from "node:path";
+import { applyMigrations } from "../src/lib/migrations";
 import React from "react";
 import { renderToString } from "react-dom/server";
 import { type AppDatabase, type AppPreparedStatement } from "../src/lib/db";
@@ -46,26 +45,6 @@ import { handleReleasesApiRequest } from "../src/routes/api.releases";
 import { HomeComponent, type HomeComponentProps } from "../src/components/home-page";
 import { runBoundedCatalogImport } from "../workers/catalog-seed";
 import { CACHE_POLICIES } from "../src/lib/cache";
-const migration0001 = readFileSync(
-  resolve(import.meta.dir, "../migrations/0001_catalog.sql"),
-  "utf8"
-);
-const migration0002 = readFileSync(
-  resolve(import.meta.dir, "../migrations/0002_player_activity.sql"),
-  "utf8"
-);
-const migration0004Path = resolve(import.meta.dir, "../migrations/0004_related_apps.sql");
-const migration0004 = existsSync(migration0004Path) ? readFileSync(migration0004Path, "utf8") : "";
-const migration0005Path = resolve(import.meta.dir, "../migrations/0005_prices.sql");
-const migration0005 = existsSync(migration0005Path) ? readFileSync(migration0005Path, "utf8") : "";
-const migration0006 = readFileSync(
-  resolve(import.meta.dir, "../migrations/0006_releases.sql"),
-  "utf8"
-);
-const migration0007 = readFileSync(
-  resolve(import.meta.dir, "../migrations/0007_release_lifecycle.sql"),
-  "utf8"
-);
 
 function createSqliteAppAdapter(db: Database): AppDatabase {
   return {
@@ -134,16 +113,7 @@ function createSqliteAppAdapter(db: Database): AppDatabase {
 async function initTestDb(): Promise<AppDatabase> {
   const sqlite = new Database(":memory:");
   sqlite.run("PRAGMA foreign_keys = ON;");
-  sqlite.run(migration0001);
-  sqlite.run(migration0002);
-  if (migration0004) {
-    sqlite.run(migration0004);
-  }
-  if (migration0005) {
-    sqlite.run(migration0005);
-  }
-  sqlite.run(migration0006);
-  sqlite.run(migration0007);
+  applyMigrations(sqlite);
   return createSqliteAppAdapter(sqlite);
 }
 
@@ -269,6 +239,22 @@ describe("Releases Discovery and Calendar", () => {
       .bind(900001)
       .first();
     expect(factImprecise).toBeNull();
+    await upsertReleaseFact(
+      db,
+      {
+        appid: 900004,
+        name: "Past But Still Upcoming",
+        type: "game",
+        release_date: "2020-01-01",
+        release_status: "upcoming",
+      },
+      "2026-09-04",
+    );
+    const preservedUpcoming = await db
+      .prepare("SELECT release_status FROM release_facts WHERE appid = ?")
+      .bind(900004)
+      .first<{ release_status: string }>();
+    expect(preservedUpcoming?.release_status).toBe("upcoming");
     // 2b. Bounded helper guarantees: clamp limit/offset and slice options.apps
     const manyApps = Array.from({ length: 10 }, (_, i) => ({
       appid: 800000 + i,
@@ -350,6 +336,16 @@ describe("Releases Discovery and Calendar", () => {
       release_from_early_access_date: "2024-06-20",
       is_early_access: false,
     });
+    await upsertApp(db, {
+      appid: 990002,
+      name: "Generic Release Game",
+      type: "game",
+      is_playable: true,
+      is_eligible: true,
+      release_date: "2024-02-01",
+      original_release_date: "2024-02-01",
+      is_early_access: false,
+    });
     await db
       .prepare("INSERT INTO app_release_events (appid, event_type, source, event_date) VALUES (?, 'patch', 'original_release_date', ?)")
       .bind(990001, "2024-03-10")
@@ -369,15 +365,22 @@ describe("Releases Discovery and Calendar", () => {
       )
       .bind(990001)
       .all<{ event_type: string; event_date: string; source: string }>();
+    const genericEvents = await db
+      .prepare(
+        "SELECT event_type, event_date, source FROM app_release_events WHERE appid = ? ORDER BY event_type, event_date"
+      )
+      .bind(990002)
+      .all<{ event_type: string; event_date: string; source: string }>();
 
-    expect(firstSync.persistedCount).toBe(1);
-    expect(secondSync.persistedCount).toBe(1);
+    expect(firstSync.persistedCount).toBe(2);
+    expect(secondSync.persistedCount).toBe(2);
     expect(firstEvents.results).toEqual([
       { event_type: "early_access", event_date: "2024-01-15", source: "original_steam_release_date" },
       { event_type: "full_release", event_date: "2024-06-20", source: "release_from_early_access_date" },
       { event_type: "patch", event_date: "2024-03-10", source: "original_release_date" },
     ]);
     expect(secondEvents.results).toEqual(firstEvents.results);
+    expect(genericEvents.results).toEqual([]);
   });
 
   test("release week loader fetches its client-safe API", async () => {

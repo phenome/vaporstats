@@ -1,6 +1,6 @@
 import { describe, test, expect, beforeAll, afterAll } from "bun:test";
 import { Database, type SQLQueryBindings } from "bun:sqlite";
-import { readFileSync, readdirSync, existsSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import React from "react";
 import { renderToString } from "react-dom/server";
@@ -38,12 +38,7 @@ import { HomeComponent, type HomeComponentProps } from "../src/components/home-p
 import { GamePageView, type GamePageProps } from "../src/components/game-page";
 import { handleGameHttpRequest } from "../src/routes/games.$game";
 import * as rollupsWorkerModule from "../workers/player-rollups";
-
-const migrationsDir = resolve(import.meta.dir, "../migrations");
-const migrationsSql = readdirSync(migrationsDir)
-  .filter((name) => name.endsWith(".sql"))
-  .sort()
-  .map((name) => readFileSync(resolve(migrationsDir, name), "utf8"));
+import { applyMigrations } from "../src/lib/migrations";
 
 function createSqliteAppAdapter(db: Database): AppDatabase {
   return {
@@ -120,10 +115,8 @@ function createSqliteAppAdapter(db: Database): AppDatabase {
 
 async function createFreshDb(): Promise<AppDatabase> {
   const sqlite = new Database(":memory:");
+  applyMigrations(sqlite);
   const db = createSqliteAppAdapter(sqlite);
-  for (const sql of migrationsSql) {
-    await db.exec(sql);
-  }
   return db;
 }
 
@@ -819,6 +812,7 @@ describe("Player History and Rankings", () => {
       release_from_early_access_date: null,
       release_date_source: null,
       is_early_access: null,
+      has_left_early_access: null,
       release_status: "released" as const,
       description: "Test description",
       header_image: "",

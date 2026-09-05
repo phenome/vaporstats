@@ -1,10 +1,9 @@
 import { describe, test, expect, beforeAll, afterAll } from "bun:test";
 import { Database, type SQLQueryBindings } from "bun:sqlite";
-import { readFileSync, readdirSync } from "node:fs";
-import { resolve } from "node:path";
 import React from "react";
 import { renderToString } from "react-dom/server";
 import { type AppDatabase, type AppPreparedStatement } from "../src/lib/db";
+import { applyMigrations } from "../src/lib/migrations";
 import {
   listPlayableGames,
   getGameByAppId,
@@ -37,11 +36,6 @@ import { handleChildHttpRequest } from "../src/routes/games.$game_.$child";
 import { SearchResultsPageView } from "../src/components/search-page";
 import { handleSearchHttpRequest } from "../src/routes/search";
 import { handleSearchApiRequest } from "../src/routes/api.search";
-const migrationsDir = resolve(import.meta.dir, "../migrations");
-const migrationsSql = readdirSync(migrationsDir)
-  .filter((name) => name.endsWith(".sql"))
-  .sort()
-  .map((name) => readFileSync(resolve(migrationsDir, name), "utf8"));
 
 function createSqliteAppAdapter(db: Database, stats?: { firstCalls: number }): AppDatabase {
   return {
@@ -119,16 +113,13 @@ function createSqliteAppAdapter(db: Database, stats?: { firstCalls: number }): A
 
 function createFreshDb(): AppDatabase {
   const sqlite = new Database(":memory:");
+  applyMigrations(sqlite);
   const appDb = createSqliteAppAdapter(sqlite);
   return appDb;
 }
 
 async function initDb(): Promise<AppDatabase> {
-  const appDb = createFreshDb();
-  for (const sql of migrationsSql) {
-    await appDb.exec(sql);
-  }
-  return appDb;
+  return createFreshDb();
 }
 
 describe("Related Apps and Search", () => {
@@ -656,8 +647,8 @@ describe("Related Apps and Search", () => {
   test("groups matching accessories under each parent without parent fetches", async () => {
     const sqlite = new Database(":memory:");
     const stats = { firstCalls: 0 };
+    applyMigrations(sqlite);
     const db = createSqliteAppAdapter(sqlite, stats);
-    for (const sql of migrationsSql) await db.exec(sql);
 
     await upsertApp(db, {
       appid: 100,

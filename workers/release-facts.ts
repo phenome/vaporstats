@@ -19,6 +19,7 @@ export interface SyncReleaseFactsOptions {
     type: string;
     parent_appid?: number | null;
     release_date?: string | null;
+    release_status?: string;
     original_steam_release_date?: string | null;
     release_from_early_access_date?: string | null;
     original_release_date?: string | null;
@@ -26,6 +27,7 @@ export interface SyncReleaseFactsOptions {
     is_eligible?: boolean;
     is_playable?: boolean;
     is_early_access?: boolean | null;
+    has_left_early_access?: boolean | null;
   }>;
 }
 
@@ -36,7 +38,6 @@ export interface SyncReleaseFactsResult {
   skippedIneligibleCount: number;
   currentIsoWeek: string;
 }
-
 interface RawCatalogAppRow {
   appid: number;
   name: string;
@@ -44,6 +45,7 @@ interface RawCatalogAppRow {
   type: string;
   parent_appid: number | null;
   release_date: string | null;
+  release_status: string;
   original_steam_release_date: string | null;
   release_from_early_access_date: string | null;
   original_release_date: string | null;
@@ -51,6 +53,7 @@ interface RawCatalogAppRow {
   is_eligible: number;
   is_playable: number;
   is_early_access: number | null;
+  has_left_early_access: number | null;
 }
 
 /**
@@ -84,7 +87,6 @@ export async function syncReleaseFactsFromApps(
       offset = Math.max(0, Math.floor(options.offset));
     }
   }
-
   let candidateApps: Array<{
     appid: number;
     name: string;
@@ -92,6 +94,7 @@ export async function syncReleaseFactsFromApps(
     type: string;
     parent_appid?: number | null;
     release_date?: string | null;
+    release_status?: string;
     original_steam_release_date?: string | null;
     release_from_early_access_date?: string | null;
     original_release_date?: string | null;
@@ -99,8 +102,8 @@ export async function syncReleaseFactsFromApps(
     is_eligible?: boolean;
     is_playable?: boolean;
     is_early_access?: boolean | null;
+    has_left_early_access?: boolean | null;
   }> = [];
-
   if (options.apps) {
     // Strictly bound injected apps to sanitized limit
     candidateApps = options.apps.slice(0, limit);
@@ -112,12 +115,12 @@ export async function syncReleaseFactsFromApps(
       const placeholders = appIds.map(() => "?").join(", ");
       const stmt = db
         .prepare(
-          "SELECT appid, name, slug, type, parent_appid, release_date, " +
+          "SELECT appid, name, slug, type, parent_appid, release_date, release_status, " +
             "original_steam_release_date, release_from_early_access_date, " +
             "original_release_date, header_image, is_eligible, is_playable, " +
-            "is_early_access FROM apps WHERE appid IN (" +
+            "is_early_access, has_left_early_access FROM apps WHERE appid IN (" +
             placeholders +
-            ") AND release_date IS NOT NULL AND is_eligible = 1 ORDER BY appid ASC"
+            ") ORDER BY appid ASC"
         )
         .bind(...appIds);
       const res = await stmt.all<RawCatalogAppRow>();
@@ -128,6 +131,7 @@ export async function syncReleaseFactsFromApps(
         type: r.type,
         parent_appid: r.parent_appid,
         release_date: r.release_date,
+        release_status: r.release_status,
         original_steam_release_date: r.original_steam_release_date,
         release_from_early_access_date: r.release_from_early_access_date,
         original_release_date: r.original_release_date,
@@ -135,18 +139,17 @@ export async function syncReleaseFactsFromApps(
         is_eligible: r.is_eligible === 1,
         is_playable: r.is_playable === 1,
         is_early_access: r.is_early_access === null ? null : r.is_early_access === 1,
+        has_left_early_access: r.has_left_early_access === null ? null : r.has_left_early_access === 1,
       }));
     }
   } else {
     const stmt = db
       .prepare(
-        `SELECT appid, name, slug, type, parent_appid, release_date,
+        `SELECT appid, name, slug, type, parent_appid, release_date, release_status,
                 original_steam_release_date, release_from_early_access_date,
                 original_release_date, header_image, is_eligible, is_playable,
-                is_early_access
+                is_early_access, has_left_early_access
          FROM apps
-         WHERE release_date IS NOT NULL
-           AND is_eligible = 1
          ORDER BY appid ASC
          LIMIT ? OFFSET ?`
       )
@@ -161,6 +164,7 @@ export async function syncReleaseFactsFromApps(
       type: r.type,
       parent_appid: r.parent_appid,
       release_date: r.release_date,
+      release_status: r.release_status,
       original_steam_release_date: r.original_steam_release_date,
       release_from_early_access_date: r.release_from_early_access_date,
       original_release_date: r.original_release_date,
@@ -169,6 +173,8 @@ export async function syncReleaseFactsFromApps(
       is_playable: r.is_playable === 1,
       is_early_access:
         r.is_early_access === null ? null : r.is_early_access === 1,
+      has_left_early_access:
+        r.has_left_early_access === null ? null : r.has_left_early_access === 1,
     }));
   }
 
@@ -185,6 +191,15 @@ export async function syncReleaseFactsFromApps(
     const parentAppId = app.parent_appid ?? null;
 
     if (!isReleaseEntityEligible(app.type, isEligible, isPlayable, parentAppId)) {
+      await db.prepare("DELETE FROM release_facts WHERE appid = ?").bind(app.appid).run();
+      await db
+        .prepare(
+          `DELETE FROM app_release_events
+           WHERE appid = ?
+             AND event_type IN ('early_access', 'full_release')`
+        )
+        .bind(app.appid)
+        .run();
       skippedIneligibleCount++;
       continue;
     }
@@ -195,16 +210,11 @@ export async function syncReleaseFactsFromApps(
     const releaseFromEarlyAccessDate = parsePreciseReleaseDate(
       app.release_from_early_access_date
     );
-    const originalReleaseDate = earlyAccessDate
-      ? parsePreciseReleaseDate(app.original_release_date)
-      : null;
-    const fullReleaseDate =
-      releaseFromEarlyAccessDate ?? originalReleaseDate;
-    const fullReleaseSource = releaseFromEarlyAccessDate
-      ? "release_from_early_access_date"
-      : originalReleaseDate
-        ? "original_release_date"
-        : null;
+    const hasEarlyAccessEvidence =
+      app.is_early_access === true ||
+      app.has_left_early_access === true ||
+      releaseFromEarlyAccessDate !== null;
+
     await db
       .prepare(
         `DELETE FROM app_release_events
@@ -214,7 +224,7 @@ export async function syncReleaseFactsFromApps(
       .bind(app.appid)
       .run();
 
-    if (earlyAccessDate) {
+    if (earlyAccessDate && hasEarlyAccessEvidence) {
       await db
         .prepare(
           `INSERT INTO app_release_events
@@ -228,26 +238,33 @@ export async function syncReleaseFactsFromApps(
         .run();
     }
 
-    if (fullReleaseDate) {
+    if (releaseFromEarlyAccessDate) {
       await db
         .prepare(
           `INSERT INTO app_release_events
              (appid, event_type, event_date, source, created_at, updated_at)
-           VALUES (?, 'full_release', ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+           VALUES (?, 'full_release', ?, 'release_from_early_access_date', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
            ON CONFLICT (appid, event_type, event_date) DO UPDATE SET
              source = excluded.source,
              updated_at = CURRENT_TIMESTAMP`
         )
-        .bind(app.appid, fullReleaseDate, fullReleaseSource)
+        .bind(app.appid, releaseFromEarlyAccessDate)
         .run();
     }
 
     const preciseDate = parsePreciseReleaseDate(app.release_date);
     if (!preciseDate) {
+      await db.prepare("DELETE FROM release_facts WHERE appid = ?").bind(app.appid).run();
       skippedImpreciseCount++;
       continue;
     }
 
+    const suppliedStatus =
+      app.release_status === "released"
+        ? "released"
+        : app.release_status === "upcoming" || app.release_status === "unannounced"
+          ? "upcoming"
+          : undefined;
     const success = await upsertReleaseFact(
       db,
       {
@@ -257,6 +274,7 @@ export async function syncReleaseFactsFromApps(
         type: app.type,
         parent_appid: parentAppId,
         release_date: preciseDate,
+        release_status: suppliedStatus,
         header_image: app.header_image,
         is_eligible: isEligible,
         is_playable: isPlayable,

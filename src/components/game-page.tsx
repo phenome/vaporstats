@@ -1,11 +1,9 @@
-import type { GameDetail, GameReleaseEvent } from "../lib/catalog";
+import type { GameDetail } from "../lib/catalog";
 import type { GroupedRelatedApps } from "../lib/related";
 import type { PlayerHistoryResult } from "../lib/player-history";
 import {
   type PriceState,
   type PriceHistoryResult,
-  formatPriceCents,
-  formatPriceUtc,
 } from "../lib/prices";
 import { getCanonicalPublisherPath } from "../lib/slug";
 import { PlayerPanel } from "./player-panel";
@@ -13,6 +11,7 @@ import { PlayerHistoryChart } from "./player-history";
 import { PriceHistoryChart } from "./price-history";
 import { RelatedApps } from "./related-apps";
 import { AppLink } from "./app-link";
+import { LifecycleHistorySection } from "./lifecycle-history";
 
 export interface GamePageProps {
   game: GameDetail;
@@ -29,9 +28,8 @@ export function GamePageView({
   price,
   priceHistory,
 }: GamePageProps) {
-  const lifecycleEvents = getLifecycleEvents(game);
-  const primaryEvent = lifecycleEvents.find((event) => event.primary);
-  const secondaryEvents = lifecycleEvents.filter((event) => !event.primary);
+  const overviewEvents = getLifecycleOverviewEvents(game);
+  const mainReleaseDate = getMainReleaseDate(game);
   return (
     <div className="max-w-7xl mx-auto px-4 py-8 space-y-6">
       {/* Top Banner / Breadcrumb & Header */}
@@ -39,9 +37,24 @@ export function GamePageView({
         <div className="flex flex-wrap items-center justify-between gap-2 border-b border-zinc-900 pb-3">
           <div className="flex items-center gap-3">
             <span className="px-2 py-0.5 bg-orange-500/10 text-orange-400 border border-orange-500/30 text-[10px] font-mono uppercase tracking-widest">
-              {game.type}
+              {game.type.toUpperCase()}
             </span>
-            {primaryEvent && <LifecycleSummary event={primaryEvent} />}
+            <div className="inline-flex items-center gap-2 text-xs font-mono">
+              <span className="border border-zinc-700 bg-zinc-900 px-1.5 py-0.5 font-bold uppercase tracking-wider text-zinc-300">
+                Released
+              </span>
+              {mainReleaseDate ? (
+                isPreciseReleaseDate(mainReleaseDate) ? (
+                  <time dateTime={mainReleaseDate} className="text-zinc-200">
+                    {formatReleaseDate(mainReleaseDate)}
+                  </time>
+                ) : (
+                  <span className="text-zinc-200">{formatReleaseDate(mainReleaseDate)}</span>
+                )
+              ) : (
+                <span className="text-zinc-500">—</span>
+              )}
+            </div>
           </div>
           <div className="flex items-center gap-4 text-xs font-mono">
             <a
@@ -71,7 +84,7 @@ export function GamePageView({
 
           <div className="flex-1">
             <div className="flow-root space-y-3">
-              {secondaryEvents.length > 0 && <LifecycleTable events={secondaryEvents} />}
+              {overviewEvents.length > 0 && <LifecycleTable events={overviewEvents} />}
               <h1 className="text-2xl md:text-3xl font-mono font-bold text-zinc-100 tracking-tight">
                 {game.name}
               </h1>
@@ -117,6 +130,7 @@ export function GamePageView({
         </div>
       </div>
 
+      <LifecycleHistorySection appid={game.appid} />
       <nav
         aria-label="Game page sections"
         className="flex min-h-[44px] items-center overflow-x-auto border border-zinc-800 bg-zinc-950 px-1 font-mono"
@@ -181,135 +195,111 @@ export function GamePageView({
   );
 }
 
-type LifecycleEventKind = "release" | "ea" | "one-dot-zero" | "patch";
+type LifecycleEventKind = "expected" | "steam-availability" | "left-ea" | "one-dot-zero" | "patch";
 
 interface LifecycleDisplayEvent {
   kind: LifecycleEventKind;
   label: string;
-  date: string;
-  dateTime: string;
-  primary?: boolean;
+  date: string | null;
+  dateTime: string | null;
 }
 
 const lifecycleEventClasses: Record<LifecycleEventKind, string> = {
-  release: "border-orange-500/40 bg-orange-500/10 text-orange-300",
-  ea: "border-sky-500/40 bg-sky-500/10 text-sky-300",
+  expected: "border-orange-500/40 bg-orange-500/10 text-orange-300",
+  "steam-availability": "border-sky-500/40 bg-sky-500/10 text-sky-300",
+  "left-ea": "border-sky-500/40 bg-sky-500/10 text-sky-300",
   "one-dot-zero": "border-emerald-500/40 bg-emerald-500/10 text-emerald-300",
   patch: "border-violet-500/40 bg-violet-500/10 text-violet-300",
 };
 
-function getLifecycleEvents(game: GameDetail): LifecycleDisplayEvent[] {
+function getLifecycleOverviewEvents(game: GameDetail): LifecycleDisplayEvent[] {
   const events: LifecycleDisplayEvent[] = [];
   const seen = new Set<string>();
   const storedEvents = game.release_events ?? [];
-  const hasEarlyAccess = storedEvents.some((event) => event.event_type === "early_access") || Boolean(game.original_steam_release_date);
 
   const addEvent = (kind: LifecycleEventKind, label: string, dateTime: string | null) => {
-    if (!dateTime) return;
-    const key = kind + ":" + dateTime;
+    const key = kind + ":" + (dateTime ?? "undated");
     if (seen.has(key)) return;
     seen.add(key);
-    events.push({ kind, label, date: formatReleaseDate(dateTime), dateTime });
+    events.push({ kind, label, date: dateTime ? formatReleaseDate(dateTime) : null, dateTime });
   };
 
-  for (const event of storedEvents) {
-    if (event.event_type === "early_access") {
-      addEvent("ea", "Early Access", event.event_date);
-    } else if (event.event_type === "full_release") {
-      addEvent(
-        hasEarlyAccess ? "one-dot-zero" : "release",
-        hasEarlyAccess ? "Version 1.0" : "Released",
-        event.event_date,
-      );
-    } else {
-      addEvent("patch", "Latest patch", event.event_date);
-    }
+  if (game.release_status === "upcoming" && game.release_date) {
+    addEvent("expected", "Expected release", game.release_date);
   }
 
-  if (game.original_steam_release_date && !events.some((event) => event.kind === "ea")) {
-    addEvent("ea", "Early Access", game.original_steam_release_date);
-  }
-  if (game.release_from_early_access_date && !events.some((event) => event.kind === "one-dot-zero")) {
-    addEvent("one-dot-zero", "Version 1.0", game.release_from_early_access_date);
-  }
-  if (!events.some((event) => event.kind === "ea" || event.kind === "one-dot-zero" || event.kind === "release")) {
-    addEvent("release", "Released", game.original_release_date ?? game.release_date);
-  }
-
-  if (game.is_early_access && !events.some((event) => event.kind === "ea")) {
-    addEvent("ea", "Early Access", game.release_date);
-  }
-
-  if (!events.some((event) => event.kind === "release" || event.kind === "one-dot-zero")) {
-    addEvent("release", "Released", game.release_date);
+  if (game.release_status === "released") {
+    addEvent("steam-availability", "Available on Steam", game.original_steam_release_date ?? game.steam_release_date);
   }
 
   if (
-    game.steam_release_date &&
-    !events.some((event) => event.dateTime === game.steam_release_date)
+    game.is_early_access !== true &&
+    (Boolean(game.release_from_early_access_date) || game.has_left_early_access === true)
   ) {
-    addEvent("release", "Steam release", game.steam_release_date);
+    addEvent("left-ea", "Left Early Access", game.release_from_early_access_date);
   }
 
-  const hasOneDotZero = events.some((event) => event.kind === "one-dot-zero");
-  const primary = game.is_early_access
-    ? events.find((event) => event.kind === "ea")
-    : hasOneDotZero
-      ? events.find((event) => event.kind === "one-dot-zero")
-      : events.find((event) => event.kind === "release" && event.dateTime === game.release_date) ??
-        events.find((event) => event.kind === "release") ??
-        events.find((event) => event.kind === "ea");
+  const versionOneEvent = storedEvents.find((event) => (event.event_type as string) === "version_1_0");
+  if (versionOneEvent) {
+    addEvent("one-dot-zero", "Version 1.0", versionOneEvent.event_date);
+  }
 
-  return events
-    .map((event) => (event === primary ? { ...event, primary: true } : event))
-    .sort((left, right) => releaseDateValue(right.dateTime) - releaseDateValue(left.dateTime));
+  const latestPatch = storedEvents
+    .filter((event) => event.event_type === "patch" && event.event_date)
+    .sort((left, right) => releaseDateValue(right.event_date) - releaseDateValue(left.event_date))[0];
+  if (latestPatch) {
+    addEvent("patch", "Latest patch", latestPatch.event_date);
+  }
+
+  return events.sort((left, right) => releaseDateValue(right.dateTime) - releaseDateValue(left.dateTime));
+}
+
+function getMainReleaseDate(game: GameDetail): string | null {
+  if (game.release_status !== "released") return null;
+  return game.original_release_date ?? game.steam_release_date ?? game.release_date;
+}
+
+const dateOnlyPattern = /^\d{4}-\d{2}-\d{2}$/;
+const timestampPattern =
+  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
+
+function isValidDateOnly(value: string): boolean {
+  if (!dateOnlyPattern.test(value)) return false;
+  const date = new Date(value + "T00:00:00Z");
+  return !Number.isNaN(date.getTime()) && date.toISOString().startsWith(value + "T");
+}
+
+function isPreciseReleaseDate(value: string | null): boolean {
+  if (!value) return false;
+  if (isValidDateOnly(value)) return true;
+  return timestampPattern.test(value) && isValidDateOnly(value.slice(0, 10)) && !Number.isNaN(Date.parse(value));
 }
 
 function formatReleaseDate(value: string): string {
-  const date = new Date(toUtcDate(value));
-  if (Number.isNaN(date.getTime())) return value;
+  const isDateOnly = isValidDateOnly(value);
+  if (!isPreciseReleaseDate(value)) return value;
+  const date = new Date(isDateOnly ? value + "T00:00:00Z" : value);
   return new Intl.DateTimeFormat("en-US", {
     month: "short",
     day: "numeric",
     year: "numeric",
-    timeZone: "UTC",
+    timeZone: isDateOnly ? "UTC" : "America/Los_Angeles",
   }).format(date);
 }
 
-function toUtcDate(value: string): string {
-  return value.includes("T") ? value : value + "T00:00:00Z";
+function toUtcDate(value: string): string | null {
+  if (isValidDateOnly(value)) return value + "T00:00:00Z";
+  return isPreciseReleaseDate(value) ? value : null;
 }
 
-function releaseDateValue(value: string): number {
-  return Date.parse(toUtcDate(value));
+function releaseDateValue(value: string | null): number {
+  const timestamp = value ? toUtcDate(value) : null;
+  return timestamp ? Date.parse(timestamp) : Number.NEGATIVE_INFINITY;
 }
 
-function LifecycleSummary({ event }: { event: LifecycleDisplayEvent }) {
+function LifecycleBadge({ event }: { event: LifecycleDisplayEvent }) {
   return (
-    <div className="inline-flex items-center gap-2 text-xs font-mono">
-      <LifecycleBadge event={event} prominent />
-      <time dateTime={event.dateTime} className="text-zinc-200">
-        {event.date}
-      </time>
-    </div>
-  );
-}
-
-function LifecycleBadge({
-  event,
-  prominent = false,
-}: {
-  event: LifecycleDisplayEvent;
-  prominent?: boolean;
-}) {
-  return (
-    <span
-      className={
-        prominent
-          ? "border py-0.5 font-bold uppercase px-2 text-[10px] font-mono leading-[15px] tracking-widest " + lifecycleEventClasses[event.kind]
-          : "border py-0.5 font-bold uppercase px-1.5 text-[9px] tracking-wider " + lifecycleEventClasses[event.kind]
-      }
-    >
+    <span className={"border py-0.5 font-bold uppercase px-1.5 text-[9px] tracking-wider " + lifecycleEventClasses[event.kind]}>
       {event.label}
     </span>
   );
@@ -318,17 +308,21 @@ function LifecycleBadge({
 function LifecycleTable({ events }: { events: LifecycleDisplayEvent[] }) {
   return (
     <section
-      aria-label="Release lifecycle"
+      aria-label="Release lifecycle overview"
       className="w-fit max-w-full py-1 font-mono md:float-right md:mb-2 md:ml-6"
     >
       <table className="border-collapse text-xs">
         <tbody>
           {events.map((event) => (
-            <tr key={event.kind + "-" + event.dateTime}>
-              <td className="py-0.5 text-left text-zinc-400">
-                <time dateTime={event.dateTime}>{event.date}</time>
+            <tr key={event.kind + "-" + (event.dateTime ?? "undated")} className="align-middle">
+              <td className="py-0.5 text-left text-zinc-400 align-middle">
+                {event.date && isPreciseReleaseDate(event.dateTime) ? (
+                  <time dateTime={event.dateTime ?? undefined}>{event.date}</time>
+                ) : (
+                  event.date && <span>{event.date}</span>
+                )}
               </td>
-              <td className="py-0.5 pl-4 text-right">
+              <td className="py-0.5 text-right align-middle">
                 <LifecycleBadge event={event} />
               </td>
             </tr>
@@ -338,4 +332,5 @@ function LifecycleTable({ events }: { events: LifecycleDisplayEvent[] }) {
     </section>
   );
 }
+
 export default GamePageView;

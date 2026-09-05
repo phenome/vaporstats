@@ -1,5 +1,6 @@
 import type { AppDatabase } from "../src/lib/db";
 import { getCheckpoint, setCheckpoint, upsertApp, type ReleaseDateSource } from "../src/lib/catalog";
+import { parsePreciseReleaseDate } from "../src/lib/releases";
 import { toSlug } from "../src/lib/slug";
 import { upsertAppRelationship } from "../src/lib/related";
 import { syncReleaseFactsFromApps } from "./release-facts";
@@ -18,6 +19,7 @@ export interface SeedAppInput {
   header_image?: string;
   developer?: string;
   publisher?: string;
+  has_left_early_access?: boolean | null;
   original_release_date?: string | null;
   steam_release_date?: string | null;
   original_steam_release_date?: string | null;
@@ -103,9 +105,10 @@ interface SteamAppDetailsResponse {
       developers?: string[];
       publishers?: string[];
       release_date?: {
-        coming_soon: boolean;
+        coming_soon?: boolean;
         date: string;
       };
+      detailed_description?: string;
     };
   };
 }
@@ -181,7 +184,22 @@ export function unixSecondsToLosAngelesDate(value: number | string | null | unde
   const year = parts.find((part) => part.type === "year")?.value;
   const month = parts.find((part) => part.type === "month")?.value;
   const day = parts.find((part) => part.type === "day")?.value;
-  return year && month && day ? `${year}-${month}-${day}` : null;
+  return year && month && day ? [year, month, day].join("-") : null;
+}
+
+/** Normalizes Steam Unix timestamps and precise storefront date strings to a calendar date. */
+export function normalizeSteamReleaseDate(
+  value: number | string | null | undefined
+): string | null {
+  if (typeof value === "string" && !/^[0-9]+$/.test(value.trim())) {
+    return parsePreciseReleaseDate(value);
+  }
+  return unixSecondsToLosAngelesDate(value);
+}
+
+/** Detects only an explicit first-party statement that the game left Early Access. */
+export function hasLeftEarlyAccessAssertion(description: string | null | undefined): boolean {
+  return /\b(?:has\s+)?(?:left|exited)\s+(?:the\s+)?early access\b/i.test(description ?? "");
 }
 
 function storeBrowseAppId(item: StoreBrowseItem): number | null {
@@ -205,25 +223,26 @@ function releaseFields(
   | "is_coming_soon"
   | "is_early_access"
 > {
-  const originalReleaseDate = unixSecondsToLosAngelesDate(
+  const originalReleaseDate = normalizeSteamReleaseDate(
     release?.original_release_date ?? (release?.["originalReleaseDate"] as number | string | null | undefined)
   );
-  const steamReleaseDate = unixSecondsToLosAngelesDate(
+  const steamReleaseDate = normalizeSteamReleaseDate(
     release?.steam_release_date ?? (release?.["steamReleaseDate"] as number | string | null | undefined)
   );
-  const originalSteamReleaseDate = unixSecondsToLosAngelesDate(
+  const originalSteamReleaseDate = normalizeSteamReleaseDate(
     release?.original_steam_release_date ?? (release?.["originalSteamReleaseDate"] as number | string | null | undefined)
   );
-  const releaseFromEarlyAccessDate = unixSecondsToLosAngelesDate(
+  const releaseFromEarlyAccessDate = normalizeSteamReleaseDate(
     release?.release_from_early_access_date ?? (release?.["releaseFromEarlyAccessDate"] as number | string | null | undefined)
   );
 
-  const releaseDate = originalReleaseDate ?? steamReleaseDate ?? appdetailsReleaseDate;
+  const normalizedAppdetailsReleaseDate = normalizeSteamReleaseDate(appdetailsReleaseDate);
+  const releaseDate = originalReleaseDate ?? steamReleaseDate ?? normalizedAppdetailsReleaseDate;
   const releaseDateSource: ReleaseDateSource = originalReleaseDate
     ? "original_release_date"
     : steamReleaseDate
       ? "steam_release_date"
-      : appdetailsReleaseDate
+      : normalizedAppdetailsReleaseDate
         ? "appdetails"
         : null;
 
@@ -240,7 +259,7 @@ function releaseFields(
     steam_release_date: steamReleaseDate,
     original_steam_release_date: originalSteamReleaseDate,
     release_from_early_access_date: releaseFromEarlyAccessDate,
-    appdetails_release_date: appdetailsReleaseDate,
+    appdetails_release_date: normalizedAppdetailsReleaseDate,
     is_coming_soon: isComingSoon,
     is_early_access: isEarlyAccess,
   };
@@ -270,7 +289,7 @@ export async function fetchSteamAppDetails(
   }
 
   const details = appData.data;
-  const appdetailsReleaseDate = details.release_date?.date ?? null;
+  const appdetailsReleaseDate = normalizeSteamReleaseDate(details.release_date?.date);
   return {
     appid: details.steam_appid,
     name: details.name,
@@ -279,11 +298,19 @@ export async function fetchSteamAppDetails(
     is_playable: details.type === "game",
     parent_appid: null,
     ...releaseFields(null, appdetailsReleaseDate),
-    release_status: details.release_date?.coming_soon ? "upcoming" : "released",
+    release_status:
+      details.release_date?.coming_soon === true
+        ? "upcoming"
+        : details.release_date?.coming_soon === false
+          ? "released"
+          : undefined,
     description: details.short_description ?? "",
     header_image: details.header_image ?? "",
     developer: details.developers?.[0] ?? "",
     publisher: details.publishers?.[0] ?? "",
+    ...(hasLeftEarlyAccessAssertion(details.detailed_description)
+      ? { has_left_early_access: true }
+      : {}),
   };
 }
 
@@ -330,6 +357,92 @@ async function fetchStoreBrowseReleases(
   }
   return releases;
 }
+type ReleaseEnrichmentRecord = {
+  appid: number;
+} & Partial<
+  Pick<
+    SeedAppInput,
+    | "release_date"
+    | "release_date_source"
+    | "original_release_date"
+    | "steam_release_date"
+    | "original_steam_release_date"
+    | "release_from_early_access_date"
+    | "appdetails_release_date"
+    | "is_coming_soon"
+    | "is_early_access"
+  >
+>;
+
+function hasEstablishedReleaseFields(record: ReleaseEnrichmentRecord): boolean {
+  return (
+    record.release_date_source != null ||
+    record.original_release_date != null ||
+    record.steam_release_date != null ||
+    record.original_steam_release_date != null ||
+    record.release_from_early_access_date != null ||
+    record.is_early_access != null
+  );
+}
+
+function hasStoreBrowseReleaseFields(
+  lifecycle: ReturnType<typeof releaseFields>
+): boolean {
+  return (
+    lifecycle.original_release_date != null ||
+    lifecycle.steam_release_date != null ||
+    lifecycle.original_steam_release_date != null ||
+    lifecycle.release_from_early_access_date != null ||
+    lifecycle.is_coming_soon != null ||
+    lifecycle.is_early_access != null
+  );
+}
+
+function existingReleaseFields(record: ReleaseEnrichmentRecord): ReturnType<typeof releaseFields> {
+  return {
+    release_date: record.release_date ?? null,
+    release_date_source: record.release_date_source ?? null,
+    original_release_date: record.original_release_date ?? null,
+    steam_release_date: record.steam_release_date ?? null,
+    original_steam_release_date: record.original_steam_release_date ?? null,
+    release_from_early_access_date: record.release_from_early_access_date ?? null,
+    appdetails_release_date: record.appdetails_release_date ?? null,
+    is_coming_soon: record.is_coming_soon ?? null,
+    is_early_access: record.is_early_access ?? null,
+  };
+}
+
+/** Enriches catalog records with one bounded, batched StoreBrowse lifecycle fetch. */
+export async function enrichCatalogReleaseFields<T extends ReleaseEnrichmentRecord>(
+  records: T[],
+  customFetch: typeof fetch = fetch,
+  options: { requireStoreBrowse?: boolean } = {}
+): Promise<T[]> {
+  const enriched: T[] = [];
+  for (let offset = 0; offset < records.length; offset += STORE_BROWSE_BATCH_SIZE) {
+    const batch = records.slice(offset, offset + STORE_BROWSE_BATCH_SIZE);
+    const releases = await fetchStoreBrowseReleases(
+      batch.map((record) => record.appid),
+      customFetch
+    );
+
+    for (const record of batch) {
+      const appdetailsReleaseDate = record.appdetails_release_date ?? record.release_date ?? null;
+      const storeBrowseFields = releaseFields(releases.get(record.appid), appdetailsReleaseDate);
+      const hasStoreBrowseRelease = hasStoreBrowseReleaseFields(storeBrowseFields);
+      if (options.requireStoreBrowse && !hasStoreBrowseRelease) {
+        throw new Error(`StoreBrowse release enrichment unavailable for app ${record.appid}`);
+      }
+      const lifecycle = hasStoreBrowseRelease
+        ? storeBrowseFields
+        : hasEstablishedReleaseFields(record)
+          ? existingReleaseFields(record)
+          : releaseFields(null, appdetailsReleaseDate);
+      enriched.push({ ...record, ...lifecycle });
+    }
+  }
+  return enriched;
+}
 
 async function fetchCatalogRecords(
   appIds: number[],
@@ -340,15 +453,7 @@ async function fetchCatalogRecords(
 
   for (let offset = 0; offset < appIds.length; offset += STORE_BROWSE_BATCH_SIZE) {
     const batch = appIds.slice(offset, offset + STORE_BROWSE_BATCH_SIZE);
-    let releases = new Map<number, StoreBrowseRelease | null>();
-    try {
-      releases = await fetchStoreBrowseReleases(batch, customFetch);
-    } catch (error) {
-      if (isSteamRateLimitError(error)) {
-        rateLimited = true;
-        break;
-      }
-    }
+    const batchRecords: SeedAppInput[] = [];
 
     for (const appid of batch) {
       let record: SeedAppInput | null = null;
@@ -363,29 +468,36 @@ async function fetchCatalogRecords(
         continue;
       }
 
-      if (!record) {
+      if (record) {
+        batchRecords.push(record);
+      } else {
         records.set(appid, null);
-        continue;
       }
-
-      const lifecycle = releaseFields(
-        releases.get(appid),
-        record.appdetails_release_date ?? record.release_date ?? null
-      );
-      records.set(appid, {
-        ...record,
-        ...lifecycle,
-        release_status:
-          lifecycle.is_coming_soon === true
-            ? "upcoming"
-            : lifecycle.is_coming_soon === false
-              ? "released"
-              : record.release_status,
-      });
     }
 
     if (rateLimited) {
       break;
+    }
+
+    try {
+      const enriched = await enrichCatalogReleaseFields(batchRecords, customFetch);
+      for (const record of enriched) {
+        records.set(record.appid, {
+          ...record,
+          release_status:
+            record.is_coming_soon === true
+              ? "upcoming"
+              : record.is_coming_soon === false
+                ? "released"
+                : record.release_status,
+        });
+      }
+    } catch (error) {
+      if (isSteamRateLimitError(error)) {
+        rateLimited = true;
+        break;
+      }
+      throw error;
     }
   }
 
@@ -457,7 +569,11 @@ export async function queueCatalogRefresh(
     requested = normalizeAppIds(normalizedOptions.appIds);
   }
 
-  const pending = normalizeAppIds([...existing.pending, ...requested]);
+  const pending = normalizeAppIds(
+    normalizedOptions.appIds === undefined
+      ? [...existing.pending, ...requested]
+      : [...requested, ...existing.pending]
+  );
   const alreadyQueued =
     requested.length > 0 && requested.every((appid) => existing.pending.includes(appid));
   await setCheckpoint(db, checkpointKey, JSON.stringify({ pending }), null);
@@ -528,33 +644,30 @@ export async function refreshCatalogBatch(
       successTarget - successful
     );
     const batchIds = working.splice(0, capacity);
-    let releases: Map<number, StoreBrowseRelease | null>;
-    try {
-      releases = await fetchStoreBrowseReleases(batchIds, fetchFn);
-    } catch (error) {
-      if (isSteamRateLimitError(error)) {
-        rateLimited = true;
-        attempted += Math.min(1, batchIds.length);
-        working.unshift(...batchIds);
-        break;
-      }
-      retained.push(...batchIds);
-      failed += batchIds.length;
-      attempted += batchIds.length;
-      continue;
-    }
+    const batchRecords: SeedAppInput[] = [];
 
-    let stoppedAt = batchIds.length;
-    for (let index = 0; index < batchIds.length; index++) {
-      const appid = batchIds[index];
+    for (const appid of batchIds) {
       const existing = await db
-        .prepare("SELECT appid, parent_appid, is_eligible, is_playable FROM apps WHERE appid = ?")
+        .prepare(
+          "SELECT appid, parent_appid, is_eligible, is_playable, release_date, " +
+            "steam_release_date, original_release_date, original_steam_release_date, " +
+            "release_from_early_access_date, release_date_source, is_early_access, " +
+            "release_status FROM apps WHERE appid = ?"
+        )
         .bind(appid)
         .first<{
           appid: number;
           parent_appid: number | null;
           is_eligible: number;
           is_playable: number;
+          release_date: string | null;
+          steam_release_date: string | null;
+          original_release_date: string | null;
+          original_steam_release_date: string | null;
+          release_from_early_access_date: string | null;
+          release_date_source: ReleaseDateSource;
+          is_early_access: number | null;
+          release_status: string | null;
         }>();
 
       if (!existing) {
@@ -564,14 +677,13 @@ export async function refreshCatalogBatch(
         continue;
       }
 
+      attempted++;
       let record: SeedAppInput | null;
       try {
-        attempted++;
         record = await fetchSteamAppDetails(appid, fetchFn);
       } catch (error) {
         if (isSteamRateLimitError(error)) {
           rateLimited = true;
-          stoppedAt = index;
           break;
         }
         failed++;
@@ -585,23 +697,67 @@ export async function refreshCatalogBatch(
         continue;
       }
 
-      const lifecycle = releaseFields(
-        releases.get(appid),
-        record.appdetails_release_date ?? record.release_date ?? null
-      );
-      const refreshedRecord = {
+      const existingHasLifecycle =
+        existing.release_date_source !== null ||
+        existing.original_release_date !== null ||
+        existing.steam_release_date !== null ||
+        existing.original_steam_release_date !== null ||
+        existing.release_from_early_access_date !== null ||
+        existing.is_early_access !== null;
+      batchRecords.push({
         ...record,
-        type: record.type ?? (record.is_playable ? "game" : "accessory"),
-        ...lifecycle,
-        release_status:
-          lifecycle.is_coming_soon === true
-            ? "upcoming"
-            : lifecycle.is_coming_soon === false
-              ? "released"
-              : record.release_status,
+        ...(existingHasLifecycle
+          ? {
+              release_date: existing.release_date,
+              steam_release_date: existing.steam_release_date,
+              original_release_date: existing.original_release_date,
+              original_steam_release_date: existing.original_steam_release_date,
+              release_from_early_access_date: existing.release_from_early_access_date,
+              release_date_source: existing.release_date_source,
+              is_early_access:
+                existing.is_early_access === null ? null : existing.is_early_access === 1,
+            }
+          : {}),
+        ...(record.release_status === undefined && existing.release_status !== null
+          ? { release_status: existing.release_status }
+          : {}),
         parent_appid: existing.parent_appid,
         is_eligible: existing.is_eligible === 1,
         is_playable: existing.is_playable === 1,
+      });
+    }
+
+    if (rateLimited) {
+      working.unshift(...batchIds);
+      break;
+    }
+
+    let enrichedRecords: SeedAppInput[];
+    try {
+      enrichedRecords = await enrichCatalogReleaseFields(batchRecords, fetchFn, {
+        requireStoreBrowse: true,
+      });
+    } catch (error) {
+      if (isSteamRateLimitError(error)) {
+        rateLimited = true;
+        working.unshift(...batchIds);
+        break;
+      }
+      failed += batchRecords.length;
+      retained.push(...batchRecords.map((record) => record.appid));
+      continue;
+    }
+
+    for (const record of enrichedRecords) {
+      const refreshedRecord = {
+        ...record,
+        type: record.type ?? (record.is_playable ? "game" : "accessory"),
+        release_status:
+          record.is_coming_soon === true
+            ? "upcoming"
+            : record.is_coming_soon === false
+              ? "released"
+              : record.release_status,
       };
 
       try {
@@ -612,17 +768,15 @@ export async function refreshCatalogBatch(
       } catch (error) {
         if (isSteamRateLimitError(error)) {
           rateLimited = true;
-          stoppedAt = index;
+          working.unshift(...batchIds);
           break;
         }
         failed++;
-        retained.push(appid);
-        continue;
+        retained.push(record.appid);
       }
     }
 
     if (rateLimited) {
-      working.unshift(...batchIds.slice(stoppedAt));
       break;
     }
   }
@@ -684,6 +838,7 @@ export async function runBoundedCatalogImport(
     const isPlayable = app.is_playable ?? (app.type === "game" && !app.parent_appid);
     const isEligible = app.is_eligible ?? true;
     const type = app.type ?? (isPlayable ? "game" : "accessory");
+    const normalizedReleaseDate = normalizeSteamReleaseDate(app.release_date);
     const record: SeedAppInput = {
       ...app,
       appid: app.appid,
@@ -693,18 +848,18 @@ export async function runBoundedCatalogImport(
       is_eligible: isEligible,
       is_playable: isPlayable,
       parent_appid: app.parent_appid ?? null,
-      release_date: app.release_date ?? null,
-      release_status: app.release_status ?? "released",
+      release_date: normalizedReleaseDate,
+      release_status: app.release_status ?? (normalizedReleaseDate ? "released" : "unannounced"),
       description: app.description ?? "",
       header_image:
         app.header_image ||
         `https://shared.fastly.steamstatic.com/store_item_assets/steam/apps/${app.appid}/header.jpg`,
       developer: app.developer ?? "",
       publisher: app.publisher ?? "",
-      original_release_date: app.original_release_date ?? null,
-      steam_release_date: app.steam_release_date ?? null,
-      original_steam_release_date: app.original_steam_release_date ?? null,
-      release_from_early_access_date: app.release_from_early_access_date ?? null,
+      original_release_date: normalizeSteamReleaseDate(app.original_release_date),
+      steam_release_date: normalizeSteamReleaseDate(app.steam_release_date),
+      original_steam_release_date: normalizeSteamReleaseDate(app.original_steam_release_date),
+      release_from_early_access_date: normalizeSteamReleaseDate(app.release_from_early_access_date),
       release_date_source: app.release_date_source ?? null,
       is_early_access: app.is_early_access ?? null,
     };
@@ -750,8 +905,10 @@ export async function runBoundedCatalogImport(
       is_eligible: true,
       is_playable: false,
       parent_appid: child.parentAppId,
-      release_date: childRecord?.release_date || child.release_date || null,
-      release_status: childRecord?.release_status || "released",
+      release_date: normalizeSteamReleaseDate(childRecord?.release_date ?? child.release_date),
+      release_status:
+        childRecord?.release_status ||
+        (childRecord?.release_date || child.release_date ? "released" : "unannounced"),
       description: childRecord?.description || "",
       header_image:
         childRecord?.header_image ||

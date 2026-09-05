@@ -1,5 +1,7 @@
 import type { AppDatabase } from "../src/lib/db";
 import { getCheckpoint, setCheckpoint, upsertApp } from "../src/lib/catalog";
+import { enrichCatalogReleaseFields, hasLeftEarlyAccessAssertion, normalizeSteamReleaseDate } from "./catalog-seed";
+import { syncReleaseFactsFromApps } from "./release-facts";
 import { recordPriceObservation, type PriceState } from "../src/lib/prices";
 
 export const DEFAULT_PRICE_CHECKPOINT_KEY = "steam_catalog_feed";
@@ -43,6 +45,7 @@ export interface SteamStoreAppData {
     coming_soon?: boolean;
     date?: string;
   };
+  detailed_description?: string;
   price_overview?: SteamPriceOverview;
 }
 
@@ -67,6 +70,9 @@ export interface PriceDetailsResult {
   formatted_initial: string | null;
   formatted_final: string | null;
 }
+type PriceCatalogApp = Parameters<typeof upsertApp>[1] & {
+  is_coming_soon?: boolean | null;
+};
 
 function toCatalogApp(details: SteamStoreAppData): Parameters<typeof upsertApp>[1] | null {
   const appid = details.steam_appid;
@@ -88,14 +94,22 @@ function toCatalogApp(details: SteamStoreAppData): Parameters<typeof upsertApp>[
     is_eligible: isEligible,
     is_playable: isPlayable,
     parent_appid: parentAppId,
-    release_date: details.release_date?.date || null,
-    release_status: details.release_date?.coming_soon ? "upcoming" : "released",
+    release_date: normalizeSteamReleaseDate(details.release_date?.date),
+    release_status:
+      details.release_date?.coming_soon === true
+        ? "upcoming"
+        : details.release_date?.coming_soon === false
+          ? "released"
+          : "unannounced",
     description: details.short_description ?? "",
     header_image:
       details.header_image ||
       `https://shared.fastly.steamstatic.com/store_item_assets/steam/apps/${appid}/header.jpg`,
     developer: details.developers?.[0] ?? "",
     publisher: details.publishers?.[0] ?? "",
+    ...(hasLeftEarlyAccessAssertion(details.detailed_description)
+      ? { has_left_early_access: true }
+      : {}),
   };
 }
 
@@ -309,48 +323,148 @@ export async function refreshIndicatedAppPrices(
   const changedAppIds: number[] = [];
 
   let index = 0;
-  for (; index < appids.length && attempted < attemptCap && successful < successTarget; index++) {
-    const appid = appids[index];
-    attempted++;
-    const priceDetails = await fetchSteamPriceDetails(appid, { customFetch });
+  while (index < appids.length && attempted < attemptCap && successful < successTarget) {
+    const capacity = Math.min(50, appids.length - index, attemptCap - attempted, successTarget - successful);
+    const batchIds = appids.slice(index, index + capacity);
+    const catalogApps: Array<{ appid: number; app: PriceCatalogApp }> = [];
+    let consumed = 0;
 
-    if (!priceDetails.success) {
-      failed++;
-      pendingAppIds.push(appid);
-      if (priceDetails.rateLimited) {
-        rateLimited = true;
-        index++;
-        break;
+    for (const appid of batchIds) {
+      consumed++;
+      attempted++;
+      const priceDetails = await fetchSteamPriceDetails(appid, { customFetch });
+
+      if (!priceDetails.success) {
+        failed++;
+        pendingAppIds.push(appid);
+        if (priceDetails.rateLimited) {
+          rateLimited = true;
+          break;
+        }
+        continue;
       }
-      continue;
+      successful++;
+
+      if (priceDetails.catalogApp) {
+        const existing = await db
+          .prepare(
+            "SELECT appid, parent_appid, is_eligible, is_playable, release_date, " +
+              "steam_release_date, original_release_date, original_steam_release_date, " +
+              "release_from_early_access_date, release_date_source, is_early_access, " +
+              "release_status FROM apps WHERE appid = ?"
+          )
+          .bind(appid)
+          .first<{
+            appid: number;
+            parent_appid: number | null;
+            is_eligible: number;
+            is_playable: number;
+            release_date: string | null;
+            steam_release_date: string | null;
+            original_release_date: string | null;
+            original_steam_release_date: string | null;
+            release_from_early_access_date: string | null;
+            release_date_source: "original_release_date" | "steam_release_date" | "appdetails" | null;
+            is_early_access: number | null;
+            release_status: string | null;
+          }>();
+
+        const existingHasLifecycle =
+          existing !== null &&
+          (existing.release_date_source !== null ||
+            existing.original_release_date !== null ||
+            existing.steam_release_date !== null ||
+            existing.original_steam_release_date !== null ||
+            existing.release_from_early_access_date !== null ||
+            existing.is_early_access !== null);
+        catalogApps.push({
+          appid,
+          app: {
+            ...priceDetails.catalogApp,
+            ...(existing
+              ? {
+                  parent_appid: existing.parent_appid,
+                  is_eligible: existing.is_eligible === 1,
+                  is_playable: existing.is_playable === 1,
+                }
+              : {}),
+            ...(existingHasLifecycle
+              ? {
+                  release_date: existing!.release_date,
+                  steam_release_date: existing!.steam_release_date,
+                  original_release_date: existing!.original_release_date,
+                  original_steam_release_date: existing!.original_steam_release_date,
+                  release_from_early_access_date: existing!.release_from_early_access_date,
+                  release_date_source: existing!.release_date_source,
+                  is_early_access:
+                    existing!.is_early_access === null ? null : existing!.is_early_access === 1,
+                }
+              : {}),
+            ...(existing &&
+            priceDetails.catalogApp.release_date === null &&
+            existing.release_status !== null
+              ? { release_status: existing.release_status }
+              : {}),
+          },
+        });
+      }
+
+      const recordResult = await recordPriceObservation(db, {
+        appid,
+        currency: priceDetails.currency,
+        initial_price: priceDetails.initial_price,
+        final_price: priceDetails.final_price,
+        discount_percent: priceDetails.discount_percent,
+        is_free: priceDetails.is_free,
+        is_available: priceDetails.is_available,
+        formatted_initial: priceDetails.formatted_initial,
+        formatted_final: priceDetails.formatted_final,
+        observed_at: observedAt,
+      });
+
+      if (recordResult.stateChanged) {
+        changed++;
+        changedAppIds.push(appid);
+      }
     }
 
-    if (priceDetails.catalogApp) {
-      const existingApp = await db
-        .prepare("SELECT appid FROM apps WHERE appid = ?")
-        .bind(appid)
-        .first<{ appid: number }>();
-      if (!existingApp) {
-        await upsertApp(db, priceDetails.catalogApp);
-      }
+    index += consumed;
+    if (rateLimited) {
+      pendingAppIds.push(...catalogApps.map(({ appid }) => appid));
+      break;
     }
-    successful++;
-    const recordResult = await recordPriceObservation(db, {
-      appid,
-      currency: priceDetails.currency,
-      initial_price: priceDetails.initial_price,
-      final_price: priceDetails.final_price,
-      discount_percent: priceDetails.discount_percent,
-      is_free: priceDetails.is_free,
-      is_available: priceDetails.is_available,
-      formatted_initial: priceDetails.formatted_initial,
-      formatted_final: priceDetails.formatted_final,
-      observed_at: observedAt,
-    });
 
-    if (recordResult.stateChanged) {
-      changed++;
-      changedAppIds.push(appid);
+    if (catalogApps.length > 0) {
+      let enrichedApps: PriceCatalogApp[];
+      try {
+        enrichedApps = await enrichCatalogReleaseFields(
+          catalogApps.map(({ app }) => app),
+          customFetch
+        );
+      } catch (error) {
+        if (error instanceof Error && error.name === "SteamRateLimitError") {
+          rateLimited = true;
+          pendingAppIds.push(...catalogApps.map(({ appid }) => appid));
+          break;
+        }
+        throw error;
+      }
+
+      for (const app of enrichedApps) {
+        const enrichedApp = {
+          ...app,
+          release_status:
+            app.is_coming_soon === true
+              ? "upcoming"
+              : app.is_coming_soon === false
+                ? "released"
+                : app.release_status,
+        };
+        await upsertApp(db, enrichedApp);
+      }
+      await syncReleaseFactsFromApps(db, {
+        appIds: enrichedApps.map((app) => app.appid),
+      });
     }
   }
   for (; index < appids.length; index++) {
@@ -358,6 +472,7 @@ export async function refreshIndicatedAppPrices(
   }
 
   return { attempted, successful, failed, changed, changedAppIds, rateLimited, pendingAppIds };
+
 }
 
 interface PriceFeedCheckpointValue {

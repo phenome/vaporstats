@@ -1,20 +1,13 @@
 import { afterAll, describe, expect, test } from "bun:test";
 import { Database, type SQLQueryBindings } from "bun:sqlite";
-import { readdirSync, readFileSync } from "node:fs";
-import { resolve } from "node:path";
 import type { AppDatabase, AppPreparedStatement } from "../src/lib/db";
+import { applyMigrations } from "../src/lib/migrations";
 import { runIngestionTick, startIngestionScheduler, type IngestionCron } from "../workers/ingestion";
 import { runDailyRollupJob } from "../workers/player-rollups";
 
-const migrationSql = readdirSync(resolve(import.meta.dir, "../migrations"))
-  .filter((file) => /^\d+_.*\.sql$/.test(file))
-  .sort()
-  .map((file) => readFileSync(resolve(import.meta.dir, "../migrations", file), "utf8"))
-  .join("\n");
-
 function createAppDatabase(): AppDatabase {
   const native = new Database(":memory:");
-  native.exec(migrationSql);
+  applyMigrations(native);
 
   const database: AppDatabase = {
     prepare(query: string): AppPreparedStatement {

@@ -5,6 +5,8 @@ export type ReleaseDateSource =
   | "original_release_date"
   | "steam_release_date"
   | "appdetails"
+  | "original_steam_release_date"
+  | "release_from_early_access_date"
   | null;
 
 export type ReleaseEventType = "early_access" | "full_release" | "patch";
@@ -30,6 +32,7 @@ export interface CatalogEntity {
   release_from_early_access_date: string | null;
   release_date_source: ReleaseDateSource;
   is_early_access: boolean | null;
+  has_left_early_access: boolean | null;
   release_status: "released" | "upcoming" | "unannounced";
   description: string;
   header_image: string;
@@ -68,6 +71,7 @@ interface RawAppRow {
   release_from_early_access_date: string | null;
   release_date_source: ReleaseDateSource;
   is_early_access: number | boolean | null;
+  has_left_early_access: number | boolean | null;
   release_status: string;
   description: string;
   header_image: string;
@@ -98,6 +102,12 @@ function mapRowToEntity(row: RawAppRow): CatalogEntity {
         : typeof row.is_early_access === "boolean"
           ? row.is_early_access
           : row.is_early_access === 1,
+    has_left_early_access:
+      row.has_left_early_access == null
+        ? null
+        : typeof row.has_left_early_access === "boolean"
+          ? row.has_left_early_access
+          : row.has_left_early_access === 1,
     release_status: (row.release_status as CatalogEntity["release_status"]) || "released",
     description: row.description || "",
     header_image: row.header_image || "",
@@ -181,13 +191,28 @@ export async function getGameByAppId(
   let release_events: GameReleaseEvent[] = [];
 
   const eventResult = await db
-    .prepare(`SELECT event_type, event_date, source
-     FROM app_release_events
-     WHERE appid = ?
-     ORDER BY event_date DESC, event_type ASC`)
+    .prepare(
+      `SELECT event_type, event_date, source
+       FROM app_release_events AS event
+       WHERE event.appid = ?
+         AND (
+           event.event_type = 'full_release'
+           OR (
+             event.event_type = 'patch'
+             AND event.event_date = (
+               SELECT MAX(patch.event_date)
+               FROM app_release_events AS patch
+               WHERE patch.appid = event.appid
+                 AND patch.event_type = 'patch'
+             )
+           )
+         )
+       ORDER BY event_date DESC, event_type ASC`
+    )
     .bind(appid)
     .all<GameReleaseEvent>();
   release_events = eventResult.results ?? [];
+
 
   return {
     ...entity,
@@ -218,6 +243,7 @@ export async function upsertApp(
     release_from_early_access_date?: string | null;
     release_date_source?: ReleaseDateSource;
     is_early_access?: boolean | null;
+    has_left_early_access?: boolean | null;
     release_status?: string;
     description?: string;
     header_image?: string;
@@ -238,6 +264,14 @@ export async function upsertApp(
   const releaseDateSource = app.release_date_source ?? null;
   const isEarlyAccess =
     app.is_early_access == null ? null : app.is_early_access ? 1 : 0;
+  const hasLeftEarlyAccess =
+    app.has_left_early_access == null
+      ? app.is_early_access === true
+        ? 0
+        : null
+      : app.has_left_early_access
+        ? 1
+        : 0;
   const releaseStatus = app.release_status ?? "released";
   const description = app.description ?? "";
   const headerImage = app.header_image ?? "";
@@ -250,9 +284,9 @@ export async function upsertApp(
         appid, name, slug, type, is_eligible, is_playable,
         parent_appid, release_date, steam_release_date, original_release_date,
         original_steam_release_date, release_from_early_access_date,
-        release_date_source, is_early_access, release_status, description,
-        header_image, developer, publisher, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        release_date_source, is_early_access, has_left_early_access,
+        release_status, description, header_image, developer, publisher, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
       ON CONFLICT(appid) DO UPDATE SET
         name = excluded.name,
         slug = excluded.slug,
@@ -267,6 +301,10 @@ export async function upsertApp(
         release_from_early_access_date = excluded.release_from_early_access_date,
         release_date_source = excluded.release_date_source,
         is_early_access = excluded.is_early_access,
+        has_left_early_access = CASE
+          WHEN excluded.has_left_early_access IS NULL THEN apps.has_left_early_access
+          ELSE excluded.has_left_early_access
+        END,
         release_status = excluded.release_status,
         description = excluded.description,
         header_image = excluded.header_image,
@@ -289,6 +327,7 @@ export async function upsertApp(
       releaseFromEarlyAccessDate,
       releaseDateSource,
       isEarlyAccess,
+      hasLeftEarlyAccess,
       releaseStatus,
       description,
       headerImage,
@@ -297,6 +336,28 @@ export async function upsertApp(
     );
 
   await stmt.run();
+
+  if (releaseStatus === "upcoming" && releaseDate?.trim()) {
+    const expectedDate = releaseDate.trim();
+    const previousPlan = await db
+      .prepare(
+        `SELECT expected_date FROM app_release_plans
+         WHERE appid = ?
+         ORDER BY id DESC
+         LIMIT 1`
+      )
+      .bind(app.appid)
+      .first<{ expected_date: string }>();
+    if (previousPlan?.expected_date !== expectedDate) {
+      await db
+        .prepare(
+          `INSERT INTO app_release_plans (appid, expected_date, observed_at)
+           VALUES (?, ?, CURRENT_TIMESTAMP)`
+        )
+        .bind(app.appid, expectedDate)
+        .run();
+    }
+  }
 }
 
 /**

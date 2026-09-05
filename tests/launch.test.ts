@@ -1,8 +1,9 @@
 import { describe, it, expect, beforeEach } from "bun:test";
-import { readFileSync, readdirSync } from "node:fs";
+import { readdirSync } from "node:fs";
 import { resolve } from "node:path";
 import { Database, type SQLQueryBindings } from "bun:sqlite";
 import type { AppDatabase, AppPreparedStatement } from "../src/lib/db";
+import { applyMigrations } from "../src/lib/migrations";
 import {
   CACHE_POLICIES,
   getHomeCacheHeaders,
@@ -31,15 +32,6 @@ import { handlePrivacyHttpRequest } from "../src/routes/privacy";
 import { runBoundedCatalogImport, INITIAL_SEED_APP_IDS } from "../workers/catalog-seed";
 import { runHourlyPriceFeedTick } from "../workers/price-collector";
 import { syncReleaseFactsFromApps } from "../workers/release-facts";
-
-// Load SQL migrations for in-memory SQLite test database
-const migration0001 = readFileSync(resolve(import.meta.dir, "../migrations/0001_catalog.sql"), "utf8");
-const migration0002 = readFileSync(resolve(import.meta.dir, "../migrations/0002_player_activity.sql"), "utf8");
-const migration0003 = readFileSync(resolve(import.meta.dir, "../migrations/0003_player_rollups.sql"), "utf8");
-const migration0004 = readFileSync(resolve(import.meta.dir, "../migrations/0004_related_apps.sql"), "utf8");
-const migration0005 = readFileSync(resolve(import.meta.dir, "../migrations/0005_prices.sql"), "utf8");
-const migration0006 = readFileSync(resolve(import.meta.dir, "../migrations/0006_releases.sql"), "utf8");
-const migration0007 = readFileSync(resolve(import.meta.dir, "../migrations/0007_release_lifecycle.sql"), "utf8");
 
 function createSqliteAdapter(db: Database): AppDatabase {
   return {
@@ -114,13 +106,7 @@ describe("public API launch contract", () => {
 
   beforeEach(async () => {
     sqliteDb = new Database(":memory:");
-    sqliteDb.exec(migration0001);
-    sqliteDb.exec(migration0002);
-    sqliteDb.exec(migration0003);
-    sqliteDb.exec(migration0004);
-    sqliteDb.exec(migration0005);
-    sqliteDb.exec(migration0006);
-    sqliteDb.exec(migration0007);
+    applyMigrations(sqliteDb);
     d1 = createSqliteAdapter(sqliteDb);
 
     // Seed test playable game and child expansion
@@ -308,13 +294,7 @@ describe("operating triggers", () => {
 
   beforeEach(() => {
     sqliteDb = new Database(":memory:");
-    sqliteDb.exec(migration0001);
-    sqliteDb.exec(migration0002);
-    sqliteDb.exec(migration0003);
-    sqliteDb.exec(migration0004);
-    sqliteDb.exec(migration0005);
-    sqliteDb.exec(migration0006);
-    sqliteDb.exec(migration0007);
+    applyMigrations(sqliteDb);
     d1 = createSqliteAdapter(sqliteDb);
   });
 

@@ -35,6 +35,7 @@ export const apps = sqliteTable(
     releaseFromEarlyAccessDate: text("release_from_early_access_date"),
     releaseDateSource: text("release_date_source"),
     isEarlyAccess: integer("is_early_access"),
+    hasLeftEarlyAccess: integer("has_left_early_access"),
   },
   (table) => [
     index("idx_apps_slug").on(table.slug),
@@ -52,6 +53,10 @@ export const apps = sqliteTable(
     check(
       "apps_is_early_access_check",
       sql`${table.isEarlyAccess} IS NULL OR ${table.isEarlyAccess} IN (0, 1)`,
+    ),
+    check(
+      "apps_has_left_early_access_check",
+      sql`${table.hasLeftEarlyAccess} IS NULL OR ${table.hasLeftEarlyAccess} IN (0, 1)`,
     ),
   ],
 );
@@ -253,6 +258,24 @@ export const appReleaseEvents = sqliteTable(
     index("idx_app_release_events_appid").on(
       table.appid,
       table.eventDate,
+    ),
+  ],
+);
+
+export const appReleasePlans = sqliteTable(
+  "app_release_plans",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    appid: integer("appid")
+      .notNull()
+      .references(() => apps.appid, { onDelete: "cascade" }),
+    expectedDate: text("expected_date").notNull(),
+    observedAt: text("observed_at").notNull().default(currentTimestamp),
+  },
+  (table) => [
+    index("idx_app_release_plans_appid_observed_at").on(
+      table.appid,
+      asc(table.observedAt),
     ),
   ],
 );

@@ -33,6 +33,7 @@ import { Route as ApiPlayersHistoryRouteImport } from './routes/api.players.hist
 import { Route as ApiPricesHistoryRouteImport } from './routes/api.prices.history'
 import { Route as GamesGameChildRouteImport } from './routes/games.$game_.$child'
 import { Route as ApiGamesAppidDetailRouteImport } from './routes/api.games.$appid.detail'
+import { Route as ApiGamesAppidLifecycleRouteImport } from './routes/api.games.$appid.lifecycle'
 import { Route as ApiGamesAppidOverviewRouteImport } from './routes/api.games.$appid.overview'
 
 const IndexRoute = IndexRouteImport.update({
@@ -155,6 +156,11 @@ const ApiGamesAppidDetailRoute = ApiGamesAppidDetailRouteImport.update({
   path: '/api/games/$appid/detail',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ApiGamesAppidLifecycleRoute = ApiGamesAppidLifecycleRouteImport.update({
+  id: '/api/games/$appid/lifecycle',
+  path: '/api/games/$appid/lifecycle',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const ApiGamesAppidOverviewRoute = ApiGamesAppidOverviewRouteImport.update({
   id: '/api/games/$appid/overview',
   path: '/api/games/$appid/overview',
@@ -186,6 +192,7 @@ export interface FileRoutesByFullPath {
   '/api/prices/history': typeof ApiPricesHistoryRoute
   '/games/$game/$child': typeof GamesGameChildRoute
   '/api/games/$appid/detail': typeof ApiGamesAppidDetailRoute
+  '/api/games/$appid/lifecycle': typeof ApiGamesAppidLifecycleRoute
   '/api/games/$appid/overview': typeof ApiGamesAppidOverviewRoute
 }
 export interface FileRoutesByTo {
@@ -213,6 +220,7 @@ export interface FileRoutesByTo {
   '/api/prices/history': typeof ApiPricesHistoryRoute
   '/games/$game/$child': typeof GamesGameChildRoute
   '/api/games/$appid/detail': typeof ApiGamesAppidDetailRoute
+  '/api/games/$appid/lifecycle': typeof ApiGamesAppidLifecycleRoute
   '/api/games/$appid/overview': typeof ApiGamesAppidOverviewRoute
 }
 export interface FileRoutesById {
@@ -241,6 +249,7 @@ export interface FileRoutesById {
   '/api/prices/history': typeof ApiPricesHistoryRoute
   '/games/$game_/$child': typeof GamesGameChildRoute
   '/api/games/$appid/detail': typeof ApiGamesAppidDetailRoute
+  '/api/games/$appid/lifecycle': typeof ApiGamesAppidLifecycleRoute
   '/api/games/$appid/overview': typeof ApiGamesAppidOverviewRoute
 }
 export interface FileRouteTypes {
@@ -270,6 +279,7 @@ export interface FileRouteTypes {
     | '/api/prices/history'
     | '/games/$game/$child'
     | '/api/games/$appid/detail'
+    | '/api/games/$appid/lifecycle'
     | '/api/games/$appid/overview'
   fileRoutesByTo: FileRoutesByTo
   to:
@@ -297,6 +307,7 @@ export interface FileRouteTypes {
     | '/api/prices/history'
     | '/games/$game/$child'
     | '/api/games/$appid/detail'
+    | '/api/games/$appid/lifecycle'
     | '/api/games/$appid/overview'
   id:
     | '__root__'
@@ -324,6 +335,7 @@ export interface FileRouteTypes {
     | '/api/prices/history'
     | '/games/$game_/$child'
     | '/api/games/$appid/detail'
+    | '/api/games/$appid/lifecycle'
     | '/api/games/$appid/overview'
   fileRoutesById: FileRoutesById
 }
@@ -352,6 +364,7 @@ export interface RootRouteChildren {
   ApiPricesHistoryRoute: typeof ApiPricesHistoryRoute
   GamesGameChildRoute: typeof GamesGameChildRoute
   ApiGamesAppidDetailRoute: typeof ApiGamesAppidDetailRoute
+  ApiGamesAppidLifecycleRoute: typeof ApiGamesAppidLifecycleRoute
   ApiGamesAppidOverviewRoute: typeof ApiGamesAppidOverviewRoute
 }
 
@@ -525,6 +538,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ApiGamesAppidDetailRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/api/games/$appid/lifecycle': {
+      id: '/api/games/$appid/lifecycle'
+      path: '/api/games/$appid/lifecycle'
+      fullPath: '/api/games/$appid/lifecycle'
+      preLoaderRoute: typeof ApiGamesAppidLifecycleRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/api/games/$appid/overview': {
       id: '/api/games/$appid/overview'
       path: '/api/games/$appid/overview'
@@ -560,6 +580,7 @@ const rootRouteChildren: RootRouteChildren = {
   ApiPricesHistoryRoute: ApiPricesHistoryRoute,
   GamesGameChildRoute: GamesGameChildRoute,
   ApiGamesAppidDetailRoute: ApiGamesAppidDetailRoute,
+  ApiGamesAppidLifecycleRoute: ApiGamesAppidLifecycleRoute,
   ApiGamesAppidOverviewRoute: ApiGamesAppidOverviewRoute,
 }
 export const routeTree = rootRouteImport
