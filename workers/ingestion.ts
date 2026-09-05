@@ -16,7 +16,13 @@ import {
   refreshIndicatedAppPrices,
   type HourlyPriceFeedTickResult,
 } from "./price-collector";
-import { runBoundedCatalogImport, type SeedResult } from "./catalog-seed";
+import {
+  CATALOG_REFRESH_CHECKPOINT_KEY,
+  refreshCatalogBatch,
+  queueCatalogRefresh,
+  runBoundedCatalogImport,
+  type SeedResult,
+} from "./catalog-seed";
 import { syncReleaseFactsFromApps, type SyncReleaseFactsResult } from "./release-facts";
 
 export interface IngestionEnv {
@@ -34,6 +40,10 @@ export interface ScheduledEvent {
 
 const INGESTION_LEASE_KEY = "ingestion:active-run";
 const INGESTION_LEASE_DURATION_MS = 15 * 60 * 1000;
+
+function hasIngestionAuth(request: Request, expectedSecret: string | undefined): boolean {
+  return Boolean(expectedSecret) && request.headers.get("Authorization") === `Bearer ${expectedSecret}`;
+}
 
 async function acquireIngestionLease(db: D1Database): Promise<string | null> {
   const token = crypto.randomUUID();
@@ -121,6 +131,11 @@ export default {
             anchorTime,
           });
         }
+        const catalogRefreshResult = await refreshCatalogBatch(db, {
+          checkpointKey: CATALOG_REFRESH_CHECKPOINT_KEY,
+          fetchFn: customFetch,
+        });
+        const { records: _catalogRefreshRecords, ...catalogRefresh } = catalogRefreshResult;
         const releaseResult = await syncReleaseFactsFromApps(db, { asOfDate: anchorTime });
 
         console.log(
@@ -133,6 +148,7 @@ export default {
             discovery: discoveryResult,
             rollups: rollupResult,
             prices: priceResult,
+            catalogRefresh,
             releaseFacts: releaseResult,
           })
         );
@@ -155,11 +171,42 @@ export default {
   ): Promise<Response> {
     const url = new URL(request.url);
 
+    if (request.method === "POST" && url.pathname === "/api/catalog/refresh") {
+      if (!hasIngestionAuth(request, env.INGESTION_TRIGGER_SECRET)) {
+        return new Response("Unauthorized", { status: 401 });
+      }
+
+      const lease = await acquireIngestionLease(env.DB);
+      if (!lease) {
+        return Response.json({ success: false, reason: "run_in_progress" }, { status: 409 });
+      }
+
+      try {
+        const customFetch = env.FETCH ?? fetch;
+        const queue = await queueCatalogRefresh(env.DB, CATALOG_REFRESH_CHECKPOINT_KEY);
+        const refresh = await refreshCatalogBatch(env.DB, {
+          checkpointKey: CATALOG_REFRESH_CHECKPOINT_KEY,
+          fetchFn: customFetch,
+        });
+        const releases = await syncReleaseFactsFromApps(env.DB, {
+          apps: refresh.records.map((record) => ({ ...record, type: record.type ?? "game" })),
+        });
+        const { records: _records, ...refreshSummary } = refresh;
+
+        return Response.json({
+          success: true,
+          queue,
+          refresh: refreshSummary,
+          releases,
+        });
+      } finally {
+        await releaseIngestionLease(env.DB, lease);
+      }
+    }
+
     // Authenticated manual catalog seed, precise release facts, and storefront prices
     if (request.method === "POST" && url.pathname === "/api/catalog/seed") {
-      const authHeader = request.headers.get("Authorization");
-      const expectedSecret = env.INGESTION_TRIGGER_SECRET;
-      if (!expectedSecret || authHeader !== `Bearer ${expectedSecret}`) {
+      if (!hasIngestionAuth(request, env.INGESTION_TRIGGER_SECRET)) {
         return new Response("Unauthorized", { status: 401 });
       }
 
@@ -231,9 +278,7 @@ export default {
         url.pathname === "/api/collect/prices")
     ) {
       // Require INGESTION_TRIGGER_SECRET bearer auth
-      const authHeader = request.headers.get("Authorization");
-      const expectedSecret = env.INGESTION_TRIGGER_SECRET;
-      if (!expectedSecret || authHeader !== `Bearer ${expectedSecret}`) {
+      if (!hasIngestionAuth(request, env.INGESTION_TRIGGER_SECRET)) {
         return new Response("Unauthorized", { status: 401 });
       }
 
@@ -275,12 +320,18 @@ export default {
             customFetch,
             anchorTime,
           });
+          const catalogRefreshResult = await refreshCatalogBatch(env.DB, {
+            checkpointKey: CATALOG_REFRESH_CHECKPOINT_KEY,
+            fetchFn: customFetch,
+          });
+          const { records: _catalogRefreshRecords, ...catalogRefresh } = catalogRefreshResult;
           const releaseResult = await syncReleaseFactsFromApps(env.DB, {
             asOfDate: anchorTime,
           });
           return Response.json({
             success: true,
             prices: priceResult,
+            catalogRefresh,
             releases: releaseResult,
           });
         }
@@ -324,6 +375,11 @@ export default {
               anchorTime,
             })
           : null;
+        const catalogRefreshResult = await refreshCatalogBatch(env.DB, {
+          checkpointKey: CATALOG_REFRESH_CHECKPOINT_KEY,
+          fetchFn: customFetch,
+        });
+        const { records: _catalogRefreshRecords, ...catalogRefresh } = catalogRefreshResult;
         const releaseResult = await syncReleaseFactsFromApps(env.DB, {
           asOfDate: anchorTime,
         });
@@ -334,6 +390,7 @@ export default {
           discovery: discoveryResult,
           rollups: rollupResult,
           prices: priceResult,
+          catalogRefresh,
           releases: releaseResult,
         });
       } finally {

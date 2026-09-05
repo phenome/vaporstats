@@ -11,11 +11,15 @@ import {
   type CatalogEntity,
 } from "../src/lib/catalog";
 import {
+  CATALOG_REFRESH_CHECKPOINT_KEY,
+  fetchSteamAppDetails,
+  queueCatalogRefresh,
+  refreshCatalogBatch,
   runBoundedCatalogImport,
   runCatalogSeed,
-  fetchSteamAppDetails,
   type SeedAppInput,
 } from "../workers/catalog-seed";
+import ingestionWorker from "../workers/ingestion";
 import { handleGameHttpRequest } from "../src/routes/games.$game";
 import { CACHE_POLICIES } from "../src/lib/cache";
 import { toSlug, parseGameSlug, getCanonicalGamePath } from "../src/lib/slug";
@@ -265,6 +269,172 @@ describe("Catalog Foundation", () => {
 
     expect(app?.release_date).toBe("Jun 30, 2018");
   });
+  test("refreshes queued catalog batches during scheduled ingestion", async () => {
+    const freshDb = createFreshDb();
+    await freshDb.exec(migrationSql);
+
+    for (const appid of [339820, 339821]) {
+      await upsertApp(freshDb, {
+        appid,
+        name: appid === 339820 ? "Starwalker" : "Refresh Test Game",
+        type: "game",
+        is_playable: true,
+        is_eligible: true,
+        release_date: "Aug 31, 2026",
+      });
+      await freshDb
+        .prepare(
+          `INSERT INTO release_facts (
+             appid, name, slug, type, release_date, release_year, release_week,
+             release_status, is_precise
+           ) VALUES (?, ?, ?, 'game', '2026-08-31', 2026, '2026-W36', 'released', 1)`
+        )
+        .bind(appid, appid === 339820 ? "Starwalker" : "Refresh Test Game", `game-${appid}`)
+        .run();
+    }
+
+    const mockFetch = (async (url: string | URL | Request) => {
+      const urlStr = url.toString();
+      if (urlStr.includes("/api/appdetails?")) {
+        const appid = Number(urlStr.match(/appids=(\d+)/)?.[1]);
+        return Response.json({
+          [appid]: {
+            success: true,
+            data: {
+              type: "game",
+              name: appid === 339820 ? "Starwalker" : "Refresh Test Game",
+              steam_appid: appid,
+              release_date: { coming_soon: false, date: "Aug 31, 2026" },
+            },
+          },
+        });
+      }
+      return new Response(
+        '<div class="subtitle column">Release Date:</div><div class="date">Jun 30, 2018</div>',
+        { status: 200, headers: { "Content-Type": "text/html" } }
+      );
+    }) as unknown as typeof fetch;
+
+    const queue = await queueCatalogRefresh(freshDb);
+    expect(queue).toMatchObject({ queued: 2, alreadyQueued: false });
+
+    const firstBatch = await refreshCatalogBatch(freshDb, {
+      successTarget: 1,
+      attemptCap: 1,
+      fetchFn: mockFetch,
+    });
+    expect(firstBatch).toMatchObject({ successful: 1, pending: 1, active: true });
+
+    const firstApp = await freshDb
+      .prepare("SELECT release_date FROM apps WHERE appid = ?")
+      .bind(339820)
+      .first<{ release_date: string }>();
+    expect(firstApp?.release_date).toBe("Jun 30, 2018");
+
+    await ingestionWorker.scheduled(
+      {
+        cron: "*/10 * * * *",
+        scheduledTime: new Date("2026-09-05T02:00:00.000Z").getTime(),
+        type: "scheduled",
+      },
+      { DB: freshDb, FETCH: mockFetch }
+    );
+
+    const secondApp = await freshDb
+      .prepare("SELECT release_date FROM apps WHERE appid = ?")
+      .bind(339821)
+      .first<{ release_date: string }>();
+    const releaseFact = await freshDb
+      .prepare("SELECT release_date, release_week FROM release_facts WHERE appid = ?")
+      .bind(339820)
+      .first<{ release_date: string; release_week: string }>();
+    const checkpoint = await getCheckpoint(freshDb, CATALOG_REFRESH_CHECKPOINT_KEY);
+
+    expect(secondApp?.release_date).toBe("Jun 30, 2018");
+    expect(releaseFact).toMatchObject({ release_date: "2018-06-30", release_week: "2018-W26" });
+    expect(JSON.parse(checkpoint?.value ?? "{}").pending).toEqual([]);
+  });
+  test("catalog refresh trigger is authenticated and repairs one app", async () => {
+    const freshDb = createFreshDb();
+    await freshDb.exec(migrationSql);
+    await upsertApp(freshDb, {
+      appid: 339822,
+      name: "Refresh Endpoint Game",
+      type: "game",
+      is_playable: true,
+      is_eligible: true,
+      release_date: "Aug 31, 2026",
+    });
+
+    const mockFetch = (async (url: string | URL | Request) => {
+      if (url.toString().includes("/api/appdetails?")) {
+        return Response.json({
+          "339822": {
+            success: true,
+            data: {
+              type: "game",
+              name: "Refresh Endpoint Game",
+              steam_appid: 339822,
+              release_date: { coming_soon: false, date: "Aug 31, 2026" },
+            },
+          },
+        });
+      }
+      return new Response(
+        '<div class="subtitle column">Release Date:</div><div class="date">Jun 30, 2018</div>',
+        { status: 200, headers: { "Content-Type": "text/html" } }
+      );
+    }) as unknown as typeof fetch;
+
+    const unauthorized = await ingestionWorker.fetch(
+      new Request("https://vaporstats-ingestion.local/api/catalog/refresh", { method: "POST" }),
+      { DB: freshDb, INGESTION_TRIGGER_SECRET: "refresh-secret", FETCH: mockFetch }
+    );
+    expect(unauthorized.status).toBe(401);
+
+    const authorized = await ingestionWorker.fetch(
+      new Request("https://vaporstats-ingestion.local/api/catalog/refresh", {
+        method: "POST",
+        headers: { Authorization: "Bearer refresh-secret" },
+      }),
+      { DB: freshDb, INGESTION_TRIGGER_SECRET: "refresh-secret", FETCH: mockFetch }
+    );
+    const body = (await authorized.json()) as {
+      success: boolean;
+      refresh: { successful: number; pending: number };
+    };
+    const app = await freshDb
+      .prepare("SELECT release_date FROM apps WHERE appid = ?")
+      .bind(339822)
+      .first<{ release_date: string }>();
+
+    expect(authorized.status).toBe(200);
+    expect(body).toMatchObject({ success: true, refresh: { successful: 1, pending: 0 } });
+    expect(app?.release_date).toBe("Jun 30, 2018");
+  });
+  test("catalog refresh preserves queued apps after a Steam rate limit", async () => {
+    const freshDb = createFreshDb();
+    await freshDb.exec(migrationSql);
+    await upsertApp(freshDb, {
+      appid: 339823,
+      name: "Rate Limited Game",
+      type: "game",
+      is_playable: true,
+      is_eligible: true,
+      release_date: "Aug 31, 2026",
+    });
+
+    await queueCatalogRefresh(freshDb);
+    const refresh = await refreshCatalogBatch(freshDb, {
+      fetchFn: (async () => new Response("", { status: 429 })) as unknown as typeof fetch,
+    });
+    const checkpoint = await getCheckpoint(freshDb, CATALOG_REFRESH_CHECKPOINT_KEY);
+
+    expect(refresh).toMatchObject({ active: true, rateLimited: true, attempted: 1, pending: 1 });
+    expect(JSON.parse(checkpoint?.value ?? "{}").pending).toEqual([339823]);
+  });
+
+
 
   test("playable catalog only", async () => {
     const freshDb = createFreshDb();
