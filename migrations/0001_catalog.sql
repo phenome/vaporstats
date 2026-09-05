@@ -18,10 +18,14 @@ CREATE TABLE IF NOT EXISTS apps (
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+--> statement-breakpoint
 
 CREATE INDEX IF NOT EXISTS idx_apps_slug ON apps(slug);
+--> statement-breakpoint
 CREATE INDEX IF NOT EXISTS idx_apps_type_playable ON apps(type, is_playable, is_eligible);
+--> statement-breakpoint
 CREATE INDEX IF NOT EXISTS idx_apps_parent ON apps(parent_appid);
+--> statement-breakpoint
 
 CREATE TABLE IF NOT EXISTS checkpoints (
   key TEXT PRIMARY KEY,

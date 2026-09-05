@@ -16,9 +16,14 @@ CREATE TABLE IF NOT EXISTS release_facts (
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+--> statement-breakpoint
 
 CREATE INDEX IF NOT EXISTS idx_release_facts_week ON release_facts(release_week, release_date);
+--> statement-breakpoint
 CREATE INDEX IF NOT EXISTS idx_release_facts_date ON release_facts(release_date);
+--> statement-breakpoint
 CREATE INDEX IF NOT EXISTS idx_release_facts_parent ON release_facts(parent_appid);
+--> statement-breakpoint
 CREATE INDEX IF NOT EXISTS idx_release_facts_type ON release_facts(type);
+--> statement-breakpoint
 CREATE INDEX IF NOT EXISTS idx_apps_release_date ON apps(release_date);

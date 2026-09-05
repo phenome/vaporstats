@@ -8,9 +8,12 @@ CREATE TABLE IF NOT EXISTS observations (
   observed_at TEXT NOT NULL,
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+--> statement-breakpoint
 
 CREATE INDEX IF NOT EXISTS idx_observations_appid_observed_at ON observations(appid, observed_at DESC);
+--> statement-breakpoint
 CREATE INDEX IF NOT EXISTS idx_observations_observed_at ON observations(observed_at);
+--> statement-breakpoint
 
 CREATE TABLE IF NOT EXISTS tracked_games (
   appid INTEGER PRIMARY KEY,
@@ -24,9 +27,12 @@ CREATE TABLE IF NOT EXISTS tracked_games (
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+--> statement-breakpoint
 
 CREATE INDEX IF NOT EXISTS idx_tracked_games_tier_due ON tracked_games(tier, next_due_at);
+--> statement-breakpoint
 CREATE INDEX IF NOT EXISTS idx_tracked_games_next_due ON tracked_games(next_due_at);
+--> statement-breakpoint
 
 CREATE TABLE IF NOT EXISTS player_daily_requests (
   date TEXT PRIMARY KEY,

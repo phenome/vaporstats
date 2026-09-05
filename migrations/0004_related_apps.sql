@@ -11,7 +11,10 @@ CREATE TABLE IF NOT EXISTS app_relationships (
   updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (parent_appid, child_appid)
 );
+--> statement-breakpoint
 
 CREATE INDEX IF NOT EXISTS idx_app_relationships_parent ON app_relationships(parent_appid, relationship_type);
+--> statement-breakpoint
 CREATE INDEX IF NOT EXISTS idx_app_relationships_child ON app_relationships(child_appid);
+--> statement-breakpoint
 CREATE INDEX IF NOT EXISTS idx_app_relationships_type ON app_relationships(relationship_type);

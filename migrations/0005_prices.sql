@@ -16,9 +16,12 @@ CREATE TABLE IF NOT EXISTS app_prices (
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+--> statement-breakpoint
 
 CREATE INDEX IF NOT EXISTS idx_app_prices_discount ON app_prices(discount_percent, is_available);
+--> statement-breakpoint
 CREATE INDEX IF NOT EXISTS idx_app_prices_observed ON app_prices(observed_at);
+--> statement-breakpoint
 
 CREATE TABLE IF NOT EXISTS price_history (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -33,6 +36,8 @@ CREATE TABLE IF NOT EXISTS price_history (
   observed_at TEXT NOT NULL,
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+--> statement-breakpoint
 
 CREATE INDEX IF NOT EXISTS idx_price_history_appid_observed ON price_history(appid, observed_at ASC);
+--> statement-breakpoint
 CREATE INDEX IF NOT EXISTS idx_price_history_observed ON price_history(observed_at);

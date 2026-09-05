@@ -12,6 +12,8 @@ CREATE TABLE IF NOT EXISTS player_rollups (
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (appid, date)
 );
+--> statement-breakpoint
 
 CREATE INDEX IF NOT EXISTS idx_player_rollups_date ON player_rollups(date);
+--> statement-breakpoint
 CREATE INDEX IF NOT EXISTS idx_player_rollups_appid_date ON player_rollups(appid, date DESC);
