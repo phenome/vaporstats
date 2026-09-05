@@ -1,6 +1,7 @@
 import React from "react";
 import { renderToString } from "react-dom/server";
 import { createFileRoute } from "@tanstack/react-router";
+import { useQuery } from "@tanstack/react-query";
 import { getDb, type D1Database } from "../lib/db";
 import {
   getMostPlayedRankings,
@@ -8,28 +9,46 @@ import {
 } from "../lib/player-history";
 import { getCanonicalGamePath } from "../lib/slug";
 import { CACHE_POLICIES, getLiveApiCacheHeaders, getPageCacheHeaders } from "../lib/cache";
+import { RouteDataError } from "../components/route-state";
+import { RankingsSkeleton } from "../components/route-skeletons";
 
-import { RouteDataError, RouteLoading } from "../components/route-state";
+export async function fetchMostPlayedRankings(): Promise<{ games: RankedGame[] }> {
+  const response = await fetch("/api/rankings?type=most_played&limit=100");
+  if (!response.ok) throw new Error("Rankings request failed");
+  const result = (await response.json()) as { status?: string; data?: RankedGame[] };
+  if (result.status === "error") throw new Error("Rankings request failed");
+  return { games: Array.isArray(result.data) ? result.data : [] };
+}
+
+export const rankingsQueryOptions = {
+  queryKey: ["rankings", "most_played"],
+  queryFn: fetchMostPlayedRankings,
+};
+
 export const Route = createFileRoute("/rankings/")({
   ssr: false,
   headers: () => getPageCacheHeaders(),
-  loader: async () => {
-    const response = await fetch("/api/rankings?type=most_played&limit=100");
-    if (!response.ok) throw new Error("Rankings request failed");
-    const result = (await response.json()) as { status?: string; data?: RankedGame[] };
-    if (result.status === "error") throw new Error("Rankings request failed");
-    return { games: Array.isArray(result.data) ? result.data : [] };
+  loader: ({ context }) => {
+    // Start unawaited prefetch so navigation/hover proceeds immediately
+    void context.queryClient.prefetchQuery(rankingsQueryOptions);
   },
-  pendingComponent: () => <RouteLoading label="Loading rankings..." />,
   errorComponent: RouteDataError,
   component: RankingsRouteComponent,
 });
 
 function RankingsRouteComponent() {
-  const data = Route.useLoaderData();
+  const { data, isLoading, isError } = useQuery(rankingsQueryOptions);
+
+  if (isLoading || !data) {
+    return <RankingsSkeleton />;
+  }
+
+  if (isError) {
+    return <RouteDataError />;
+  }
+
   return <RankingsPageView games={data.games} />;
 }
-
 export interface RankingsPageViewProps {
   games?: RankedGame[];
 }

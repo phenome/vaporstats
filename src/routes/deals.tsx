@@ -1,50 +1,77 @@
 import React from "react";
 import { renderToString } from "react-dom/server";
 import { createFileRoute } from "@tanstack/react-router";
+import { useQuery } from "@tanstack/react-query";
 import { getDb, type D1Database } from "../lib/db";
 import { getDeals, type DealItem } from "../lib/prices";
 import { DealsList } from "../components/deals";
 import { getLiveApiCacheHeaders, getPageCacheHeaders } from "../lib/cache";
+import { RouteDataError } from "../components/route-state";
+import { DealsSkeleton } from "../components/route-skeletons";
 
-import { RouteDataError, RouteLoading } from "../components/route-state";
+export interface DealsData {
+  deals: DealItem[];
+  total: number;
+}
+
+export async function fetchDeals(type: string, sort: string): Promise<DealsData> {
+  const params = new URLSearchParams({ type, sort, limit: "100" });
+  const response = await fetch(`/api/deals?${params}`);
+  if (!response.ok) throw new Error("Deals request failed");
+  const result = (await response.json()) as {
+    status?: string;
+    data?: { deals: DealItem[]; total: number };
+  };
+  if (result.status === "error") throw new Error("Deals request failed");
+  return {
+    deals: result.data?.deals ?? [],
+    total: result.data?.total ?? 0,
+  };
+}
+
+export function dealsQueryOptions(type: string, sort: string) {
+  return {
+    queryKey: ["deals", type, sort],
+    queryFn: () => fetchDeals(type, sort),
+  };
+}
+
 export const Route = createFileRoute("/deals")({
   ssr: false,
   headers: () => getPageCacheHeaders(),
-  loader: async ({ location }) => {
+  loader: ({ location, context }) => {
     const search = location.search as {
       type?: "game" | "dlc" | "expansion" | "all";
       sort?: "discount" | "price" | "recent";
     };
     const type = search.type ?? "all";
     const sort = search.sort ?? "discount";
-    const params = new URLSearchParams({ type, sort, limit: "100" });
-    const response = await fetch(`/api/deals?${params}`);
-    if (!response.ok) throw new Error("Deals request failed");
-    const result = (await response.json()) as {
-      status?: string;
-      data?: { deals: DealItem[]; total: number };
-    };
-    if (result.status === "error") throw new Error("Deals request failed");
-    return {
-      deals: result.data?.deals ?? [],
-      total: result.data?.total ?? 0,
-      type,
-      sort,
-    };
+    // Start unawaited prefetch so navigation/hover proceeds immediately
+    void context.queryClient.prefetchQuery(dealsQueryOptions(type, sort));
+    return { type, sort };
   },
-  pendingComponent: () => <RouteLoading label="Loading Steam deals..." />,
   errorComponent: RouteDataError,
   component: DealsRouteComponent,
 });
 
 function DealsRouteComponent() {
-  const data = Route.useLoaderData();
+  const { type, sort } = Route.useLoaderData();
+  const { data, isLoading, isError } = useQuery(dealsQueryOptions(type, sort));
+
+  if (isLoading || !data) {
+    return <DealsSkeleton />;
+  }
+
+  if (isError) {
+    return <RouteDataError />;
+  }
+
   return (
     <DealsPageView
       deals={data.deals}
       total={data.total}
-      currentType={data.type}
-      currentSort={data.sort}
+      currentType={type}
+      currentSort={sort}
     />
   );
 }

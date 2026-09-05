@@ -1,6 +1,7 @@
 import React from "react";
 import { renderToString } from "react-dom/server";
-import { createFileRoute, notFound, redirect } from "@tanstack/react-router";
+import { createFileRoute, notFound } from "@tanstack/react-router";
+import { useQuery } from "@tanstack/react-query";
 import { getGameByAppId } from "../lib/catalog";
 import { getRelatedApps } from "../lib/related";
 import { getPlayerHistory } from "../lib/player-history";
@@ -9,43 +10,62 @@ import { getCurrentPrice, getPriceHistory } from "../lib/prices";
 import { parseGameSlug, toSlug, getCanonicalGamePath } from "../lib/slug";
 import { CACHE_POLICIES, getEntityCacheHeaders } from "../lib/cache";
 import { GamePageView } from "../components/game-page";
+import { GamePageSkeleton } from "../components/route-skeletons";
+import type { GameDetailResponseData } from "./api.games.$appid.detail";
+
+export async function fetchGameDetail(appid: number): Promise<GameDetailResponseData> {
+  const response = await fetch(`/api/games/${appid}/detail`);
+  if (!response.ok) {
+    throw new Error(`Failed to load game detail for ${appid}`);
+  }
+  const result = (await response.json()) as { status?: string; data?: GameDetailResponseData };
+  if (result.status === "error" || !result.data) {
+    throw new Error(`Failed to load game detail for ${appid}`);
+  }
+  return result.data;
+}
+
+export function gameDetailQueryOptions(appid: number) {
+  return {
+    queryKey: ["game-detail", appid],
+    queryFn: () => fetchGameDetail(appid),
+  };
+}
 
 export const Route = createFileRoute("/games/$game")({
   headers: () => getEntityCacheHeaders(),
-  loader: async ({ params }) => {
+  loader: ({ params, context }) => {
     const parsed = parseGameSlug(params.game);
     if (!parsed) {
       throw notFound();
     }
-
-    const db = await getDb();
-    const game = await getGameByAppId(db, parsed.appid);
-    if (!game) {
-      throw notFound();
-    }
-
-    const canonicalSlug = toSlug(game.name);
-    if (parsed.slug !== canonicalSlug) {
-      const canonicalPath = getCanonicalGamePath(game.appid, game.name);
-      throw redirect({
-        href: canonicalPath,
-        statusCode: 301,
-      });
-    }
-    const [related, playerHistory, price, priceHistory] = await Promise.all([
-      getRelatedApps(db, game.appid),
-      getPlayerHistory(db, game.appid, "30d"),
-      getCurrentPrice(db, game.appid),
-      getPriceHistory(db, game.appid, "all"),
-    ]);
-    return { game, related, playerHistory, price, priceHistory };
+    // Start unawaited prefetch so navigation/hover proceeds immediately
+    void context.queryClient.prefetchQuery(gameDetailQueryOptions(parsed.appid));
+    return { appid: parsed.appid, slug: parsed.slug };
   },
   component: GameRouteComponent,
   notFoundComponent: GameNotFoundComponent,
 });
 
 function GameRouteComponent() {
-  const { game, related, playerHistory, price, priceHistory } = Route.useLoaderData();
+  const { appid, slug } = Route.useLoaderData();
+  const { data, isLoading, isError } = useQuery(gameDetailQueryOptions(appid));
+
+  if (isLoading || !data) {
+    return <GamePageSkeleton />;
+  }
+
+  if (isError) {
+    return <GameNotFoundComponent />;
+  }
+
+  const { game, related, playerHistory, price, priceHistory } = data;
+  const canonicalSlug = toSlug(game.name);
+  if (slug !== canonicalSlug && typeof window !== "undefined") {
+    const canonicalPath = getCanonicalGamePath(game.appid, game.name);
+    window.location.replace(canonicalPath);
+  }
+
   return (
     <GamePageView
       game={game}
@@ -56,7 +76,6 @@ function GameRouteComponent() {
     />
   );
 }
-
 function GameNotFoundComponent() {
   return (
     <div className="max-w-7xl mx-auto px-4 py-16 text-center space-y-4 font-mono">

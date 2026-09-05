@@ -48,10 +48,10 @@ export default defineConfig({
     alias: {
       "~": path.resolve(import.meta.dirname, "./src"),
     },
-    dedupe: ["react", "react-dom", "@tanstack/react-router", "@tanstack/react-start"],
+    dedupe: ["react", "react-dom", "@tanstack/react-router", "@tanstack/react-start", "@tanstack/react-query"],
   },
   ssr: {
-    noExternal: ["react", "react-dom", "@tanstack/react-router", "@tanstack/react-start"],
+    noExternal: ["react", "react-dom", "@tanstack/react-router", "@tanstack/react-start", "@tanstack/react-query"],
   },
   environments: {
     ssr: {

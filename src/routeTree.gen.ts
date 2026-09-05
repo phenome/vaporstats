@@ -32,6 +32,7 @@ import { Route as ReleasesWeekRouteImport } from './routes/releases.$week'
 import { Route as ApiPlayersHistoryRouteImport } from './routes/api.players.history'
 import { Route as ApiPricesHistoryRouteImport } from './routes/api.prices.history'
 import { Route as GamesGameChildRouteImport } from './routes/games.$game_.$child'
+import { Route as ApiGamesAppidDetailRouteImport } from './routes/api.games.$appid.detail'
 import { Route as ApiGamesAppidOverviewRouteImport } from './routes/api.games.$appid.overview'
 
 const IndexRoute = IndexRouteImport.update({
@@ -149,6 +150,11 @@ const GamesGameChildRoute = GamesGameChildRouteImport.update({
   path: '/games/$game/$child',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ApiGamesAppidDetailRoute = ApiGamesAppidDetailRouteImport.update({
+  id: '/api/games/$appid/detail',
+  path: '/api/games/$appid/detail',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const ApiGamesAppidOverviewRoute = ApiGamesAppidOverviewRouteImport.update({
   id: '/api/games/$appid/overview',
   path: '/api/games/$appid/overview',
@@ -179,6 +185,7 @@ export interface FileRoutesByFullPath {
   '/api/players/history': typeof ApiPlayersHistoryRoute
   '/api/prices/history': typeof ApiPricesHistoryRoute
   '/games/$game/$child': typeof GamesGameChildRoute
+  '/api/games/$appid/detail': typeof ApiGamesAppidDetailRoute
   '/api/games/$appid/overview': typeof ApiGamesAppidOverviewRoute
 }
 export interface FileRoutesByTo {
@@ -205,6 +212,7 @@ export interface FileRoutesByTo {
   '/api/players/history': typeof ApiPlayersHistoryRoute
   '/api/prices/history': typeof ApiPricesHistoryRoute
   '/games/$game/$child': typeof GamesGameChildRoute
+  '/api/games/$appid/detail': typeof ApiGamesAppidDetailRoute
   '/api/games/$appid/overview': typeof ApiGamesAppidOverviewRoute
 }
 export interface FileRoutesById {
@@ -232,6 +240,7 @@ export interface FileRoutesById {
   '/api/players/history': typeof ApiPlayersHistoryRoute
   '/api/prices/history': typeof ApiPricesHistoryRoute
   '/games/$game_/$child': typeof GamesGameChildRoute
+  '/api/games/$appid/detail': typeof ApiGamesAppidDetailRoute
   '/api/games/$appid/overview': typeof ApiGamesAppidOverviewRoute
 }
 export interface FileRouteTypes {
@@ -260,6 +269,7 @@ export interface FileRouteTypes {
     | '/api/players/history'
     | '/api/prices/history'
     | '/games/$game/$child'
+    | '/api/games/$appid/detail'
     | '/api/games/$appid/overview'
   fileRoutesByTo: FileRoutesByTo
   to:
@@ -286,6 +296,7 @@ export interface FileRouteTypes {
     | '/api/players/history'
     | '/api/prices/history'
     | '/games/$game/$child'
+    | '/api/games/$appid/detail'
     | '/api/games/$appid/overview'
   id:
     | '__root__'
@@ -312,6 +323,7 @@ export interface FileRouteTypes {
     | '/api/players/history'
     | '/api/prices/history'
     | '/games/$game_/$child'
+    | '/api/games/$appid/detail'
     | '/api/games/$appid/overview'
   fileRoutesById: FileRoutesById
 }
@@ -339,6 +351,7 @@ export interface RootRouteChildren {
   ApiPlayersHistoryRoute: typeof ApiPlayersHistoryRoute
   ApiPricesHistoryRoute: typeof ApiPricesHistoryRoute
   GamesGameChildRoute: typeof GamesGameChildRoute
+  ApiGamesAppidDetailRoute: typeof ApiGamesAppidDetailRoute
   ApiGamesAppidOverviewRoute: typeof ApiGamesAppidOverviewRoute
 }
 
@@ -505,6 +518,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof GamesGameChildRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/api/games/$appid/detail': {
+      id: '/api/games/$appid/detail'
+      path: '/api/games/$appid/detail'
+      fullPath: '/api/games/$appid/detail'
+      preLoaderRoute: typeof ApiGamesAppidDetailRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/api/games/$appid/overview': {
       id: '/api/games/$appid/overview'
       path: '/api/games/$appid/overview'
@@ -539,6 +559,7 @@ const rootRouteChildren: RootRouteChildren = {
   ApiPlayersHistoryRoute: ApiPlayersHistoryRoute,
   ApiPricesHistoryRoute: ApiPricesHistoryRoute,
   GamesGameChildRoute: GamesGameChildRoute,
+  ApiGamesAppidDetailRoute: ApiGamesAppidDetailRoute,
   ApiGamesAppidOverviewRoute: ApiGamesAppidOverviewRoute,
 }
 export const routeTree = rootRouteImport

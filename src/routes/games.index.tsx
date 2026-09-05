@@ -1,33 +1,54 @@
 import React from "react";
 import { createFileRoute } from "@tanstack/react-router";
-import { listPlayableGames, type CatalogEntity } from "../lib/catalog";
-import { getDb } from "../lib/db";
+import { useQuery } from "@tanstack/react-query";
+import { type CatalogEntity } from "../lib/catalog";
 import { getCanonicalGamePath, getCanonicalPublisherPath } from "../lib/slug";
 import { getPageCacheHeaders } from "../lib/cache";
-import { RouteDataError, RouteLoading } from "../components/route-state";
+import { RouteDataError } from "../components/route-state";
+import { CatalogSkeleton } from "../components/route-skeletons";
+
+export async function fetchCatalogGames(): Promise<CatalogEntity[]> {
+  const response = await fetch("/api/catalog?limit=500");
+  if (!response.ok) throw new Error("Catalog request failed");
+  const result = (await response.json()) as {
+    status?: string;
+    data?: CatalogEntity[];
+  };
+  if (result.status === "error") throw new Error("Catalog request failed");
+  return Array.isArray(result.data) ? result.data : [];
+}
+
+export const catalogQueryOptions = {
+  queryKey: ["catalog-games"],
+  queryFn: fetchCatalogGames,
+};
 
 export const Route = createFileRoute("/games/")({
   ssr: false,
   headers: () => getPageCacheHeaders(),
-  loader: async () => {
-    const response = await fetch("/api/catalog?limit=500");
-    if (!response.ok) throw new Error("Catalog request failed");
-    const result = (await response.json()) as {
-      status?: string;
-      data?: CatalogEntity[];
-    };
-    if (result.status === "error") throw new Error("Catalog request failed");
-    return { games: Array.isArray(result.data) ? result.data : [] };
+  loader: ({ context }) => {
+    // Start unawaited prefetch so navigation/hover proceeds immediately
+    void context.queryClient.prefetchQuery(catalogQueryOptions);
   },
-  pendingComponent: () => <RouteLoading label="Loading playable games..." />,
   errorComponent: RouteDataError,
   component: GamesRouteView,
 });
 
 export function GamesIndexComponent({ games: propGames }: { games?: CatalogEntity[] }) {
-  const loaderData = !propGames ? Route.useLoaderData() : null;
-  const games = propGames ?? loaderData?.games ?? [];
+  const { data: queryGames, isLoading, isError } = useQuery({
+    ...catalogQueryOptions,
+    enabled: !propGames,
+  });
 
+  if (!propGames && (isLoading || !queryGames)) {
+    return <CatalogSkeleton />;
+  }
+
+  if (!propGames && isError) {
+    return <RouteDataError />;
+  }
+
+  const games = propGames ?? queryGames ?? [];
   return (
     <div className="max-w-7xl mx-auto px-4 py-8 space-y-6">
       <div className="border border-zinc-800 bg-zinc-950 p-6 flex flex-col sm:flex-row sm:items-center justify-between gap-4">

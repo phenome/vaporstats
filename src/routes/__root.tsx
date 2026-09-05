@@ -1,11 +1,17 @@
-import { HeadContent, Link, Outlet, Scripts, createRootRoute } from "@tanstack/react-router";
+import { HeadContent, Link, Outlet, Scripts, createRootRouteWithContext } from "@tanstack/react-router";
+import { QueryClientProvider, type QueryClient } from "@tanstack/react-query";
 import * as React from "react";
 import { SiteHeader } from "../components/site-header";
 import { ConsentBanner, FooterPrivacyControl } from "../components/consent-banner";
 import { initAnalyticsIfConsented } from "../lib/analytics";
+import { queryClient as defaultQueryClient } from "../lib/query-client";
 import "../styles.css";
 
-export const Route = createRootRoute({
+export interface RootRouterContext {
+  queryClient: QueryClient;
+}
+
+export const Route = createRootRouteWithContext<RootRouterContext>()({
   head: () => ({
     meta: [
       { charSet: "utf-8" },
@@ -24,9 +30,13 @@ export const Route = createRootRoute({
 });
 
 function RootComponent() {
+  const context = Route.useRouteContext();
+  const client = context?.queryClient ?? defaultQueryClient;
   return (
     <RootDocument>
-      <Outlet />
+      <QueryClientProvider client={client}>
+        <Outlet />
+      </QueryClientProvider>
     </RootDocument>
   );
 }
