@@ -10,13 +10,13 @@ import {
   getCanonicalChildPath,
 } from "../lib/related";
 import { getCanonicalGamePath, toSlug } from "../lib/slug";
-import { CACHE_POLICIES, getLiveApiCacheHeaders } from "../lib/cache";
+import { CACHE_POLICIES, getLiveApiCacheHeaders, getPageCacheHeaders } from "../lib/cache";
 import { SearchForm } from "../components/search-form";
 
 import { RouteDataError, RouteLoading } from "../components/route-state";
 export const Route = createFileRoute("/search")({
   ssr: false,
-  headers: () => getLiveApiCacheHeaders(),
+  headers: () => getPageCacheHeaders(),
   validateSearch: (search: Record<string, unknown>) => ({
     q: typeof search.q === "string" ? search.q : "",
   }),

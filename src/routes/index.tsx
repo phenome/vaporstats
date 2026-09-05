@@ -7,11 +7,11 @@ import { DealsList } from "../components/deals";
 import type { WeeklyReleasesResult, ReleaseEntity } from "../lib/releases";
 import { HomeReleaseCalendarSection } from "../components/release-calendar";
 import { HomeRecentReleasesSection } from "../components/recent-releases";
-import { getLiveApiCacheHeaders } from "../lib/cache";
+import { getHomeCacheHeaders } from "../lib/cache";
 import { RouteDataError, RouteLoading } from "../components/route-state";
 export const Route = createFileRoute("/")({
   ssr: false,
-  headers: () => getLiveApiCacheHeaders(),
+  headers: () => getHomeCacheHeaders(),
   loader: async () => {
     const responses = await Promise.all([
       fetch("/api/rankings?type=trending"),

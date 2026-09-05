@@ -7,12 +7,12 @@ import {
   type RankedGame,
 } from "../lib/player-history";
 import { getCanonicalGamePath } from "../lib/slug";
-import { CACHE_POLICIES, getLiveApiCacheHeaders } from "../lib/cache";
+import { CACHE_POLICIES, getLiveApiCacheHeaders, getPageCacheHeaders } from "../lib/cache";
 
 import { RouteDataError, RouteLoading } from "../components/route-state";
 export const Route = createFileRoute("/rankings/")({
   ssr: false,
-  headers: () => getLiveApiCacheHeaders(),
+  headers: () => getPageCacheHeaders(),
   loader: async () => {
     const response = await fetch("/api/rankings?type=most_played&limit=100");
     if (!response.ok) throw new Error("Rankings request failed");

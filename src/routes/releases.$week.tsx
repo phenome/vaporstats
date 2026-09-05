@@ -9,7 +9,7 @@ import {
   type WeeklyReleasesResult,
 } from "../lib/releases";
 import { ReleaseCalendar } from "../components/release-calendar";
-import { CACHE_POLICIES, getEntityCacheHeaders } from "../lib/cache";
+import { CACHE_POLICIES, getEntityCacheHeaders, getPageCacheHeaders } from "../lib/cache";
 
 export interface ReleasesWeekPageViewProps {
   data: WeeklyReleasesResult;
@@ -165,7 +165,7 @@ function wrapHtml(title: string, bodyContent: string): string {
 
 export const Route = createFileRoute("/releases/$week")({
   ssr: false,
-  headers: () => getEntityCacheHeaders(),
+  headers: () => getPageCacheHeaders(),
   loader: async ({ params }) => loadReleaseWeekData(params.week),
   component: ReleasesWeekRouteComponent,
 });

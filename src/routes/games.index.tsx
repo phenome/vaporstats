@@ -3,12 +3,12 @@ import { createFileRoute } from "@tanstack/react-router";
 import { listPlayableGames, type CatalogEntity } from "../lib/catalog";
 import { getDb } from "../lib/db";
 import { getCanonicalGamePath } from "../lib/slug";
-import { getLiveApiCacheHeaders } from "../lib/cache";
+import { getPageCacheHeaders } from "../lib/cache";
 import { RouteDataError, RouteLoading } from "../components/route-state";
 
 export const Route = createFileRoute("/games/")({
   ssr: false,
-  headers: () => getLiveApiCacheHeaders(),
+  headers: () => getPageCacheHeaders(),
   loader: async () => {
     const response = await fetch("/api/catalog?limit=500");
     if (!response.ok) throw new Error("Catalog request failed");

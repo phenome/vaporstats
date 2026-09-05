@@ -3,7 +3,11 @@ import { readFileSync, readdirSync } from "node:fs";
 import { resolve } from "node:path";
 import { Database, type SQLQueryBindings } from "bun:sqlite";
 import type { D1Database, D1PreparedStatement } from "../src/lib/db";
-import { CACHE_POLICIES } from "../src/lib/cache";
+import {
+  CACHE_POLICIES,
+  getHomeCacheHeaders,
+  getPageCacheHeaders,
+} from "../src/lib/cache";
 import {
   TICK_REQUEST_CAP,
   DAILY_REQUEST_CAP,
@@ -274,6 +278,25 @@ describe("public worker launch contract", () => {
     const privacyRes = handlePrivacyHttpRequest(privacyReq);
     expect(privacyRes.status).toBe(200);
     expect(privacyRes.headers.get("Cache-Control")).toBe(CACHE_POLICIES.entity);
+
+    // 6. Fast-refresh page and home cache headers
+    expect(getHomeCacheHeaders()).toEqual({
+      "Cache-Control": CACHE_POLICIES.homePage,
+      Vary: "Accept-Encoding",
+    });
+    expect(getPageCacheHeaders()).toEqual({
+      "Cache-Control": CACHE_POLICIES.page,
+      Vary: "Accept-Encoding",
+    });
+    expect(CACHE_POLICIES.homePage).toBe(
+      "public, max-age=30, s-maxage=30, stale-while-revalidate=30"
+    );
+    expect(CACHE_POLICIES.page).toBe(
+      "public, max-age=60, s-maxage=60, stale-while-revalidate=60"
+    );
+    expect(CACHE_POLICIES.immutableAsset).toBe(
+      "public, max-age=31536000, immutable"
+    );
   });
 
   it("handles malformed/missing params with appropriate 400 error responses", async () => {

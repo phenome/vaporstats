@@ -4,12 +4,12 @@ import { createFileRoute } from "@tanstack/react-router";
 import { getDb, type D1Database } from "../lib/db";
 import { getDeals, type DealItem } from "../lib/prices";
 import { DealsList } from "../components/deals";
-import { getLiveApiCacheHeaders } from "../lib/cache";
+import { getLiveApiCacheHeaders, getPageCacheHeaders } from "../lib/cache";
 
 import { RouteDataError, RouteLoading } from "../components/route-state";
 export const Route = createFileRoute("/deals")({
   ssr: false,
-  headers: () => getLiveApiCacheHeaders(),
+  headers: () => getPageCacheHeaders(),
   loader: async ({ location }) => {
     const search = location.search as {
       type?: "game" | "dlc" | "expansion" | "all";

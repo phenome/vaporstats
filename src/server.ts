@@ -1,5 +1,5 @@
 import serverEntry from "@tanstack/react-start/server-entry";
-
+import { CACHE_POLICIES } from "./lib/cache";
 export default {
   async fetch(request: Request, env: { ASSETS: Fetcher }): Promise<Response> {
     const url = new URL(request.url);
@@ -10,7 +10,17 @@ export default {
     }
 
     if (url.pathname.startsWith("/assets/")) {
-      return env.ASSETS.fetch(request);
+      const res = await env.ASSETS.fetch(request);
+      if (res.ok) {
+        const headers = new Headers(res.headers);
+        headers.set("Cache-Control", CACHE_POLICIES.immutableAsset);
+        return new Response(res.body, {
+          status: res.status,
+          statusText: res.statusText,
+          headers,
+        });
+      }
+      return res;
     }
 
     return serverEntry.fetch(request);

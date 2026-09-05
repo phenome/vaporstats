@@ -9,12 +9,12 @@ import {
   type HistoryRange,
 } from "../lib/player-history";
 import { getCanonicalGamePath } from "../lib/slug";
-import { CACHE_POLICIES, getLiveApiCacheHeaders } from "../lib/cache";
+import { CACHE_POLICIES, getLiveApiCacheHeaders, getPageCacheHeaders } from "../lib/cache";
 
 import { RouteDataError, RouteLoading } from "../components/route-state";
 export const Route = createFileRoute("/rankings/peak")({
   ssr: false,
-  headers: () => getLiveApiCacheHeaders(),
+  headers: () => getPageCacheHeaders(),
   validateSearch: (search: Record<string, unknown>) => ({
     period: typeof search.period === "string" ? search.period : "all",
   }),
