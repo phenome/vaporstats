@@ -1,0 +1,66 @@
+name: Deploy
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.0
+      - run: bun install --frozen-lockfile
+      - run: bun run verify
+      - run: bun run check:migrations
+
+  deploy:
+    needs: verify
+    concurrency:
+      group: vaporstats-production
+      cancel-in-progress: false
+    runs-on: ubuntu-latest
+    steps:
+      - name: Configure deployment SSH
+        env:
+          DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}
+          KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          set -eu
+          test -n "$DEPLOY_KEY"
+          test -n "$KNOWN_HOSTS"
+          umask 077
+          install -d -m 700 "$HOME/.ssh"
+          printf '%s\n' "$DEPLOY_KEY" > "$HOME/.ssh/vaporstats_deploy"
+          printf '%s\n' "$KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+          chmod 600 "$HOME/.ssh/vaporstats_deploy" "$HOME/.ssh/known_hosts"
+
+      - name: Deploy exact commit
+        env:
+          COMMIT: ${{ github.sha }}
+          TARGET_HOST: ${{ secrets.TARGET_HOST }}
+        run: |
+          set -eu
+          test -n "$TARGET_HOST"
+          if [[ ! "$COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
+            echo 'GitHub did not provide a 40-character commit SHA' >&2
+            exit 1
+          fi
+          ssh -i "$HOME/.ssh/vaporstats_deploy" \
+            -o BatchMode=yes \
+            -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile="$HOME/.ssh/known_hosts" \
+            -o GlobalKnownHostsFile=/dev/null \
+            "vaporstats-deploy@$TARGET_HOST" \
+            "deploy $COMMIT"
+
+      - name: Remove deployment SSH key
+        if: always()
+        run: rm -f "$HOME/.ssh/vaporstats_deploy"

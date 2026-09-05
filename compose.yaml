@@ -1,6 +1,7 @@
 services:
   vaporstats:
     container_name: vaporstats
+    image: vaporstats:${VAPORSTATS_IMAGE_TAG:-current}
     build:
       context: .
     env_file:
@@ -24,7 +25,7 @@ services:
         - >-
           fetch("http://127.0.0.1:3000/").then((response) =>
           process.exit(response.ok ? 0 : 1)).catch(() => process.exit(1))
-      interval: 30s
+      interval: 5s
       timeout: 5s
       retries: 3
       start_period: 10s

@@ -6,7 +6,9 @@ COPY package.json bun.lock ./
 RUN bun install --frozen-lockfile
 
 COPY . .
-RUN bun run build && bun run check:output
+RUN bun run build \
+  && bun build scripts/migrate.ts --target bun --external bun:sqlite --outfile dist/migrate.js \
+  && bun run check:output
 
 FROM oven/bun:1.4.0 AS runtime
 
