@@ -42,11 +42,21 @@ export function GamePageView({
               APPID <strong className="text-zinc-300 tabular-nums">{game.appid}</strong>
             </span>
           </div>
-          {game.release_date && (
-            <div className="text-xs font-mono text-zinc-400">
-              RELEASED: <span className="text-zinc-200">{game.release_date}</span>
-            </div>
-          )}
+          <div className="flex items-center gap-4 text-xs font-mono">
+            {game.release_date && (
+              <div className="text-zinc-400">
+                RELEASED: <span className="text-zinc-200">{game.release_date}</span>
+              </div>
+            )}
+            <a
+              href={`https://store.steampowered.com/app/${game.appid}/`}
+              target="_blank"
+              rel="noreferrer"
+              className="text-orange-400 hover:text-orange-300 hover:underline inline-flex items-center gap-1"
+            >
+              Steam Store ↗
+            </a>
+          </div>
         </div>
 
         <div className="flex flex-col md:flex-row gap-6 items-start">

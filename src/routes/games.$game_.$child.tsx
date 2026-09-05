@@ -152,11 +152,21 @@ export function ChildAppPageView({
             </span>
             <span className="text-xs text-zinc-500 tabular-nums">{`AppID #${child.appid}`}</span>
           </div>
-          {child.release_date && (
-            <div className="text-xs text-zinc-400">
-              RELEASED: <span className="text-zinc-200">{child.release_date}</span>
-            </div>
-          )}
+          <div className="flex items-center gap-4 text-xs">
+            {child.release_date && (
+              <div className="text-zinc-400">
+                RELEASED: <span className="text-zinc-200">{child.release_date}</span>
+              </div>
+            )}
+            <a
+              href={`https://store.steampowered.com/app/${child.appid}/`}
+              target="_blank"
+              rel="noreferrer"
+              className="text-orange-400 hover:text-orange-300 hover:underline inline-flex items-center gap-1"
+            >
+              Steam Store ↗
+            </a>
+          </div>
         </div>
 
         <div className="flex flex-col md:flex-row gap-6 items-start">
@@ -230,12 +240,20 @@ export function ChildAppPageView({
 
 
       {/* Return Navigation */}
-      <div className="pt-2">
+      <div className="pt-2 flex flex-wrap items-center gap-3">
         <a
           href={parentUrl}
           className="inline-flex items-center gap-2 px-4 py-2 bg-zinc-900 border border-zinc-800 hover:border-orange-500 text-zinc-300 hover:text-white text-xs transition-colors"
         >
           <span>&larr;</span> Return to Parent Game: {parent.name}
+        </a>
+        <a
+          href={`https://store.steampowered.com/app/${child.appid}/`}
+          target="_blank"
+          rel="noreferrer"
+          className="inline-flex items-center gap-2 px-4 py-2 bg-zinc-900 border border-zinc-800 hover:border-orange-500 text-orange-400 hover:text-orange-300 text-xs transition-colors"
+        >
+          <span>Steam Store ↗</span>
         </a>
       </div>
     </div>

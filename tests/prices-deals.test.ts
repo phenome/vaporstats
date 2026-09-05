@@ -1220,6 +1220,9 @@ describe("VaporStats Steam Prices and Deals", () => {
     expect(gameHtml).toContain("Price History (US / USD)");
     // Verifies player history + related apps preserved
     expect(gameHtml).toContain("Player Count History");
+    expect(gameHtml).toContain("https://store.steampowered.com/app/1086940/");
+    expect(gameHtml).toContain("Steam Store ↗");
+    expect(gameHtml).not.toContain("&nearr;");
     // 2. Child Route Integration: handleChildHttpRequest
     const childRes = await handleChildHttpRequest(
       new Request("http://localhost/games/1245620-elden-ring/2778580-elden-ring-shadow-of-the-erdtree"),
@@ -1232,6 +1235,9 @@ describe("VaporStats Steam Prices and Deals", () => {
     expect(childHtml).toContain("-25%");
     expect(childHtml).toContain("Price History (US / USD)");
 
+    expect(childHtml).toContain("https://store.steampowered.com/app/2778580/");
+    expect(childHtml).toContain("Steam Store ↗");
+    expect(childHtml).not.toContain("&nearr;");
     // Dedicated server page truthfully displays unavailable/no data yet
     const serverRes = await handleChildHttpRequest(
       new Request("http://localhost/games/730-counter-strike-2/999001-dedicated-server-tool"),
