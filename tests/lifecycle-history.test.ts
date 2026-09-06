@@ -220,6 +220,27 @@ describe("Lifecycle history", () => {
     expect(html).not.toContain("2026-09-01");
   });
 
+  test("maintains horizontal gap between date and badge in release lifecycle overview", async () => {
+    const db = initTestDb();
+    await upsertApp(db, {
+      appid: 2502430,
+      name: "Terminal Error",
+      type: "game",
+      is_playable: true,
+      is_eligible: true,
+      release_date: "2024-10-10",
+      steam_release_date: "2024-10-10",
+      release_status: "released",
+    });
+
+    const game = await getGameByAppId(db, 2502430);
+    expect(game).not.toBeNull();
+    const html = renderToString(React.createElement(GamePageView, { game: game! }));
+    expect(html).toContain("Available on Steam");
+    expect(html).toContain("Oct 10, 2024");
+    expect(html).toMatch(/<td class="[^"]*pl-4[^"]*text-right[^"]*">\s*<span[^>]*>Available on Steam<\/span>\s*<\/td>/);
+  });
+
   test("prefers original and Steam platform dates over the appdetails date", async () => {
     const db = initTestDb();
     await upsertApp(db, {

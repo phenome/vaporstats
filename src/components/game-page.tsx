@@ -322,7 +322,7 @@ function LifecycleTable({ events }: { events: LifecycleDisplayEvent[] }) {
                   event.date && <span>{event.date}</span>
                 )}
               </td>
-              <td className="py-0.5 text-right align-middle">
+              <td className="py-0.5 pl-4 text-right align-middle">
                 <LifecycleBadge event={event} />
               </td>
             </tr>
