@@ -62,6 +62,12 @@
   pointer-events: none;
 }
 
+@media (max-width: 767px) {
+  .morphing-game-hero-flow {
+    top: 102px;
+  }
+}
+
 .morphing-game-hero {
   padding: 1.5rem;
   overflow: hidden;
@@ -85,10 +91,22 @@
   padding-bottom: 0.75rem;
 }
 
-.hero-store {
+.hero-status {
   margin-left: auto;
 }
 
+.hero-store {
+  margin-left: 0;
+}
+
+.hero-bottom-edge {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: hsl(240 3.7% 18%);
+  pointer-events: none;
+}
 .hero-main {
   display: flex;
   align-items: flex-start;
@@ -120,8 +138,17 @@
 
 .hero-title {
   display: block;
+  font-size: clamp(1rem, calc(1.875rem - 0.875rem * var(--hero-morph-progress, 0)), 1.875rem);
+  line-height: clamp(1.25rem, calc(2.25rem - 1rem * var(--hero-morph-progress, 0)), 2.25rem);
+  letter-spacing: -0.025em;
 }
 
+@media (max-width: 767px) {
+  .hero-title {
+    font-size: clamp(0.9375rem, calc(1.5rem - 0.5625rem * var(--hero-morph-progress, 0)), 1.5rem);
+    line-height: clamp(1.2rem, calc(1.875rem - 0.675rem * var(--hero-morph-progress, 0)), 1.875rem);
+  }
+}
 .morphing-game-hero[data-morph-layout="compact"] {
   padding: 0.5rem 1rem;
 }
@@ -179,7 +206,7 @@
   white-space: nowrap;
 }
 
-@media (max-width: 639px) {
+@media (max-width: 767px) {
   .morphing-game-hero[data-morph-layout="compact"] .hero-stage {
     grid-template-columns: 2rem minmax(0, 1fr);
     grid-template-areas: "art title";

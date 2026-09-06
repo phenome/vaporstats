@@ -27,7 +27,8 @@ function useHeroScrollProgress(sentinelRef: React.RefObject<HTMLDivElement | nul
         const el = sentinelRef.current;
         if (!el) return;
         const rect = el.getBoundingClientRect();
-        const topDiff = 56 - rect.top;
+        const stickyTop = window.innerWidth < 768 ? 102 : 56;
+        const topDiff = stickyTop - rect.top;
         const rawProgress = Math.min(Math.max(topDiff / 160, 0), 1);
         setProgress(media.matches ? (topDiff > 0 ? 1 : 0) : rawProgress);
       });
@@ -169,6 +170,33 @@ function heroTransform(
   if (!first || !last || first.width <= 0 || first.height <= 0) return undefined;
   const left = first.left + (last.left - first.left) * progress;
   const top = (first.top + (last.top - first.top) * progress) / visualScaleY;
+
+  // The hero root applies scaleY(visualScaleY) to squash into compact height.
+  // Typography must counteract that squash with scaleY(1/visualScaleY) so glyphs
+  // render at natural aspect ratio while still moving with the FLIP morph.
+  if (identity === "title") {
+    return {
+      transformOrigin: "top left",
+      transform:
+        "translate3d(" + (left - first.left).toFixed(3) + "px, " +
+        (top - first.top).toFixed(3) + "px, 0) scaleY(" +
+        (1 / visualScaleY).toFixed(5) + ")",
+      willChange: "transform",
+    };
+  }
+
+  if (identity === "status" || identity === "date" || identity === "store") {
+    return {
+      transformOrigin: "top right",
+      transform:
+        "translate3d(" + (left - first.left).toFixed(3) + "px, " +
+        (top - first.top).toFixed(3) + "px, 0) scaleY(" +
+        (1 / visualScaleY).toFixed(5) + ")",
+      willChange: "transform",
+    };
+  }
+
+  // Artwork shell retains scale transformation to morph its aspect ratio
   const width = first.width + (last.width - first.width) * progress;
   const height = (first.height + (last.height - first.height) * progress) / visualScaleY;
   return {
@@ -247,9 +275,20 @@ export function GamePageView({
       >
       <header
         ref={heroRef}
-        className="morphing-game-hero border border-zinc-800 bg-zinc-950/95 backdrop-blur-md"
+        className="morphing-game-hero relative border border-zinc-800 bg-zinc-950/95 backdrop-blur-md"
         style={heroStyle}
       >
+        {/* Bottom edge of the compact sticky bar; counter-scaled so it renders 1px despite the root squash */}
+        <div
+          aria-hidden="true"
+          className="hero-bottom-edge"
+          style={{
+            height: "1px",
+            opacity: p2,
+            transform: "scaleY(" + (1 / visualScaleY).toFixed(5) + ")",
+            transformOrigin: "bottom",
+          }}
+        />
         <div className="hero-stage">
           <div className="hero-topbar">
             <span
@@ -262,7 +301,7 @@ export function GamePageView({
             <span
               ref={statusRef}
               data-game-identity="status"
-              className="hero-status border border-zinc-700 bg-zinc-900 px-1.5 py-0.5 font-bold uppercase tracking-wider text-zinc-300 text-xs"
+              className="hero-status border border-zinc-700 bg-zinc-900 px-1.5 py-0.5 font-bold uppercase tracking-wider text-zinc-300 text-xs ml-auto"
               style={heroTransform(geometry, "status", p2, visualScaleY)}
             >
               {releaseStatusLabel}
@@ -321,7 +360,7 @@ export function GamePageView({
               <h1
                 ref={titleRef}
                 data-game-identity="title"
-                className="hero-title text-2xl md:text-3xl font-mono font-bold text-zinc-100 tracking-tight"
+                className="hero-title font-mono font-bold text-zinc-100 tracking-tight"
                 style={heroTransform(geometry, "title", p2, visualScaleY)}
               >
                 {game.name}
