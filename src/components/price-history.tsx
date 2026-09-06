@@ -12,8 +12,8 @@ import {
   type PriceState,
   DEFAULT_PRICE_RANGE,
   formatPriceCents,
-  formatPriceUtc,
 } from "../lib/prices";
+import { formatLocalDateTime } from "../lib/format";
 import { formatCurrentPrice, isPriceDiscounted } from "../lib/price-presentation";
 import { PriceSummary } from "./price-summary";
 import {
@@ -101,11 +101,20 @@ function formatPointPrice(point: PriceChartPoint) {
   return formatCurrentPrice(pointAsHistoryEntry(point));
 }
 
+/** Renders a chart domain edge instant in the visitor's locale/time zone. */
+function formatAxisDate(timestamp: number): string {
+  return new Intl.DateTimeFormat(undefined, {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+  }).format(new Date(timestamp));
+}
+
 function pointDescription(point: PriceChartPoint) {
   if (point.inferred) {
-    return `Last observed ${formatPriceUtc(point.sourceTimestamp)}; dashed continuation is not a new observation.`;
+    return `Last observed ${formatLocalDateTime(point.sourceTimestamp)}; dashed continuation is not a new observation.`;
   }
-  return `Observed ${formatPriceUtc(point.observedAt)}.`;
+  return `Observed ${formatLocalDateTime(point.observedAt)}.`;
 }
 
 function statusForSummary(status: LoadStatus): "loading" | "error" | "success" {
@@ -299,9 +308,9 @@ export function PriceHistoryChart({
           ) : (
             <div className={`space-y-3 transition-opacity duration-200 ${isUpdating ? "opacity-50" : "opacity-100"}`}>
               <div className="flex flex-wrap items-center justify-between gap-2 text-[10px] text-zinc-500">
-                <span>{new Date(domain.start).toISOString().slice(0, 10)}</span>
+                <span>{formatAxisDate(domain.start)}</span>
                 <span>Selected range: {range.toUpperCase()}</span>
-                <span>{new Date(domain.end).toISOString().slice(0, 10)}</span>
+                <span>{formatAxisDate(domain.end)}</span>
               </div>
               <div ref={chartContainerRef} className="relative overflow-hidden border border-zinc-900 bg-zinc-900/20 p-2" data-testid="price-history-chart">
                 <svg
@@ -319,8 +328,8 @@ export function PriceHistoryChart({
                   <line x1={geometry.padLeft} y1={geometry.height - geometry.padBottom} x2={geometry.width - geometry.padRight} y2={geometry.height - geometry.padBottom} stroke="#3f3f46" />
                   <text x={geometry.padLeft - 6} y={geometry.padTop + 4} textAnchor="end" fill="#71717a" fontSize="10" fontFamily="monospace">{formatPriceCents(geometry.maxPriceCents, currentPrice?.currency ?? "USD")}</text>
                   <text x={geometry.padLeft - 6} y={geometry.height - geometry.padBottom + 4} textAnchor="end" fill="#71717a" fontSize="10" fontFamily="monospace">{formatPriceCents(0, currentPrice?.currency ?? "USD")}</text>
-                  <text x={geometry.padLeft} y={geometry.height - 10} textAnchor="start" fill="#71717a" fontSize="10" fontFamily="monospace">{new Date(domain.start).toISOString().slice(0, 10)}</text>
-                  <text x={geometry.width - geometry.padRight} y={geometry.height - 10} textAnchor="end" fill="#71717a" fontSize="10" fontFamily="monospace">{new Date(domain.end).toISOString().slice(0, 10)}</text>
+                  <text x={geometry.padLeft} y={geometry.height - 10} textAnchor="start" fill="#71717a" fontSize="10" fontFamily="monospace">{formatAxisDate(domain.start)}</text>
+                  <text x={geometry.width - geometry.padRight} y={geometry.height - 10} textAnchor="end" fill="#71717a" fontSize="10" fontFamily="monospace">{formatAxisDate(domain.end)}</text>
                   {geometry.savingsAreas.map((area, index) => (
                     <path key={`savings-${index}`} d={area.d} fill="#fb923c" opacity="0.2" data-testid="price-savings-area" aria-label={`Savings area ${formatPriceCents(area.savingsCents, area.from.currency)}`} />
                   ))}
@@ -353,7 +362,7 @@ export function PriceHistoryChart({
                         strokeWidth="2"
                         tabIndex={0}
                         role="button"
-                        aria-label={`${formatPointPrice(coordinate.point)} at ${formatPriceUtc(coordinate.point.observedAt)}${coordinate.point.inferred ? ", carried forward, not observed" : ""}`}
+                        aria-label={`${formatPointPrice(coordinate.point)} at ${formatLocalDateTime(coordinate.point.observedAt)}${coordinate.point.inferred ? ", carried forward, not observed" : ""}`}
                         onMouseEnter={() => setHoveredIndex(index)}
                         onFocus={() => setHoveredIndex(index)}
                         onMouseLeave={() => setHoveredIndex(null)}

@@ -1,5 +1,6 @@
 import React from "react";
-import { formatPriceCents, formatPriceUtc, type PriceState } from "../lib/prices";
+import { formatLocalDateTime } from "../lib/format";
+import { formatPriceCents, type PriceState } from "../lib/prices";
 import { formatCurrentPrice, isPriceDiscounted } from "../lib/price-presentation";
 
 export type PriceSummaryVariant = "card" | "hero";
@@ -29,8 +30,8 @@ export function PriceSummary({
   const finalPrice = price?.final_price ?? null;
   const currency = price?.currency ?? "USD";
   const label = offer ? "Current offer" : "Current price";
-  const observed = status === "success" && price
-    ? `Observed: ${formatPriceUtc(price.observed_at)}`
+  const observed = status === "success" && price && price.observed_at
+    ? formatLocalDateTime(price.observed_at)
     : null;
   const base = offer && initialPrice !== null
     ? formatPriceCents(initialPrice, currency)
@@ -64,7 +65,7 @@ export function PriceSummary({
               {value}
             </h2>
             {observed && (
-              <p className="mt-2 max-w-xl text-xs text-zinc-400">{observed}</p>
+              <p className="mt-2 max-w-xl text-xs text-zinc-400" suppressHydrationWarning>{observed}</p>
             )}
           </div>
           {offer && base && savings && (
@@ -86,9 +87,11 @@ export function PriceSummary({
 
   return (
     <article className={`border p-5 space-y-3 ${tone}`} aria-label="Current price">
-      <div className="flex items-center justify-between gap-2">
-        <p className="text-[11px] font-mono uppercase tracking-wider text-zinc-400">
-          {label} (US / USD)
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <p className="text-[11px] font-mono uppercase tracking-wider text-zinc-400 whitespace-nowrap">
+          {label}
+          {" "}
+          <span className="hidden sm:inline">(US / USD)</span>
         </p>
         {offer && (
           <span className="border border-orange-400/40 px-1.5 py-0.5 text-[10px] text-orange-200">
@@ -115,7 +118,7 @@ export function PriceSummary({
         {zeroOffer && (
           <p className="mt-1 text-[11px] text-zinc-400">Limited-time offer</p>
         )}
-        {observed && <p className="mt-1 text-[11px] font-mono text-zinc-500">{observed}</p>}
+        {observed && <p className="mt-1 text-[11px] font-mono text-zinc-500" suppressHydrationWarning>{observed}</p>}
       </div>
     </article>
   );

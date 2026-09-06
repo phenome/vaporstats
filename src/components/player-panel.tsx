@@ -1,4 +1,4 @@
-import { formatNumber } from "../lib/format";
+import { formatLocalDateTime, formatNumber } from "../lib/format";
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import type { PriceState } from "../lib/prices";
 import { PriceSummary } from "./price-summary";
@@ -197,8 +197,8 @@ export function PlayerPanel({
                   {formatNumber(data.latest_players)}
                 </div>
                 {data.observed_at && (
-                  <p className="text-[11px] text-zinc-500 font-mono">
-                    {`Observed: ${data.observed_at} UTC`}
+                  <p className="text-[11px] text-zinc-500 font-mono" suppressHydrationWarning>
+                    {formatLocalDateTime(data.observed_at)}
                   </p>
                 )}
               </div>

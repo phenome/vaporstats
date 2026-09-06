@@ -15,6 +15,7 @@ import {
   type PriceHistoryRange,
 } from "../src/lib/prices";
 import { formatCurrentPrice, isPriceDiscounted } from "../src/lib/price-presentation";
+import { formatLocalDateTime } from "../src/lib/format";
 import { PriceSummary } from "../src/components/price-summary";
 import {
   buildPriceChartGeometry,
@@ -1213,8 +1214,8 @@ describe("VaporStats Steam Prices and Deals", () => {
     expect(html).toContain("Base Price");
     expect(html).toContain("All-Time Low");
     expect(html).toContain(formatPriceCents(5999, "USD"));
-    // Verify explicit UTC display
-    expect(html).toContain("UTC");
+    // Observation stamps render in the runtime locale/time zone, not fixed UTC
+    expect(html).toContain(formatLocalDateTime("2026-08-31T12:00:00.000Z"));
     // Regression: SSR render does not invoke render-time fetch loops
     let ssrFetchCount = 0;
     const trackingFetch = (async () => {
@@ -1618,7 +1619,7 @@ describe("VaporStats Steam Prices and Deals", () => {
     // Verifies GamePage visibly displays current US/USD price, discount %, source time
     expect(gameHtml).toContain(formatPriceCents(2999, "USD"));
     expect(gameText).toContain("50%");
-    expect(gameHtml).toContain("2026-09-04 12:00:00 UTC");
+    expect(gameHtml).toContain(formatLocalDateTime("2026-09-04T12:00:00.000Z"));
     // Verifies player history + related apps preserved
     expect(gameHtml).toContain("Player Count History");
     expect(gameHtml).toContain("https://store.steampowered.com/app/1086940/");
@@ -1663,9 +1664,9 @@ describe("VaporStats Steam Prices and Deals", () => {
     expect(homeHtml).toContain("Baldurs Gate 3");
     expect(homeText).toContain("50%");
     // Verifies single trending block preserved
-    // Verifies explicit UTC timestamps on rendered pages
-    expect(gameHtml).toContain("UTC");
-    expect(childHtml).toContain("UTC");
+    // Heroes and charts render local-notation stamps; exact-UTC text stays in table surfaces (deals rows)
+    expect(gameHtml).not.toContain(" UTC");
+    expect(childHtml).not.toContain(" UTC");
     expect(homeHtml).toContain("UTC");
 
   });

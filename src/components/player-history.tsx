@@ -1,4 +1,4 @@
-import { formatNumber } from "../lib/format";
+import { formatLocalDateTime, formatNumber } from "../lib/format";
 import React, { useState, useEffect, useMemo } from "react";
 import { AreaChart, Area, XAxis, YAxis, CartesianGrid, ReferenceLine } from "recharts";
 import { CircleNotch } from "@phosphor-icons/react";
@@ -241,7 +241,7 @@ export function PlayerHistoryChart({
       const d = new Date(p.timestamp);
       const fullDate = isNaN(d.getTime())
         ? ""
-        : d.toISOString().replace("T", " ").replace(/\.\d+Z$/, " UTC");
+        : formatLocalDateTime(d);
       const hasRange = !p.is_gap && typeof p.min === "number" && typeof p.max === "number";
       const min = typeof p.min === "number" ? p.min : p.players;
       const max = typeof p.max === "number" ? p.max : p.players;
@@ -264,17 +264,14 @@ export function PlayerHistoryChart({
     const date = new Date(timestamp);
     if (!Number.isFinite(date.getTime())) return "";
     return range === "24h"
-      ? date.toLocaleTimeString("en-US", {
+      ? new Intl.DateTimeFormat(undefined, {
           hour: "2-digit",
           minute: "2-digit",
-          hour12: false,
-          timeZone: "UTC",
-        })
-      : date.toLocaleDateString("en-US", {
+        }).format(date)
+      : new Intl.DateTimeFormat(undefined, {
           month: "short",
           day: "numeric",
-          timeZone: "UTC",
-        });
+        }).format(date);
   };
 
   return (

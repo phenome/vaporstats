@@ -504,8 +504,11 @@ describe("Player History and Rankings", () => {
     expect(html).toContain('cx="180"');
     expect(html).toContain('cx="420"');
     expect(html.match(/<circle\b/g)).toHaveLength(2); // Both isolated observations remain visible.
-    expect(html).toContain(">Aug 5</text>");
-    expect(html).toContain(">Sep 4</text>");
+    // Axis edges label the range edges in the runtime locale/time zone
+    const axisEdgeLabel = (iso: string) =>
+      new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric" }).format(new Date(iso));
+    expect(html).toContain(`>${axisEdgeLabel("2026-08-05T12:00:00.000Z")}</text>`);
+    expect(html).toContain(`>${axisEdgeLabel("2026-09-04T12:00:00.000Z")}</text>`);
 
     // No secondary text view is rendered alongside the chart.
     expect(html).not.toContain("<table");
