@@ -460,17 +460,22 @@ export function PlayerHistoryChart({
                   <ChartTooltip
                     content={
                       <ChartTooltipContent
+                        className="!bg-zinc-950 !opacity-100 border-zinc-700 shadow-2xl text-zinc-100"
                         labelFormatter={(_, payload) => {
                           const item = payload?.[0]?.payload;
                           return item?.fullDate ?? "";
                         }}
                         formatter={(value, name, item) => {
+                          if (item?.dataKey === "rangeBand") return null;
                           const payload = item?.payload;
                           if (payload?.hasRange && typeof payload.min === "number" && typeof payload.max === "number") {
                             return [
                               <span key="rollup-tooltip" className="flex flex-col gap-0.5">
                                 <span className="font-bold">
-                                  {typeof payload.avg === "number" ? payload.avg.toLocaleString("en-US") : value?.toLocaleString("en-US")} (Avg)
+                                  {typeof payload.avg === "number"
+                                    ? Math.round(payload.avg).toLocaleString("en-US")
+                                    : value?.toLocaleString("en-US")}{" "}
+                                  (Avg)
                                 </span>
                                 <span className="text-[10px] text-zinc-400">
                                   Min: {payload.min.toLocaleString("en-US")} | Max: {payload.max.toLocaleString("en-US")}
@@ -479,6 +484,12 @@ export function PlayerHistoryChart({
                               "Players",
                             ];
                           }
+                          return [
+                            typeof value === "number"
+                              ? value.toLocaleString("en-US")
+                              : "No data",
+                            "Players",
+                          ];
                         }}
                       />
                     }
@@ -486,11 +497,14 @@ export function PlayerHistoryChart({
                   <Area
                     type="monotone"
                     dataKey="rangeBand"
-                    stroke="none"
+                    stroke="#f97316"
+                    strokeWidth={1}
+                    strokeOpacity={0.4}
                     fill="#f97316"
-                    fillOpacity={0.25}
+                    fillOpacity={0.3}
                     isAnimationActive={false}
                     connectNulls={false}
+                    tooltipType="none"
                   />
                   <Area
                     type="monotone"

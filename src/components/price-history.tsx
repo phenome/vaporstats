@@ -402,7 +402,7 @@ export function PriceHistoryChart({
                 {hoveredPoint && (
                   <div
                     role="tooltip"
-                    className="pointer-events-none absolute left-2 top-2 max-w-[260px] border border-zinc-700 bg-zinc-950/95 px-3 py-2 text-[11px] text-zinc-200 shadow-lg"
+                    className="pointer-events-none absolute left-2 top-2 max-w-[260px] border border-zinc-700 bg-zinc-950 px-3 py-2 text-[11px] text-zinc-200 shadow-2xl"
                   >
                     <p className="font-mono tabular-nums">{formatPointPrice(hoveredPoint)}</p>
                     <p className="mt-1 text-zinc-400">{pointDescription(hoveredPoint)}</p>
