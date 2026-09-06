@@ -88,7 +88,7 @@ export function PrivacyNoticeView(): React.JSX.Element {
       </section>
 
       {/* Storage and Analytics Breakdown */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
         {/* Necessary Storage */}
         <section className="p-6 bg-zinc-950 border border-zinc-800 space-y-3">
           <div className="text-xs font-mono uppercase tracking-wider text-zinc-400 font-semibold">
@@ -104,6 +104,24 @@ export function PrivacyNoticeView(): React.JSX.Element {
             <li>No tracking cookies are stored for site navigation.</li>
             <li>No personal identification data is stored.</li>
             <li>Used solely to avoid re-prompting on every page visit.</li>
+          </ul>
+        </section>
+
+        {/* Performance Monitoring */}
+        <section className="p-6 bg-zinc-950 border border-zinc-800 space-y-3">
+          <div className="text-xs font-mono uppercase tracking-wider text-zinc-400 font-semibold">
+            Performance Metrics
+          </div>
+          <h2 className="text-lg font-semibold text-zinc-100">
+            Cookie-Free RUM
+          </h2>
+          <p className="text-xs text-zinc-400 leading-relaxed">
+            Aggregate performance and Core Web Vitals are monitored via Cloudflare Real User Monitoring without cookies or persistent storage.
+          </p>
+          <ul className="text-xs text-zinc-400 space-y-1 list-disc list-inside">
+            <li>No cookies, local storage, or device identifiers.</li>
+            <li>Strictly aggregate page-speed telemetry.</li>
+            <li>No cross-site tracking or profiling.</li>
           </ul>
         </section>
 

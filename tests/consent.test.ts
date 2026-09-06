@@ -168,6 +168,7 @@ describe("Analytics Consent and Privacy Foundation", () => {
     expect(body).toContain("Optional Tracking");
     expect(body).toContain("PostHog");
 
+    expect(body).toContain("Cookie-Free RUM");
     // Must include reversible consent explanation
     expect(body).toContain("Withdrawing consent");
 
