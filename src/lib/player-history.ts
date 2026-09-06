@@ -51,6 +51,7 @@ export interface PlayerHistoryResult {
   range_end: string | null;
   points: PlayerHistoryPoint[];
   source_timestamp: string | null;
+  all_time_peak?: number | null;
 }
 export interface RankedGame {
   rank: number;
@@ -437,6 +438,7 @@ export async function getPlayerHistory(
       range_end: null,
       points: [],
       source_timestamp: null,
+      all_time_peak: null,
     };
   }
 
@@ -527,6 +529,8 @@ export async function getPlayerHistory(
   const rangeStart = range === "all" && realPoints.length === 0 ? null : cutoffIso;
   const rangeEnd = range === "all" ? sourceTimestamp : anchorTimeIso;
 
+  const allTimePeak = await getAllTimePeak(db, appid, anchorTimeIso);
+
   return {
     appid,
     range,
@@ -535,7 +539,34 @@ export async function getPlayerHistory(
     range_end: rangeEnd,
     points,
     source_timestamp: sourceTimestamp,
+    all_time_peak: allTimePeak,
   };
+}
+
+/**
+ * Queries the all-time peak player count across retained observations and durable rollups.
+ */
+export async function getAllTimePeak(
+  db: AppDatabase,
+  appid: number,
+  anchorTimeIso?: string
+): Promise<number | null> {
+  const maxObsStmt = anchorTimeIso
+    ? db.prepare("SELECT MAX(current_players) AS peak FROM observations WHERE appid = ? AND observed_at <= ?").bind(appid, anchorTimeIso)
+    : db.prepare("SELECT MAX(current_players) AS peak FROM observations WHERE appid = ?").bind(appid);
+  const maxObs = await maxObsStmt.first<{ peak: number | null }>();
+
+  const maxRollup = await db
+    .prepare("SELECT MAX(max_players) AS peak FROM player_rollups WHERE appid = ?")
+    .bind(appid)
+    .first<{ peak: number | null }>();
+
+  const p1 = maxObs?.peak ?? null;
+  const p2 = maxRollup?.peak ?? null;
+  if (p1 === null && p2 === null) return null;
+  if (p1 === null) return p2;
+  if (p2 === null) return p1;
+  return Math.max(p1, p2);
 }
 
 export async function getMostPlayedRankings(

@@ -69,6 +69,13 @@ export interface DealItem {
   observed_at: string;
 }
 
+export interface PriceAllTimeLow {
+  price_cents: number;
+  currency: string;
+  discount_percent: number;
+  observed_at: string;
+}
+
 export interface PriceHistoryResult {
   appid: number;
   range: PriceHistoryRange;
@@ -78,6 +85,7 @@ export interface PriceHistoryResult {
   source_timestamp: string;
   anchor_timestamp?: string;
   is_always_free?: boolean;
+  all_time_low?: PriceAllTimeLow | null;
 }
 
 export interface DealsResult {
@@ -544,7 +552,36 @@ export async function getPriceHistory(
   const currentIsWithinAnchor = Boolean(
     current && new Date(current.observed_at).getTime() <= anchorTime.getTime()
   );
+  const allTimeLowRow = await db
+    .prepare(
+      `SELECT final_price, currency, discount_percent, observed_at
+       FROM price_history
+       WHERE appid = ? AND is_available = 1 AND final_price IS NOT NULL AND observed_at <= ?
+       ORDER BY final_price ASC, observed_at ASC
+       LIMIT 1`
+    )
+    .bind(appid, anchorIso)
+    .first<{ final_price: number; currency: string; discount_percent: number | null; observed_at: string }>();
 
+  let all_time_low: PriceAllTimeLow | null = allTimeLowRow
+    ? {
+        price_cents: allTimeLowRow.final_price,
+        currency: allTimeLowRow.currency || "USD",
+        discount_percent: allTimeLowRow.discount_percent ?? 0,
+        observed_at: allTimeLowRow.observed_at,
+      }
+    : null;
+
+  if (current && current.is_available && typeof current.final_price === "number") {
+    if (!all_time_low || current.final_price < all_time_low.price_cents) {
+      all_time_low = {
+        price_cents: current.final_price,
+        currency: current.currency,
+        discount_percent: current.discount_percent ?? 0,
+        observed_at: current.observed_at,
+      };
+    }
+  }
 
   return {
     appid,
@@ -558,6 +595,7 @@ export async function getPriceHistory(
       observationCount > 0 &&
       freeCount === observationCount &&
       currentIsWithinAnchor && Boolean(current?.is_available && current.is_free),
+    all_time_low,
   };
 }
 

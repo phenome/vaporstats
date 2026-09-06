@@ -585,7 +585,31 @@ describe("Player History and Rankings", () => {
     );
     expect(aggregateHtml).toContain("50");
     expect(aggregateHtml).toContain("900");
-    expect(aggregateHtml).toContain("583");
+    expect(aggregateHtml).toContain("30D Low");
+    expect(aggregateHtml).toContain("30D Peak");
+
+    // On 'all' range, slot 3 renders the sample-weighted average
+    const aggregateAllHtml = renderToString(
+      React.createElement(PlayerHistoryChart, {
+        appid: 31,
+        initialRange: "all",
+        initialData: {
+          appid: 31,
+          range: "all",
+          earliest_observation: "2026-08-01T00:00:00.000Z",
+          range_start: "2026-08-05T12:00:00.000Z",
+          range_end: "2026-09-04T12:00:00.000Z",
+          points: [
+            { timestamp: "2026-08-10T12:00:00.000Z", players: 100, min: 50, max: 300, avg: 100, close: 100, sample_count: 1 },
+            { timestamp: "2026-08-15T12:00:00.000Z", players: 900, min: 200, max: 900, avg: 700, close: 900, sample_count: 9 },
+            { timestamp: "2026-08-20T12:00:00.000Z", players: 400, min: 100, max: 500, avg: 300, close: 400, sample_count: 2 },
+          ],
+          source_timestamp: "2026-08-20T12:00:00.000Z",
+        },
+      })
+    );
+    expect(aggregateAllHtml).toContain("All-Time Avg");
+    expect(aggregateAllHtml).toContain("583");
     // Ensure render does not trigger infinite loops or unexpected side-effects
     let fetchCount = 0;
     const trackingFetch = (async () => {
@@ -608,6 +632,41 @@ describe("Player History and Rankings", () => {
     console.log("accessible gap-preserving chart");
   });
 
+  test("player history chart retains summary bar during period revalidation", async () => {
+    const initialData: PlayerHistoryResult = {
+      appid: 42,
+      range: "30d",
+      earliest_observation: "2026-08-01T00:00:00.000Z",
+      range_start: "2026-08-05T12:00:00.000Z",
+      range_end: "2026-09-04T12:00:00.000Z",
+      points: [
+        { timestamp: "2026-08-10T12:00:00.000Z", players: 1200 },
+        { timestamp: "2026-08-20T12:00:00.000Z", players: 3400 },
+      ],
+      source_timestamp: "2026-08-20T12:00:00.000Z",
+      all_time_peak: 5000,
+    };
+
+    const html = renderToString(
+      React.createElement(PlayerHistoryChart, {
+        appid: 42,
+        initialRange: "30d",
+        initialData,
+      })
+    );
+
+    // Summary bar must be present with period-adapted labels and all-time peak
+    expect(html).toContain("Current");
+    expect(html).toContain("30D Low");
+    expect(html).toContain("30D Peak");
+    expect(html).toContain("All-Time Peak");
+    expect(html).toContain("1,200");
+    expect(html).toContain("3,400");
+    expect(html).toContain("5,000");
+
+    // Verify the summary bar is not replaced with a bare loading placeholder
+    expect(html).not.toContain("Loading player history...");
+  });
   // G5: Most Played orders latest observations with relative and exact UTC age
   test("most played ordering", async () => {
     const db = await createFreshDb();
@@ -791,11 +850,12 @@ describe("Player History and Rankings", () => {
     expect(histRes.headers.get("Cache-Control")).toBe(CACHE_POLICIES.liveApi);
     const histJson = (await histRes.json()) as {
       status: string;
-      data: { appid: number; range_start: string; range_end: string };
+      data: { appid: number; range_start: string; range_end: string; all_time_peak?: number };
       source_timestamp: string;
     };
     expect(histJson.status).toBe("data");
     expect(histJson.data.appid).toBe(10);
+    expect(histJson.data.all_time_peak).toBe(500);
     expect(typeof histJson.data.range_start).toBe("string");
     expect(typeof histJson.data.range_end).toBe("string");
     expect(typeof histJson.source_timestamp).toBe("string");

@@ -1,5 +1,12 @@
 import React, { useState, useEffect, useMemo } from "react";
-import { AreaChart, Area, XAxis, YAxis, CartesianGrid } from "recharts";
+import { AreaChart, Area, XAxis, YAxis, CartesianGrid, ReferenceLine } from "recharts";
+import { CircleNotch } from "@phosphor-icons/react";
+import {
+  useQuery,
+  useQueryClient,
+  QueryClient,
+  keepPreviousData,
+} from "@tanstack/react-query";
 import {
   ChartContainer,
   ChartTooltip,
@@ -27,6 +34,55 @@ const playerChartConfig = {
   },
 } satisfies ChartConfig;
 
+function useSafeQueryClient() {
+  try {
+    return useQueryClient();
+  } catch {
+    return new QueryClient({
+      defaultOptions: {
+        queries: {
+          staleTime: 5 * 60 * 1000,
+        },
+      },
+    });
+  }
+}
+
+export async function fetchPlayerHistory(
+  appid: number,
+  range: HistoryRange,
+  customFetch?: typeof fetch
+): Promise<PlayerHistoryResult> {
+  const fetchFn = customFetch ?? fetch;
+  const res = await fetchFn(`/api/players/history?appid=${appid}&range=${range}`);
+  if (!res.ok) {
+    throw new Error(`Failed to load player history: ${res.status}`);
+  }
+  const json = (await res.json()) as { status?: string; data?: PlayerHistoryResult };
+  if (json.status !== "data" || !json.data) {
+    throw new Error("Empty player history data");
+  }
+  return json.data;
+}
+
+export function playerHistoryQueryOptions(
+  appid: number,
+  range: HistoryRange,
+  options?: { initialData?: PlayerHistoryResult; customFetch?: typeof fetch }
+) {
+  const hasInitial =
+    options?.initialData &&
+    options.initialData.appid === appid &&
+    options.initialData.range === range;
+  return {
+    queryKey: ["player-history", appid, range],
+    queryFn: () => fetchPlayerHistory(appid, range, options?.customFetch),
+    initialData: hasInitial ? options?.initialData : undefined,
+    placeholderData: keepPreviousData,
+    staleTime: 5 * 60 * 1000,
+  };
+}
+
 /**
  * Accessible, gap-preserving player history chart.
  * Enforces:
@@ -41,72 +97,32 @@ export function PlayerHistoryChart({
   customFetch,
 }: PlayerHistoryChartProps) {
   const [range, setRange] = useState<HistoryRange>(initialRange);
-  const [data, setData] = useState<PlayerHistoryResult | null>(
-    initialData && initialData.appid === appid && initialData.range === initialRange
-      ? initialData
-      : null
-  );
-  const [status, setStatus] = useState<"idle" | "loading" | "success" | "error">(
-    initialData && initialData.appid === appid && initialData.range === initialRange
-      ? "success"
-      : "loading"
-  );
+  const [hoveredPoint, setHoveredPoint] = useState<{
+    players: number | null;
+    fullDate: string;
+    hasRange?: boolean;
+    min?: number;
+    max?: number;
+    avg?: number;
+  } | null>(null);
   const [isMounted, setIsMounted] = useState(false);
 
   useEffect(() => {
     setIsMounted(true);
   }, []);
 
-  // Keep initial display synced if initialData / appid changes
-  useEffect(() => {
-    if (initialData && initialData.appid === appid && initialData.range === range) {
-      setData(initialData);
-      setStatus("success");
-    }
-  }, [appid, initialData, range]);
+  const queryClient = useSafeQueryClient();
+  const queryOptions = useMemo(
+    () => playerHistoryQueryOptions(appid, range, { initialData, customFetch }),
+    [appid, range, initialData, customFetch]
+  );
+  const { data, isFetching, isPlaceholderData, status: queryStatus } = useQuery(
+    queryOptions,
+    queryClient
+  );
 
-  // Exactly one fetch per mount / appid / range change.
-  // Never depends on data, avoiding infinite re-triggering upon success.
-  useEffect(() => {
-    let cancelled = false;
-
-    // SSR game detail already supplies this exact range. Avoid requesting it again on mount.
-    if (initialData && initialData.appid === appid && initialData.range === range) {
-      return () => {
-        cancelled = true;
-      };
-    }
-    async function load() {
-      const fetchFn = customFetch ?? fetch;
-      try {
-        const res = await fetchFn(`/api/players/history?appid=${appid}&range=${range}`);
-        if (cancelled) return;
-        if (!res.ok) {
-          setStatus("error");
-          return;
-        }
-        const json = (await res.json()) as { status?: string; data?: PlayerHistoryResult };
-        if (cancelled) return;
-        if (json.status === "data" && json.data) {
-          setData(json.data);
-          setStatus("success");
-        } else {
-          setData(null);
-          setStatus("success");
-        }
-      } catch {
-        if (!cancelled) {
-          setStatus("error");
-        }
-      }
-    }
-
-    load();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [appid, range, customFetch, initialData]);
+  const status = queryStatus === "pending" ? "loading" : queryStatus;
+  const isUpdating = isFetching && isPlaceholderData;
 
   const points = data?.points ?? [];
   const validPoints = useMemo(
@@ -204,9 +220,10 @@ export function PlayerHistoryChart({
         chartDomain.timeSpan === 1 && chartDomain.startTime === chartDomain.endTime
           ? padLeft + plotWidth / 2
           : padLeft + ((t - chartDomain.startTime) / chartDomain.timeSpan) * plotWidth;
+      const ptVal = typeof pt.avg === "number" ? Math.round(pt.avg) : pt.players;
       const y = isConstantValue
         ? padTop + plotHeight / 2
-        : padTop + plotHeight - ((pt.players - stats.min) / valueSpan) * plotHeight;
+        : padTop + plotHeight - ((ptVal - stats.min) / valueSpan) * plotHeight;
 
       currentSegment.push({ x, y, point: pt });
     }
@@ -224,11 +241,20 @@ export function PlayerHistoryChart({
       const fullDate = isNaN(d.getTime())
         ? ""
         : d.toISOString().replace("T", " ").replace(/\.\d+Z$/, " UTC");
+      const hasRange = !p.is_gap && typeof p.min === "number" && typeof p.max === "number";
+      const min = typeof p.min === "number" ? p.min : p.players;
+      const max = typeof p.max === "number" ? p.max : p.players;
+      const avg = typeof p.avg === "number" ? Math.round(p.avg) : p.players;
       return {
         timestamp: p.timestamp,
         timestampMs: d.getTime(),
         fullDate,
-        players: p.is_gap ? null : p.players,
+        players: p.is_gap ? null : (hasRange && typeof avg === "number" ? avg : p.players),
+        rangeBand: p.is_gap || !hasRange || min === null || max === null ? null : [min, max],
+        min: min ?? undefined,
+        max: max ?? undefined,
+        avg: avg ?? undefined,
+        hasRange,
       };
     });
   }, [points]);
@@ -262,8 +288,13 @@ export function PlayerHistoryChart({
           <h2 className="text-xs font-mono font-semibold text-zinc-200 uppercase tracking-wider">
             Player Count History
           </h2>
+          {isUpdating && (
+            <span className="inline-flex items-center gap-1.5 text-[10px] font-mono text-orange-400">
+              <CircleNotch className="h-3 w-3 animate-spin" />
+              <span>Updating...</span>
+            </span>
+          )}
         </div>
-
         {/* Range control buttons */}
         <div
           className="flex items-center space-x-1"
@@ -279,8 +310,6 @@ export function PlayerHistoryChart({
                 onClick={() => {
                   if (r === range) return;
                   setRange(r);
-                  setData(null);
-                  setStatus("loading");
                 }}
                 aria-pressed={active}
                 className={`min-h-[44px] min-w-[44px] px-2.5 py-1 inline-flex items-center justify-center text-[11px] font-mono uppercase tracking-wider transition-colors rounded-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-orange-500 ${
@@ -306,28 +335,32 @@ export function PlayerHistoryChart({
             </span>
           </div>
           <div className="border border-zinc-900 bg-zinc-900/40 p-2">
-            <span className="text-zinc-500 text-[10px] uppercase block">Minimum</span>
+            <span className="text-zinc-500 text-[10px] uppercase block">
+              {range === "all" ? "All-Time Low" : `${range.toUpperCase()} Low`}
+            </span>
             <span className="text-zinc-300 tabular-nums">
               {stats.min.toLocaleString("en-US")}
             </span>
           </div>
           <div className="border border-zinc-900 bg-zinc-900/40 p-2">
-            <span className="text-zinc-500 text-[10px] uppercase block">Maximum</span>
+            <span className="text-zinc-500 text-[10px] uppercase block">
+              {range === "all" ? "All-Time Avg" : `${range.toUpperCase()} Peak`}
+            </span>
             <span className="text-orange-400 font-bold tabular-nums">
-              {stats.max.toLocaleString("en-US")}
+              {(range === "all" ? stats.avg : stats.max).toLocaleString("en-US")}
             </span>
           </div>
           <div className="border border-zinc-900 bg-zinc-900/40 p-2">
-            <span className="text-zinc-500 text-[10px] uppercase block">Average</span>
-            <span className="text-zinc-300 tabular-nums">
-              {stats.avg.toLocaleString("en-US")}
+            <span className="text-zinc-500 text-[10px] uppercase block">All-Time Peak</span>
+            <span className="text-orange-400 font-bold tabular-nums">
+              {(data?.all_time_peak ?? stats.max).toLocaleString("en-US")}
             </span>
           </div>
         </div>
       )}
 
       {/* Chart visualization */}
-      <div className="relative w-full">
+      <div className={`relative w-full transition-opacity duration-200 ${isUpdating ? "opacity-50" : "opacity-100"}`}>
         {status === "loading" && (
           <div className="h-56 flex items-center justify-center font-mono text-xs text-zinc-500">
             Loading player history...
@@ -360,6 +393,17 @@ export function PlayerHistoryChart({
                 <AreaChart
                   data={rechartsData}
                   margin={{ top: 10, right: 15, left: 10, bottom: 0 }}
+                  onMouseMove={(state) => {
+                    const activePt = state?.activePayload?.[0]?.payload;
+                    if (activePt && activePt.players !== null && activePt.players !== undefined) {
+                      setHoveredPoint(activePt);
+                    } else {
+                      setHoveredPoint(null);
+                    }
+                  }}
+                  onMouseLeave={() => {
+                    setHoveredPoint(null);
+                  }}
                 >
                   <defs>
                     <linearGradient id="playerGradient" x1="0" y1="0" x2="0" y2="1">
@@ -394,6 +438,25 @@ export function PlayerHistoryChart({
                     }
                     domain={["auto", "auto"]}
                   />
+                  {hoveredPoint && typeof hoveredPoint.players === "number" && (
+                    <ReferenceLine
+                      y={hoveredPoint.players}
+                      stroke="#ea580c"
+                      strokeDasharray="3 3"
+                      strokeWidth={1}
+                      label={{
+                        value: hoveredPoint.players >= 1000000
+                          ? `${(hoveredPoint.players / 1000000).toFixed(1)}M`
+                          : hoveredPoint.players >= 1000
+                          ? `${(hoveredPoint.players / 1000).toFixed(0)}k`
+                          : `${hoveredPoint.players}`,
+                        position: "left",
+                        fill: "#ea580c",
+                        fontSize: 10,
+                        fontFamily: "monospace",
+                      }}
+                    />
+                  )}
                   <ChartTooltip
                     content={
                       <ChartTooltipContent
@@ -401,14 +464,33 @@ export function PlayerHistoryChart({
                           const item = payload?.[0]?.payload;
                           return item?.fullDate ?? "";
                         }}
-                        formatter={(value) => [
-                          typeof value === "number"
-                            ? value.toLocaleString("en-US")
-                            : "No data",
-                          "Players",
-                        ]}
+                        formatter={(value, name, item) => {
+                          const payload = item?.payload;
+                          if (payload?.hasRange && typeof payload.min === "number" && typeof payload.max === "number") {
+                            return [
+                              <span key="rollup-tooltip" className="flex flex-col gap-0.5">
+                                <span className="font-bold">
+                                  {typeof payload.avg === "number" ? payload.avg.toLocaleString("en-US") : value?.toLocaleString("en-US")} (Avg)
+                                </span>
+                                <span className="text-[10px] text-zinc-400">
+                                  Min: {payload.min.toLocaleString("en-US")} | Max: {payload.max.toLocaleString("en-US")}
+                                </span>
+                              </span>,
+                              "Players",
+                            ];
+                          }
+                        }}
                       />
                     }
+                  />
+                  <Area
+                    type="monotone"
+                    dataKey="rangeBand"
+                    stroke="none"
+                    fill="#f97316"
+                    fillOpacity={0.25}
+                    isAnimationActive={false}
+                    connectNulls={false}
                   />
                   <Area
                     type="monotone"

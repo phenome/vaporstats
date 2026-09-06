@@ -53,3 +53,18 @@ _Avoid_: Blurhash, thumbnail preview, image stub
 **Sticky Game Header**:
 A persistent, single-line sub-header docked immediately below the primary site navigation that displays core game identity and action links when scrolling past the main game details card.
 _Avoid_: Floating bar, sticky title, mini navbar
+
+**Period Peak**:
+The highest recorded player count within a specific observation window (e.g. 24 hours, 7 days, 30 days). Distinct from All-Time Peak.
+
+**All-Time Peak**:
+The highest recorded player count for an application across all retained raw observations and durable rollups.
+
+**Period Low**:
+The lowest non-null recorded player count or price within a specific observation window.
+
+**All-Time Low**:
+The lowest recorded price for an application across its entire tracked pricing history.
+
+**Chart Transition State**:
+An active revalidation state during which existing period data remains visible with muted presentation while next-period data is fetched, preventing layout collapse.

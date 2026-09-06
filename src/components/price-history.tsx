@@ -1,5 +1,11 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
-import { PriceSummary } from "./price-summary";
+import React, { useState, useEffect, useRef, useMemo } from "react";
+import { CircleNotch } from "@phosphor-icons/react";
+import {
+  useQuery,
+  useQueryClient,
+  QueryClient,
+  keepPreviousData,
+} from "@tanstack/react-query";
 import {
   type PriceHistoryRange,
   type PriceHistoryResult,
@@ -9,6 +15,7 @@ import {
   formatPriceUtc,
 } from "../lib/prices";
 import { formatCurrentPrice, isPriceDiscounted } from "../lib/price-presentation";
+import { PriceSummary } from "./price-summary";
 import {
   buildPriceChartGeometry,
   buildPriceChartPoints,
@@ -26,6 +33,55 @@ export interface PriceHistoryChartProps {
 type LoadStatus = "idle" | "loading" | "success" | "error";
 
 const RANGES: readonly PriceHistoryRange[] = ["30d", "6m", "1y", "all"];
+
+function useSafeQueryClient() {
+  try {
+    return useQueryClient();
+  } catch {
+    return new QueryClient({
+      defaultOptions: {
+        queries: {
+          staleTime: 5 * 60 * 1000,
+        },
+      },
+    });
+  }
+}
+
+export async function fetchPriceHistory(
+  appid: number,
+  range: PriceHistoryRange,
+  customFetch?: typeof fetch
+): Promise<PriceHistoryResult> {
+  const fetchFn = customFetch ?? fetch;
+  const res = await fetchFn(`/api/prices/history?appid=${appid}&range=${range}`);
+  if (!res.ok) {
+    throw new Error(`Failed to load price history: ${res.status}`);
+  }
+  const payload = (await res.json()) as { status?: string; data?: PriceHistoryResult };
+  if (!payload.data) {
+    throw new Error("Empty price history data");
+  }
+  return payload.data;
+}
+
+export function priceHistoryQueryOptions(
+  appid: number,
+  range: PriceHistoryRange,
+  options?: { initialData?: PriceHistoryResult; customFetch?: typeof fetch }
+) {
+  const hasInitial =
+    options?.initialData &&
+    options.initialData.appid === appid &&
+    options.initialData.range === range;
+  return {
+    queryKey: ["price-history", appid, range],
+    queryFn: () => fetchPriceHistory(appid, range, options?.customFetch),
+    initialData: hasInitial ? options?.initialData : undefined,
+    placeholderData: keepPreviousData,
+    staleTime: 5 * 60 * 1000,
+  };
+}
 
 function pointAsHistoryEntry(point: PriceChartPoint) {
   return {
@@ -65,51 +121,22 @@ export function PriceHistoryChart({
   customFetch,
 }: PriceHistoryChartProps) {
   const [range, setRange] = useState<PriceHistoryRange>(initialRange);
-  const [data, setData] = useState<PriceHistoryResult | null>(initialData ?? null);
-  const [status, setStatus] = useState<LoadStatus>(initialData ? "success" : "idle");
   const [hoveredIndex, setHoveredIndex] = useState<number | null>(null);
   const chartContainerRef = useRef<HTMLDivElement>(null);
   const [chartWidth, setChartWidth] = useState(900);
 
-  useEffect(() => {
-    let cancelled = false;
-    const fetchFn = customFetch ?? fetch;
-    if (data?.appid === appid && data.range === range) {
-      return () => {
-        cancelled = true;
-      };
-    }
+  const queryClient = useSafeQueryClient();
+  const queryOptions = useMemo(
+    () => priceHistoryQueryOptions(appid, range, { initialData, customFetch }),
+    [appid, range, initialData, customFetch]
+  );
+  const { data, isFetching, isPlaceholderData, status: queryStatus } = useQuery(
+    queryOptions,
+    queryClient
+  );
 
-    async function revalidate() {
-      if (!data) setStatus("loading");
-      try {
-        const response = await fetchFn(`/api/prices/history?appid=${appid}&range=${range}`);
-        if (cancelled) return;
-        if (!response.ok) {
-          setStatus("error");
-          return;
-        }
-        const payload = (await response.json()) as {
-          status?: string;
-          data?: PriceHistoryResult;
-        };
-        if (cancelled) return;
-        if (payload.status === "data" || payload.status === "empty") {
-          setData(payload.data ?? null);
-          setStatus("success");
-        } else {
-          setStatus("error");
-        }
-      } catch {
-        if (!cancelled) setStatus("error");
-      }
-    }
-
-    void revalidate();
-    return () => {
-      cancelled = true;
-    };
-  }, [appid, range, customFetch, data]);
+  const status = queryStatus === "pending" ? "loading" : queryStatus;
+  const isUpdating = isFetching && isPlaceholderData;
 
   useEffect(() => {
     const element = chartContainerRef.current;
@@ -145,11 +172,21 @@ export function PriceHistoryChart({
   const compactFree = Boolean(
     data?.is_always_free && currentPrice?.is_available && currentPrice.is_free
   );
+  const periodLowCents = useMemo(() => {
+    const validPrices = points
+      .map((p) => p.finalPriceCents)
+      .filter((v): v is number => typeof v === "number" && !isNaN(v));
+    if (validPrices.length === 0) {
+      return currentPrice?.final_price ?? null;
+    }
+    return Math.min(...validPrices);
+  }, [points, currentPrice]);
+  const basePriceCents = currentPrice?.initial_price ?? currentPrice?.final_price ?? null;
+  const allTimeLow = data?.all_time_low;
   const summaryStatus = statusForSummary(status);
   const currentIsOffer = isPriceDiscounted(currentPrice);
   const hoveredPoint = hoveredIndex === null ? null : points[hoveredIndex] ?? null;
   const hasData = points.length > 0 || currentPrice !== null;
-
   return (
     <div
       className="w-full space-y-4 border border-zinc-800 bg-zinc-950 p-4 sm:p-5"
@@ -157,31 +194,77 @@ export function PriceHistoryChart({
     >
       <PriceSummary price={currentPrice} variant="hero" status={summaryStatus} />
 
-      <div className="flex flex-col gap-3 border-b border-zinc-900 pb-3 sm:flex-row sm:items-center sm:justify-between">
-        <div>
-          <p className="text-[10px] uppercase tracking-[0.22em] text-zinc-500">Price history</p>
-          <p className="mt-1 text-xs text-zinc-400">
-            {currentPrice ? `Current: ${formatCurrentPrice(currentPrice)}` : "No successful observation yet"}
-          </p>
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-zinc-900 pb-3">
+        <div className="flex items-center gap-2">
+          <span className="w-2 h-2 bg-orange-500 inline-block"></span>
+          <h2 className="text-xs font-mono font-semibold text-zinc-200 uppercase tracking-wider">
+            Price History
+          </h2>
+          {isUpdating && (
+            <span className="inline-flex items-center gap-1.5 text-[10px] font-mono text-orange-400">
+              <CircleNotch className="h-3 w-3 animate-spin" />
+              <span>Updating...</span>
+            </span>
+          )}
         </div>
-        <div className="flex items-center gap-1" role="group" aria-label="Price history time ranges">
-          {RANGES.map((item) => (
-            <button
-              key={item}
-              type="button"
-              onClick={() => setRange(item)}
-              aria-pressed={range === item}
-              className={`min-h-9 min-w-10 px-2 text-[11px] font-mono uppercase tracking-wider transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-orange-500 ${
-                range === item
-                  ? "bg-orange-500/15 text-orange-200"
-                  : "text-zinc-500 hover:bg-zinc-900 hover:text-zinc-200"
-              }`}
-            >
-              {item === "all" ? "All" : item}
-            </button>
-          ))}
+        <div className="flex items-center space-x-1" role="group" aria-label="Price history time ranges">
+          {RANGES.map((item) => {
+            const active = range === item;
+            return (
+              <button
+                key={item}
+                type="button"
+                onClick={() => {
+                  if (item === range) return;
+                  setRange(item);
+                }}
+                aria-pressed={active}
+                className={`min-h-[44px] min-w-[44px] px-2.5 py-1 inline-flex items-center justify-center text-[11px] font-mono uppercase tracking-wider transition-colors rounded-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-orange-500 ${
+                  active
+                    ? "bg-orange-600 text-white font-semibold"
+                    : "bg-zinc-900 text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 border border-zinc-800"
+                }`}
+              >
+                {item === "all" ? "All" : item}
+              </button>
+            );
+          })}
         </div>
       </div>
+
+      {/* 4-slot price summary bar */}
+      {!compactFree && hasData && (
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 pt-1 text-xs font-mono">
+          <div className="border border-zinc-900 bg-zinc-900/40 p-2">
+            <span className="text-zinc-500 text-[10px] uppercase block">Current Price</span>
+            <span className="text-zinc-100 font-bold tabular-nums">
+              {currentPrice ? formatCurrentPrice(currentPrice) : "No data"}
+            </span>
+          </div>
+          <div className="border border-zinc-900 bg-zinc-900/40 p-2">
+            <span className="text-zinc-500 text-[10px] uppercase block">
+              {range === "all" ? "All-Time Low" : `${range.toUpperCase()} Low`}
+            </span>
+            <span className="text-zinc-300 tabular-nums">
+              {periodLowCents !== null ? formatPriceCents(periodLowCents, currentPrice?.currency ?? "USD") : "No data"}
+            </span>
+          </div>
+          <div className="border border-zinc-900 bg-zinc-900/40 p-2">
+            <span className="text-zinc-500 text-[10px] uppercase block">Base Price</span>
+            <span className="text-zinc-300 tabular-nums">
+              {basePriceCents !== null ? formatPriceCents(basePriceCents, currentPrice?.currency ?? "USD") : "No data"}
+            </span>
+          </div>
+          <div className="border border-zinc-900 bg-zinc-900/40 p-2">
+            <span className="text-zinc-500 text-[10px] uppercase block">All-Time Low</span>
+            <span className="text-orange-400 font-bold tabular-nums">
+              {allTimeLow
+                ? `${formatPriceCents(allTimeLow.price_cents, allTimeLow.currency)}${allTimeLow.discount_percent > 0 ? ` (-${allTimeLow.discount_percent}%)` : ""}`
+                : (periodLowCents !== null ? formatPriceCents(periodLowCents, currentPrice?.currency ?? "USD") : "No data")}
+            </span>
+          </div>
+        </div>
+      )}
 
       {status === "loading" && (
         <div className="flex h-48 items-center justify-center text-xs text-zinc-500">Loading price history...</div>
@@ -214,7 +297,7 @@ export function PriceHistoryChart({
               </div>
             </div>
           ) : (
-            <div className="space-y-3">
+            <div className={`space-y-3 transition-opacity duration-200 ${isUpdating ? "opacity-50" : "opacity-100"}`}>
               <div className="flex flex-wrap items-center justify-between gap-2 text-[10px] text-zinc-500">
                 <span>{new Date(domain.start).toISOString().slice(0, 10)}</span>
                 <span>Selected range: {range.toUpperCase()}</span>
@@ -281,6 +364,40 @@ export function PriceHistoryChart({
                       />
                     );
                   })}
+                  {hoveredIndex !== null &&
+                    geometry.coordinates[hoveredIndex] &&
+                    geometry.coordinates[hoveredIndex].y !== null && (
+                      <g data-testid="price-hover-guide">
+                        <line
+                          x1={geometry.padLeft}
+                          y1={geometry.coordinates[hoveredIndex].y!}
+                          x2={geometry.coordinates[hoveredIndex].x}
+                          y2={geometry.coordinates[hoveredIndex].y!}
+                          stroke="#ea580c"
+                          strokeDasharray="3 3"
+                          strokeWidth="1"
+                        />
+                        <rect
+                          x={geometry.padLeft - 50}
+                          y={geometry.coordinates[hoveredIndex].y! - 7}
+                          width={44}
+                          height={14}
+                          fill="#ea580c"
+                          rx={2}
+                        />
+                        <text
+                          x={geometry.padLeft - 28}
+                          y={geometry.coordinates[hoveredIndex].y! + 4}
+                          textAnchor="middle"
+                          fill="#ffffff"
+                          fontSize="9"
+                          fontFamily="monospace"
+                          fontWeight="bold"
+                        >
+                          {formatPointPrice(geometry.coordinates[hoveredIndex].point)}
+                        </text>
+                      </g>
+                    )}
                 </svg>
                 {hoveredPoint && (
                   <div

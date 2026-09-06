@@ -1120,7 +1120,7 @@ describe("VaporStats Steam Prices and Deals", () => {
     expect(historyAll.history.length).toBe(3);
     expect(historyAll.history[0].observed_at).toBe(tFirst);
     expect(historyAll.history.every((h) => h.observed_at <= anchor.toISOString())).toBe(true);
-
+    expect(historyAll.all_time_low?.price_cents).toBe(2999);
     // Test '30d': anchor captures state going into window ($49.99) + observation in window ($29.99), excludes future
     const history30d = await getPriceHistory(appDb, 1086940, "30d", { anchorTime: anchor });
     expect(history30d.history.length).toBe(2);
@@ -1128,6 +1128,9 @@ describe("VaporStats Steam Prices and Deals", () => {
     expect(history30d.history[1].final_price).toBe(2999);
     expect(history30d.history.every((h) => h.observed_at <= anchor.toISOString())).toBe(true);
     expect(history30d.anchor_timestamp).toBe(anchor.toISOString());
+    expect(history30d.all_time_low?.price_cents).toBe(2999);
+    expect(history30d.all_time_low?.currency).toBe("USD");
+    expect(history30d.all_time_low?.discount_percent).toBe(57);
     await recordPriceObservation(appDb, {
       appid: 730,
       initial_price: 999,
@@ -1203,9 +1206,14 @@ describe("VaporStats Steam Prices and Deals", () => {
     expect(html).toContain('aria-label="Price history time ranges"');
     expect(html).toContain('role="img"');
     expect(html).toContain("$29.99");
+    // Verify 4-slot metric bar rendering
+    expect(html).toContain("Current Price");
+    expect(html).toContain("30D Low");
+    expect(html).toContain("Base Price");
+    expect(html).toContain("All-Time Low");
+    expect(html).toContain("$59.99");
     // Verify explicit UTC display
     expect(html).toContain("UTC");
-
     // Regression: SSR render does not invoke render-time fetch loops
     let ssrFetchCount = 0;
     const trackingFetch = (async () => {
