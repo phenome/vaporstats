@@ -45,14 +45,6 @@ function formatPointPrice(point: PriceChartPoint) {
   return formatCurrentPrice(pointAsHistoryEntry(point));
 }
 
-function formatBasePrice(point: PriceChartPoint) {
-  if (!point.isAvailable || point.initialPriceCents === null) return "Price unavailable";
-  if (point.initialPriceCents === 0 && !point.isFree) {
-    return point.currency === "USD" ? "$0.00" : `0.00 ${point.currency}`;
-  }
-  return formatPriceCents(point.initialPriceCents, point.currency, false);
-}
-
 function pointDescription(point: PriceChartPoint) {
   if (point.inferred) {
     return `Last observed ${formatPriceUtc(point.sourceTimestamp)}; dashed continuation is not a new observation.`;
@@ -207,8 +199,7 @@ export function PriceHistoryChart({
       )}
 
       {status === "success" && hasData && (
-        <>
-          {compactFree ? (
+        compactFree ? (
             <div
               className="border border-zinc-800 bg-zinc-900/30 p-4"
               data-testid="price-history-always-free"
@@ -311,37 +302,7 @@ export function PriceHistoryChart({
                 {currentIsOffer && <span className="text-orange-300">Current offer savings shown above</span>}
               </div>
             </div>
-          )}
-
-          <details className="border border-zinc-900 bg-zinc-900/20" open>
-            <summary className="cursor-pointer px-3 py-2 text-[10px] uppercase tracking-[0.2em] text-zinc-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-orange-500">Accessible observations</summary>
-            <div className="overflow-x-auto border-t border-zinc-900">
-              <table className="w-full min-w-[620px] text-left text-xs">
-                <caption className="sr-only">Price observations and carried-forward state</caption>
-                <thead className="text-[10px] uppercase tracking-wider text-zinc-500">
-                  <tr>
-                    <th className="px-3 py-2 font-normal">Timestamp (UTC)</th>
-                    <th className="px-3 py-2 font-normal">Price</th>
-                    <th className="px-3 py-2 font-normal">Base</th>
-                    <th className="px-3 py-2 font-normal">Currency</th>
-                    <th className="px-3 py-2 font-normal">State</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-zinc-900 text-zinc-300">
-                  {points.map((point, index) => (
-                    <tr key={`${point.observedAt}-${index}`}>
-                      <td className="whitespace-nowrap px-3 py-2 font-mono tabular-nums">{formatPriceUtc(point.observedAt)}</td>
-                      <td className="px-3 py-2 font-mono tabular-nums">{formatPointPrice(point)}</td>
-                      <td className="px-3 py-2 font-mono tabular-nums">{formatBasePrice(point)}</td>
-                      <td className="px-3 py-2">{point.currency}</td>
-                      <td className="px-3 py-2 text-zinc-500">{point.inferred ? "Carried forward, not observed" : point.isAvailable ? "Observed" : "Unavailable"}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </details>
-        </>
+          )
       )}
     </div>
   );
