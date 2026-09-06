@@ -15,7 +15,19 @@ import { RelatedApps } from "./related-apps";
 import { AppLink } from "./app-link";
 import { LifecycleHistorySection } from "./lifecycle-history";
 
-function useHeroScrollProgress(sentinelRef: React.RefObject<HTMLDivElement | null>) {
+// The sentinel, the hero flow wrapper, and the first section below it are
+// siblings spaced by the container's space-y-6 rhythm, so the sentinel sits
+// HERO_ROW_GAP above the hero top and the next section sits HERO_ROW_GAP
+// below the hero bottom. The morph range must span (expanded - compact) plus
+// that trailing gap: the hero bottom then shrinks at exactly the rate the
+// following section scrolls up, reaching compact the moment the section
+// touches the compact bar.
+const HERO_ROW_GAP = 24;
+
+function useHeroScrollProgress(
+  sentinelRef: React.RefObject<HTMLDivElement | null>,
+  morphRange: number | null,
+) {
   const [progress, setProgress] = useState(0);
 
   useEffect(() => {
@@ -25,12 +37,15 @@ function useHeroScrollProgress(sentinelRef: React.RefObject<HTMLDivElement | nul
       cancelAnimationFrame(rafId);
       rafId = requestAnimationFrame(() => {
         const el = sentinelRef.current;
-        if (!el) return;
+        if (!el || morphRange === null) return;
         const rect = el.getBoundingClientRect();
         const stickyTop = window.innerWidth < 768 ? 102 : 56;
-        const topDiff = stickyTop - rect.top;
-        const rawProgress = Math.min(Math.max(topDiff / 160, 0), 1);
-        setProgress(media.matches ? (topDiff > 0 ? 1 : 0) : rawProgress);
+        // The morph starts exactly when the hero top (sentinel plus the row
+        // gap) reaches the sticky line, not 24px earlier.
+        const startTop = stickyTop - HERO_ROW_GAP;
+        const scrolledPastStart = startTop - rect.top;
+        const rawProgress = Math.min(Math.max(scrolledPastStart / morphRange, 0), 1);
+        setProgress(media.matches ? (scrolledPastStart > 0 ? 1 : 0) : rawProgress);
       });
     };
 
@@ -44,7 +59,7 @@ function useHeroScrollProgress(sentinelRef: React.RefObject<HTMLDivElement | nul
       media.removeEventListener?.("change", updateProgress);
       cancelAnimationFrame(rafId);
     };
-  }, [sentinelRef]);
+  }, [sentinelRef, morphRange]);
 
   return progress;
 }
@@ -249,12 +264,18 @@ export function GamePageView({
     () => ({ title: titleRef, status: statusRef, date: dateRef, store: storeRef, artwork: artworkRef }),
     [],
   );
-  const scrollProgress = useHeroScrollProgress(sentinelRef);
+  const geometry = useHeroGeometry(heroRef, identityRefs, game.appid);
+  // The scroll range is measured from the captured layouts: shrinking from the
+  // expanded height to the compact height takes exactly as much scroll as the
+  // distance the following section needs to travel up to the compact bar.
+  const morphRange = geometry
+    ? Math.max(1, geometry.expandedHeight - geometry.compactHeight + HERO_ROW_GAP)
+    : null;
+  const scrollProgress = useHeroScrollProgress(sentinelRef, morphRange);
   // One shared 0-to-1 progress drives every morph animation: fades, FLIP
   // transforms, typography, and the artwork crossfade all start and finish
   // together.
   const progress = scrollProgress;
-  const geometry = useHeroGeometry(heroRef, identityRefs, game.appid);
   const communityIconUrl = game.icon_hash ? getCommunityIconUrl(game.appid, game.icon_hash) : null;
   const compactImage = communityIconUrl ?? game.icon_lqip ?? game.header_lqip ?? game.header_image ?? null;
   const headerImage = game.header_image ?? game.header_lqip ?? compactImage;
