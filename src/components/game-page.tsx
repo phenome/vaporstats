@@ -350,7 +350,16 @@ export function GamePageView({
               target="_blank"
               rel="noreferrer"
               className="hero-store text-orange-400 hover:text-orange-300 hover:underline inline-flex items-center gap-1 font-mono text-xs"
-              style={heroTransform(geometry, "store", progress, visualScaleY)}
+              style={
+                // On narrow screens the compact layout hides the store (no FLIP
+                // target) and CSS fades it with the shared progress; the
+                // <=767px stylesheet rule pins pointer-events to none for the
+                // whole mobile state, so restore clickability while the link is
+                // visible and make it inert only once fully faded out.
+                heroTransform(geometry, "store", progress, visualScaleY) ?? {
+                  pointerEvents: progress >= 1 ? "none" : "auto",
+                }
+              }
             >
               Steam Store ↗
             </a>
