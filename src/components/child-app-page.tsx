@@ -3,6 +3,7 @@ import type { CatalogEntity } from "../lib/catalog";
 import type { RelatedAppEntity } from "../lib/related";
 import type { PriceState, PriceHistoryResult } from "../lib/prices";
 import { PriceHistoryChart } from "./price-history";
+import { PriceSummary } from "./price-summary";
 import { getCanonicalGamePath, getCanonicalPublisherPath } from "../lib/slug";
 import { AppLink } from "./app-link";
 
@@ -150,6 +151,9 @@ export function ChildAppPageView({
           </div>
         </div>
       </div>
+      {child.is_eligible && (
+        <PriceSummary price={price ?? null} variant="card" />
+      )}
       {/* Child Price History Chart */}
       <PriceHistoryChart
         key={`price-${child.appid}`}

@@ -77,6 +77,7 @@ export interface PriceHistoryResult {
   history: PriceHistoryEntry[];
   source_timestamp: string;
   anchor_timestamp?: string;
+  is_always_free?: boolean;
 }
 
 export interface DealsResult {
@@ -443,13 +444,21 @@ export async function getPriceHistory(
   // Find earliest observation date bounded by anchorTime
   const earliestStmt = db
     .prepare(
-      `SELECT MIN(observed_at) as earliest
+      `SELECT MIN(observed_at) as earliest,
+              COUNT(*) AS observation_count,
+              SUM(CASE WHEN is_available = 1 AND is_free = 1 THEN 1 ELSE 0 END) AS free_count
        FROM price_history
        WHERE appid = ? AND observed_at <= ?`
     )
     .bind(appid, anchorIso);
-  const earliestRow = await earliestStmt.first<{ earliest: string | null }>();
+  const earliestRow = await earliestStmt.first<{
+    earliest: string | null;
+    observation_count: number | string | null;
+    free_count: number | string | null;
+  }>();
   const earliestObservation = earliestRow?.earliest ?? null;
+  const observationCount = Number(earliestRow?.observation_count ?? 0);
+  const freeCount = Number(earliestRow?.free_count ?? 0);
 
   const cutoff = getPriceRangeCutoffDate(range, anchorTime, earliestObservation);
   let historyRows: PriceHistoryEntry[] = [];
@@ -532,6 +541,10 @@ export async function getPriceHistory(
 
   const sourceTimestamp =
     current?.observed_at ?? earliestObservation ?? new Date().toISOString();
+  const currentIsWithinAnchor = Boolean(
+    current && new Date(current.observed_at).getTime() <= anchorTime.getTime()
+  );
+
 
   return {
     appid,
@@ -541,6 +554,10 @@ export async function getPriceHistory(
     history: historyRows,
     source_timestamp: sourceTimestamp,
     anchor_timestamp: anchorIso,
+    is_always_free:
+      observationCount > 0 &&
+      freeCount === observationCount &&
+      currentIsWithinAnchor && Boolean(current?.is_available && current.is_free),
   };
 }
 

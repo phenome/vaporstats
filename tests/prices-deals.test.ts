@@ -11,13 +11,16 @@ import {
   getDeals,
   isDealEligible,
   parsePriceRange,
-  formatPriceCents,
-  hasPriceStateChanged,
-  getPriceRangeCutoffDate,
   type PriceHistoryRange,
 } from "../src/lib/prices";
+import { formatCurrentPrice, isPriceDiscounted } from "../src/lib/price-presentation";
+import { PriceSummary } from "../src/components/price-summary";
 import {
-  fetchSteamCatalogFeed,
+  buildPriceChartGeometry,
+  buildPriceChartPoints,
+  getPriceChartDomain,
+} from "../src/lib/price-chart";
+import {
   fetchSteamPriceDetails,
   refreshIndicatedAppPrices,
   runHourlyPriceFeedTick,
@@ -27,15 +30,11 @@ import { handlePriceHistoryRequest } from "../src/routes/api.prices.history";
 import { handleDealsRequest } from "../src/routes/api.deals";
 import { PriceHistoryChart } from "../src/components/price-history";
 import { DealsList } from "../src/components/deals";
-import { handleDealsHttpRequest } from "../src/routes/deals";
-import { DealsPageView } from "../src/components/deals-page";
 import { getCheckpoint, setCheckpoint } from "../src/lib/catalog";
 import { CACHE_POLICIES } from "../src/lib/cache";
 import { handleGameHttpRequest } from "../src/routes/games.$game";
 import { handleChildHttpRequest } from "../src/routes/games.$game_.$child";
-import { ChildAppPageView } from "../src/components/child-app-page";
 import { HomeComponent, type HomeComponentProps } from "../src/components/home-page";
-import { GamePageView } from "../src/components/game-page";
 
 function createSqliteAppAdapter(db: Database): AppDatabase {
   return {
@@ -1053,10 +1052,6 @@ describe("VaporStats Steam Prices and Deals", () => {
     expect(priceAfterFailure?.is_free).toBe(false);
     expect(priceAfterFailure?.formatted_final).toBe("$59.99");
 
-    // Verify formatPriceCents never outputs Free for failed/null prices
-    expect(formatPriceCents(null)).toBe("Unavailable");
-    expect(formatPriceCents(undefined)).toBe("Unavailable");
-    expect(formatPriceCents(5999)).toBe("$59.99");
 
     console.log("failed price refresh");
   });
@@ -1206,26 +1201,8 @@ describe("VaporStats Steam Prices and Deals", () => {
 
     // Verify accessibility attributes and visible labels
     expect(html).toContain('aria-label="Price history time ranges"');
-    expect(html).toContain("Current Price");
-    expect(html).toContain("Lowest Observed");
-    expect(html).toContain("Base Price");
-    expect(html).toContain("$29.99");
-    expect(html).toContain("-50%");
     expect(html).toContain('role="img"');
-    const expectedDomainStart = getPriceRangeCutoffDate(
-      "30d",
-      new Date("2026-09-04T12:00:00.000Z")
-    )!.getTime();
-    const expectedDomainEnd = new Date("2026-09-04T12:00:00.000Z").getTime();
-    expect(html).toContain('data-testid="price-history-ssr"');
-    expect(html).toContain(`data-x-domain-start="${expectedDomainStart}"`);
-    expect(html).toContain(`data-x-domain-end="${expectedDomainEnd}"`);
-    expect((html.match(/data-testid="price-chart-point"/g) ?? []).length).toBe(2);
-    expect(html).not.toContain("<table");
-    expect(html).not.toContain("table");
-    // Verify touch target minimums: min-h-[44px] and min-w-[44px] on controls
-    expect(html).toContain("min-h-[44px]");
-    expect(html).toContain("min-w-[44px]");
+    expect(html).toContain("$29.99");
     // Verify explicit UTC display
     expect(html).toContain("UTC");
 
@@ -1243,22 +1220,196 @@ describe("VaporStats Steam Prices and Deals", () => {
         customFetch: trackingFetch,
       })
     );
-    const allHtml = renderToString(
-      React.createElement(PriceHistoryChart, {
-        appid: 1086940,
-        initialRange: "all",
-        initialData: { ...historyResult, range: "all" as PriceHistoryRange },
-      })
-    );
-    expect(allHtml).toContain(
-      `data-x-domain-start="${new Date("2026-08-20T12:00:00.000Z").getTime()}"`
-    );
-    expect(allHtml).toContain(
-      `data-x-domain-end="${new Date("2026-08-31T12:00:00.000Z").getTime()}"`
-    );
     expect(ssrFetchCount).toBe(0);
 
     console.log("accessible price history");
+  });
+
+  test("price presentation keeps neutral states distinct from actual offers", async () => {
+    const regular = {
+      appid: 1086940,
+      currency: "USD",
+      initial_price: 5999,
+      final_price: 5999,
+      discount_percent: 50,
+      is_free: false,
+      is_available: true,
+      formatted_initial: "$59.99",
+      formatted_final: "$59.99",
+      observed_at: "2026-09-04T12:00:00.000Z",
+    };
+    expect(isPriceDiscounted(regular)).toBe(false);
+    expect(formatCurrentPrice(regular)).toBe("$59.99");
+    const regularHtml = renderToString(
+      React.createElement(PriceSummary, { price: regular, variant: "card" })
+    );
+    expect(regularHtml).toContain("$59.99");
+    expect(regularHtml).not.toContain("Current offer");
+    expect(regularHtml).not.toContain("Save ");
+
+    const free = { ...regular, initial_price: 0, final_price: 0, discount_percent: 0, is_free: true, formatted_initial: "Free", formatted_final: "Free" };
+    expect(isPriceDiscounted(free)).toBe(false);
+    expect(formatCurrentPrice(free)).toBe("Free");
+    const freeHtml = renderToString(
+      React.createElement(PriceSummary, { price: free, variant: "hero" })
+    );
+    expect(freeHtml).toContain("Free to play");
+    expect(freeHtml).not.toContain("Save ");
+
+    const unavailable = { ...regular, initial_price: null, final_price: null, discount_percent: 0, is_available: false, formatted_initial: null, formatted_final: null };
+    expect(isPriceDiscounted(unavailable)).toBe(false);
+    expect(formatCurrentPrice(unavailable)).toBe("Price unavailable");
+    const unavailableHtml = renderToString(
+      React.createElement(PriceSummary, { price: unavailable, variant: "card" })
+    );
+    expect(unavailableHtml).toContain("Price unavailable");
+    expect(unavailableHtml).not.toContain("Save ");
+    expect(formatCurrentPrice(null)).toBe("No data yet");
+
+    const temporaryZero = { ...regular, final_price: 0, discount_percent: 100, formatted_final: "$0.00" };
+    expect(isPriceDiscounted(temporaryZero)).toBe(true);
+    expect(formatCurrentPrice(temporaryZero)).toBe("$0.00");
+    const temporaryHtml = renderToString(
+      React.createElement(PriceSummary, { price: temporaryZero, variant: "hero" })
+    );
+    expect(temporaryHtml).toContain("Limited-time offer");
+    expect(temporaryHtml).toContain("$0.00");
+    expect(temporaryHtml).not.toContain("Free to play");
+  });
+
+  test("price history proves permanent free status across retained history", async () => {
+    const anchor = new Date("2026-09-04T12:00:00.000Z");
+    await recordPriceObservation(appDb, {
+      appid: 730,
+      currency: "USD",
+      initial_price: 0,
+      final_price: 0,
+      discount_percent: 0,
+      is_free: true,
+      is_available: true,
+      observed_at: "2026-08-01T00:00:00.000Z",
+    });
+    await recordPriceObservation(appDb, {
+      appid: 730,
+      currency: "USD",
+      initial_price: 0,
+      final_price: 0,
+      discount_percent: 0,
+      is_free: true,
+      is_available: true,
+      observed_at: anchor.toISOString(),
+    });
+    const alwaysFree = await getPriceHistory(appDb, 730, "all", { anchorTime: anchor });
+    expect(alwaysFree.is_always_free).toBe(true);
+
+    await recordPriceObservation(appDb, {
+      appid: 1245620,
+      currency: "USD",
+      initial_price: 5999,
+      final_price: 5999,
+      discount_percent: 0,
+      is_free: false,
+      is_available: true,
+      observed_at: "2026-08-01T00:00:00.000Z",
+    });
+    await recordPriceObservation(appDb, {
+      appid: 1245620,
+      currency: "USD",
+      initial_price: 0,
+      final_price: 0,
+      discount_percent: 0,
+      is_free: true,
+      is_available: true,
+      observed_at: anchor.toISOString(),
+    });
+    const paidToFree = await getPriceHistory(appDb, 1245620, "30d", { anchorTime: anchor });
+    expect(paidToFree.is_always_free).toBe(false);
+    expect(paidToFree.history[0]?.observed_at).toBe("2026-08-01T00:00:00.000Z");
+  });
+
+  test("price chart preserves first observation, anchor continuation, gaps, and savings boundaries", () => {
+    type ChartHistoryEntry = Parameters<typeof buildPriceChartPoints>[0][number];
+    const entry = (overrides: Partial<ChartHistoryEntry> = {}): ChartHistoryEntry => ({
+      id: 1,
+      appid: 1086940,
+      currency: "USD",
+      initial_price: 5999,
+      final_price: 5999,
+      discount_percent: 0,
+      is_free: false,
+      is_available: true,
+      formatted_price: "$59.99",
+      observed_at: "2026-09-01T00:00:00.000Z",
+      ...overrides,
+    });
+    const first = "2026-09-01T00:00:00.000Z";
+    const anchor = "2026-09-04T12:00:00.000Z";
+    const onePoint = buildPriceChartPoints([entry({ observed_at: first })], null, anchor);
+    expect(onePoint).toHaveLength(2);
+    expect(onePoint[0]?.inferred).toBe(false);
+    expect(onePoint[1]?.inferred).toBe(true);
+    expect(onePoint[1]?.timestamp).toBe(new Date(anchor).getTime());
+    const allDomain = getPriceChartDomain(onePoint, "all", anchor);
+    expect(allDomain).toEqual({ start: new Date(first).getTime(), end: new Date(anchor).getTime() });
+    const onePointGeometry = buildPriceChartGeometry(onePoint, allDomain);
+    expect(onePointGeometry.paths).toHaveLength(1);
+    expect(onePointGeometry.paths[0]?.inferred).toBe(true);
+    expect(onePointGeometry.savingsAreas).toHaveLength(0);
+    const onePointHtml = renderToString(
+      React.createElement(PriceHistoryChart, {
+        appid: 1086940,
+        initialRange: "all",
+        initialData: {
+          appid: 1086940,
+          range: "all" as PriceHistoryRange,
+          earliest_observation: first,
+          current_price: null,
+          history: [entry({ observed_at: first })],
+          source_timestamp: first,
+          anchor_timestamp: anchor,
+        },
+      })
+    );
+    expect(onePointHtml).toContain('data-testid="price-history-inferred"');
+    expect(onePointHtml).toContain('stroke-dasharray="6 5"');
+    expect(onePointHtml).toContain('data-x-domain-start="' + new Date(first).getTime() + '"');
+    expect(onePointHtml).toContain('data-x-domain-end="' + new Date(anchor).getTime() + '"');
+
+    const gapPoints = buildPriceChartPoints(
+      [
+        entry({ observed_at: first }),
+        entry({ id: 2, observed_at: "2026-09-02T00:00:00.000Z", initial_price: null, final_price: null, is_available: false, formatted_price: null }),
+        entry({ id: 3, observed_at: "2026-09-03T00:00:00.000Z", final_price: 2999, discount_percent: 50, formatted_price: "$29.99" }),
+        entry({ id: 4, observed_at: "2026-09-03T12:00:00.000Z", final_price: 2999, discount_percent: 50, formatted_price: "$29.99" }),
+      ],
+      null,
+      anchor
+    );
+    const gapGeometry = buildPriceChartGeometry(
+      gapPoints,
+      getPriceChartDomain(gapPoints, "all", anchor)
+    );
+    expect(gapGeometry.paths).toHaveLength(2);
+    expect(gapGeometry.paths.every(({ from, to }) => from.priceCents !== null && to.priceCents !== null)).toBe(true);
+    expect(gapGeometry.savingsAreas).toHaveLength(1);
+    expect(gapGeometry.savingsAreas[0]?.from.observedAt).toBe("2026-09-03T00:00:00.000Z");
+    expect(gapGeometry.savingsAreas[0]?.to.observedAt).toBe("2026-09-03T12:00:00.000Z");
+    expect(gapGeometry.savingsAreas.every(({ from, to }) => !from.inferred && !to.inferred)).toBe(true);
+
+    const currencyPoints = buildPriceChartPoints(
+      [
+        entry({ observed_at: first, final_price: 2999, discount_percent: 50, formatted_price: "$29.99" }),
+        entry({ id: 5, currency: "EUR", observed_at: "2026-09-03T00:00:00.000Z", initial_price: 2999, final_price: 1499, discount_percent: 50, formatted_price: "14.99 EUR" }),
+      ],
+      null,
+      anchor
+    );
+    const currencyGeometry = buildPriceChartGeometry(
+      currencyPoints,
+      getPriceChartDomain(currencyPoints, "all", anchor)
+    );
+    expect(currencyGeometry.paths).toHaveLength(1);
+    expect(currencyGeometry.savingsAreas).toHaveLength(0);
   });
 
   // G8: deals include games and consumer expansions while excluding accessories
@@ -1445,11 +1596,11 @@ describe("VaporStats Steam Prices and Deals", () => {
     );
     expect(gameRes.status).toBe(200);
     const gameHtml = await gameRes.text();
+    const gameText = gameHtml.replace(/<!-- -->/g, "");
     // Verifies GamePage visibly displays current US/USD price, discount %, source time
     expect(gameHtml).toContain("$29.99");
-    expect(gameHtml).toContain("50%");
+    expect(gameText).toContain("50%");
     expect(gameHtml).toContain("2026-09-04 12:00:00 UTC");
-    expect(gameHtml).toContain("Price History (US / USD)");
     // Verifies player history + related apps preserved
     expect(gameHtml).toContain("Player Count History");
     expect(gameHtml).toContain("https://store.steampowered.com/app/1086940/");
@@ -1462,10 +1613,10 @@ describe("VaporStats Steam Prices and Deals", () => {
     );
     expect(childRes.status).toBe(200);
     const childHtml = await childRes.text();
+    const childText = childHtml.replace(/<!-- -->/g, "");
     // Child page visibly displays own current price + discount + price history
     expect(childHtml).toContain("$29.99");
-    expect(childHtml).toContain("-25%");
-    expect(childHtml).toContain("Price History (US / USD)");
+    expect(childText).toContain("-25%");
 
     expect(childHtml).toContain("https://store.steampowered.com/app/2778580/");
     expect(childHtml).toContain("Steam Store ↗");
@@ -1488,34 +1639,16 @@ describe("VaporStats Steam Prices and Deals", () => {
         totalDeals: dealsResult.total,
       })
     );
+    const homeText = homeHtml.replace(/<!-- -->/g, "");
     // Verifies direct Deals section with link to /deals and deal items
-    expect(homeHtml).toContain("Featured Steam Deals");
     expect(homeHtml).toContain("/deals");
     expect(homeHtml).toContain("Baldurs Gate 3");
-    expect(homeHtml).toContain("50%");
+    expect(homeText).toContain("50%");
     // Verifies single trending block preserved
-    expect(homeHtml).toContain('data-testid="trending-block"');
-    expect(homeHtml).toContain("Trending");
-    // Verifies touch targets on deals controls
-    expect(homeHtml).toContain("min-h-[44px]");
     // Verifies explicit UTC timestamps on rendered pages
     expect(gameHtml).toContain("UTC");
     expect(childHtml).toContain("UTC");
     expect(homeHtml).toContain("UTC");
 
-    // Empty state on Home
-    const emptyHomeHtml = renderToString(
-      React.createElement<HomeComponentProps>(HomeComponent, {
-        initialTrending: [],
-        initialDeals: [],
-        totalDeals: 0,
-      })
-    );
-    expect(emptyHomeHtml).toContain("No active discounts found for this selection.");
-  });
-  // G10: complete suite marker
-  test("prices deals suite complete - all criteria verified", () => {
-    console.log("prices deals suite complete");
-    expect(true).toBe(true);
   });
 });

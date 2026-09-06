@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
-import { formatPriceCents, formatPriceUtc, type PriceState } from "../lib/prices";
+import type { PriceState } from "../lib/prices";
+import { PriceSummary } from "./price-summary";
 
 export interface PlayerOverview {
   appid: number;
@@ -204,38 +205,12 @@ export function PlayerPanel({
         </div>
       </div>
 
-      <div key={`price-${appid}`} className="border border-zinc-800 bg-zinc-950 p-5 space-y-3">
-        <div className="flex items-center justify-between">
-          <span className="text-[11px] font-mono text-zinc-400 uppercase tracking-wider">
-            Current Price (US / USD)
-          </span>
-          <span className="w-2 h-2 bg-emerald-500 inline-block"></span>
-        </div>
-        <div className="pt-2">
-          {status === "pending" && <div className="text-xl font-mono text-zinc-500">Loading</div>}
-          {status === "error" && (
-            <div className="text-xl font-mono text-amber-500/80">Live data unavailable</div>
-          )}
-          {status === "success" && !price && (
-            <div className="text-xl font-mono text-zinc-400">No data yet</div>
-          )}
-          {status === "success" && price && (
-            <div className="space-y-1">
-              <div className="text-3xl font-mono font-bold text-zinc-100 tabular-nums">
-                {price.is_free
-                  ? "Free"
-                  : price.is_available && price.final_price !== null
-                    ? formatPriceCents(price.final_price, price.currency)
-                    : "Price unavailable"}
-              </div>
-              <p className="text-[11px] text-zinc-500 font-mono">
-                {`Observed: ${formatPriceUtc(price.observed_at)}`}
-                {price.discount_percent > 0 ? ` · -${price.discount_percent}%` : ""}
-              </p>
-            </div>
-          )}
-        </div>
-      </div>
+      <PriceSummary
+        key={`price-${appid}`}
+        price={price}
+        variant="card"
+        status={status === "pending" ? "loading" : status}
+      />
     </>
   );
 }
