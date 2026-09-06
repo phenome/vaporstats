@@ -302,6 +302,12 @@ export function GamePageView({
   const visualScaleY = geometry && geometry.expandedHeight > 0
     ? 1 + (geometry.compactHeight / geometry.expandedHeight - 1) * progress
     : 1;
+  // The developer/publisher card chrome stays fully opaque while the
+  // description slides beneath it (a fading background would let the text
+  // ghost through); only its labels fade with the shared progress. The chrome
+  // itself fades during the final stretch, once the rising hero edge has
+  // eaten all but a small remnant of the cards.
+  const publisherChromeOpacity = Math.min(1, Math.max(0, (1 - progress) / 0.15));
   const heroStyle = {
     transformOrigin: "top left",
     transform: geometry ? "scaleY(" + visualScaleY.toFixed(5) + ")" : undefined,
@@ -458,13 +464,15 @@ export function GamePageView({
                 className="hero-publishers grid grid-cols-2 gap-3 pt-2 text-xs font-mono"
                 style={{
                   ...fadeContentStyle(visualScaleY),
-                  opacity: 1 - progress,
                   pointerEvents: progress >= 1 ? "none" : "auto",
                 }}
               >
-                <div className="border border-zinc-900 bg-zinc-900/40 p-2.5">
-                  <div className="text-zinc-500 text-[10px] uppercase">Developer</div>
-                  <div className="text-zinc-200 font-medium truncate">
+                <div
+                  className="border border-zinc-800 bg-zinc-900 p-2.5"
+                  style={{ opacity: publisherChromeOpacity }}
+                >
+                  <div className="text-zinc-500 text-[10px] uppercase" style={{ opacity: 1 - progress }}>Developer</div>
+                  <div className="text-zinc-200 font-medium truncate" style={{ opacity: 1 - progress }}>
                     {game.developer ? (
                       <AppLink href={getCanonicalPublisherPath(game.developer)} className="hover:text-orange-400 hover:underline transition-colors">
                         {game.developer}
@@ -474,9 +482,12 @@ export function GamePageView({
                     )}
                   </div>
                 </div>
-                <div className="border border-zinc-900 bg-zinc-900/40 p-2.5">
-                  <div className="text-zinc-500 text-[10px] uppercase">Publisher</div>
-                  <div className="text-zinc-200 font-medium truncate">
+                <div
+                  className="border border-zinc-800 bg-zinc-900 p-2.5"
+                  style={{ opacity: publisherChromeOpacity }}
+                >
+                  <div className="text-zinc-500 text-[10px] uppercase" style={{ opacity: 1 - progress }}>Publisher</div>
+                  <div className="text-zinc-200 font-medium truncate" style={{ opacity: 1 - progress }}>
                     {game.publisher ? (
                       <AppLink href={getCanonicalPublisherPath(game.publisher)} className="hover:text-orange-400 hover:underline transition-colors">
                         {game.publisher}
