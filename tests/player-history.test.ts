@@ -267,6 +267,31 @@ describe("Player History and Rankings", () => {
     expect(sixHour[1]).toMatchObject({ players: 600, min: 400, max: 600, avg: 500, close: 600, sample_count: 2 });
     expect(sixHour[3].players).toBe(0);
   });
+  // A previous 30d builder merged a midnight daily rollup with later raw rows,
+  // producing an isolated dot and a false gap before the current six-hour pair.
+  test("30d history does not merge daily rollups into raw six-hour buckets", async () => {
+    const db = await createFreshDb();
+    const anchor = new Date("2026-09-06T01:30:00.000Z");
+
+    await db.prepare("INSERT INTO apps (appid, name, slug) VALUES (10, 'Game 10', 'game-10')").run();
+    await db.prepare("INSERT INTO player_rollups (appid, date, min_players, max_players, avg_players, close_players, sample_count) VALUES (10, '2026-09-04', 100, 200, 150, 180, 4)").run();
+    await db.prepare("INSERT INTO observations (appid, current_players, observed_at) VALUES (10, 300, '2026-09-05T23:50:00.001Z')").run();
+    await db.prepare("INSERT INTO observations (appid, current_players, observed_at) VALUES (10, 400, '2026-09-06T01:10:00.003Z')").run();
+
+    const history = await getPlayerHistory(db, 10, "30d", anchor);
+    expect(history.points).toEqual([
+      expect.objectContaining({
+        timestamp: "2026-09-05T23:50:00.001Z",
+        players: 300,
+        is_rollup: false,
+      }),
+      expect.objectContaining({
+        timestamp: "2026-09-06T01:10:00.003Z",
+        players: 400,
+        is_rollup: false,
+      }),
+    ]);
+  });
 
   // G4: 90d and All expose one daily point per occupied UTC day, including today.
   test("daily history merges rollups and raw-only current day", async () => {
@@ -467,6 +492,7 @@ describe("Player History and Rankings", () => {
     // The sparse observations retain their positions across the complete fixed window.
     expect(html).toContain('cx="180"');
     expect(html).toContain('cx="420"');
+    expect(html.match(/<circle\b/g)).toHaveLength(2); // Both isolated observations remain visible.
     expect(html).toContain(">Aug 5</text>");
     expect(html).toContain(">Sep 4</text>");
 
@@ -524,6 +550,7 @@ describe("Player History and Rankings", () => {
     );
     expect(constHtml).toContain("500");
     expect(constHtml).toContain("<path");
+    expect(constHtml).not.toContain("<circle"); // Connected observations have no persistent markers.
 
 
     // Aggregated buckets expose extrema and a sample-weighted average, not an average of closes.

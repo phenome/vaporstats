@@ -416,7 +416,27 @@ export function PlayerHistoryChart({
                     stroke="#f97316"
                     strokeWidth={2}
                     fill="url(#playerGradient)"
-                    dot={{ fill: "#ea580c", r: 3, stroke: "#18181b", strokeWidth: 1 }}
+                    dot={(dotProps) => {
+                      const point = rechartsData[dotProps.index];
+                      if (!point || point.players === null) return <></>;
+
+                      const previous = rechartsData[dotProps.index - 1]?.players;
+                      const next = rechartsData[dotProps.index + 1]?.players;
+                      if (previous !== null && previous !== undefined) return <></>;
+                      if (next !== null && next !== undefined) return <></>;
+
+                      return (
+                        <circle
+                          cx={dotProps.cx}
+                          cy={dotProps.cy}
+                          r={3}
+                          fill="#ea580c"
+                          stroke="#18181b"
+                          strokeWidth={1}
+                        />
+                      );
+                    }}
+                    activeDot={{ r: 5, fill: "#ea580c", stroke: "#18181b", strokeWidth: 2 }}
                     connectNulls={false}
                     isAnimationActive={false}
                   />
@@ -545,17 +565,17 @@ export function PlayerHistoryChart({
                         strokeLinejoin="round"
                       />
                     )}
-                    {segment.map((point, pointIdx) => (
+                    {segment.length === 1 && (
                       <circle
-                        key={`dot-${segIdx}-${pointIdx}`}
-                        cx={point.x}
-                        cy={point.y}
+                        key={`dot-${segIdx}`}
+                        cx={segment[0].x}
+                        cy={segment[0].y}
                         r={3}
                         fill="#ea580c"
                         stroke="#18181b"
                         strokeWidth={1}
                       />
-                    ))}
+                    )}
                   </React.Fragment>
                 );
               })}
