@@ -36,6 +36,9 @@ export interface CatalogEntity {
   release_status: "released" | "upcoming" | "unannounced";
   description: string;
   header_image: string;
+  header_lqip?: string | null;
+  icon_hash?: string | null;
+  icon_lqip?: string | null;
   developer: string;
   publisher: string;
   created_at: string;
@@ -75,6 +78,9 @@ interface RawAppRow {
   release_status: string;
   description: string;
   header_image: string;
+  header_lqip: string | null;
+  icon_hash: string | null;
+  icon_lqip: string | null;
   developer: string;
   publisher: string;
   created_at: string;
@@ -111,6 +117,9 @@ function mapRowToEntity(row: RawAppRow): CatalogEntity {
     release_status: (row.release_status as CatalogEntity["release_status"]) || "released",
     description: row.description || "",
     header_image: row.header_image || "",
+    header_lqip: row.header_lqip ?? null,
+    icon_hash: row.icon_hash ?? null,
+    icon_lqip: row.icon_lqip ?? null,
     developer: row.developer || "",
     publisher: row.publisher || "",
     created_at: row.created_at,
@@ -247,6 +256,9 @@ export async function upsertApp(
     release_status?: string;
     description?: string;
     header_image?: string;
+    header_lqip?: string | null;
+    icon_hash?: string | null;
+    icon_lqip?: string | null;
     developer?: string;
     publisher?: string;
   }
@@ -275,6 +287,9 @@ export async function upsertApp(
   const releaseStatus = app.release_status ?? "released";
   const description = app.description ?? "";
   const headerImage = app.header_image ?? "";
+  const headerLqip = app.header_lqip ?? null;
+  const iconHash = app.icon_hash ?? null;
+  const iconLqip = app.icon_lqip ?? null;
   const developer = app.developer ?? "";
   const publisher = app.publisher ?? "";
 
@@ -285,8 +300,8 @@ export async function upsertApp(
         parent_appid, release_date, steam_release_date, original_release_date,
         original_steam_release_date, release_from_early_access_date,
         release_date_source, is_early_access, has_left_early_access,
-        release_status, description, header_image, developer, publisher, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        release_status, description, header_image, header_lqip, icon_hash, icon_lqip, developer, publisher, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
       ON CONFLICT(appid) DO UPDATE SET
         name = excluded.name,
         slug = excluded.slug,
@@ -308,6 +323,9 @@ export async function upsertApp(
         release_status = excluded.release_status,
         description = excluded.description,
         header_image = excluded.header_image,
+        header_lqip = COALESCE(excluded.header_lqip, apps.header_lqip),
+        icon_hash = COALESCE(excluded.icon_hash, apps.icon_hash),
+        icon_lqip = COALESCE(excluded.icon_lqip, apps.icon_lqip),
         developer = excluded.developer,
         publisher = excluded.publisher,
         updated_at = CURRENT_TIMESTAMP`
@@ -331,6 +349,9 @@ export async function upsertApp(
       releaseStatus,
       description,
       headerImage,
+      headerLqip,
+      iconHash,
+      iconLqip,
       developer,
       publisher
     );

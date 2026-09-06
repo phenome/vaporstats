@@ -1,3 +1,4 @@
+import React, { useRef, useState, useEffect } from "react";
 import type { GameDetail } from "../lib/catalog";
 import type { GroupedRelatedApps } from "../lib/related";
 import type { PlayerHistoryResult } from "../lib/player-history";
@@ -6,6 +7,7 @@ import {
   type PriceHistoryResult,
 } from "../lib/prices";
 import { getCanonicalPublisherPath } from "../lib/slug";
+import { getCommunityIconUrl } from "../lib/lqip";
 import { PlayerPanel } from "./player-panel";
 import { PlayerHistoryChart } from "./player-history";
 import { PriceHistoryChart } from "./price-history";
@@ -13,6 +15,34 @@ import { RelatedApps } from "./related-apps";
 import { AppLink } from "./app-link";
 import { LifecycleHistorySection } from "./lifecycle-history";
 
+function useHeroScrollProgress(heroRef: React.RefObject<HTMLElement | null>) {
+  const [progress, setProgress] = useState(0);
+
+  useEffect(() => {
+    let rafId = 0;
+    const updateProgress = () => {
+      rafId = requestAnimationFrame(() => {
+        const el = heroRef.current;
+        if (!el) return;
+        const rect = el.getBoundingClientRect();
+        // Natural top begins sticking when rect.top touches 56px (SiteHeader bottom)
+        const topDiff = 56 - rect.top;
+        // Collapses over 160px of scroll
+        const p = Math.min(Math.max(topDiff / 160, 0), 1);
+        setProgress(p);
+      });
+    };
+
+    window.addEventListener("scroll", updateProgress, { passive: true });
+    updateProgress();
+    return () => {
+      window.removeEventListener("scroll", updateProgress);
+      cancelAnimationFrame(rafId);
+    };
+  }, [heroRef]);
+
+  return progress;
+}
 export interface GamePageProps {
   game: GameDetail;
   related?: GroupedRelatedApps;
@@ -37,107 +67,240 @@ export function GamePageView({
         ? "Unannounced"
         : "Released";
   const isUnreleased = game.release_status === "upcoming" || game.release_status === "unannounced";
+  const heroRef = useRef<HTMLElement>(null);
+  const scrollProgress = useHeroScrollProgress(heroRef);
+
+  // Overlapping 2-phase progression:
+  // Phase 1 (0%..60%): Secondary details fade out and collapse height
+  // Phase 2 (40%..100%): Card padding compresses, image crossfades, single-line aligns
+  const p1 = Math.min(Math.max(scrollProgress / 0.6, 0), 1);
+  const p2 = Math.min(Math.max((scrollProgress - 0.4) / 0.6, 0), 1);
+
+  const communityIconUrl = game.icon_hash
+    ? getCommunityIconUrl(game.appid, game.icon_hash)
+    : null;
+
   return (
-    <div className="max-w-7xl mx-auto px-4 py-8 space-y-6">
-      {/* Top Banner / Breadcrumb & Header */}
-      <div className="border border-zinc-800 bg-zinc-950 p-6 space-y-4">
-        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-zinc-900 pb-3">
-          <div className="flex items-center gap-3">
-            <span className="px-2 py-0.5 bg-orange-500/10 text-orange-400 border border-orange-500/30 text-[10px] font-mono uppercase tracking-widest">
-              {game.type.toUpperCase()}
+    <div className="game-page-container max-w-7xl mx-auto px-4 py-8 space-y-6">
+      {/* Morphing Sticky Game Header */}
+      <header
+        ref={heroRef}
+        className="morphing-game-hero border border-zinc-800 bg-zinc-950/95 backdrop-blur-md transition-shadow"
+        style={{
+          padding: `${Math.round(24 - p2 * 16)}px 24px`,
+          boxShadow: p2 > 0.1 ? "0 4px 20px -2px rgba(0, 0, 0, 0.5)" : undefined,
+        }}
+      >
+        {/* Compact Single-Line Header (Active when stuck) */}
+        <div
+          className="flex items-center justify-between gap-3 w-full font-mono text-xs overflow-hidden"
+          style={{
+            opacity: p2,
+            maxHeight: `${Math.round(p2 * 48)}px`,
+            pointerEvents: p2 > 0.5 ? "auto" : "none",
+            display: p2 > 0 ? "flex" : "none",
+          }}
+        >
+          <div className="flex items-center gap-3 min-w-0 flex-1">
+            {/* Square Art (Community icon or resized LQIP) */}
+            <div className="w-8 h-8 shrink-0 relative bg-zinc-900 border border-zinc-800 overflow-hidden flex items-center justify-center">
+              {communityIconUrl ? (
+                <img
+                  src={communityIconUrl}
+                  alt=""
+                  className="w-full h-full object-cover"
+                  style={
+                    game.icon_lqip
+                      ? { backgroundImage: `url(${game.icon_lqip})`, backgroundSize: "cover" }
+                      : undefined
+                  }
+                />
+              ) : game.icon_lqip ? (
+                <img src={game.icon_lqip} alt="" className="w-full h-full object-cover" />
+              ) : (
+                <div className="w-full h-full flex items-center justify-center text-[10px] text-zinc-600 font-mono">
+                  VS
+                </div>
+              )}
+            </div>
+
+            {/* Title (Truncated) */}
+            <span className="font-bold text-zinc-100 truncate text-sm md:text-base">
+              {game.name}
             </span>
-            <div className="inline-flex items-center gap-2 text-xs font-mono">
+
+            {/* Status & Main Release Date (Hidden on mobile <640px) */}
+            <div className="hidden sm:inline-flex items-center gap-1.5 shrink-0 text-[11px]">
               <span className="border border-zinc-700 bg-zinc-900 px-1.5 py-0.5 font-bold uppercase tracking-wider text-zinc-300">
                 {releaseStatusLabel}
               </span>
-              {mainReleaseDate ? (
-                isPreciseReleaseDate(mainReleaseDate) ? (
-                  <time dateTime={mainReleaseDate} className="text-zinc-200">
-                    {formatReleaseDate(mainReleaseDate)}
-                  </time>
-                ) : (
-                  <span className="text-zinc-200">{formatReleaseDate(mainReleaseDate)}</span>
-                )
-              ) : isUnreleased ? (
-                <span className="text-zinc-400">TBA</span>
-              ) : (
-                <span className="text-zinc-500">—</span>
+              {mainReleaseDate && (
+                <span className="text-zinc-300 font-mono">
+                  {formatReleaseDate(mainReleaseDate)}
+                </span>
               )}
             </div>
           </div>
-          <div className="flex items-center gap-4 text-xs font-mono">
+
+          {/* Steam Store Link (Hidden on mobile <640px) */}
+          <div className="hidden sm:flex items-center gap-2 shrink-0">
             <a
               href={`https://store.steampowered.com/app/${game.appid}/`}
               target="_blank"
               rel="noreferrer"
-              className="text-orange-400 hover:text-orange-300 hover:underline inline-flex items-center gap-1"
+              className="text-orange-400 hover:text-orange-300 hover:underline inline-flex items-center gap-1 font-mono text-xs"
             >
               Steam Store ↗
             </a>
           </div>
         </div>
 
-
-        <div className="flex flex-col md:flex-row gap-6 items-start">
-          {game.header_image ? (
-            <img
-              src={game.header_image}
-              alt={game.name}
-              className="w-full md:w-80 border border-zinc-800 object-cover aspect-[460/215]"
-            />
-          ) : (
-            <div className="w-full md:w-80 h-36 bg-zinc-900 border border-zinc-800 flex items-center justify-center text-zinc-600 font-mono text-xs">
-              NO IMAGE AVAILABLE
-            </div>
-          )}
-
-          <div className="flex-1">
-            <div className="flow-root space-y-3">
-              {overviewEvents.length > 0 && <LifecycleTable events={overviewEvents} />}
-              <h1 className="text-2xl md:text-3xl font-mono font-bold text-zinc-100 tracking-tight">
-                {game.name}
-              </h1>
-              {game.description && (
-                <p className="text-sm text-zinc-400 leading-relaxed font-sans">
-                  {game.description}
-                </p>
-              )}
-            </div>
-            <div className="grid grid-cols-2 gap-3 pt-2 text-xs font-mono">
-              <div className="border border-zinc-900 bg-zinc-900/40 p-2.5">
-                <div className="text-zinc-500 text-[10px] uppercase">Developer</div>
-                <div className="text-zinc-200 font-medium truncate">
-                  {game.developer ? (
-                    <AppLink
-                      href={getCanonicalPublisherPath(game.developer)}
-                      className="hover:text-orange-400 hover:underline transition-colors"
-                    >
-                      {game.developer}
-                    </AppLink>
-                  ) : (
-                    "Unknown"
-                  )}
-                </div>
-              </div>
-              <div className="border border-zinc-900 bg-zinc-900/40 p-2.5">
-                <div className="text-zinc-500 text-[10px] uppercase">Publisher</div>
-                <div className="text-zinc-200 font-medium truncate">
-                  {game.publisher ? (
-                    <AppLink
-                      href={getCanonicalPublisherPath(game.publisher)}
-                      className="hover:text-orange-400 hover:underline transition-colors"
-                    >
-                      {game.publisher}
-                    </AppLink>
-                  ) : (
-                    "Unknown"
-                  )}
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
+        {/* Expanded Header Body */}
+        <div
+          className="space-y-4"
+          style={{
+            opacity: 1 - p2,
+            display: p2 >= 1 ? "none" : "block",
+            pointerEvents: p2 > 0.5 ? "none" : "auto",
+          }}
+        >
+          {/* Top Row: Type, Status, Date, Steam Link */}
+          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-zinc-900 pb-3">
+            <div className="flex items-center gap-3">
+              <span className="px-2 py-0.5 bg-orange-500/10 text-orange-400 border border-orange-500/30 text-[10px] font-mono uppercase tracking-widest">
+                {game.type.toUpperCase()}
+              </span>
+              <div className="inline-flex items-center gap-2 text-xs font-mono">
+                <span className="border border-zinc-700 bg-zinc-900 px-1.5 py-0.5 font-bold uppercase tracking-wider text-zinc-300">
+                  {releaseStatusLabel}
+                </span>
+                {mainReleaseDate ? (
+                  isPreciseReleaseDate(mainReleaseDate) ? (
+                     <time dateTime={mainReleaseDate} className="text-zinc-200">
+                       {formatReleaseDate(mainReleaseDate)}
+                     </time>
+                   ) : (
+                     <span className="text-zinc-200">{formatReleaseDate(mainReleaseDate)}</span>
+                   )
+                 ) : isUnreleased ? (
+                   <span className="text-zinc-400">TBA</span>
+                 ) : (
+                   <span className="text-zinc-500">—</span>
+                 )}
+               </div>
+             </div>
+             <div className="flex items-center gap-4 text-xs font-mono">
+               <a
+                 href={`https://store.steampowered.com/app/${game.appid}/`}
+                 target="_blank"
+                 rel="noreferrer"
+                 className="text-orange-400 hover:text-orange-300 hover:underline inline-flex items-center gap-1"
+               >
+                 Steam Store ↗
+               </a>
+             </div>
+           </div>
+ 
+           {/* Hero Content: Image & Details */}
+           <div className="flex flex-col md:flex-row gap-6 items-start">
+             {game.header_image ? (
+               <div className="w-full md:w-80 border border-zinc-800 aspect-[460/215] overflow-hidden bg-zinc-900 relative shrink-0">
+                 <img
+                   src={game.header_image}
+                   alt={game.name}
+                   className="w-full h-full object-cover"
+                   style={
+                     game.header_lqip
+                       ? { backgroundImage: `url(${game.header_lqip})`, backgroundSize: "cover" }
+                       : undefined
+                   }
+                 />
+               </div>
+             ) : (
+               <div className="w-full md:w-80 h-36 bg-zinc-900 border border-zinc-800 flex items-center justify-center text-zinc-600 font-mono text-xs shrink-0">
+                 NO IMAGE AVAILABLE
+               </div>
+             )}
+ 
+             <div className="flex-1 min-w-0">
+               <div className="flow-root space-y-3">
+                 {/* Secondary: Lifecycle Table (Collapses in Phase 1) */}
+                 {overviewEvents.length > 0 && (
+                   <div
+                     style={{
+                       opacity: 1 - p1,
+                       maxHeight: `${Math.round((1 - p1) * 120)}px`,
+                       overflow: "hidden",
+                     }}
+                   >
+                     <LifecycleTable events={overviewEvents} />
+                   </div>
+                 )}
+ 
+                 <h1 className="text-2xl md:text-3xl font-mono font-bold text-zinc-100 tracking-tight">
+                   {game.name}
+                 </h1>
+ 
+                 {/* Secondary: Description (Collapses in Phase 1) */}
+                 {game.description && (
+                   <div
+                     style={{
+                       opacity: 1 - p1,
+                       maxHeight: `${Math.round((1 - p1) * 160)}px`,
+                       overflow: "hidden",
+                     }}
+                   >
+                     <p className="text-sm text-zinc-400 leading-relaxed font-sans">
+                       {game.description}
+                     </p>
+                   </div>
+                 )}
+               </div>
+ 
+               {/* Secondary: Developer & Publisher Grid (Collapses in Phase 1) */}
+               <div
+                 className="grid grid-cols-2 gap-3 pt-2 text-xs font-mono"
+                 style={{
+                   opacity: 1 - p1,
+                   maxHeight: `${Math.round((1 - p1) * 80)}px`,
+                   overflow: "hidden",
+                 }}
+               >
+                 <div className="border border-zinc-900 bg-zinc-900/40 p-2.5">
+                   <div className="text-zinc-500 text-[10px] uppercase">Developer</div>
+                   <div className="text-zinc-200 font-medium truncate">
+                     {game.developer ? (
+                       <AppLink
+                         href={getCanonicalPublisherPath(game.developer)}
+                         className="hover:text-orange-400 hover:underline transition-colors"
+                       >
+                         {game.developer}
+                       </AppLink>
+                     ) : (
+                       "Unknown"
+                     )}
+                   </div>
+                 </div>
+                 <div className="border border-zinc-900 bg-zinc-900/40 p-2.5">
+                   <div className="text-zinc-500 text-[10px] uppercase">Publisher</div>
+                   <div className="text-zinc-200 font-medium truncate">
+                     {game.publisher ? (
+                       <AppLink
+                         href={getCanonicalPublisherPath(game.publisher)}
+                         className="hover:text-orange-400 hover:underline transition-colors"
+                       >
+                         {game.publisher}
+                       </AppLink>
+                     ) : (
+                       "Unknown"
+                     )}
+                   </div>
+                 </div>
+               </div>
+             </div>
+           </div>
+         </div>
+       </header>
 
       <LifecycleHistorySection appid={game.appid} />
       <nav

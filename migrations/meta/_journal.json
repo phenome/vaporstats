@@ -57,6 +57,13 @@
       "when": 1788649326833,
       "tag": "0007_release_plans_and_state",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "6",
+      "when": 1788694174923,
+      "tag": "0008_medical_famine",
+      "breakpoints": true
     }
   ]
 }

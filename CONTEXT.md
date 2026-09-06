@@ -41,3 +41,15 @@ _Avoid_: Public API, developer API
 **Release provenance**: The first-party release field that supplied the Main Released date.
 
 **Activity timestamp**: A timestamp for news, updates, feeds, or transport and cache metadata; it describes activity or delivery, not a release milestone.
+
+**Community icon**:
+Steam's 1:1 square application icon, identified by its community icon hash and served from Steam's community CDN. Distinct from store capsule and header art.
+_Avoid_: App icon, client icon, avatar
+
+**Low-Quality Image Placeholder (LQIP)**:
+A compact, precomputed inline base64 data URL generated from existing header artwork via Bun's native image processing, serving as an interim asset for the Sticky Game Header until a title's Community icon is ingested.
+_Avoid_: Blurhash, thumbnail preview, image stub
+
+**Sticky Game Header**:
+A persistent, single-line sub-header docked immediately below the primary site navigation that displays core game identity and action links when scrolling past the main game details card.
+_Avoid_: Floating bar, sticky title, mini navbar

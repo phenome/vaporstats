@@ -2,6 +2,7 @@ import { createFileRoute } from "@tanstack/react-router";
 import { getDb } from "../lib/db-access";
 import type { AppDatabase } from "../lib/db";
 import { getGameByAppId, type GameDetail } from "../lib/catalog";
+import { ensureAppLqips } from "../lib/lqip";
 import { getRelatedApps, type GroupedRelatedApps } from "../lib/related";
 import { getPlayerHistory, type PlayerHistoryResult } from "../lib/player-history";
 import { getCurrentPrice, getPriceHistory, type PriceState, type PriceHistoryResult } from "../lib/prices";
@@ -56,11 +57,14 @@ export async function handleGameDetailRequest(
     );
   }
 
-  const [related, playerHistory, currentPrice] = await Promise.all([
+  const [related, playerHistory, currentPrice, lqips] = await Promise.all([
     getRelatedApps(db, game.appid),
     getPlayerHistory(db, game.appid, "30d"),
     getCurrentPrice(db, game.appid),
+    ensureAppLqips(db, game),
   ]);
+  game.header_lqip = lqips.header_lqip;
+  game.icon_lqip = lqips.icon_lqip;
   const priceHistory = await getPriceHistory(db, game.appid, "all", { currentPrice });
 
   const responseData: GameDetailResponseData = {

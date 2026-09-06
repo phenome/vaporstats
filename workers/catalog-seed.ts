@@ -17,6 +17,9 @@ export interface SeedAppInput {
   release_status?: string;
   description?: string;
   header_image?: string;
+  header_lqip?: string | null;
+  icon_hash?: string | null;
+  icon_lqip?: string | null;
   developer?: string;
   publisher?: string;
   has_left_early_access?: boolean | null;
@@ -123,10 +126,21 @@ interface StoreBrowseRelease {
   [key: string]: unknown;
 }
 
+interface StoreBrowseAssets {
+  community_icon?: string;
+  [key: string]: unknown;
+}
+
 interface StoreBrowseItem {
   appid?: number | string;
   id?: number | string;
   release?: StoreBrowseRelease | null;
+  assets?: StoreBrowseAssets | null;
+}
+
+export interface StoreBrowseData {
+  release: StoreBrowseRelease | null;
+  assets: StoreBrowseAssets | null;
 }
 
 interface StoreBrowseResponse {
@@ -314,11 +328,11 @@ export async function fetchSteamAppDetails(
   };
 }
 
-async function fetchStoreBrowseReleases(
+export async function fetchStoreBrowseReleases(
   appIds: number[],
   customFetch: typeof fetch
-): Promise<Map<number, StoreBrowseRelease | null>> {
-  const releases = new Map<number, StoreBrowseRelease | null>();
+): Promise<Map<number, StoreBrowseData | null>> {
+  const releases = new Map<number, StoreBrowseData | null>();
   if (appIds.length === 0) {
     return releases;
   }
@@ -332,6 +346,7 @@ async function fetchStoreBrowseReleases(
     },
     data_request: {
       include_release: true,
+      include_assets: true,
     },
   };
   const url = `${STORE_BROWSE_URL}?input_json=${encodeURIComponent(JSON.stringify(input))}`;
@@ -349,7 +364,10 @@ async function fetchStoreBrowseReleases(
     for (const item of items) {
       const appid = storeBrowseAppId(item);
       if (appid !== null) {
-        releases.set(appid, item.release ?? null);
+        releases.set(appid, {
+          release: item.release ?? null,
+          assets: item.assets ?? null,
+        });
       }
     }
   } catch {
@@ -371,6 +389,7 @@ type ReleaseEnrichmentRecord = {
     | "appdetails_release_date"
     | "is_coming_soon"
     | "is_early_access"
+    | "icon_hash"
   >
 >;
 
@@ -428,7 +447,8 @@ export async function enrichCatalogReleaseFields<T extends ReleaseEnrichmentReco
 
     for (const record of batch) {
       const appdetailsReleaseDate = record.appdetails_release_date ?? record.release_date ?? null;
-      const storeBrowseFields = releaseFields(releases.get(record.appid), appdetailsReleaseDate);
+      const browseData = releases.get(record.appid);
+      const storeBrowseFields = releaseFields(browseData?.release, appdetailsReleaseDate);
       const hasStoreBrowseRelease = hasStoreBrowseReleaseFields(storeBrowseFields);
       if (options.requireStoreBrowse && !hasStoreBrowseRelease) {
         throw new Error(`StoreBrowse release enrichment unavailable for app ${record.appid}`);
@@ -438,7 +458,12 @@ export async function enrichCatalogReleaseFields<T extends ReleaseEnrichmentReco
         : hasEstablishedReleaseFields(record)
           ? existingReleaseFields(record)
           : releaseFields(null, appdetailsReleaseDate);
-      enriched.push({ ...record, ...lifecycle });
+      const iconHash = browseData?.assets?.community_icon ?? record.icon_hash ?? null;
+      enriched.push({
+        ...record,
+        ...lifecycle,
+        ...(iconHash ? { icon_hash: iconHash } : {}),
+      });
     }
   }
   return enriched;
