@@ -30,6 +30,13 @@ export function GamePageView({
 }: GamePageProps) {
   const overviewEvents = getLifecycleOverviewEvents(game);
   const mainReleaseDate = getMainReleaseDate(game);
+  const releaseStatusLabel =
+    game.release_status === "upcoming"
+      ? "Upcoming"
+      : game.release_status === "unannounced"
+        ? "Unannounced"
+        : "Released";
+  const isUnreleased = game.release_status === "upcoming" || game.release_status === "unannounced";
   return (
     <div className="max-w-7xl mx-auto px-4 py-8 space-y-6">
       {/* Top Banner / Breadcrumb & Header */}
@@ -41,7 +48,7 @@ export function GamePageView({
             </span>
             <div className="inline-flex items-center gap-2 text-xs font-mono">
               <span className="border border-zinc-700 bg-zinc-900 px-1.5 py-0.5 font-bold uppercase tracking-wider text-zinc-300">
-                Released
+                {releaseStatusLabel}
               </span>
               {mainReleaseDate ? (
                 isPreciseReleaseDate(mainReleaseDate) ? (
@@ -51,6 +58,8 @@ export function GamePageView({
                 ) : (
                   <span className="text-zinc-200">{formatReleaseDate(mainReleaseDate)}</span>
                 )
+              ) : isUnreleased ? (
+                <span className="text-zinc-400">TBA</span>
               ) : (
                 <span className="text-zinc-500">—</span>
               )}
@@ -255,7 +264,12 @@ function getLifecycleOverviewEvents(game: GameDetail): LifecycleDisplayEvent[] {
 }
 
 function getMainReleaseDate(game: GameDetail): string | null {
-  if (game.release_status !== "released") return null;
+  if (game.release_status === "upcoming") {
+    return game.release_date ?? game.original_release_date ?? game.steam_release_date;
+  }
+  if (game.release_status === "unannounced") {
+    return game.release_date ?? null;
+  }
   return game.original_release_date ?? game.steam_release_date ?? game.release_date;
 }
 

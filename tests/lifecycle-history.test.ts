@@ -215,9 +215,28 @@ describe("Lifecycle history", () => {
     const html = renderToString(React.createElement(GamePageView, { game: game! }));
     expect(html).toContain("September 2026");
     expect(html).toContain("Expected release");
-    expect(html).toMatch(/>Released<\/span><span[^>]*>—<\/span>/);
     expect(html).not.toContain("Sep 1, 2026");
     expect(html).not.toContain("2026-09-01");
+  });
+
+  test("displays TBA and upcoming status for unreleased games without a release date", async () => {
+    const db = initTestDb();
+    await upsertApp(db, {
+      appid: 2643540,
+      name: "Age Twisters",
+      type: "game",
+      is_playable: true,
+      is_eligible: true,
+      release_date: null,
+      release_status: "upcoming",
+    });
+
+    const game = await getGameByAppId(db, 2643540);
+    expect(game).not.toBeNull();
+    const html = renderToString(React.createElement(GamePageView, { game: game! }));
+    expect(html).toContain("Upcoming");
+    expect(html).toContain("TBA");
+    expect(html).not.toContain("Released");
   });
 
   test("maintains horizontal gap between date and badge in release lifecycle overview", async () => {
