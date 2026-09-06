@@ -30,15 +30,15 @@ jobs:
       - name: Configure deployment SSH
         env:
           DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}
-          KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+          TARGET_HOST: ${{ secrets.TARGET_HOST }}
         run: |
           set -eu
           test -n "$DEPLOY_KEY"
-          test -n "$KNOWN_HOSTS"
+          test -n "$TARGET_HOST"
           umask 077
           install -d -m 700 "$HOME/.ssh"
           printf '%s\n' "$DEPLOY_KEY" > "$HOME/.ssh/vaporstats_deploy"
-          printf '%s\n' "$KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+          printf '%s ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIA51h5nwC1jWsVxRCe9xuhpxh4/dCGtpvsT42YtCaq7m\n' "$TARGET_HOST" > "$HOME/.ssh/known_hosts"
           chmod 600 "$HOME/.ssh/vaporstats_deploy" "$HOME/.ssh/known_hosts"
 
       - name: Deploy exact commit
