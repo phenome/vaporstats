@@ -31,6 +31,7 @@ import { HomeComponent, type HomeComponentProps } from "../src/components/home-p
 import { GamePageView, type GamePageProps } from "../src/components/game-page";
 import { handleGameHttpRequest } from "../src/routes/games.$game";
 import { applyMigrations } from "../src/lib/migrations";
+import { CADENCE_MS } from "../src/lib/player";
 function createSqliteAppAdapter(db: Database): AppDatabase {
   return {
     prepare(query: string): AppPreparedStatement {
@@ -360,6 +361,68 @@ describe("Player History and Rankings", () => {
     expect(outage.points.some((point) => point.is_gap && point.players === null)).toBe(true);
     expect(outage.points.some((point) => point.players === 0)).toBe(true);
     expect(outage.points.some((point) => point.players === null && !point.is_gap)).toBe(false);
+  });
+  test("24h gaps follow tracked cadence without fabricating points", async () => {
+    const db = await createFreshDb();
+    const anchor = new Date("2026-09-05T00:00:00.000Z");
+    const minute = 60 * 1000;
+    const at = (offsetMs: number) => new Date(anchor.getTime() + offsetMs).toISOString();
+
+    for (const [appid, name] of [
+      [101, "Hourly Game"],
+      [102, "Fast Game"],
+      [103, "Daily Game"],
+      [104, "Unknown Tier Game"],
+      [105, "Untracked Game"],
+    ] as const) {
+      await db.prepare("INSERT INTO apps (appid, name, slug) VALUES (?, ?, ?)").bind(appid, name, name.toLowerCase().replaceAll(" ", "-")).run();
+    }
+    for (const [appid, tier] of [[101, "hourly"], [102, "fast"], [103, "daily"], [104, "mystery"]] as const) {
+      await db.prepare("INSERT INTO tracked_games (appid, tier, next_due_at) VALUES (?, ?, ?)").bind(appid, tier, anchor.toISOString()).run();
+    }
+
+    const hourly = CADENCE_MS.hourly;
+    const fast = CADENCE_MS.fast;
+    const observations = [
+      [101, 100, at(-6 * hourly)],
+      [101, 0, at(-6 * hourly + 250)],
+      [101, 200, at(-5 * hourly + 251)],
+      [101, 300, at(-4 * hourly + 252)],
+      [101, 400, at(-2 * hourly + 252)],
+      [102, 7, at(-6 * hourly)],
+      [102, 0, at(-6 * hourly + fast + 1)],
+      [102, 9, at(-6 * hourly + 2 * fast + 2)],
+      [102, 11, at(-6 * hourly + 2 * fast + 41 * minute + 2)],
+      [102, 13, at(-6 * hourly + 2 * fast + 41 * minute + fast + 3)],
+      [103, 42, at(-CADENCE_MS.daily)],
+      [103, 43, at(0)],
+      [104, 5, at(-90 * minute)],
+      [104, 6, at(-59 * minute)],
+      [105, 8, at(-120 * minute)],
+      [105, 9, at(-80 * minute)],
+    ] as const;
+    for (const [appid, players, observedAt] of observations) {
+      await db.prepare("INSERT INTO observations (appid, current_players, observed_at) VALUES (?, ?, ?)").bind(appid, players, observedAt).run();
+    }
+
+    const hourlyHistory = await getPlayerHistory(db, 101, "24h", anchor);
+    expect(hourlyHistory.points.map((point) => point.players)).toEqual([100, 0, 200, 300, null, 400]);
+    expect(hourlyHistory.points.filter((point) => point.is_gap)).toHaveLength(1);
+
+    const fastHistory = await getPlayerHistory(db, 102, "24h", anchor);
+    expect(fastHistory.points.map((point) => point.players)).toEqual([7, 0, 9, null, 11, 13]);
+    expect(fastHistory.points.filter((point) => point.is_gap)).toHaveLength(1);
+
+    const dailyHistory = await getPlayerHistory(db, 103, "24h", anchor);
+    expect(dailyHistory.points.map((point) => point.players)).toEqual([42, 43]);
+    expect(dailyHistory.points.some((point) => point.is_gap)).toBe(false);
+
+    const unknownTierHistory = await getPlayerHistory(db, 104, "24h", anchor);
+    expect(unknownTierHistory.points.map((point) => point.players)).toEqual([5, null, 6]);
+
+    // No tracked row is conservative too; the hourly row must not affect this appid.
+    const untrackedHistory = await getPlayerHistory(db, 105, "24h", anchor);
+    expect(untrackedHistory.points.map((point) => point.players)).toEqual([8, null, 9]);
   });
 
   // G4: player charts expose labels, values, gaps, and a numeric time domain

@@ -1,4 +1,5 @@
 import type { AppDatabase } from "./db";
+import { CADENCE_MS } from "./player";
 import { toSlug } from "./slug";
 
 export type HistoryRange = "24h" | "7d" | "30d" | "90d" | "all";
@@ -329,7 +330,11 @@ async function queryRawBuckets(
   return result.results ?? [];
 }
 
-function addBucketGaps(points: HistoryBucketPoint[], range: HistoryRange): PlayerHistoryPoint[] {
+function addBucketGaps(
+  points: HistoryBucketPoint[],
+  range: HistoryRange,
+  rawGapThresholdMs: number
+): PlayerHistoryPoint[] {
   if (points.length === 0) return [];
   const withGaps: HistoryBucketPoint[] = [];
   if (range === "24h") {
@@ -338,7 +343,7 @@ function addBucketGaps(points: HistoryBucketPoint[], range: HistoryRange): Playe
       if (index > 0) {
         const previous = new Date(points[index - 1].timestamp).getTime();
         const current = new Date(point.timestamp).getTime();
-        if (current - previous > 30 * 60 * 1000) {
+        if (current - previous > rawGapThresholdMs) {
           withGaps.push({
             timestamp: new Date(previous + (current - previous) / 2).toISOString(),
             players: null,
@@ -421,6 +426,7 @@ export async function getPlayerHistory(
   const anchorTimeIso = anchorTime.toISOString();
   const anchorDate = anchorTimeIso.slice(0, 10);
   let bucketPoints: HistoryBucketPoint[] = [];
+  let rawGapThresholdMs = 30 * 60 * 1000;
 
   if (range === "all" && !cutoffIso) {
     return {
@@ -435,6 +441,15 @@ export async function getPlayerHistory(
   }
 
   if (range === "24h") {
+    const trackedGame = await db
+      .prepare("SELECT tier FROM tracked_games WHERE appid = ?")
+      .bind(appid)
+      .first<{ tier: string | null }>();
+    const tier = trackedGame?.tier;
+    if (tier === "fast" || tier === "hourly" || tier === "daily") {
+      // Allow 50% scheduling tolerance, but preserve the existing 30-minute floor.
+      rawGapThresholdMs = Math.max(30 * 60 * 1000, 1.5 * CADENCE_MS[tier]);
+    }
     const result = await db
       .prepare(
         "SELECT id, current_players, observed_at FROM observations" +
@@ -487,7 +502,7 @@ export async function getPlayerHistory(
     }
   }
 
-  const points = addBucketGaps(bucketPoints, range);
+  const points = addBucketGaps(bucketPoints, range, rawGapThresholdMs);
   const realPoints = points.filter((point) => point.players !== null && !point.is_gap);
   const sourceTimestamp = realPoints.length > 0 ? realPoints[realPoints.length - 1].timestamp : null;
   const rangeStart = range === "all" && realPoints.length === 0 ? null : cutoffIso;
