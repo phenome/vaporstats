@@ -165,34 +165,22 @@ export async function getEarliestObservationDate(
   db: AppDatabase,
   appid?: number
 ): Promise<string | null> {
-  let obsRow: { earliest: string | null } | null;
-  let rollupRow: { earliest: string | null } | null;
-
-  if (appid !== undefined) {
-    const obsStmt = db
-      .prepare("SELECT MIN(observed_at) as earliest FROM observations WHERE appid = ?")
-      .bind(appid);
-    obsRow = await obsStmt.first<{ earliest: string | null }>();
-
-    const rollupStmt = db
-      .prepare("SELECT MIN(date) as earliest FROM player_rollups WHERE appid = ?")
-      .bind(appid);
-    rollupRow = await rollupStmt.first<{ earliest: string | null }>();
-  } else {
-    const obsStmt = db.prepare("SELECT MIN(observed_at) as earliest FROM observations");
-    obsRow = await obsStmt.first<{ earliest: string | null }>();
-
-    const rollupStmt = db.prepare("SELECT MIN(date) as earliest FROM player_rollups");
-    rollupRow = await rollupStmt.first<{ earliest: string | null }>();
-  }
+  const scope = appid === undefined ? "" : " WHERE appid = ?";
+  const values = appid === undefined ? [] : [appid];
+  const obsRow = await db
+    .prepare("SELECT MIN(observed_at) AS earliest FROM observations" + scope)
+    .bind(...values)
+    .first<{ earliest: string | null }>();
+  const rollupRow = await db
+    .prepare("SELECT MIN(date) AS earliest FROM player_rollups" + scope)
+    .bind(...values)
+    .first<{ earliest: string | null }>();
 
   const obsEarliest = obsRow?.earliest ?? null;
-  const rollupEarliest = rollupRow?.earliest ? `${rollupRow.earliest}T00:00:00.000Z` : null;
-
-  if (obsEarliest && rollupEarliest) {
-    return obsEarliest < rollupEarliest ? obsEarliest : rollupEarliest;
-  }
-  return obsEarliest || rollupEarliest;
+  const rollupEarliest = rollupRow?.earliest ?? null;
+  if (!obsEarliest) return rollupEarliest ? rollupEarliest + "T00:00:00.000Z" : null;
+  if (!rollupEarliest || obsEarliest.slice(0, 10) <= rollupEarliest) return obsEarliest;
+  return rollupEarliest + "T00:00:00.000Z";
 }
 
 /**
@@ -269,10 +257,10 @@ export async function computeDailyRollups(
   };
 }
 
-export const RAW_OBSERVATION_RETENTION_DAYS = 7;
+export const RAW_OBSERVATION_RETENTION_DAYS = 30;
 
 /**
- * Cleans up raw observations older than the configured seven-day retention period.
+ * Cleans up raw observations older than the configured thirty-day retention period.
  * Must be executed after or alongside daily rollups to ensure no data loss.
  */
 export async function cleanExpiredRawObservations(
@@ -286,6 +274,133 @@ export async function cleanExpiredRawObservations(
   const stmt = db.prepare(`DELETE FROM observations WHERE observed_at < ?`).bind(cutoffIso);
   const res = await stmt.run();
   return res.meta.changes;
+}
+
+/** Resolution-aware bucket helpers. */
+type HistoryBucketPoint = PlayerHistoryPoint & { bucketKey?: string };
+type RawBucketRow = {
+  bucket_key: string;
+  min_players: number;
+  max_players: number;
+  avg_players: number;
+  close_players: number;
+  sample_count: number;
+  latest_observed_at: string;
+};
+
+type RawObservationRow = {
+  id: number;
+  current_players: number;
+  observed_at: string;
+};
+
+async function queryRawBuckets(
+  db: AppDatabase,
+  appid: number,
+  startIso: string,
+  endIso: string,
+  resolution: "hour" | "six-hour" | "day"
+): Promise<RawBucketRow[]> {
+  const bucketExpression =
+    resolution === "hour"
+      ? "substr(observed_at, 1, 13) || ':00:00.000Z'"
+      : resolution === "six-hour"
+        ? "substr(observed_at, 1, 11) || printf('%02d:00:00.000Z', (CAST(substr(observed_at, 12, 2) AS INTEGER) / 6) * 6)"
+        : "substr(observed_at, 1, 10) || 'T00:00:00.000Z'";
+  const sql =
+    "WITH filtered AS (" +
+    " SELECT id, current_players, observed_at, " + bucketExpression + " AS bucket_key" +
+    " FROM observations WHERE appid = ? AND observed_at >= ? AND observed_at <= ?" +
+    "), grouped AS (" +
+    " SELECT bucket_key, MIN(current_players) AS min_players," +
+    " MAX(current_players) AS max_players, ROUND(AVG(current_players), 2) AS avg_players," +
+    " COUNT(*) AS sample_count, MAX(observed_at) AS latest_observed_at" +
+    " FROM filtered GROUP BY bucket_key" +
+    ") SELECT grouped.bucket_key, grouped.min_players, grouped.max_players," +
+    " grouped.avg_players, grouped.sample_count, grouped.latest_observed_at," +
+    " (SELECT current_players FROM filtered latest" +
+    "  WHERE latest.bucket_key = grouped.bucket_key" +
+    "  ORDER BY latest.observed_at DESC, latest.id DESC LIMIT 1) AS close_players" +
+    " FROM grouped ORDER BY grouped.bucket_key ASC";
+  const result = await db
+    .prepare(sql)
+    .bind(appid, startIso, endIso)
+    .all<RawBucketRow>();
+  return result.results ?? [];
+}
+
+function addBucketGaps(points: HistoryBucketPoint[], range: HistoryRange): PlayerHistoryPoint[] {
+  if (points.length === 0) return [];
+  const withGaps: HistoryBucketPoint[] = [];
+  if (range === "24h") {
+    for (let index = 0; index < points.length; index++) {
+      const point = points[index];
+      if (index > 0) {
+        const previous = new Date(points[index - 1].timestamp).getTime();
+        const current = new Date(point.timestamp).getTime();
+        if (current - previous > 30 * 60 * 1000) {
+          withGaps.push({
+            timestamp: new Date(previous + (current - previous) / 2).toISOString(),
+            players: null,
+            is_gap: true,
+          });
+        }
+      }
+      withGaps.push(point);
+    }
+  } else {
+    const bucketMs = range === "7d" ? 60 * 60 * 1000 : range === "30d" ? 6 * 60 * 60 * 1000 : 24 * 60 * 60 * 1000;
+    for (let index = 0; index < points.length; index++) {
+      const point = points[index];
+      if (index > 0 && point.bucketKey && points[index - 1].bucketKey) {
+        const previous = Date.parse(points[index - 1].bucketKey!);
+        const current = Date.parse(point.bucketKey);
+        const missing = Math.floor((current - previous) / bucketMs) - 1;
+        for (let gap = 1; gap <= missing; gap++) {
+          withGaps.push({
+            timestamp: new Date(previous + gap * bucketMs).toISOString(),
+            players: null,
+            is_gap: true,
+          });
+        }
+      }
+      withGaps.push(point);
+    }
+  }
+  return withGaps.map(({ bucketKey: _bucketKey, ...point }) => point);
+}
+
+function dailyPoint(
+  date: string,
+  raw: RawBucketRow | undefined,
+  rollup: RollupRecord | undefined,
+  useRollup: boolean
+): HistoryBucketPoint | null {
+  if (useRollup && rollup) {
+    return {
+      bucketKey: date + "T00:00:00.000Z",
+      timestamp: raw?.latest_observed_at ?? date + "T00:00:00.000Z",
+      players: rollup.close_players,
+      min: rollup.min_players,
+      max: rollup.max_players,
+      avg: rollup.avg_players,
+      close: rollup.close_players,
+      sample_count: rollup.sample_count,
+      is_rollup: true,
+    };
+  }
+  if (!raw) return null;
+  return {
+    bucketKey: date + "T00:00:00.000Z",
+    timestamp: raw.latest_observed_at,
+    players: raw.close_players,
+    min: raw.min_players,
+    max: raw.max_players,
+    avg: raw.avg_players,
+    close: raw.close_players,
+    sample_count: raw.sample_count,
+    is_rollup: false,
+  };
 }
 
 /**
@@ -304,168 +419,87 @@ export async function getPlayerHistory(
   const cutoff = getRangeCutoffDate(range, anchorTime, earliestObservation);
   const cutoffIso = cutoff ? cutoff.toISOString() : null;
   const anchorTimeIso = anchorTime.toISOString();
-  const anchorDateStr = anchorTimeIso.substring(0, 10);
+  const anchorDate = anchorTimeIso.slice(0, 10);
+  let bucketPoints: HistoryBucketPoint[] = [];
 
-  const points: PlayerHistoryPoint[] = [];
+  if (range === "all" && !cutoffIso) {
+    return {
+      appid,
+      range,
+      earliest_observation: null,
+      range_start: null,
+      range_end: null,
+      points: [],
+      source_timestamp: null,
+    };
+  }
 
-  if (range === "all") {
-    // In All range, query daily rollups up to anchorDate
-    const rollupStmt = db.prepare(
-      `SELECT date, min_players, max_players, avg_players, close_players, sample_count
-       FROM player_rollups
-       WHERE appid = ? AND date <= ?
-       ORDER BY date ASC`
-    ).bind(appid, anchorDateStr);
-    const rollupRows = await rollupStmt.all<RollupRecord>();
-
-    // Also query raw observations up to anchorTimeIso
-    const rawStmt = db.prepare(
-      `SELECT current_players, observed_at
-       FROM observations
-       WHERE appid = ? AND observed_at <= ?
-       ORDER BY observed_at ASC`
-    ).bind(appid, anchorTimeIso);
-    const rawRows = await rawStmt.all<{ current_players: number; observed_at: string }>();
-
-    const rollupDates = new Set((rollupRows.results ?? []).map((r) => r.date));
-
-    // Add daily rollups
-    for (const r of rollupRows.results ?? []) {
-      points.push({
-        timestamp: `${r.date}T00:00:00.000Z`,
-        players: r.close_players,
-        min: r.min_players,
-        max: r.max_players,
-        avg: r.avg_players,
-        close: r.close_players,
-        sample_count: r.sample_count,
-        is_rollup: true,
-      });
-    }
-
-    // Append recent raw observations that haven't been rolled up yet
-    for (const raw of rawRows.results ?? []) {
-      const rawDate = raw.observed_at.substring(0, 10);
-      if (!rollupDates.has(rawDate)) {
-        points.push({
-          timestamp: raw.observed_at,
-          players: raw.current_players,
-          is_rollup: false,
-        });
-      }
-    }
-
-    // Chronologically sort merged points before gap detection
-    points.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+  if (range === "24h") {
+    const result = await db
+      .prepare(
+        "SELECT id, current_players, observed_at FROM observations" +
+        " WHERE appid = ? AND observed_at >= ? AND observed_at <= ?" +
+        " ORDER BY observed_at ASC, id ASC"
+      )
+      .bind(appid, cutoffIso!, anchorTimeIso)
+      .all<RawObservationRow>();
+    bucketPoints = (result.results ?? []).map((row) => ({
+      timestamp: row.observed_at,
+      players: row.current_players,
+      is_rollup: false,
+    }));
+  } else if (range === "7d" || range === "30d") {
+    const resolution = range === "7d" ? "hour" : "six-hour";
+    const rows = await queryRawBuckets(db, appid, cutoffIso!, anchorTimeIso, resolution);
+    bucketPoints = rows.map((row) => ({
+      bucketKey: row.bucket_key,
+      timestamp: row.latest_observed_at,
+      players: row.close_players,
+      min: row.min_players,
+      max: row.max_players,
+      avg: row.avg_players,
+      close: row.close_players,
+      sample_count: row.sample_count,
+      is_rollup: false,
+    }));
   } else {
-    if (range === "24h") {
-      const rawRows = await db
-        .prepare(
-          `SELECT current_players, observed_at
-           FROM observations
-           WHERE appid = ?
-             AND observed_at >= ?
-             AND observed_at <= ?
-           ORDER BY observed_at ASC`
-        )
-        .bind(appid, cutoffIso!, anchorTimeIso)
-        .all<{ current_players: number; observed_at: string }>();
-      for (const raw of rawRows.results ?? []) {
-        points.push({ timestamp: raw.observed_at, players: raw.current_players, is_rollup: false });
-      }
-    } else {
-      // Older days are represented by durable rollups; the cutoff day remains raw
-      // so the range boundary stays exact instead of broadening to midnight.
-      const rollupRows = await db
-        .prepare(
-          `SELECT date, min_players, max_players, avg_players, close_players, sample_count
-           FROM player_rollups
-           WHERE appid = ? AND date > ? AND date <= ?
-           ORDER BY date ASC`
-        )
-        .bind(appid, cutoffIso!.substring(0, 10), anchorDateStr)
-        .all<RollupRecord>();
-      const rollupDates = new Set((rollupRows.results ?? []).map((row) => row.date));
-
-      for (const row of rollupRows.results ?? []) {
-        points.push({
-          timestamp: row.date + "T00:00:00.000Z",
-          players: row.close_players,
-          min: row.min_players,
-          max: row.max_players,
-          avg: row.avg_players,
-          close: row.close_players,
-          sample_count: row.sample_count,
-          is_rollup: true,
-        });
-      }
-
-      const rawRows = await db
-        .prepare(
-          `SELECT current_players, observed_at
-           FROM observations
-           WHERE appid = ?
-             AND observed_at >= ?
-             AND observed_at <= ?
-           ORDER BY observed_at ASC`
-        )
-        .bind(appid, cutoffIso!, anchorTimeIso)
-        .all<{ current_players: number; observed_at: string }>();
-      for (const raw of rawRows.results ?? []) {
-        if (!rollupDates.has(raw.observed_at.substring(0, 10))) {
-          points.push({ timestamp: raw.observed_at, players: raw.current_players, is_rollup: false });
-        }
-      }
-      points.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+    const rawRows = await queryRawBuckets(db, appid, cutoffIso!, anchorTimeIso, "day");
+    const rawByDate = new Map(rawRows.map((row) => [row.bucket_key.slice(0, 10), row]));
+    const rollupResult = await db
+      .prepare(
+        "SELECT date, min_players, max_players, avg_players, close_players, sample_count" +
+        " FROM player_rollups WHERE appid = ? AND date >= ? AND date < ? ORDER BY date ASC"
+      )
+      .bind(appid, cutoffIso!.slice(0, 10), anchorDate)
+      .all<RollupRecord>();
+    const rollups = rollupResult.results ?? [];
+    const rollupByDate = new Map(rollups.map((row) => [row.date, row]));
+    const dates = new Set<string>([...rawByDate.keys(), ...rollupByDate.keys()]);
+    const sortedDates = [...dates].sort();
+    const cutoffIsMidnight = cutoffIso!.endsWith("T00:00:00.000Z");
+    for (const date of sortedDates) {
+      const raw = rawByDate.get(date);
+      const rollup = rollupByDate.get(date);
+      const isCutoffDate = date === cutoffIso!.slice(0, 10);
+      const useRollup = Boolean(rollup && (!isCutoffDate || cutoffIsMidnight));
+      const point = dailyPoint(date, raw, rollup, useRollup);
+      if (point) bucketPoints.push(point);
     }
   }
-  // Gap detection: insert gap marker when interval between consecutive points exceeds cadence
-  // For 24h: gap > 30 minutes
-  // For 7d: gap > 3 hours
-  // For 30d/90d: gap > 12 hours
-  // For all: gap > 2 days
-  const gapThresholdMs =
-    range === "24h"
-      ? 30 * 60 * 1000
-      : range === "7d"
-        ? 3 * 60 * 60 * 1000
-        : range === "30d" || range === "90d"
-          ? 12 * 60 * 60 * 1000
-          : 48 * 60 * 60 * 1000;
 
-  const pointsWithGaps: PlayerHistoryPoint[] = [];
-  for (let i = 0; i < points.length; i++) {
-    const pt = points[i];
-    if (i > 0) {
-      const prevPt = points[i - 1];
-      const prevTime = new Date(prevPt.timestamp).getTime();
-      const currTime = new Date(pt.timestamp).getTime();
-      if (!isNaN(prevTime) && !isNaN(currTime) && currTime - prevTime > gapThresholdMs) {
-        // Insert gap marker: players is null, NEVER 0
-        const gapTime = new Date(prevTime + (currTime - prevTime) / 2).toISOString();
-        pointsWithGaps.push({
-          timestamp: gapTime,
-          players: null,
-          is_gap: true,
-        });
-      }
-    }
-    pointsWithGaps.push(pt);
-  }
-
-  // Derive latest real non-gap point timestamp for truthful source freshness
-  const realPoints = pointsWithGaps.filter((p) => p.players !== null && !p.is_gap);
+  const points = addBucketGaps(bucketPoints, range);
+  const realPoints = points.filter((point) => point.players !== null && !point.is_gap);
   const sourceTimestamp = realPoints.length > 0 ? realPoints[realPoints.length - 1].timestamp : null;
-  // Fixed ranges use the exact query window; All spans its actual records.
+  const rangeStart = range === "all" && realPoints.length === 0 ? null : cutoffIso;
   const rangeEnd = range === "all" ? sourceTimestamp : anchorTimeIso;
 
   return {
     appid,
     range,
     earliest_observation: earliestObservation,
-    range_start: cutoffIso,
+    range_start: rangeStart,
     range_end: rangeEnd,
-    points: pointsWithGaps,
+    points,
     source_timestamp: sourceTimestamp,
   };
 }

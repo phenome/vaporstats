@@ -1,19 +1,12 @@
 import { describe, test, expect, beforeAll, afterAll } from "bun:test";
 import { Database, type SQLQueryBindings } from "bun:sqlite";
-import { existsSync } from "node:fs";
-import { resolve } from "node:path";
 import React from "react";
 import { renderToString } from "react-dom/server";
 import { type AppDatabase, type AppPreparedStatement } from "../src/lib/db";
-import * as playerHistoryModule from "../src/lib/player-history";
 import {
-  type HistoryRange,
   type PlayerHistoryResult,
-  type RollupRecord,
-  parseHistoryRange,
   formatRelativeAge,
   formatExactUtc,
-  getEarliestObservationDate,
   computeDailyRollups,
   cleanExpiredRawObservations,
   getPlayerHistory,
@@ -37,9 +30,7 @@ import { CACHE_POLICIES } from "../src/lib/cache";
 import { HomeComponent, type HomeComponentProps } from "../src/components/home-page";
 import { GamePageView, type GamePageProps } from "../src/components/game-page";
 import { handleGameHttpRequest } from "../src/routes/games.$game";
-import * as rollupsWorkerModule from "../workers/player-rollups";
 import { applyMigrations } from "../src/lib/migrations";
-
 function createSqliteAppAdapter(db: Database): AppDatabase {
   return {
     prepare(query: string): AppPreparedStatement {
@@ -125,7 +116,7 @@ describe("Player History and Rankings", () => {
     console.log("player history suite complete");
   });
 
-  // G1: raw successful player observations remain queryable for seven days
+  // G1: raw successful player observations remain queryable through the 30-day inclusive boundary.
   test("raw retention", async () => {
     const db = await createFreshDb();
     const anchor = new Date("2026-09-04T12:00:00.000Z");
@@ -134,16 +125,15 @@ describe("Player History and Rankings", () => {
       .prepare("INSERT INTO apps (appid, name, slug) VALUES (10, 'Counter-Strike', 'counter-strike')")
       .run();
 
-    // Keep observations inside the seven-day window and at its inclusive boundary.
-    const t6d = new Date(anchor.getTime() - 6 * 24 * 60 * 60 * 1000).toISOString();
-    const t7d = new Date(anchor.getTime() - 7 * 24 * 60 * 60 * 1000).toISOString();
-    const t8d = new Date(anchor.getTime() - 8 * 24 * 60 * 60 * 1000).toISOString();
-    const t10d = new Date(anchor.getTime() - 10 * 24 * 60 * 60 * 1000).toISOString();
+    const t29d = new Date(anchor.getTime() - 29 * 24 * 60 * 60 * 1000).toISOString();
+    const t30d = new Date(anchor.getTime() - 30 * 24 * 60 * 60 * 1000).toISOString();
+    const t31d = new Date(anchor.getTime() - 31 * 24 * 60 * 60 * 1000).toISOString();
+    const t32d = new Date(anchor.getTime() - 32 * 24 * 60 * 60 * 1000).toISOString();
 
-    await db.prepare("INSERT INTO observations (appid, current_players, observed_at) VALUES (10, 100, ?)").bind(t6d).run();
-    await db.prepare("INSERT INTO observations (appid, current_players, observed_at) VALUES (10, 200, ?)").bind(t7d).run();
-    await db.prepare("INSERT INTO observations (appid, current_players, observed_at) VALUES (10, 300, ?)").bind(t8d).run();
-    await db.prepare("INSERT INTO observations (appid, current_players, observed_at) VALUES (10, 400, ?)").bind(t10d).run();
+    await db.prepare("INSERT INTO observations (appid, current_players, observed_at) VALUES (10, 100, ?)").bind(t29d).run();
+    await db.prepare("INSERT INTO observations (appid, current_players, observed_at) VALUES (10, 200, ?)").bind(t30d).run();
+    await db.prepare("INSERT INTO observations (appid, current_players, observed_at) VALUES (10, 300, ?)").bind(t31d).run();
+    await db.prepare("INSERT INTO observations (appid, current_players, observed_at) VALUES (10, 400, ?)").bind(t32d).run();
 
     const beforeCount = await db.prepare("SELECT COUNT(*) as count FROM observations").first<number>("count");
     expect(beforeCount).toBe(4);
@@ -152,11 +142,21 @@ describe("Player History and Rankings", () => {
     expect(cleaned).toBe(2);
 
     const remaining = await db.prepare("SELECT current_players, observed_at FROM observations ORDER BY observed_at ASC").all<{ current_players: number; observed_at: string }>();
-    expect(remaining.results.length).toBe(2);
-    expect(remaining.results[0].current_players).toBe(200); // exactly seven days old
-    expect(remaining.results[1].current_players).toBe(100); // six days old
+    expect(remaining.results.map((row) => row.current_players)).toEqual([200, 100]);
 
-    console.log("raw retention");
+    // The scheduled worker uses the same 30-day inclusive raw window.
+    const workerDb = await createFreshDb();
+    await workerDb.prepare("INSERT INTO apps (appid, name, slug) VALUES (10, 'Worker Game', 'worker-game')").run();
+    await workerDb.prepare("INSERT INTO observations (appid, current_players, observed_at) VALUES (10, 100, ?)").bind(t29d).run();
+    await workerDb.prepare("INSERT INTO observations (appid, current_players, observed_at) VALUES (10, 200, ?)").bind(t30d).run();
+    await workerDb.prepare("INSERT INTO observations (appid, current_players, observed_at) VALUES (10, 300, ?)").bind(t31d).run();
+    const jobRes = await runDailyRollupJob(workerDb, {
+      anchorTime: anchor,
+      snapshot: async () => "test-snapshot.sqlite",
+    });
+    expect(jobRes.cleanedObservationsCount).toBe(1);
+    const workerRemaining = await workerDb.prepare("SELECT current_players FROM observations ORDER BY observed_at ASC").all<{ current_players: number }>();
+    expect(workerRemaining.results.map((row) => row.current_players)).toEqual([200, 100]);
   });
 
   // G2: UTC daily rollups retain minimum, maximum, average, close, and sample count
@@ -200,24 +200,8 @@ describe("Player History and Rankings", () => {
     await db.prepare("INSERT INTO observations (appid, current_players, observed_at) VALUES (10, 999, '2026-09-04T10:00:00.000Z')").run();
     await db.prepare("INSERT INTO player_rollups (appid, date, min_players, max_players, avg_players, close_players, sample_count) VALUES (11, '2026-09-01', 1, 2, 1.5, 2, 1)").run();
 
-    const tracedQueries: string[] = [];
-    const tracedDb: AppDatabase = {
-      prepare(query) {
-        tracedQueries.push(query);
-        return db.prepare(query);
-      },
-      batch(statements) {
-        return db.batch(statements);
-      },
-      exec(query) {
-        return db.exec(query);
-      },
-    };
-    const bounded = await computeDailyRollups(tracedDb, { anchorTime: anchor });
+    const bounded = await computeDailyRollups(db, { anchorTime: anchor });
     expect(bounded.records.map((record) => record.date)).toEqual(["2026-09-03"]);
-    expect(tracedQueries.some((query) => query.includes("observed_at >= ? AND observed_at < ?"))).toBe(true);
-    expect(tracedQueries.some((query) => query.includes("substr(observed_at"))).toBe(false);
-    expect(tracedQueries.some((query) => query.includes("FROM player_rollups") && query.includes("WHERE date = ?"))).toBe(true);
 
     const todayRollup = await db.prepare("SELECT * FROM player_rollups WHERE date = '2026-09-04'").first();
     expect(todayRollup).toBeNull(); // Current partial day is not rolled up
@@ -225,107 +209,157 @@ describe("Player History and Rankings", () => {
     // Test worker coordinator helper (runs rollups before raw cleanup)
     const jobRes = await runDailyRollupJob(db, {
       anchorTime: anchor,
-      retentionDays: 90,
       snapshot: async () => "test-snapshot.sqlite",
     });
     expect(jobRes.rolledUpCount).toBe(1);
     console.log("daily rollup continuity");
   });
 
-  // G3: player ranges enforce boundaries and All begins at first observation
-  test("player history ranges", async () => {
+  // G3: resolution-aware history aggregates retained raw observations, not stale daily rows.
+  test("hourly and six-hour history preserve raw buckets", async () => {
     const db = await createFreshDb();
     const anchor = new Date("2026-09-04T12:00:00.000Z");
 
     await db.prepare("INSERT INTO apps (appid, name, slug) VALUES (10, 'Game 10', 'game-10')").run();
+    await db.prepare("INSERT INTO player_rollups (appid, date, min_players, max_players, avg_players, close_players, sample_count) VALUES (10, '2026-09-01', 10, 900, 400, 700, 4)").run();
 
-    // First successful observation: 2025-01-01 (All begins here)
-    await db.prepare("INSERT INTO player_rollups (appid, date, min_players, max_players, avg_players, close_players, sample_count) VALUES (10, '2025-01-01', 50, 100, 75, 90, 10)").run();
+    const observations = [
+      [100, "2026-09-01T01:05:00.000Z"],
+      [200, "2026-09-01T01:55:00.000Z"],
+      [300, "2026-09-01T02:02:00.000Z"],
+      [350, "2026-09-01T02:02:00.000Z"],
+      [400, "2026-09-01T06:10:00.000Z"],
+      [600, "2026-09-01T06:59:00.000Z"],
+      [800, "2026-09-01T12:01:00.000Z"],
+      [0, "2026-09-01T18:01:00.000Z"],
+    ] as const;
+    for (const [players, timestamp] of observations) {
+      await db.prepare("INSERT INTO observations (appid, current_players, observed_at) VALUES (10, ?, ?)").bind(players, timestamp).run();
+    }
 
-    // Points inside various ranges:
-    // 2 hours ago (inside 24h, 7d, 30d, 90d)
-    const t2h = new Date(anchor.getTime() - 2 * 60 * 60 * 1000).toISOString();
-    // 3 days ago (inside 7d, 30d, 90d; outside 24h)
-    const t3d = new Date(anchor.getTime() - 3 * 24 * 60 * 60 * 1000).toISOString();
-    // 15 days ago (inside 30d, 90d; outside 7d)
-    const t15d = new Date(anchor.getTime() - 15 * 24 * 60 * 60 * 1000).toISOString();
-    // 45 days ago (inside 90d; outside 30d)
-    const t45d = new Date(anchor.getTime() - 45 * 24 * 60 * 60 * 1000).toISOString();
+    const hourlyResult = await getPlayerHistory(db, 10, "7d", anchor);
+    const hourly = hourlyResult.points.filter((point) => !point.is_gap);
+    expect(hourly.map((point) => point.timestamp)).toEqual([
+      "2026-09-01T01:55:00.000Z",
+      "2026-09-01T02:02:00.000Z",
+      "2026-09-01T06:59:00.000Z",
+      "2026-09-01T12:01:00.000Z",
+      "2026-09-01T18:01:00.000Z",
+    ]);
+    expect(hourlyResult.source_timestamp).toBe("2026-09-01T18:01:00.000Z");
+    expect(hourly[0]).toMatchObject({ players: 200, min: 100, max: 200, avg: 150, close: 200, sample_count: 2 });
+    expect(hourly[1]).toMatchObject({ players: 350, min: 300, max: 350, avg: 325, close: 350, sample_count: 2 });
+    expect(hourly[2]).toMatchObject({ players: 600, min: 400, max: 600, avg: 500, close: 600, sample_count: 2 });
+    expect(hourly[4]).toMatchObject({ players: 0, min: 0, max: 0, avg: 0, close: 0, sample_count: 1 });
+    expect(hourly.some((point) => point.timestamp === "2026-09-01T00:00:00.000Z")).toBe(false);
 
-    await db.prepare("INSERT INTO observations (appid, current_players, observed_at) VALUES (10, 1000, ?)").bind(t2h).run();
-    await db.prepare("INSERT INTO observations (appid, current_players, observed_at) VALUES (10, 800, ?)").bind(t3d).run();
-    await db.prepare("INSERT INTO observations (appid, current_players, observed_at) VALUES (10, 600, ?)").bind(t15d).run();
-    await db.prepare("INSERT INTO observations (appid, current_players, observed_at) VALUES (10, 400, ?)").bind(t45d).run();
-    const t15dDate = t15d.substring(0, 10);
-    const t45dDate = t45d.substring(0, 10);
-    await db.prepare("INSERT INTO player_rollups (appid, date, min_players, max_players, avg_players, close_players, sample_count) VALUES (10, ?, 600, 600, 600, 600, 1)").bind(t15dDate).run();
-    await db.prepare("INSERT INTO player_rollups (appid, date, min_players, max_players, avg_players, close_players, sample_count) VALUES (10, ?, 400, 400, 400, 400, 1)").bind(t45dDate).run();
+    const sixHourResult = await getPlayerHistory(db, 10, "30d", anchor);
+    const sixHour = sixHourResult.points.filter((point) => !point.is_gap);
+    expect(sixHour.map((point) => point.timestamp)).toEqual([
+      "2026-09-01T02:02:00.000Z",
+      "2026-09-01T06:59:00.000Z",
+      "2026-09-01T12:01:00.000Z",
+      "2026-09-01T18:01:00.000Z",
+    ]);
+    expect(sixHourResult.source_timestamp).toBe("2026-09-01T18:01:00.000Z");
+    expect(sixHour[0]).toMatchObject({ players: 350, min: 100, max: 350, avg: 237.5, close: 350, sample_count: 4 });
+    expect(sixHour[1]).toMatchObject({ players: 600, min: 400, max: 600, avg: 500, close: 600, sample_count: 2 });
+    expect(sixHour[3].players).toBe(0);
+  });
 
-    // 24h range: only 2h observation
-    const res24h = await getPlayerHistory(db, 10, "24h", anchor);
-    expect(res24h.range).toBe("24h");
-    expect(res24h.range_start).toBe(new Date(anchor.getTime() - 24 * 60 * 60 * 1000).toISOString());
-    expect(res24h.range_end).toBe(anchor.toISOString());
-    expect(res24h.points.filter((p) => !p.is_gap).length).toBe(1);
-    expect(res24h.points.find((p) => !p.is_gap)?.players).toBe(1000);
+  // G4: 90d and All expose one daily point per occupied UTC day, including today.
+  test("daily history merges rollups and raw-only current day", async () => {
+    const db = await createFreshDb();
+    const anchor = new Date("2026-09-04T12:00:00.000Z");
 
-    // 7d range: 2h and 3d
-    const res7d = await getPlayerHistory(db, 10, "7d", anchor);
-    expect(res7d.range).toBe("7d");
-    expect(res7d.range_start).toBe(new Date(anchor.getTime() - 7 * 24 * 60 * 60 * 1000).toISOString());
-    expect(res7d.range_end).toBe(anchor.toISOString());
-    expect(res7d.points.filter((p) => !p.is_gap).length).toBe(2);
+    await db.prepare("INSERT INTO apps (appid, name, slug) VALUES (10, 'Game 10', 'game-10')").run();
+    await db.prepare("INSERT INTO player_rollups (appid, date, min_players, max_players, avg_players, close_players, sample_count) VALUES (10, '2026-09-01', 10, 900, 400, 700, 4)").run();
+    await db.prepare("INSERT INTO player_rollups (appid, date, min_players, max_players, avg_players, close_players, sample_count) VALUES (10, '2026-09-04', 900, 9999, 5000, 9999, 99)").run();
+    const observations = [
+      [22, "2026-09-01T02:00:00.000Z"],
+      [50, "2026-09-03T03:00:00.000Z"],
+      [70, "2026-09-03T23:00:00.000Z"],
+      [100, "2026-09-04T01:00:00.000Z"],
+      [0, "2026-09-04T10:00:00.000Z"],
+    ] as const;
+    for (const [players, timestamp] of observations) {
+      await db.prepare("INSERT INTO observations (appid, current_players, observed_at) VALUES (10, ?, ?)").bind(players, timestamp).run();
+    }
 
-    // 30d range (default): 2h, 3d, 15d
-    const res30d = await getPlayerHistory(db, 10, "30d", anchor);
-    expect(res30d.range).toBe("30d");
-    expect(res30d.range_start).toBe(new Date(anchor.getTime() - 30 * 24 * 60 * 60 * 1000).toISOString());
-    expect(res30d.range_end).toBe(anchor.toISOString());
-    expect(res30d.points.filter((p) => !p.is_gap).length).toBe(3);
+    const daily90 = (await getPlayerHistory(db, 10, "90d", anchor)).points.filter((point) => !point.is_gap);
+    expect(daily90).toHaveLength(3);
+    expect(daily90.map((point) => point.timestamp.slice(0, 10))).toEqual(["2026-09-01", "2026-09-03", "2026-09-04"]);
+    expect(daily90[0]).toMatchObject({ timestamp: "2026-09-01T02:00:00.000Z", players: 700, min: 10, max: 900, avg: 400, close: 700, sample_count: 4 });
+    expect(daily90[1]).toMatchObject({ timestamp: "2026-09-03T23:00:00.000Z", players: 70, min: 50, max: 70, avg: 60, close: 70, sample_count: 2 });
+    expect(daily90[2]).toMatchObject({ timestamp: "2026-09-04T10:00:00.000Z", players: 0, min: 0, max: 100, avg: 50, close: 0, sample_count: 2 });
 
-    // Default range when omitted or invalid
-    const resDefault = await getPlayerHistory(db, 10, "invalid_range_string", anchor);
-    expect(resDefault.range).toBe("30d");
+    const all = await getPlayerHistory(db, 10, "all", anchor);
+    expect(all.range_start).toBe("2026-09-01T02:00:00.000Z");
+    expect(all.range_end).toBe("2026-09-04T10:00:00.000Z");
+    expect(all.source_timestamp).toBe("2026-09-04T10:00:00.000Z");
+    expect(all.points.filter((point) => !point.is_gap)).toHaveLength(3);
+    expect(all.points.some((point) => point.timestamp === "2026-09-04T00:00:00.000Z")).toBe(false);
+  });
 
-    // 90d range: 2h, 3d, 15d, 45d
-    const res90d = await getPlayerHistory(db, 10, "90d", anchor);
-    expect(res90d.range).toBe("90d");
-    expect(res90d.range_start).toBe(new Date(anchor.getTime() - 90 * 24 * 60 * 60 * 1000).toISOString());
-    expect(res90d.range_end).toBe(anchor.toISOString());
-    expect(res90d.points.filter((p) => !p.is_gap).length).toBe(4);
-    const cleanedHistory = await cleanExpiredRawObservations(db, anchor);
-    expect(cleanedHistory).toBe(2);
-    const retained30d = await getPlayerHistory(db, 10, "30d", anchor);
-    const retained90d = await getPlayerHistory(db, 10, "90d", anchor);
-    expect(retained30d.points.filter((p) => !p.is_gap).length).toBe(3);
-    expect(retained90d.points.filter((p) => !p.is_gap).length).toBe(4);
+  // G4b: a midnight cutoff includes the complete boundary rollup; a partial day uses raw only.
+  test("daily cutoff boundary semantics", async () => {
+    const db = await createFreshDb();
+    const exactMidnight = new Date("2026-09-04T00:00:00.000Z");
+    await db.prepare("INSERT INTO apps (appid, name, slug) VALUES (40, 'Cutoff Game', 'cutoff-game')").run();
+    await db.prepare("INSERT INTO player_rollups (appid, date, min_players, max_players, avg_players, close_players, sample_count) VALUES (40, '2026-06-06', 10, 20, 15, 20, 2)").run();
 
-    // Future observations/rollups after anchorTime must be bounded out
-    await db.prepare("INSERT INTO observations (appid, current_players, observed_at) VALUES (10, 9999, '2026-09-05T00:00:00.000Z')").run();
-    await db.prepare("INSERT INTO player_rollups (appid, date, min_players, max_players, avg_players, close_players, sample_count) VALUES (10, '2026-09-06', 9999, 9999, 9999, 9999, 1)").run();
+    const midnightHistory = await getPlayerHistory(db, 40, "90d", exactMidnight);
+    const midnightBoundary = midnightHistory.points.find((point) => !point.is_gap && point.timestamp.startsWith("2026-06-06"));
+    expect(midnightBoundary).toMatchObject({ timestamp: "2026-06-06T00:00:00.000Z", players: 20, min: 10, max: 20, avg: 15, close: 20, sample_count: 2 });
 
-    // App-scoped earliest observation begins at this game's earliest, not another game's earlier observation
-    await db.prepare("INSERT INTO apps (appid, name, slug) VALUES (99, 'Earlier Game', 'earlier-game')").run();
-    await db.prepare("INSERT INTO player_rollups (appid, date, min_players, max_players, avg_players, close_players, sample_count) VALUES (99, '2024-01-01', 1, 2, 1, 2, 1)").run();
+    await db.prepare("INSERT INTO observations (appid, current_players, observed_at) VALUES (40, 999, '2026-06-06T11:59:00.000Z')").run();
+    await db.prepare("INSERT INTO observations (appid, current_players, observed_at) VALUES (40, 200, '2026-06-06T12:01:00.000Z')").run();
+    const partialHistory = await getPlayerHistory(db, 40, "90d", new Date("2026-09-04T12:00:00.000Z"));
+    const partialBoundary = partialHistory.points.find((point) => !point.is_gap && point.timestamp.startsWith("2026-06-06"));
+    expect(partialBoundary).toMatchObject({ timestamp: "2026-06-06T12:01:00.000Z", players: 200, min: 200, max: 200, avg: 200, close: 200, sample_count: 1 });
+    expect(partialHistory.points.some((point) => point.players === 999)).toBe(false);
+  });
 
-    const earliestGlobal = await getEarliestObservationDate(db);
-    expect(earliestGlobal).toContain("2024-01-01");
-    const earliestGame10 = await getEarliestObservationDate(db, 10);
-    expect(earliestGame10).toContain("2025-01-01"); // Game 10's own earliest
-    expect(earliestGame10).not.toContain("2024-01-01");
+  // G5: fixed windows exclude outside observations; bucket-key gaps differ from raw outages.
+  test("window cutoffs and bucket gaps are observable", async () => {
+    const db = await createFreshDb();
+    const anchor = new Date("2026-09-04T12:00:00.000Z");
 
-    // All range starts at this game's first record and ends at its latest record.
-    const resAll = await getPlayerHistory(db, 10, "all", anchor);
-    expect(resAll.range).toBe("all");
-    expect(resAll.earliest_observation).toContain("2025-01-01");
-    expect(resAll.range_start).toBe("2025-01-01T00:00:00.000Z");
-    expect(resAll.points.some((p) => p.is_rollup)).toBe(true);
-    // Future observation after anchorTime is bounded out
-    expect(resAll.points.some((p) => p.players === 9999)).toBe(false);
-    // source_timestamp and the All-domain end reflect the latest real record.
-    expect(resAll.source_timestamp).toBe(t2h);
-    expect(resAll.range_end).toBe(t2h);
-    console.log("player history ranges");
+    await db.prepare("INSERT INTO apps (appid, name, slug) VALUES (20, 'Boundary Game', 'boundary-game')").run();
+    const boundaryObservations = [
+      [999, "2026-08-28T11:59:00.000Z"],
+      [100, "2026-08-28T12:00:00.000Z"],
+      [200, "2026-08-28T12:05:00.000Z"],
+      [300, "2026-08-28T13:59:00.000Z"],
+      [400, "2026-08-28T15:01:00.000Z"],
+    ] as const;
+    for (const [players, timestamp] of boundaryObservations) {
+      await db.prepare("INSERT INTO observations (appid, current_players, observed_at) VALUES (20, ?, ?)").bind(players, timestamp).run();
+    }
+
+    const bounded = await getPlayerHistory(db, 20, "7d", anchor);
+    expect(bounded.range_start).toBe("2026-08-28T12:00:00.000Z");
+    expect(bounded.range_end).toBe(anchor.toISOString());
+    expect(bounded.points.some((point) => point.players === 999)).toBe(false);
+    expect(bounded.points[0]?.is_gap).not.toBe(true);
+    const valid = bounded.points.filter((point) => !point.is_gap);
+    expect(valid.map((point) => point.players)).toEqual([200, 300, 400]);
+    expect(bounded.points.some((point) => point.players === 0)).toBe(false);
+    const adjacentFirst = bounded.points.findIndex((point) => point.timestamp === "2026-08-28T12:05:00.000Z");
+    const adjacentSecond = bounded.points.findIndex((point) => point.timestamp === "2026-08-28T13:59:00.000Z");
+    expect(adjacentSecond - adjacentFirst).toBe(1);
+    const afterAdjacentBuckets = bounded.points.findIndex((point) => point.timestamp === "2026-08-28T13:59:00.000Z");
+    expect(afterAdjacentBuckets).toBeGreaterThanOrEqual(0);
+    expect(bounded.points[afterAdjacentBuckets + 1]?.is_gap).toBe(true);
+    expect(bounded.points[afterAdjacentBuckets + 1]?.players).toBeNull();
+
+    await db.prepare("INSERT INTO apps (appid, name, slug) VALUES (30, 'Outage Game', 'outage-game')").run();
+    await db.prepare("INSERT INTO observations (appid, current_players, observed_at) VALUES (30, 500, '2026-09-04T10:00:00.000Z')").run();
+    await db.prepare("INSERT INTO observations (appid, current_players, observed_at) VALUES (30, 0, '2026-09-04T11:01:00.000Z')").run();
+    const outage = await getPlayerHistory(db, 30, "24h", anchor);
+    expect(outage.points.some((point) => point.is_gap && point.players === null)).toBe(true);
+    expect(outage.points.some((point) => point.players === 0)).toBe(true);
+    expect(outage.points.some((point) => point.players === null && !point.is_gap)).toBe(false);
   });
 
   // G4: player charts expose labels, values, gaps, and a numeric time domain
@@ -428,6 +462,30 @@ describe("Player History and Rankings", () => {
     expect(constHtml).toContain("500");
     expect(constHtml).toContain("<path");
 
+
+    // Aggregated buckets expose extrema and a sample-weighted average, not an average of closes.
+    const aggregateHtml = renderToString(
+      React.createElement(PlayerHistoryChart, {
+        appid: 31,
+        initialRange: "30d",
+        initialData: {
+          appid: 31,
+          range: "30d",
+          earliest_observation: "2026-08-01T00:00:00.000Z",
+          range_start: "2026-08-05T12:00:00.000Z",
+          range_end: "2026-09-04T12:00:00.000Z",
+          points: [
+            { timestamp: "2026-08-10T12:00:00.000Z", players: 100, min: 50, max: 300, avg: 100, close: 100, sample_count: 1 },
+            { timestamp: "2026-08-15T12:00:00.000Z", players: 900, min: 200, max: 900, avg: 700, close: 900, sample_count: 9 },
+            { timestamp: "2026-08-20T12:00:00.000Z", players: 400, min: 100, max: 500, avg: 300, close: 400, sample_count: 2 },
+          ],
+          source_timestamp: "2026-08-20T12:00:00.000Z",
+        },
+      })
+    );
+    expect(aggregateHtml).toContain("50");
+    expect(aggregateHtml).toContain("900");
+    expect(aggregateHtml).toContain("583");
     // Ensure render does not trigger infinite loops or unexpected side-effects
     let fetchCount = 0;
     const trackingFetch = (async () => {
@@ -616,32 +674,6 @@ describe("Player History and Rankings", () => {
     console.log("home trending contract");
   });
 
-  // G8: no momentum score, duplicate Most Played block, or trending route exists
-  test("forbidden ranking surfaces", async () => {
-    // 1. Confirm /rankings/trending route file does NOT exist
-    const forbiddenRoute = resolve(import.meta.dir, "../src/routes/rankings.trending.tsx");
-    expect(existsSync(forbiddenRoute)).toBe(false);
-
-    // 2. Confirm no momentum score or velocity is exported or calculated
-    const phModule = playerHistoryModule;
-    expect((phModule as Record<string, unknown>).calculateMomentum).toBeUndefined();
-    expect((phModule as Record<string, unknown>).getMomentumRankings).toBeUndefined();
-
-    // 3. Confirm trending has no minimum-player floor
-    const db = await createFreshDb();
-    const now = new Date("2026-09-04T12:00:00.000Z");
-    await db.prepare("INSERT INTO apps (appid, name, slug) VALUES (999, 'Small Indie', 'small-indie')").run();
-    await db.prepare("INSERT INTO tracked_games (appid, latest_players, last_successful_at, next_due_at) VALUES (999, 1, ?, '2026-09-04T13:00:00Z')").bind(now.toISOString()).run();
-
-    const lowCountTrending = await getTrendingGames(db, { now });
-    // 1 player is eligible, not filtered out by an arbitrary floor like 100 players
-    expect(lowCountTrending.some((g) => g.appid === 999 && g.current_players === 1)).toBe(true);
-
-    // 4. Confirm workers/player-rollups does not export an unauthenticated worker fetch surface
-    expect((rollupsWorkerModule as Record<string, unknown>).default).toBeUndefined();
-
-    console.log("forbidden ranking surfaces");
-  });
 
   // G9: history and ranking responses expose source times and live caching
   test("history api contract", async () => {

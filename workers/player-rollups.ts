@@ -2,6 +2,7 @@ import { createDailySnapshot, type AppDatabase } from "../src/lib/db";
 import {
   computeDailyRollups,
   cleanExpiredRawObservations,
+  RAW_OBSERVATION_RETENTION_DAYS,
   type RollupRecord,
 } from "../src/lib/player-history";
 
@@ -16,7 +17,7 @@ export interface RollupJobResult {
 
 /**
  * Executes the UTC daily player rollup cycle. The prior UTC day is rolled up,
- * then seven-day raw observations are removed, and one dated snapshot is made.
+ * then thirty-day raw observations are removed, and one dated snapshot is made.
  * Cleanup and snapshot are reached only after rollup persistence succeeds.
  */
 export async function runDailyRollupJob(
@@ -30,7 +31,7 @@ export async function runDailyRollupJob(
 ): Promise<RollupJobResult> {
   const anchorTime = options.anchorTime ?? new Date();
   const targetDate = options.targetDate ?? previousUtcDate(anchorTime);
-  const retentionDays = options.retentionDays ?? 7;
+  const retentionDays = options.retentionDays ?? RAW_OBSERVATION_RETENTION_DAYS;
 
   const rollupResult = await computeDailyRollups(db, {
     targetDate,

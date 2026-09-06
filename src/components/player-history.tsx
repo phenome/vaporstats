@@ -114,20 +114,34 @@ export function PlayerHistoryChart({
     [points]
   );
 
-  // Derive metrics across valid points without zero-falsification
+  // Derive metrics from bucket metadata when available. Raw points count once;
+  // rollups contribute their recorded sample_count.
   const stats = useMemo(() => {
     if (validPoints.length === 0) return null;
     let min = Infinity;
     let max = -Infinity;
-    let sum = 0;
+    let weightedSum = 0;
+    let totalWeight = 0;
     for (const p of validPoints) {
       const val = p.players!;
-      if (val < min) min = val;
-      if (val > max) max = val;
-      sum += val;
+      const pointMin = typeof p.min === "number" ? p.min : val;
+      const pointMax = typeof p.max === "number" ? p.max : val;
+      if (pointMin < min) min = pointMin;
+      if (pointMax > max) max = pointMax;
+
+      const pointAverage = typeof p.avg === "number" ? p.avg : val;
+      const pointWeight =
+        typeof p.sample_count === "number" &&
+        Number.isFinite(p.sample_count) &&
+        p.sample_count > 0
+          ? p.sample_count
+          : 1;
+      weightedSum += pointAverage * pointWeight;
+      totalWeight += pointWeight;
     }
-    const avg = Math.round(sum / validPoints.length);
-    const latest = validPoints[validPoints.length - 1]?.players ?? null;
+    const avg = Math.round(weightedSum / totalWeight);
+    const latestPoint = validPoints[validPoints.length - 1];
+    const latest = latestPoint?.close ?? latestPoint?.players ?? null;
     return { min, max, avg, latest };
   }, [validPoints]);
 
@@ -214,7 +228,7 @@ export function PlayerHistoryChart({
         timestamp: p.timestamp,
         timestampMs: d.getTime(),
         fullDate,
-        players: p.players,
+        players: p.is_gap ? null : p.players,
       };
     });
   }, [points]);
@@ -262,7 +276,12 @@ export function PlayerHistoryChart({
               <button
                 key={r}
                 type="button"
-                onClick={() => setRange(r)}
+                onClick={() => {
+                  if (r === range) return;
+                  setRange(r);
+                  setData(null);
+                  setStatus("loading");
+                }}
                 aria-pressed={active}
                 className={`min-h-[44px] min-w-[44px] px-2.5 py-1 inline-flex items-center justify-center text-[11px] font-mono uppercase tracking-wider transition-colors rounded-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-orange-500 ${
                   active
@@ -397,6 +416,7 @@ export function PlayerHistoryChart({
                     stroke="#f97316"
                     strokeWidth={2}
                     fill="url(#playerGradient)"
+                    dot={{ fill: "#ea580c", r: 3, stroke: "#18181b", strokeWidth: 1 }}
                     connectNulls={false}
                     isAnimationActive={false}
                   />
@@ -509,46 +529,36 @@ export function PlayerHistoryChart({
 
               {/* Gap-preserving Polyline Segments */}
               {chartSegments.map((segment, segIdx) => {
-                if (segment.length === 1) {
-                  // Single point: render as dot
-                  return (
-                    <circle
-                      key={`dot-${segIdx}`}
-                      cx={segment[0].x}
-                      cy={segment[0].y}
-                      r={3}
-                      fill="#ea580c"
-                    />
-                  );
-                }
                 const pathD = segment
                   .map((p, i) => `${i === 0 ? "M" : "L"} ${p.x.toFixed(1)} ${p.y.toFixed(1)}`)
                   .join(" ");
 
                 return (
-                  <path
-                    key={`seg-${segIdx}`}
-                    d={pathD}
-                    fill="none"
-                    stroke="#ea580c"
-                    strokeWidth="2"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  />
+                  <React.Fragment key={`seg-${segIdx}`}>
+                    {segment.length > 1 && (
+                      <path
+                        d={pathD}
+                        fill="none"
+                        stroke="#ea580c"
+                        strokeWidth="2"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      />
+                    )}
+                    {segment.map((point, pointIdx) => (
+                      <circle
+                        key={`dot-${segIdx}-${pointIdx}`}
+                        cx={point.x}
+                        cy={point.y}
+                        r={3}
+                        fill="#ea580c"
+                        stroke="#18181b"
+                        strokeWidth={1}
+                      />
+                    ))}
+                  </React.Fragment>
                 );
               })}
-
-              {/* Endpoint marker */}
-              {chartSegments.length > 0 && (
-                <circle
-                  cx={chartSegments[chartSegments.length - 1].slice(-1)[0]?.x}
-                  cy={chartSegments[chartSegments.length - 1].slice(-1)[0]?.y}
-                  r={4}
-                  fill="#f97316"
-                  stroke="#18181b"
-                  strokeWidth={2}
-                />
-              )}
             </svg>
             )}
           </div>

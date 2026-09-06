@@ -159,7 +159,7 @@ describe("Bun ingestion scheduling and player rollups", () => {
     expect(observation?.current_players).toBe(1234);
   });
 
-  test("rolls up only the prior UTC day, then retains seven days before snapshot", async () => {
+  test("rolls up only the prior UTC day, then retains thirty days before snapshot", async () => {
     const db = createAppDatabase();
     const anchorTime = new Date("2026-09-05T00:05:00.000Z");
     await db
@@ -172,11 +172,11 @@ describe("Bun ingestion scheduling and player rollups", () => {
       .run();
     await db
       .prepare("INSERT INTO observations (appid, current_players, observed_at) VALUES (?, ?, ?)")
-      .bind(1, 50, "2026-08-28T23:59:59.999Z")
+      .bind(1, 50, "2026-08-05T23:59:59.999Z")
       .run();
     await db
       .prepare("INSERT INTO observations (appid, current_players, observed_at) VALUES (?, ?, ?)")
-      .bind(1, 75, "2026-08-29T00:05:00.000Z")
+      .bind(1, 75, "2026-08-06T00:05:00.000Z")
       .run();
 
     const order: string[] = [];
@@ -199,7 +199,7 @@ describe("Bun ingestion scheduling and player rollups", () => {
       .prepare("SELECT observed_at FROM observations ORDER BY observed_at")
       .all<{ observed_at: string }>();
     expect(retained.results.map((row) => row.observed_at)).toEqual([
-      "2026-08-29T00:05:00.000Z",
+      "2026-08-06T00:05:00.000Z",
       "2026-09-04T12:00:00.000Z",
       "2026-09-04T18:00:00.000Z",
     ]);
