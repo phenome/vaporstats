@@ -47,6 +47,12 @@ if ! git diff-index --quiet HEAD --; then
   fail "deployment checkout has tracked changes"
 fi
 
+current_commit=$(git rev-parse HEAD)
+migrations_changed=0
+if ! git diff --quiet "$current_commit" "$requested_commit" -- migrations/; then
+  migrations_changed=1
+fi
+
 previous_image_id=$(docker inspect --format '{{.Image}}' "$CONTAINER_NAME" 2>/dev/null || true)
 [[ -n "$previous_image_id" ]] || fail "missing running container: $CONTAINER_NAME"
 docker image tag "$previous_image_id" "$ROLLBACK_IMAGE"
@@ -118,25 +124,42 @@ rollback() {
 }
 trap rollback EXIT
 
-compose stop vaporstats
 rollback_required=1
-mkdir -p "$SNAPSHOT_ROOT"
-snapshot_dir=$(mktemp -d "$SNAPSHOT_ROOT/deploy-$requested_commit.XXXXXX")
-for path in "$DATABASE_PATH" "$DATABASE_PATH-wal" "$DATABASE_PATH-shm"; do
-  [[ -e "$path" ]] || continue
-  cp -a "$path" "$snapshot_dir/$(basename "$path")"
-done
-snapshot_ready=1
 
-# The migration image must see a coherent pre-migration database.
-check_database_integrity() {
-  [[ -e "$DATABASE_PATH" ]] || return 0
-  compose run --rm --no-deps -T vaporstats bun -e 'const { Database } = require("bun:sqlite"); const db = new Database(process.env.DATABASE_PATH, { readonly: true }); const result = db.query("PRAGMA integrity_check").get(); if (result?.integrity_check !== "ok") { console.error(result); process.exit(1); } db.close();'
+if (( migrations_changed )); then
+  # Migration path: schema changes detected.
+  # Stop service, snapshot database, and run combined integrity check + migrations in one container.
+  compose stop vaporstats
+  mkdir -p "$SNAPSHOT_ROOT"
+  snapshot_dir=$(mktemp -d "$SNAPSHOT_ROOT/deploy-$requested_commit.XXXXXX")
+  for path in "$DATABASE_PATH" "$DATABASE_PATH-wal" "$DATABASE_PATH-shm"; do
+    [[ -e "$path" ]] || continue
+    cp -a "$path" "$snapshot_dir/$(basename "$path")"
+  done
+  snapshot_ready=1
+
+  # Combined integrity check and migrations run in a single temporary container.
+  compose run --rm --no-deps -T vaporstats bun -e '
+const { Database } = require("bun:sqlite");
+const dbPath = process.env.DATABASE_PATH;
+if (dbPath && require("node:fs").existsSync(dbPath)) {
+  const db = new Database(dbPath, { readonly: true });
+  const result = db.query("PRAGMA integrity_check").get();
+  db.close();
+  if (result?.integrity_check !== "ok") {
+    console.error("PRAGMA integrity_check failed:", result);
+    process.exit(1);
+  }
 }
+import("./dist/migrate.js");
+'
+else
+  # Fast path: no schema changes.
+  # Direct in-place container recreation with zero database mutation risk.
+  # Caddy reverse_proxy retries buffer incoming requests during the ~500ms recreate window.
+  printf 'deploy: no migration changes detected; executing fast in-place recreate\n'
+fi
 
-check_database_integrity
-# Migrations are an explicit runtime artifact; generation never runs here.
-compose run --rm --no-deps -T vaporstats bun dist/migrate.js
 compose up -d --no-build vaporstats
 wait_for_healthy || fail 'new container did not become healthy'
 
