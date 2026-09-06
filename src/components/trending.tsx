@@ -1,3 +1,4 @@
+import { formatNumber } from "../lib/format";
 import React, { useState, useEffect } from "react";
 import { AppLink } from "./app-link";
 import type { RankedGame } from "../lib/player-history";
@@ -124,9 +125,7 @@ export function TrendingBlock({ initialGames, customFetch }: TrendingProps) {
                   <div className="flex items-center gap-4 shrink-0 text-right font-mono text-xs">
                     <div>
                       <span className="text-zinc-100 font-bold tabular-nums block">
-                        {game.current_players !== null
-                          ? game.current_players.toLocaleString("en-US")
-                          : "No data"}
+                        {formatNumber(game.current_players)}
                       </span>
                       <span className="text-[10px] text-zinc-500 block">
                         {game.relative_age}

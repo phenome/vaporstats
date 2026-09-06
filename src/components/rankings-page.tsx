@@ -1,3 +1,4 @@
+import { formatNumber } from "../lib/format";
 import React from "react";
 import type { RankedGame } from "../lib/player-history";
 import { getCanonicalGamePath } from "../lib/slug";
@@ -98,9 +99,7 @@ export function RankingsPageView({ games = [] }: RankingsPageViewProps) {
                       </span>
                     </td>
                     <td className="px-4 py-3 text-right font-bold text-zinc-100 tabular-nums">
-                      {game.current_players !== null
-                        ? game.current_players.toLocaleString("en-US")
-                        : "No data"}
+                      {formatNumber(game.current_players)}
                     </td>
                     <td className="px-4 py-3 text-right text-zinc-400 tabular-nums">
                       {game.relative_age}

@@ -11,6 +11,7 @@ import {
   getDeals,
   isDealEligible,
   parsePriceRange,
+  formatPriceCents,
   type PriceHistoryRange,
 } from "../src/lib/prices";
 import { formatCurrentPrice, isPriceDiscounted } from "../src/lib/price-presentation";
@@ -1205,13 +1206,13 @@ describe("VaporStats Steam Prices and Deals", () => {
     // Verify accessibility attributes and visible labels
     expect(html).toContain('aria-label="Price history time ranges"');
     expect(html).toContain('role="img"');
-    expect(html).toContain("$29.99");
+    expect(html).toContain(formatPriceCents(2999, "USD"));
     // Verify 4-slot metric bar rendering
     expect(html).toContain("Current Price");
     expect(html).toContain("30D Low");
     expect(html).toContain("Base Price");
     expect(html).toContain("All-Time Low");
-    expect(html).toContain("$59.99");
+    expect(html).toContain(formatPriceCents(5999, "USD"));
     // Verify explicit UTC display
     expect(html).toContain("UTC");
     // Regression: SSR render does not invoke render-time fetch loops
@@ -1247,11 +1248,12 @@ describe("VaporStats Steam Prices and Deals", () => {
       observed_at: "2026-09-04T12:00:00.000Z",
     };
     expect(isPriceDiscounted(regular)).toBe(false);
-    expect(formatCurrentPrice(regular)).toBe("$59.99");
+    expect(formatCurrentPrice(regular)).toBe(formatPriceCents(5999, "USD"));
     const regularHtml = renderToString(
       React.createElement(PriceSummary, { price: regular, variant: "card" })
     );
-    expect(regularHtml).toContain("$59.99");
+    expect(regularHtml).toContain(formatPriceCents(5999, "USD"));
+    expect(regularHtml).toContain("text-right ml-auto");
     expect(regularHtml).not.toContain("Current offer");
     expect(regularHtml).not.toContain("Save ");
 
@@ -1261,9 +1263,17 @@ describe("VaporStats Steam Prices and Deals", () => {
     const freeHtml = renderToString(
       React.createElement(PriceSummary, { price: free, variant: "hero" })
     );
-    expect(freeHtml).toContain("Free to play");
+    expect(freeHtml).toContain("Free");
+    expect(freeHtml).not.toContain("Free to play");
     expect(freeHtml).not.toContain("Save ");
 
+    const freeCardHtml = renderToString(
+      React.createElement(PriceSummary, { price: free, variant: "card" })
+    );
+    expect(freeCardHtml).toContain("Free");
+    expect(freeCardHtml).not.toContain("Free to play");
+    expect(freeCardHtml).toContain("text-left");
+    expect(freeCardHtml).not.toContain("text-right ml-auto");
     const unavailable = { ...regular, initial_price: null, final_price: null, discount_percent: 0, is_available: false, formatted_initial: null, formatted_final: null };
     expect(isPriceDiscounted(unavailable)).toBe(false);
     expect(formatCurrentPrice(unavailable)).toBe("Price unavailable");
@@ -1276,13 +1286,13 @@ describe("VaporStats Steam Prices and Deals", () => {
 
     const temporaryZero = { ...regular, final_price: 0, discount_percent: 100, formatted_final: "$0.00" };
     expect(isPriceDiscounted(temporaryZero)).toBe(true);
-    expect(formatCurrentPrice(temporaryZero)).toBe("$0.00");
+    expect(formatCurrentPrice(temporaryZero)).toBe(formatPriceCents(0, "USD"));
     const temporaryHtml = renderToString(
       React.createElement(PriceSummary, { price: temporaryZero, variant: "hero" })
     );
     expect(temporaryHtml).toContain("Limited-time offer");
-    expect(temporaryHtml).toContain("$0.00");
-    expect(temporaryHtml).not.toContain("Free to play");
+    expect(temporaryHtml).toContain(formatPriceCents(0, "USD"));
+    expect(temporaryHtml).not.toContain("Free");
   });
 
   test("price history proves permanent free status across retained history", async () => {
@@ -1606,7 +1616,7 @@ describe("VaporStats Steam Prices and Deals", () => {
     const gameHtml = await gameRes.text();
     const gameText = gameHtml.replace(/<!-- -->/g, "");
     // Verifies GamePage visibly displays current US/USD price, discount %, source time
-    expect(gameHtml).toContain("$29.99");
+    expect(gameHtml).toContain(formatPriceCents(2999, "USD"));
     expect(gameText).toContain("50%");
     expect(gameHtml).toContain("2026-09-04 12:00:00 UTC");
     // Verifies player history + related apps preserved
@@ -1623,7 +1633,7 @@ describe("VaporStats Steam Prices and Deals", () => {
     const childHtml = await childRes.text();
     const childText = childHtml.replace(/<!-- -->/g, "");
     // Child page visibly displays own current price + discount + price history
-    expect(childHtml).toContain("$29.99");
+    expect(childHtml).toContain(formatPriceCents(2999, "USD"));
     expect(childText).toContain("-25%");
 
     expect(childHtml).toContain("https://store.steampowered.com/app/2778580/");

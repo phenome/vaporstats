@@ -318,7 +318,7 @@ export function PriceHistoryChart({
                   <line x1={geometry.padLeft} y1={geometry.padTop} x2={geometry.width - geometry.padRight} y2={geometry.padTop} stroke="#27272a" strokeDasharray="3 3" />
                   <line x1={geometry.padLeft} y1={geometry.height - geometry.padBottom} x2={geometry.width - geometry.padRight} y2={geometry.height - geometry.padBottom} stroke="#3f3f46" />
                   <text x={geometry.padLeft - 6} y={geometry.padTop + 4} textAnchor="end" fill="#71717a" fontSize="10" fontFamily="monospace">{formatPriceCents(geometry.maxPriceCents, currentPrice?.currency ?? "USD")}</text>
-                  <text x={geometry.padLeft - 6} y={geometry.height - geometry.padBottom + 4} textAnchor="end" fill="#71717a" fontSize="10" fontFamily="monospace">$0.00</text>
+                  <text x={geometry.padLeft - 6} y={geometry.height - geometry.padBottom + 4} textAnchor="end" fill="#71717a" fontSize="10" fontFamily="monospace">{formatPriceCents(0, currentPrice?.currency ?? "USD")}</text>
                   <text x={geometry.padLeft} y={geometry.height - 10} textAnchor="start" fill="#71717a" fontSize="10" fontFamily="monospace">{new Date(domain.start).toISOString().slice(0, 10)}</text>
                   <text x={geometry.width - geometry.padRight} y={geometry.height - 10} textAnchor="end" fill="#71717a" fontSize="10" fontFamily="monospace">{new Date(domain.end).toISOString().slice(0, 10)}</text>
                   {geometry.savingsAreas.map((area, index) => (

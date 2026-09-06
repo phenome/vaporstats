@@ -1,3 +1,4 @@
+import { formatNumber } from "../lib/format";
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import type { PriceState } from "../lib/prices";
 import { PriceSummary } from "./price-summary";
@@ -192,8 +193,8 @@ export function PlayerPanel({
             data?.latest_players !== null &&
             data?.latest_players !== undefined && (
               <div className="space-y-1" data-testid="player-panel-data">
-                <div className="text-3xl font-mono font-bold text-zinc-100 tabular-nums">
-                  {data.latest_players.toLocaleString("en-US")}
+                <div className="text-3xl font-mono font-bold text-zinc-100 tabular-nums text-right">
+                  {formatNumber(data.latest_players)}
                 </div>
                 {data.observed_at && (
                   <p className="text-[11px] text-zinc-500 font-mono">

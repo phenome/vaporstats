@@ -17,15 +17,13 @@ export function PriceSummary({
   status = "success",
 }: PriceSummaryProps) {
   const offer = status === "success" && isPriceDiscounted(price);
-  const free = status === "success" && Boolean(price?.is_available && price.is_free);
   const value =
     status === "loading"
       ? "Loading"
       : status === "error"
         ? "Live data unavailable"
-        : free
-          ? "Free to play"
-          : formatCurrentPrice(price);
+        : formatCurrentPrice(price);
+  const isNumeric = /\d/.test(value);
   const discount = price?.discount_percent ?? 0;
   const initialPrice = price?.initial_price ?? null;
   const finalPrice = price?.final_price ?? null;
@@ -100,10 +98,14 @@ export function PriceSummary({
       </div>
       <div className="pt-2">
         <div className="flex flex-wrap items-baseline justify-between gap-2">
-          <p className="text-3xl font-mono font-bold tabular-nums text-zinc-100">
+          {offer && savings && <span className="text-xs text-emerald-300">Save {savings}</span>}
+          <p
+            className={`text-3xl font-mono font-bold tabular-nums text-zinc-100 ${
+              isNumeric ? "text-right ml-auto" : "text-left"
+            }`}
+          >
             {value}
           </p>
-          {offer && savings && <span className="text-xs text-emerald-300">Save {savings}</span>}
         </div>
         {offer && base && (
           <p className="mt-1 text-xs text-zinc-400">

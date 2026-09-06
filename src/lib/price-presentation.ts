@@ -26,8 +26,5 @@ export function formatCurrentPrice(
   if (!price) return "No data yet";
   if (!price.is_available) return "Price unavailable";
   if (price.is_free) return "Free";
-  if (price.final_price === 0) {
-    return price.currency === "USD" ? "$0.00" : `0.00 ${price.currency}`;
-  }
-  return formatPriceCents(price.final_price, price.currency);
+  return formatPriceCents(price.final_price, price.currency, price.is_free);
 }

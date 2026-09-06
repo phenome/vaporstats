@@ -443,7 +443,7 @@ export function GamePageView({
         )}
       </nav>
 
-      <div id="activity" className="grid scroll-mt-28 grid-cols-1 gap-4 md:grid-cols-3">
+      <div id="activity" className="grid scroll-mt-28 grid-cols-2 gap-3 sm:gap-4 max-w-3xl">
         <PlayerPanel
           key={game.appid}
           appid={game.appid}

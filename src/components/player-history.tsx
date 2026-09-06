@@ -1,3 +1,4 @@
+import { formatNumber } from "../lib/format";
 import React, { useState, useEffect, useMemo } from "react";
 import { AreaChart, Area, XAxis, YAxis, CartesianGrid, ReferenceLine } from "recharts";
 import { CircleNotch } from "@phosphor-icons/react";
@@ -331,7 +332,7 @@ export function PlayerHistoryChart({
           <div className="border border-zinc-900 bg-zinc-900/40 p-2">
             <span className="text-zinc-500 text-[10px] uppercase block">Current</span>
             <span className="text-zinc-100 font-bold tabular-nums">
-              {stats.latest !== null ? stats.latest.toLocaleString("en-US") : "No data"}
+              {formatNumber(stats.latest)}
             </span>
           </div>
           <div className="border border-zinc-900 bg-zinc-900/40 p-2">
@@ -339,7 +340,7 @@ export function PlayerHistoryChart({
               {range === "all" ? "All-Time Low" : `${range.toUpperCase()} Low`}
             </span>
             <span className="text-zinc-300 tabular-nums">
-              {stats.min.toLocaleString("en-US")}
+              {formatNumber(stats.min)}
             </span>
           </div>
           <div className="border border-zinc-900 bg-zinc-900/40 p-2">
@@ -347,13 +348,13 @@ export function PlayerHistoryChart({
               {range === "all" ? "All-Time Avg" : `${range.toUpperCase()} Peak`}
             </span>
             <span className="text-orange-400 font-bold tabular-nums">
-              {(range === "all" ? stats.avg : stats.max).toLocaleString("en-US")}
+              {formatNumber(range === "all" ? stats.avg : stats.max)}
             </span>
           </div>
           <div className="border border-zinc-900 bg-zinc-900/40 p-2">
             <span className="text-zinc-500 text-[10px] uppercase block">All-Time Peak</span>
             <span className="text-orange-400 font-bold tabular-nums">
-              {(data?.all_time_peak ?? stats.max).toLocaleString("en-US")}
+              {formatNumber(data?.all_time_peak ?? stats.max)}
             </span>
           </div>
         </div>
@@ -473,20 +474,21 @@ export function PlayerHistoryChart({
                               <span key="rollup-tooltip" className="flex flex-col gap-0.5">
                                 <span className="font-bold">
                                   {typeof payload.avg === "number"
-                                    ? Math.round(payload.avg).toLocaleString("en-US")
-                                    : value?.toLocaleString("en-US")}{" "}
+                                    ? formatNumber(Math.round(payload.avg))
+                                    : typeof value === "number"
+                                    ? formatNumber(value)
+                                    : "No data"}{" "}
                                   (Avg)
                                 </span>
                                 <span className="text-[10px] text-zinc-400">
-                                  Min: {payload.min.toLocaleString("en-US")} | Max: {payload.max.toLocaleString("en-US")}
+                                  Min: {formatNumber(payload.min)} | Max: {formatNumber(payload.max)}
                                 </span>
                               </span>,
-                              "Players",
                             ];
                           }
                           return [
                             typeof value === "number"
-                              ? value.toLocaleString("en-US")
+                              ? formatNumber(value)
                               : "No data",
                             "Players",
                           ];
@@ -585,7 +587,7 @@ export function PlayerHistoryChart({
                   fontFamily="monospace"
                   textAnchor="end"
                 >
-                  {stats.max.toLocaleString("en-US")}
+                  {formatNumber(stats.max)}
                 </text>
               ) : (
                 <>
@@ -597,7 +599,7 @@ export function PlayerHistoryChart({
                     fontFamily="monospace"
                     textAnchor="end"
                   >
-                    {stats.max.toLocaleString("en-US")}
+                    {formatNumber(stats.max)}
                   </text>
                   <text
                     x={padLeft - 8}
@@ -607,7 +609,7 @@ export function PlayerHistoryChart({
                     fontFamily="monospace"
                     textAnchor="end"
                   >
-                    {Math.round((stats.max + stats.min) / 2).toLocaleString("en-US")}
+                    {formatNumber(Math.round((stats.max + stats.min) / 2))}
                   </text>
                   <text
                     x={padLeft - 8}
@@ -617,7 +619,7 @@ export function PlayerHistoryChart({
                     fontFamily="monospace"
                     textAnchor="end"
                   >
-                    {stats.min.toLocaleString("en-US")}
+                    {formatNumber(stats.min)}
                   </text>
                 </>
               )}

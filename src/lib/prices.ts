@@ -1,3 +1,4 @@
+import { formatPrice } from "./format";
 import type { AppDatabase } from "./db";
 import { toSlug } from "./slug";
 
@@ -118,11 +119,7 @@ export function formatPriceCents(
   currency = "USD",
   isFree = false
 ): string {
-  if (isFree) return "Free";
-  if (cents === null || cents === undefined) return "Unavailable";
-  if (cents === 0) return "Free";
-  const dollars = (cents / 100).toFixed(2);
-  return currency === "USD" ? `$${dollars}` : `${dollars} ${currency}`;
+  return formatPrice(cents, currency, isFree);
 }
 /**
  * Formats observation timestamp to an explicit UTC string: "YYYY-MM-DD HH:mm:ss UTC".

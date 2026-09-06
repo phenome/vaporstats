@@ -1,3 +1,4 @@
+import { formatNumber } from "../lib/format";
 import { type PeakRankedGame, type HistoryRange } from "../lib/player-history";
 import { getCanonicalGamePath } from "../lib/slug";
 import { AppLink } from "./app-link";
@@ -120,7 +121,7 @@ export function PeakRankingsPageView({
                       </span>
                     </td>
                     <td className="px-4 py-3 text-right font-bold text-orange-400 tabular-nums">
-                      {game.peak_players.toLocaleString("en-US")}
+                      {formatNumber(game.peak_players)}
                     </td>
                     <td className="px-4 py-3 text-right text-zinc-500 uppercase text-[10px]">
                       {periodOptions.find((p) => p.id === game.period)?.label ?? game.period}

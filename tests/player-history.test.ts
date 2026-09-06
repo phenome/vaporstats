@@ -1,3 +1,4 @@
+import { formatNumber } from "../src/lib/format";
 import { describe, test, expect, beforeAll, afterAll } from "bun:test";
 import { Database, type SQLQueryBindings } from "bun:sqlite";
 import React from "react";
@@ -492,12 +493,12 @@ describe("Player History and Rankings", () => {
     expect(html).toContain("<desc>");
 
     // Metrics visible
-    expect(html).toContain("1,500");
-    expect(html).toContain("2,500");
+    expect(html).toContain(formatNumber(1500));
+    expect(html).toContain(formatNumber(2500));
 
     // Missing sample is NEVER converted to zero or bridged by the fallback SVG.
     expect(html).not.toContain(">0</text>");
-    expect(html).toContain("1,500");
+    expect(html).toContain(formatNumber(1500));
 
     // The sparse observations retain their positions across the complete fixed window.
     expect(html).toContain('cx="180"');
@@ -660,9 +661,9 @@ describe("Player History and Rankings", () => {
     expect(html).toContain("30D Low");
     expect(html).toContain("30D Peak");
     expect(html).toContain("All-Time Peak");
-    expect(html).toContain("1,200");
-    expect(html).toContain("3,400");
-    expect(html).toContain("5,000");
+    expect(html).toContain(formatNumber(1200));
+    expect(html).toContain(formatNumber(3400));
+    expect(html).toContain(formatNumber(5000));
 
     // Verify the summary bar is not replaced with a bare loading placeholder
     expect(html).not.toContain("Loading player history...");
@@ -724,7 +725,7 @@ describe("Player History and Rankings", () => {
     // Page view rendering check
     const pageHtml = renderToString(React.createElement(RankingsPageView, { games: rankings }));
     expect(pageHtml).toContain("Game High");
-    expect(pageHtml).toContain("5,000");
+    expect(pageHtml).toContain(formatNumber(5000));
     expect(pageHtml).toContain("5m ago");
     expect(pageHtml).toContain(formatExactUtc(obsHigh));
     // Exact UTC is kept visible at narrow widths without responsive column hiding
@@ -783,7 +784,7 @@ describe("Player History and Rankings", () => {
     // Page view rendering check
     const pageHtml = renderToString(React.createElement(PeakRankingsPageView, { peaks: peaksAll, period: "all" }));
     expect(pageHtml).toContain("Highest Observed Peak");
-    expect(pageHtml).toContain("3,500");
+    expect(pageHtml).toContain(formatNumber(3500));
 
     // HTTP handler check
     const req = new Request("https://vaporstats.com/rankings/peak?period=all");
@@ -1039,7 +1040,8 @@ describe("Player History and Rankings", () => {
     // Preserves PlayerPanel
     expect(html).toContain("Current Players");
     expect(html).toContain("850");
-
+    expect(html).toContain('id="activity" class="grid scroll-mt-28 grid-cols-2 gap-3 sm:gap-4 max-w-3xl"');
+    expect(html).toContain("tabular-nums text-right");
     // Preserves RelatedApps structure
     expect(html).toContain("Portal 2");
 
