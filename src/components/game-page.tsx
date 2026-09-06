@@ -229,6 +229,21 @@ function heroTransform(
   };
 }
 
+// Fade-only content (and the identities the compact layout hides on narrow
+// screens) must keep natural proportions while the hero root squashes: each
+// block counter-scales about its own top so glyphs never flatten. The block
+// keeps riding up with the root squash; whatever extends past the rising hero
+// bottom edge is clipped by the root's overflow, so text never draws outside
+// the container. Later blocks (developer/publisher) paint above the earlier
+// description text that slides beneath them.
+function fadeContentStyle(visualScaleY: number): React.CSSProperties {
+  return {
+    transformOrigin: "top left",
+    transform: "scaleY(" + (1 / visualScaleY).toFixed(5) + ")",
+    willChange: "transform",
+  };
+}
+
 export interface GamePageProps {
   game: GameDetail;
   related?: GroupedRelatedApps;
@@ -322,7 +337,7 @@ export function GamePageView({
             <span
               className="hero-type px-2 py-0.5 bg-orange-500/10 text-orange-400 border border-orange-500/30 text-[10px] font-mono uppercase tracking-widest"
               data-game-fade-only="type"
-              style={{ opacity: 1 - progress }}
+              style={{ ...fadeContentStyle(visualScaleY), opacity: 1 - progress }}
             >
               {game.type.toUpperCase()}
             </span>
@@ -330,7 +345,10 @@ export function GamePageView({
               ref={statusRef}
               data-game-identity="status"
               className="hero-status border border-zinc-700 bg-zinc-900 px-1.5 py-0.5 font-bold uppercase tracking-wider text-zinc-300 text-xs ml-auto"
-              style={heroTransform(geometry, "status", progress, visualScaleY)}
+              style={
+                heroTransform(geometry, "status", progress, visualScaleY) ??
+                fadeContentStyle(visualScaleY)
+              }
             >
               {releaseStatusLabel}
             </span>
@@ -339,7 +357,10 @@ export function GamePageView({
               data-game-identity="date"
               dateTime={mainReleaseDate && isPreciseReleaseDate(mainReleaseDate) ? mainReleaseDate : undefined}
               className="hero-date text-zinc-200 text-xs font-mono"
-              style={heroTransform(geometry, "date", progress, visualScaleY)}
+              style={
+                heroTransform(geometry, "date", progress, visualScaleY) ??
+                fadeContentStyle(visualScaleY)
+              }
             >
               {dateLabel}
             </time>
@@ -357,6 +378,7 @@ export function GamePageView({
                 // whole mobile state, so restore clickability while the link is
                 // visible and make it inert only once fully faded out.
                 heroTransform(geometry, "store", progress, visualScaleY) ?? {
+                  ...fadeContentStyle(visualScaleY),
                   pointerEvents: progress >= 1 ? "none" : "auto",
                 }
               }
@@ -407,7 +429,11 @@ export function GamePageView({
                 <div
                   data-game-fade-only="lifecycle"
                   className="hero-lifecycle"
-                  style={{ opacity: 1 - progress, pointerEvents: progress >= 1 ? "none" : "auto" }}
+                  style={{
+                    ...fadeContentStyle(visualScaleY),
+                    opacity: 1 - progress,
+                    pointerEvents: progress >= 1 ? "none" : "auto",
+                  }}
                 >
                   <LifecycleTable events={overviewEvents} />
                 </div>
@@ -417,7 +443,11 @@ export function GamePageView({
                 <div
                   data-game-fade-only="description"
                   className="hero-description"
-                  style={{ opacity: 1 - progress, pointerEvents: progress >= 1 ? "none" : "auto" }}
+                  style={{
+                    ...fadeContentStyle(visualScaleY),
+                    opacity: 1 - progress,
+                    pointerEvents: progress >= 1 ? "none" : "auto",
+                  }}
                 >
                   <p className="text-sm text-zinc-400 leading-relaxed font-sans">{game.description}</p>
                 </div>
@@ -426,7 +456,11 @@ export function GamePageView({
               <div
                 data-game-fade-only="publisher"
                 className="hero-publishers grid grid-cols-2 gap-3 pt-2 text-xs font-mono"
-                style={{ opacity: 1 - progress, pointerEvents: progress >= 1 ? "none" : "auto" }}
+                style={{
+                  ...fadeContentStyle(visualScaleY),
+                  opacity: 1 - progress,
+                  pointerEvents: progress >= 1 ? "none" : "auto",
+                }}
               >
                 <div className="border border-zinc-900 bg-zinc-900/40 p-2.5">
                   <div className="text-zinc-500 text-[10px] uppercase">Developer</div>
