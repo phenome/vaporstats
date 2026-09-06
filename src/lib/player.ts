@@ -14,13 +14,13 @@ export const TICK_REQUEST_CAP = 100;
 export const CONCURRENCY_LIMIT = 6;
 
 export const CADENCE_MINUTES = {
-  fast: 10,
+  fast: 15,
   hourly: 60,
   daily: 1440,
 } as const;
 
 export const CADENCE_MS = {
-  fast: 10 * 60 * 1000,
+  fast: 15 * 60 * 1000,
   hourly: 60 * 60 * 1000,
   daily: 24 * 60 * 60 * 1000,
 } as const;
@@ -66,32 +66,32 @@ export function formatUtcDateKey(date: Date): string {
 }
 
 /**
- * Calculates deterministic ten-minute slot distribution for a game.
- * Fast: runs every 10-minute tick (slot 0).
- * Hourly: distributed across 6 slots per hour (0..5) via appid % 6.
- * Daily: distributed across 144 slots per day (0..143) via appid % 144.
+ * Calculates deterministic fifteen-minute slot distribution for a game.
+ * Fast: runs every 15-minute tick (slot 0).
+ * Hourly: distributed across 4 slots per hour (0..3) via appid % 4.
+ * Daily: distributed across 96 slots per day (0..95) via appid % 96.
  */
 export function calculateDeterministicSlot(appid: number, tier: PlayerTier): number {
   if (tier === "fast") return 0;
-  if (tier === "hourly") return Math.abs(appid) % 6;
-  return Math.abs(appid) % 144;
+  if (tier === "hourly") return Math.abs(appid) % 4;
+  return Math.abs(appid) % 96;
 }
 
 /**
- * Calculates next due time aligned to appid's deterministic 10-minute UTC slot
- * using epoch 10-minute tick arithmetic:
+ * Calculates next due time aligned to appid's deterministic 15-minute UTC slot
+ * using epoch 15-minute tick arithmetic:
  * - First tick strictly after anchorTime.
- * - Fast: aligns to next UTC 10-minute tick.
- * - Hourly: advances to next tick where (tick % 6) equals (appid % 6).
- * - Daily: advances to next tick where (tick % 144) equals (appid % 144).
- * Always strictly after anchorTime and exactly on a 10-minute UTC boundary.
+ * - Fast: aligns to next UTC 15-minute tick.
+ * - Hourly: advances to next tick where (tick % 4) equals (appid % 4).
+ * - Daily: advances to next tick where (tick % 96) equals (appid % 96).
+ * Always strictly after anchorTime and exactly on a 15-minute UTC boundary.
  */
 export function calculateNextDueAt(
   anchorTime: Date,
   tier: PlayerTier,
   appid: number
 ): Date {
-  const TICK_MS = 10 * 60 * 1000;
+  const TICK_MS = 15 * 60 * 1000;
   const firstNextTick = Math.floor(anchorTime.getTime() / TICK_MS) + 1;
 
   if (tier === "fast") {
@@ -101,15 +101,15 @@ export function calculateNextDueAt(
   const candidateDate = new Date(firstNextTick * TICK_MS);
 
   if (tier === "hourly") {
-    const targetSlot = Math.abs(appid) % 6;
-    const currentSlot = Math.floor(candidateDate.getUTCMinutes() / 10);
-    const delta = (targetSlot - currentSlot + 6) % 6;
+    const targetSlot = Math.abs(appid) % 4;
+    const currentSlot = Math.floor(candidateDate.getUTCMinutes() / 15);
+    const delta = (targetSlot - currentSlot + 4) % 4;
     return new Date((firstNextTick + delta) * TICK_MS);
   }
 
-  const targetSlot = Math.abs(appid) % 144;
-  const currentSlot = Math.floor((candidateDate.getUTCHours() * 60 + candidateDate.getUTCMinutes()) / 10);
-  const delta = (targetSlot - currentSlot + 144) % 144;
+  const targetSlot = Math.abs(appid) % 96;
+  const currentSlot = Math.floor((candidateDate.getUTCHours() * 60 + candidateDate.getUTCMinutes()) / 15);
+  const delta = (targetSlot - currentSlot + 96) % 96;
   return new Date((firstNextTick + delta) * TICK_MS);
 }
 /**
@@ -288,7 +288,7 @@ export async function registerTrackedGame(
 
 /**
  * Re-ranks tracked games according to latest successful count:
- * Top 10 -> fast tier (10m)
+ * Top 10 -> fast tier (15m)
  * Next 90 -> hourly tier (60m)
  * Remaining up to 900 -> daily tier (24h)
  * Enforces at most 1,000 tracked games.

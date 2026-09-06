@@ -4,6 +4,7 @@ import type { AppDatabase, AppPreparedStatement } from "../src/lib/db";
 import { applyMigrations } from "../src/lib/migrations";
 import { runIngestionTick, startIngestionScheduler, type IngestionCron } from "../workers/ingestion";
 import { runDailyRollupJob } from "../workers/player-rollups";
+import { calculateDeterministicSlot, calculateNextDueAt, CADENCE_MINUTES } from "../src/lib/player";
 
 function createAppDatabase(): AppDatabase {
   const native = new Database(":memory:");
@@ -91,7 +92,7 @@ function setDailyCheckpoint(db: AppDatabase, date: string): Promise<void> {
 describe("Bun ingestion scheduling and player rollups", () => {
   afterAll(() => console.log("player activity suite complete"));
 
-  test("registers the UTC ten-minute schedule through the injected cron seam", () => {
+  test("registers the UTC fifteen-minute schedule through the injected cron seam", () => {
     const calls: Array<{ expression: string; options: { tz: string } }> = [];
     const cron: IngestionCron = (expression, _handler, options) => {
       calls.push({ expression, options });
@@ -99,7 +100,7 @@ describe("Bun ingestion scheduling and player rollups", () => {
 
     startIngestionScheduler({ db: createAppDatabase(), cron, runImmediately: false });
 
-    expect(calls).toEqual([{ expression: "*/10 * * * *", options: { tz: "UTC" } }]);
+    expect(calls).toEqual([{ expression: "*/15 * * * *", options: { tz: "UTC" } }]);
   });
   test("bootstraps player tracking after an empty daily discovery", async () => {
     const db = createAppDatabase();
@@ -230,5 +231,20 @@ describe("Bun ingestion scheduling and player rollups", () => {
       .bind(570)
       .first<{ current_players: number }>();
     expect(observation?.current_players).toBe(1234);
+  });
+
+  test("calculates deterministic 15-minute slot and next due times for fast tier", () => {
+    expect(CADENCE_MINUTES.fast).toBe(15);
+    expect(calculateDeterministicSlot(1245620, "fast")).toBe(0);
+
+    const anchor = new Date("2026-09-06T12:00:00.000Z");
+    const nextDue = calculateNextDueAt(anchor, "fast", 1245620);
+    expect(nextDue.toISOString()).toBe("2026-09-06T12:15:00.000Z");
+
+    const nextDue2 = calculateNextDueAt(new Date("2026-09-06T12:01:23.000Z"), "fast", 1245620);
+    expect(nextDue2.toISOString()).toBe("2026-09-06T12:15:00.000Z");
+
+    const nextDue3 = calculateNextDueAt(new Date("2026-09-06T12:15:00.000Z"), "fast", 1245620);
+    expect(nextDue3.toISOString()).toBe("2026-09-06T12:30:00.000Z");
   });
 });

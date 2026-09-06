@@ -18,7 +18,7 @@ import {
 import { syncReleaseFactsFromApps } from "./release-facts";
 
 const INGESTION_DAILY_CHECKPOINT_KEY = "ingestion:last-daily-cycle";
-const INGESTION_CRON = "*/10 * * * *";
+const INGESTION_CRON = "*/15 * * * *";
 const UTC = { tz: "UTC" as const };
 
 export interface IngestionTickOptions {
@@ -212,7 +212,7 @@ export function runIngestionTick(options: IngestionTickOptions): Promise<Ingesti
   return run;
 }
 
-/** Registers the UTC ten-minute scheduler and optionally resumes work immediately. */
+/** Registers the UTC fifteen-minute scheduler and optionally resumes work immediately. */
 export function startIngestionScheduler(options: IngestionSchedulerOptions): unknown {
   const cron = options.cron ?? (Bun.cron as IngestionCron);
   try {
