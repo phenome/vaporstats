@@ -167,7 +167,12 @@ function heroTransform(
 ): React.CSSProperties | undefined {
   const first = geometry?.expanded[identity];
   const last = geometry?.compact[identity];
-  if (!first || !last || first.width <= 0 || first.height <= 0) return undefined;
+  // Identities that the compact layout hides on narrow screens measure as
+  // zero-size boxes there; leave them in place and let CSS fade them out
+  // rather than flying them toward a degenerate target.
+  if (!first || !last || first.width <= 0 || first.height <= 0 || last.width <= 0 || last.height <= 0) {
+    return undefined;
+  }
   const left = first.left + (last.left - first.left) * progress;
   const top = (first.top + (last.top - first.top) * progress) / visualScaleY;
 
@@ -245,8 +250,10 @@ export function GamePageView({
     [],
   );
   const scrollProgress = useHeroScrollProgress(sentinelRef);
-  const p1 = Math.min(Math.max(scrollProgress / 0.6, 0), 1);
-  const p2 = Math.min(Math.max((scrollProgress - 0.4) / 0.6, 0), 1);
+  // One shared 0-to-1 progress drives every morph animation: fades, FLIP
+  // transforms, typography, and the artwork crossfade all start and finish
+  // together.
+  const progress = scrollProgress;
   const geometry = useHeroGeometry(heroRef, identityRefs, game.appid);
   const communityIconUrl = game.icon_hash ? getCommunityIconUrl(game.appid, game.icon_hash) : null;
   const compactImage = communityIconUrl ?? game.icon_lqip ?? game.header_lqip ?? game.header_image ?? null;
@@ -257,13 +264,13 @@ export function GamePageView({
       ? "TBA"
       : "—";
   const visualScaleY = geometry && geometry.expandedHeight > 0
-    ? 1 + (geometry.compactHeight / geometry.expandedHeight - 1) * p2
+    ? 1 + (geometry.compactHeight / geometry.expandedHeight - 1) * progress
     : 1;
   const heroStyle = {
     transformOrigin: "top left",
     transform: geometry ? "scaleY(" + visualScaleY.toFixed(5) + ")" : undefined,
     willChange: "transform",
-    ["--hero-morph-progress"]: p2,
+    ["--hero-morph-progress"]: progress,
   } as React.CSSProperties & Record<string, string | number | undefined>;
 
   return (
@@ -284,7 +291,7 @@ export function GamePageView({
           className="hero-bottom-edge"
           style={{
             height: "1px",
-            opacity: p2,
+            opacity: progress,
             transform: "scaleY(" + (1 / visualScaleY).toFixed(5) + ")",
             transformOrigin: "bottom",
           }}
@@ -294,7 +301,7 @@ export function GamePageView({
             <span
               className="hero-type px-2 py-0.5 bg-orange-500/10 text-orange-400 border border-orange-500/30 text-[10px] font-mono uppercase tracking-widest"
               data-game-fade-only="type"
-              style={{ opacity: 1 - p1 }}
+              style={{ opacity: 1 - progress }}
             >
               {game.type.toUpperCase()}
             </span>
@@ -302,7 +309,7 @@ export function GamePageView({
               ref={statusRef}
               data-game-identity="status"
               className="hero-status border border-zinc-700 bg-zinc-900 px-1.5 py-0.5 font-bold uppercase tracking-wider text-zinc-300 text-xs ml-auto"
-              style={heroTransform(geometry, "status", p2, visualScaleY)}
+              style={heroTransform(geometry, "status", progress, visualScaleY)}
             >
               {releaseStatusLabel}
             </span>
@@ -311,7 +318,7 @@ export function GamePageView({
               data-game-identity="date"
               dateTime={mainReleaseDate && isPreciseReleaseDate(mainReleaseDate) ? mainReleaseDate : undefined}
               className="hero-date text-zinc-200 text-xs font-mono"
-              style={heroTransform(geometry, "date", p2, visualScaleY)}
+              style={heroTransform(geometry, "date", progress, visualScaleY)}
             >
               {dateLabel}
             </time>
@@ -322,7 +329,7 @@ export function GamePageView({
               target="_blank"
               rel="noreferrer"
               className="hero-store text-orange-400 hover:text-orange-300 hover:underline inline-flex items-center gap-1 font-mono text-xs"
-              style={heroTransform(geometry, "store", p2, visualScaleY)}
+              style={heroTransform(geometry, "store", progress, visualScaleY)}
             >
               Steam Store ↗
             </a>
@@ -333,7 +340,7 @@ export function GamePageView({
               ref={artworkRef}
               data-game-identity="artwork"
               className="hero-artwork border border-zinc-800 overflow-hidden bg-zinc-900 relative shrink-0"
-              style={heroTransform(geometry, "artwork", p2, visualScaleY)}
+              style={heroTransform(geometry, "artwork", progress, visualScaleY)}
             >
               {headerImage && (
                 <img
@@ -341,7 +348,7 @@ export function GamePageView({
                   alt={game.name}
                   className="hero-art-image hero-art-header"
                   style={{
-                    opacity: compactImage === headerImage ? 1 : 1 - p2,
+                    opacity: compactImage === headerImage ? 1 : 1 - progress,
                     backgroundImage: game.header_lqip ? "url(" + game.header_lqip + ")" : undefined,
                   }}
                 />
@@ -351,7 +358,7 @@ export function GamePageView({
                   src={compactImage}
                   alt=""
                   className="hero-art-image hero-art-compact"
-                  style={{ opacity: p2 }}
+                  style={{ opacity: progress }}
                 />
               )}
             </div>
@@ -361,7 +368,7 @@ export function GamePageView({
                 ref={titleRef}
                 data-game-identity="title"
                 className="hero-title font-mono font-bold text-zinc-100 tracking-tight"
-                style={heroTransform(geometry, "title", p2, visualScaleY)}
+                style={heroTransform(geometry, "title", progress, visualScaleY)}
               >
                 {game.name}
               </h1>
@@ -370,7 +377,7 @@ export function GamePageView({
                 <div
                   data-game-fade-only="lifecycle"
                   className="hero-lifecycle"
-                  style={{ opacity: 1 - p1, pointerEvents: p1 >= 1 ? "none" : "auto" }}
+                  style={{ opacity: 1 - progress, pointerEvents: progress >= 1 ? "none" : "auto" }}
                 >
                   <LifecycleTable events={overviewEvents} />
                 </div>
@@ -380,7 +387,7 @@ export function GamePageView({
                 <div
                   data-game-fade-only="description"
                   className="hero-description"
-                  style={{ opacity: 1 - p1, pointerEvents: p1 >= 1 ? "none" : "auto" }}
+                  style={{ opacity: 1 - progress, pointerEvents: progress >= 1 ? "none" : "auto" }}
                 >
                   <p className="text-sm text-zinc-400 leading-relaxed font-sans">{game.description}</p>
                 </div>
@@ -389,7 +396,7 @@ export function GamePageView({
               <div
                 data-game-fade-only="publisher"
                 className="hero-publishers grid grid-cols-2 gap-3 pt-2 text-xs font-mono"
-                style={{ opacity: 1 - p1, pointerEvents: p1 >= 1 ? "none" : "auto" }}
+                style={{ opacity: 1 - progress, pointerEvents: progress >= 1 ? "none" : "auto" }}
               >
                 <div className="border border-zinc-900 bg-zinc-900/40 p-2.5">
                   <div className="text-zinc-500 text-[10px] uppercase">Developer</div>
