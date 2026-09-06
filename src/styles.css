@@ -55,16 +55,158 @@
   color: #a1a1aa;
 }
 
-/* Morphing Sticky Game Header */
-.morphing-game-hero {
+.morphing-game-hero-flow {
   position: sticky;
-  top: 3.5rem; /* 56px, directly below SiteHeader */
+  top: 56px;
   z-index: 40;
-  will-change: padding, transform;
-  transition: box-shadow 0.2s ease, border-color 0.2s ease;
+  pointer-events: none;
 }
 
-/* Prevent scroll anchoring oscillation during sticky height transitions */
+.morphing-game-hero {
+  padding: 1.5rem;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.morphing-game-hero [data-game-identity] {
+  pointer-events: auto;
+}
+
+.hero-stage {
+  display: block;
+}
+
+.hero-topbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem;
+  border-bottom: 1px solid hsl(240 3.7% 10%);
+  padding-bottom: 0.75rem;
+}
+
+.hero-store {
+  margin-left: auto;
+}
+
+.hero-main {
+  display: flex;
+  align-items: flex-start;
+  gap: 1.5rem;
+  margin-top: 1rem;
+}
+
+.hero-artwork {
+  width: 100%;
+  max-width: 20rem;
+  aspect-ratio: 460 / 215;
+}
+
+.hero-art-image {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: center;
+  background-size: cover;
+  background-position: center;
+}
+
+.hero-copy {
+  min-width: 0;
+  flex: 1;
+}
+
+.hero-title {
+  display: block;
+}
+
+.morphing-game-hero[data-morph-layout="compact"] {
+  padding: 0.5rem 1rem;
+}
+
+.morphing-game-hero[data-morph-layout="compact"] .hero-stage {
+  display: grid;
+  grid-template-columns: 2rem minmax(0, 1fr) auto auto auto;
+  grid-template-areas: "art title status date store";
+  align-items: center;
+  column-gap: 0.75rem;
+}
+
+.morphing-game-hero[data-morph-layout="compact"] .hero-topbar,
+.morphing-game-hero[data-morph-layout="compact"] .hero-main,
+.morphing-game-hero[data-morph-layout="compact"] .hero-copy {
+  display: contents;
+}
+
+.morphing-game-hero[data-morph-layout="compact"] [data-game-fade-only] {
+  display: none;
+}
+
+.morphing-game-hero[data-morph-layout="compact"] .hero-artwork {
+  grid-area: art;
+  width: 2rem;
+  height: 2rem;
+  max-width: none;
+  aspect-ratio: auto;
+  margin: 0;
+}
+
+.morphing-game-hero[data-morph-layout="compact"] .hero-title {
+  grid-area: title;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 1rem;
+  line-height: 1.25;
+}
+
+.morphing-game-hero[data-morph-layout="compact"] .hero-status {
+  grid-area: status;
+  white-space: nowrap;
+}
+
+.morphing-game-hero[data-morph-layout="compact"] .hero-date {
+  grid-area: date;
+  white-space: nowrap;
+}
+
+.morphing-game-hero[data-morph-layout="compact"] .hero-store {
+  grid-area: store;
+  margin-left: 0;
+  white-space: nowrap;
+}
+
+@media (max-width: 639px) {
+  .morphing-game-hero[data-morph-layout="compact"] .hero-stage {
+    grid-template-columns: 2rem minmax(0, 1fr);
+    grid-template-areas: "art title";
+  }
+
+  .morphing-game-hero[data-morph-layout="compact"] .hero-status,
+  .morphing-game-hero[data-morph-layout="compact"] .hero-date,
+  .morphing-game-hero[data-morph-layout="compact"] .hero-store {
+    display: none;
+  }
+
+  .morphing-game-hero [data-game-identity="status"],
+  .morphing-game-hero [data-game-identity="date"],
+  .morphing-game-hero [data-game-identity="store"] {
+    opacity: calc(1 - var(--hero-morph-progress));
+    pointer-events: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .morphing-game-hero,
+  .morphing-game-hero * {
+    transition: none !important;
+  }
+}
+
+/* Keep scroll anchoring from fighting the stable sticky flow wrapper. */
 .game-page-container {
   overflow-anchor: none;
 }
