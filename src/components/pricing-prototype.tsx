@@ -129,7 +129,7 @@ const SCENARIOS: Scenario[] = [
   { id: "few-changes", label: "Few price changes", summary: "A short state-change ledger makes step transitions explicit.", lastSuccessfulCheck: PRICE_PROTOTYPE_NOW, rows: [row(26, 5999, 5999), row(19, 5999, 2999, 50), row(11, 5999, 4499, 25), row(4, 5999, 5999)] },
   { id: "always-free", label: "Always free", summary: "Free history can be compact or retain its zero baseline and observations.", lastSuccessfulCheck: PRICE_PROTOTYPE_NOW, rows: [row(180, 0, 0, 0, true), row(90, 0, 0, 0, true), row(18, 0, 0, 0, true)] },
   { id: "paid-to-free", label: "Paid to free", summary: "The paid history remains visible after the game becomes free.", lastSuccessfulCheck: PRICE_PROTOTYPE_NOW, rows: [row(220, 1999, 1999), row(150, 1999, 999, 50), row(94, 1999, 1999), row(45, 1999, 0, 0, true), row(10, 1999, 0, 0, true)] },
-  { id: "temporary-free", label: "Temporary 100% off", summary: "A 100% discount is a temporary offer, not permanent free pricing.", lastSuccessfulCheck: PRICE_PROTOTYPE_NOW, rows: [row(50, 3999, 3999), row(35, 3999, 0, 100, false), row(28, 3999, 3999)] },
+  { id: "temporary-free", label: "Temporary 100% off", summary: "An active 100% discount is a limited-time offer, not permanent free pricing.", lastSuccessfulCheck: PRICE_PROTOTYPE_NOW, rows: [row(50, 3999, 3999), row(35, 3999, 0, 100, false), row(28, 3999, 3999), row(3, 3999, 0, 100, false)] },
   { id: "unavailable-gap", label: "Unavailable gap", summary: "Unavailable periods remain gaps instead of becoming zero or a guessed price.", lastSuccessfulCheck: PRICE_PROTOTYPE_NOW, rows: [row(52, 2999, 2999), row(38, null, null, 0, false, false), row(27, 2999, 1499, 50), row(6, 2999, 1499, 50)] },
   { id: "no-data", label: "No data", summary: "No successful observation exists yet.", lastSuccessfulCheck: null, rows: [] },
 ];
@@ -154,8 +154,8 @@ function getState(search: PrototypeSearchState) {
     header: normalize(search.header, ["inline", "hero", "sidebar", "panel"] as const, defaults.header),
     range: normalize(search.range, ["30d", "6m", "1y", "all"] as const, "30d"),
     carry: normalize(search.carry, ["solid", "dashed", "off"] as const, "dashed"),
-    area: normalize(search.area, ["bands", "savings", "line"] as const, "bands"),
-    free: normalize(search.free, ["compact", "retained"] as const, "retained"),
+    area: normalize(search.area, ["bands", "savings", "line"] as const, variant === "B" ? "savings" : "bands"),
+    free: normalize(search.free, ["compact", "retained"] as const, variant === "B" ? "compact" : "retained"),
   };
 }
 function money(cents: number | null, free = false) {
@@ -214,7 +214,13 @@ function PrototypeSwitcher({ variant, onChange }: { variant: Variant; onChange: 
   </div>;
 }
 
-function HeaderLayout({ layout, current, saved, onJump }: { layout: HeaderLayout; current: MockRow | null; saved: number | null; onJump: () => void }) {
+function isCurrentOffer(current: MockRow | null) {
+  return !!current && current.isAvailable && !current.isFree && current.discountPercent > 0 && current.initialPrice !== null && current.finalPrice !== null && current.finalPrice < current.initialPrice;
+}
+
+function HeaderLayout({ layout, current, saved, onJump, id = "price-prototype-header" }: { id?: string; layout: HeaderLayout; current: MockRow | null; saved: number | null; onJump: () => void }) {
+  const offer = isCurrentOffer(current);
+  const label = offer ? "Current offer" : "Current price";
   const summary = current?.isAvailable === false ? "Price unavailable" : current ? (current.discountPercent ? String(current.discountPercent) + "% off" : money(current.finalPrice, current.isFree)) : "No data yet";
   const observed = current ? "Observed " + dateTime(current.observedAt) : "No successful observation yet";
   const base = "Base price " + money(current?.initialPrice ?? null);
@@ -222,22 +228,33 @@ function HeaderLayout({ layout, current, saved, onJump }: { layout: HeaderLayout
     <div><p className="text-[10px] uppercase tracking-[0.22em] text-zinc-500">Price history</p><h2 className="mt-1 text-xl font-bold tracking-tight text-zinc-100">Price history</h2></div>
     <div className="text-right"><p className="text-[10px] uppercase tracking-[0.22em] text-zinc-500">Now</p><p className="mt-1 text-2xl font-bold tabular-nums text-orange-300">{summary}</p></div>
   </>;
-  if (layout === "hero") return <div id="price-prototype-header" className="border border-orange-500/40 bg-orange-500/10 p-5"><div className="flex flex-wrap items-end justify-between gap-4"><div><p className="text-[10px] uppercase tracking-[0.25em] text-orange-300">Current offer</p><h2 className="mt-1 text-3xl font-bold text-zinc-100">{summary}</h2><p className="mt-2 max-w-xl text-xs text-zinc-400">{observed}</p></div><div className="text-right"><p className="text-xs text-zinc-400">Base price</p><p className="text-xl font-mono text-zinc-100">{money(current?.initialPrice ?? null)}</p>{saved !== null && <p className="text-xs text-emerald-300">Save {money(saved)}</p>}</div></div></div>;
-  if (layout === "sidebar") return <div id="price-prototype-header" className="grid gap-4 border border-zinc-800 bg-zinc-950 p-4 md:grid-cols-[180px_1fr]"><aside className="border-r border-zinc-800 pr-4"><p className="text-[10px] uppercase tracking-[0.22em] text-zinc-500">Ledger</p><p className="mt-2 text-2xl font-bold text-orange-300">{summary}</p><button type="button" onClick={onJump} className="mt-4 text-left text-[10px] uppercase tracking-wider text-zinc-400 underline decoration-zinc-700 underline-offset-4 hover:text-orange-300">Jump to graph</button></aside><div><h2 className="text-xl font-bold text-zinc-100">Price history</h2><p className="mt-2 text-sm leading-relaxed text-zinc-400">{base} · {observed}</p></div></div>;
-  if (layout === "panel") return <div id="price-prototype-header" className="border border-zinc-800 bg-zinc-950 p-5"><div className="flex flex-wrap items-center justify-between gap-3">{core}</div><p className="mt-4 border-t border-zinc-800 pt-3 text-xs text-zinc-500">{base} · {observed}</p></div>;
-  return <div id="price-prototype-header" className="flex flex-wrap items-end justify-between gap-3 border-b border-zinc-800 pb-3">{core}<p className="w-full text-xs text-zinc-500 md:w-auto">{base} · {observed}</p></div>;
+  if (layout === "hero") return <div id={id} className={`border p-5 ${offer ? "border-orange-500/40 bg-orange-500/10" : "border-zinc-800 bg-zinc-950"}`}>
+    <div className="flex flex-wrap items-end justify-between gap-4">
+      <div><p className={offer ? "text-[10px] uppercase tracking-[0.25em] text-orange-300" : "text-[10px] uppercase tracking-[0.25em] text-zinc-500"}>{label}</p><h2 className="mt-1 text-3xl font-bold text-zinc-100">{current?.isFree && current.isAvailable ? "Free to play" : summary}</h2><p className="mt-2 max-w-xl text-xs text-zinc-400">{observed}</p></div>
+      {offer && <div className="text-right"><p className="text-xs text-zinc-400"><s>{money(current!.initialPrice)}</s> base price</p><p className="text-xl font-mono text-zinc-100">{current!.finalPrice === 0 ? "$0.00" : money(current!.finalPrice)}</p><p className="text-xs text-emerald-300">Save {money(saved)}</p>{current!.finalPrice === 0 && <p className="mt-1 text-xs text-zinc-400">Limited-time offer</p>}</div>}
+    </div>
+  </div>;
+  if (layout === "sidebar") return <div id={id} className="grid gap-4 border border-zinc-800 bg-zinc-950 p-4 md:grid-cols-[180px_1fr]"><aside className="border-r border-zinc-800 pr-4"><p className="text-[10px] uppercase tracking-[0.22em] text-zinc-500">Ledger</p><p className="mt-2 text-2xl font-bold text-orange-300">{summary}</p><button type="button" onClick={onJump} className="mt-4 text-left text-[10px] uppercase tracking-wider text-zinc-400 underline decoration-zinc-700 underline-offset-4 hover:text-orange-300">Jump to graph</button></aside><div><h2 className="text-xl font-bold text-zinc-100">Price history</h2><p className="mt-2 text-sm leading-relaxed text-zinc-400">{base} · {observed}</p></div></div>;
+  if (layout === "panel") return <div id={id} className="border border-zinc-800 bg-zinc-950 p-5"><div className="flex flex-wrap items-center justify-between gap-3">{core}</div><p className="mt-4 border-t border-zinc-800 pt-3 text-xs text-zinc-500">{base} · {observed}</p></div>;
+  return <div id={id} className="flex flex-wrap items-end justify-between gap-3 border-b border-zinc-800 pb-3">{core}<p className="w-full text-xs text-zinc-500 md:w-auto">{base} · {observed}</p></div>;
 }
 
-function PriceCard({ layout, current, scenario }: { layout: CardLayout; current: MockRow | null; scenario: Scenario }) {
+function PriceCard({ layout, current, scenario, id = "price-prototype-card" }: { id?: string; layout: CardLayout; current: MockRow | null; scenario: Scenario }) {
   const final = current?.isAvailable === false ? null : current?.finalPrice ?? null;
   const saved = savedAmount(current);
   const discount = current?.discountPercent ?? 0;
-  if (layout === "offer-first") return <article id="price-prototype-card" className="border border-orange-500/40 bg-orange-500/10 p-5"><p className="text-[10px] uppercase tracking-[0.2em] text-orange-300">Offer</p><p className="mt-2 text-4xl font-bold tabular-nums text-zinc-100">{current ? money(final, current.isFree) : "No data yet"}</p><div className="mt-3 flex flex-wrap gap-2 text-xs"><span className="border border-orange-400/40 px-2 py-1 text-orange-200">{discount ? `${discount}% off` : "List price"}</span>{saved !== null && <span className="border border-emerald-400/30 px-2 py-1 text-emerald-300">Save {money(saved)}</span>}</div><p className="mt-4 text-[11px] text-zinc-400">Checked {dateTime(scenario.lastSuccessfulCheck)}</p></article>;
-  if (layout === "ledger") return <article id="price-prototype-card" className="border border-zinc-800 bg-zinc-950 p-4"><div className="mb-3 flex items-center justify-between"><p className="text-[10px] uppercase tracking-[0.2em] text-zinc-500">Current ledger</p><span className="text-xs text-zinc-400">{discount ? `-${discount}%` : "—"}</span></div><dl className="grid grid-cols-2 gap-x-4 gap-y-3 text-xs"><div><dt className="text-zinc-500">Paid now</dt><dd className="mt-1 font-mono text-lg text-zinc-100">{money(final, current?.isFree)}</dd></div><div><dt className="text-zinc-500">Base</dt><dd className="mt-1 font-mono text-lg text-zinc-300">{money(current?.initialPrice ?? null)}</dd></div><div><dt className="text-zinc-500">State</dt><dd className="mt-1 text-zinc-300">{current?.isAvailable === false ? "Unavailable" : current?.isFree && discount === 0 ? "Free" : discount === 100 ? "100% off" : "Paid"}</dd></div><div><dt className="text-zinc-500">Observed</dt><dd className="mt-1 text-zinc-300">{current ? dateShort(current.observedAt) : "—"}</dd></div></dl></article>;
-  if (layout === "unified") return <article id="price-prototype-card" className="border border-zinc-700 bg-zinc-900/60 p-5"><div className="flex flex-wrap items-end justify-between gap-3"><div><p className="text-[10px] uppercase tracking-[0.2em] text-zinc-500">Price surface</p><p className="mt-1 text-3xl font-bold text-zinc-100">{money(final, current?.isFree)}</p></div><div className="text-right text-xs text-zinc-400"><p>{discount ? `${discount}% discount` : "No active discount"}</p><p>{saved !== null ? `${money(saved)} saved` : "No savings recorded"}</p></div></div><div className="mt-4 border-t border-zinc-700 pt-3 text-[11px] text-zinc-400">Last retained change: {current ? dateTime(current.observedAt) : "No data yet"}</div></article>;
-  return <article id="price-prototype-card" className="border border-zinc-800 bg-zinc-950 p-4"><div className="flex items-center justify-between gap-3"><div><p className="text-[10px] uppercase tracking-[0.2em] text-zinc-500">Price now</p><p className="mt-1 text-2xl font-bold tabular-nums text-zinc-100">{money(final, current?.isFree)}</p></div><div className="text-right"><p className="text-xs text-orange-300">{discount ? `-${discount}%` : "List"}</p><p className="mt-1 text-[10px] text-zinc-500">{current ? dateShort(current.observedAt) : "No observation"}</p></div></div></article>;
+  const offer = isCurrentOffer(current);
+  if (layout === "offer-first") return <article id={id} className={`scroll-mt-28 border p-5 space-y-3 ${offer ? "border-orange-500/40 bg-orange-500/10" : "border-zinc-800 bg-zinc-950"}`}>
+    <div className="flex items-center justify-between gap-2"><p className="text-[11px] font-mono uppercase tracking-wider text-zinc-400">{offer ? "Current offer" : "Current price"} (US / USD)</p>{offer && <span className="border border-orange-400/40 px-1.5 py-0.5 text-[10px] text-orange-200">-{discount}%</span>}</div>
+    <div className="pt-2"><div className="flex flex-wrap items-baseline justify-between gap-2"><p className="text-3xl font-mono font-bold tabular-nums text-zinc-100">{!current ? "No data yet" : !current.isAvailable ? "Unavailable" : offer && final === 0 ? "$0.00" : money(final, current.isFree)}</p>{offer && <span className="text-xs text-emerald-300">Save {money(saved)}</span>}</div>
+      <p className="mt-1 text-[11px] font-mono text-zinc-500">{scenario.lastSuccessfulCheck ? "Checked " + dateTime(scenario.lastSuccessfulCheck) : "No successful observation yet"}</p>
+      {offer && final === 0 && <p className="mt-1 text-[11px] text-zinc-400">Limited-time offer · not free-to-play</p>}
+    </div>
+  </article>;
+  if (layout === "ledger") return <article id={id} className="border border-zinc-800 bg-zinc-950 p-4"><div className="mb-3 flex items-center justify-between"><p className="text-[10px] uppercase tracking-[0.2em] text-zinc-500">Current ledger</p><span className="text-xs text-zinc-400">{discount ? `-${discount}%` : "—"}</span></div><dl className="grid grid-cols-2 gap-x-4 gap-y-3 text-xs"><div><dt className="text-zinc-500">Paid now</dt><dd className="mt-1 font-mono text-lg text-zinc-100">{money(final, current?.isFree)}</dd></div><div><dt className="text-zinc-500">Base</dt><dd className="mt-1 font-mono text-lg text-zinc-300">{money(current?.initialPrice ?? null)}</dd></div><div><dt className="text-zinc-500">State</dt><dd className="mt-1 text-zinc-300">{current?.isAvailable === false ? "Unavailable" : current?.isFree && discount === 0 ? "Free" : discount === 100 ? "100% off" : "Paid"}</dd></div><div><dt className="text-zinc-500">Observed</dt><dd className="mt-1 text-zinc-300">{current ? dateShort(current.observedAt) : "—"}</dd></div></dl></article>;
+  if (layout === "unified") return <article id={id} className="border border-zinc-700 bg-zinc-900/60 p-5"><div className="flex flex-wrap items-end justify-between gap-3"><div><p className="text-[10px] uppercase tracking-[0.2em] text-zinc-500">Price surface</p><p className="mt-1 text-3xl font-bold text-zinc-100">{money(final, current?.isFree)}</p></div><div className="text-right text-xs text-zinc-400"><p>{discount ? `${discount}% discount` : "No active discount"}</p><p>{saved !== null ? `${money(saved)} saved` : "No savings recorded"}</p></div></div><div className="mt-4 border-t border-zinc-700 pt-3 text-[11px] text-zinc-400">Last retained change: {current ? dateTime(current.observedAt) : "No data yet"}</div></article>;
+  return <article id={id} className="border border-zinc-800 bg-zinc-950 p-4"><div className="flex items-center justify-between gap-3"><div><p className="text-[10px] uppercase tracking-[0.2em] text-zinc-500">Price now</p><p className="mt-1 text-2xl font-bold tabular-nums text-zinc-100">{money(final, current?.isFree)}</p></div><div className="text-right"><p className="text-xs text-orange-300">{discount ? `-${discount}%` : "List"}</p><p className="mt-1 text-[10px] text-zinc-500">{current ? dateShort(current.observedAt) : "No observation"}</p></div></div></article>;
 }
-
 interface GraphPoint { at: number; value: number | null; row: MockRow; inferred: boolean; }
 function rangeBounds(range: Range, rows: MockRow[]) {
   const end = NOW;
@@ -319,6 +336,37 @@ function MockInspector({ scenario, state }: { scenario: Scenario; state: ReturnT
   return <details className="border border-zinc-800 bg-zinc-950"><summary className="cursor-pointer px-4 py-3 text-xs font-mono uppercase tracking-wider text-zinc-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-orange-500">Mock state inspector</summary><div className="space-y-4 border-t border-zinc-800 p-4 text-xs"><div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4"><div><p className="text-zinc-500">Fixed clock</p><p className="mt-1 font-mono text-zinc-200">{dateTime(PRICE_PROTOTYPE_NOW)}</p></div><div><p className="text-zinc-500">Scenario current</p><p className="mt-1 text-zinc-200">{current ? money(current.finalPrice, current.isFree) : "No data yet"}</p></div><div><p className="text-zinc-500">Last successful check</p><p className="mt-1 font-mono text-zinc-200">{dateTime(scenario.lastSuccessfulCheck)}</p></div><div><p className="text-zinc-500">Last retained change</p><p className="mt-1 font-mono text-zinc-200">{dateTime(current?.observedAt ?? null)}</p></div></div><dl className="grid gap-2 border-t border-zinc-800 pt-3 text-[11px] text-zinc-400 sm:grid-cols-2 lg:grid-cols-4"><div><dt>Variant</dt><dd className="text-zinc-200">{state.variant}</dd></div><div><dt>Card</dt><dd className="text-zinc-200">{state.card}</dd></div><div><dt>Header</dt><dd className="text-zinc-200">{state.header}</dd></div><div><dt>Range / carry / area</dt><dd className="text-zinc-200">{state.range} / {state.carry} / {state.area}</dd></div></dl><div className="overflow-x-auto"><table className="w-full min-w-[760px] text-left text-[11px]"><caption className="mb-2 text-left text-zinc-500">Retained state-change rows (Issue #19); repeated identical polls are omitted.</caption><thead className="border-b border-zinc-800 text-zinc-500"><tr><th className="py-2 pr-3">Observed UTC</th><th className="py-2 pr-3">Availability</th><th className="py-2 pr-3">Base</th><th className="py-2 pr-3">Paid</th><th className="py-2 pr-3">Discount</th><th className="py-2">Meaning</th></tr></thead><tbody>{scenario.rows.map((item) => <tr key={item.observedAt} className="border-b border-zinc-900"><td className="py-2 pr-3 font-mono text-zinc-300">{dateTime(item.observedAt)}</td><td className="py-2 pr-3 text-zinc-300">{item.isAvailable ? "Available" : "Unavailable"}</td><td className="py-2 pr-3 font-mono text-zinc-300">{money(item.initialPrice)}</td><td className="py-2 pr-3 font-mono text-zinc-300">{money(item.finalPrice, item.isFree)}</td><td className="py-2 pr-3 text-zinc-300">{item.discountPercent}%</td><td className="py-2 text-zinc-400">Observed state change</td></tr>)}</tbody></table>{!scenario.rows.length && <p className="py-3 text-zinc-500">No retained rows.</p>}</div></div></details>;
 }
 
+export function PricingPrototypeCard({ search }: Pick<PricingPrototypeProps, "search">) {
+  const state = getState(search);
+  const scenario = SCENARIOS.find(item => item.id === state.scenario) ?? SCENARIOS[0];
+  return <PriceCard layout={state.card} current={currentState(scenario)} scenario={scenario} />;
+}
+
+function PricingStateExamples() {
+  const examples = [
+    { scenario: SCENARIOS.find(item => item.id === "few-equal")!, title: "Regular price", note: "Neutral. Current price, no offer badge, no savings or repeated base price." },
+    { scenario: SCENARIOS.find(item => item.id === "active-discount")!, title: "Active discount", note: "Accented. Current offer, discount, base price and real savings." },
+    { scenario: SCENARIOS.find(item => item.id === "always-free")!, title: "Always free", note: "Neutral. Free to play, no discount or savings. Keep the compact free history." },
+    { scenario: SCENARIOS.find(item => item.id === "paid-to-free")!, title: "Previously paid, now free", note: "Neutral current price. Previous paid prices belong in history, not in a savings claim." },
+    { scenario: SCENARIOS.find(item => item.id === "temporary-free")!, title: "Temporary 100% discount", note: "Accented offer at $0.00. Explicitly limited-time, not free-to-play." },
+    { scenario: { ...SCENARIOS.find(item => item.id === "unavailable-gap")!, rows: [row(2, null, null, 0, false, false)] }, title: "Currently unavailable", note: "Neutral. Unknown price is not free and has no discount badge." },
+    { scenario: SCENARIOS.find(item => item.id === "no-data")!, title: "No observations yet", note: "Neutral. No data yet, without a price, base price or savings." },
+  ];
+  return <details id="pricing-state-examples" className="scroll-mt-28 border border-zinc-800 bg-zinc-950" open>
+    <summary className="cursor-pointer p-4 font-mono text-sm text-zinc-200">Compare pricing states · hero header + offer-first card</summary>
+    <div className="grid gap-6 border-t border-zinc-800 p-4 xl:grid-cols-2">
+      {examples.map(({ scenario, title, note }) => {
+        const current = currentState(scenario);
+        return <section key={title} aria-label={title} className="min-w-0 space-y-3">
+          <div><h3 className="font-mono text-sm text-zinc-200">{title}</h3><p className="mt-1 text-xs leading-relaxed text-zinc-400">{note}</p></div>
+          <HeaderLayout id={`example-header-${scenario.id}`} layout="hero" current={current} saved={savedAmount(current)} onJump={() => document.getElementById("price-prototype-graph")?.scrollIntoView()} />
+          <PriceCard id={`example-card-${scenario.id}`} layout="offer-first" current={current} scenario={scenario} />
+        </section>;
+      })}
+    </div>
+  </details>;
+}
+
 export function PricingPrototype({ search, onChange }: PricingPrototypeProps) {
   const state = useMemo(() => getState(search), [search]);
   const scenario = SCENARIOS.find((item) => item.id === state.scenario) ?? SCENARIOS[0];
@@ -328,7 +376,8 @@ export function PricingPrototype({ search, onChange }: PricingPrototypeProps) {
     <nav aria-label="Price prototype surfaces" className="flex flex-wrap gap-1 border border-zinc-800 bg-zinc-950 p-1 text-[10px] font-mono uppercase tracking-wider"><a href="#price-prototype-header" className="min-h-9 px-3 py-2 text-zinc-400 hover:bg-zinc-900 hover:text-orange-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-orange-500">Header</a><a href="#price-prototype-card" className="min-h-9 px-3 py-2 text-zinc-400 hover:bg-zinc-900 hover:text-orange-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-orange-500">Card</a><a href="#price-prototype-graph" className="min-h-9 px-3 py-2 text-zinc-400 hover:bg-zinc-900 hover:text-orange-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-orange-500">Graph</a></nav>
     <div className="grid gap-3 border border-zinc-800 bg-zinc-950 p-3 md:grid-cols-2 lg:grid-cols-4"><SelectControl label="Scenario" value={state.scenario} values={SCENARIOS.map((item) => item.id)} onChange={(value) => onChange({ scenario: value })} /><SelectControl label="Card treatment" value={state.card} values={["compact", "offer-first", "ledger", "unified"]} onChange={(value) => onChange({ card: value })} /><SelectControl label="Header treatment" value={state.header} values={["inline", "hero", "sidebar", "panel"]} onChange={(value) => onChange({ header: value })} /><SelectControl label="Range" value={state.range} values={["30d", "6m", "1y", "all"]} onChange={(value) => onChange({ range: value })} /><SelectControl label="Last observation" value={state.carry} values={["solid", "dashed", "off"]} onChange={(value) => onChange({ carry: value })} /><SelectControl label="Area" value={state.area} values={["bands", "savings", "line"]} onChange={(value) => onChange({ area: value })} /><SelectControl label="Free presentation" value={state.free} values={["compact", "retained"]} onChange={(value) => onChange({ free: value })} /></div>
     <p className="border border-zinc-800 bg-zinc-950 px-3 py-2 text-xs leading-relaxed text-zinc-400"><span className="font-mono uppercase tracking-wider text-zinc-500">Scenario notes</span> · {scenario.summary}</p>
-    <div id="price-prototype-surfaces"><HeaderLayout layout={state.header} current={current} saved={saved} onJump={() => document.getElementById("price-prototype-graph")?.scrollIntoView({ behavior: "smooth", block: "start" })} /><div className="mt-4 grid gap-4 lg:grid-cols-[minmax(0,280px)_minmax(0,1fr)]"><PriceCard layout={state.card} current={current} scenario={scenario} /><PriceGraph scenario={scenario} range={state.range} carry={state.carry} area={state.area} freePresentation={state.free} /></div></div>
+    <div id="price-prototype-surfaces" className="space-y-4"><HeaderLayout layout={state.header} current={current} saved={saved} onJump={() => document.getElementById("price-prototype-graph")?.scrollIntoView({ behavior: "smooth", block: "start" })} /><PriceGraph scenario={scenario} range={state.range} carry={state.carry} area={state.area} freePresentation={state.free} /></div>
+    <PricingStateExamples />
     <MockInspector scenario={scenario} state={state} />
     <PrototypeSwitcher variant={state.variant} onChange={(variant) => onChange({ variant })} />
   </section>;

@@ -11,7 +11,7 @@ import { PlayerHistoryChart } from "./player-history";
 import { PriceHistoryChart } from "./price-history";
 import { RelatedApps } from "./related-apps";
 import { AppLink } from "./app-link";
-import { PricingPrototype, type PricingPrototypeProps } from "./pricing-prototype";
+import { PricingPrototype, PricingPrototypeCard, type PricingPrototypeProps } from "./pricing-prototype";
 import { LifecycleHistorySection } from "./lifecycle-history";
 export interface GamePageProps {
   game: GameDetail;
@@ -168,6 +168,7 @@ export function GamePageView({
             current_price: price ?? null,
           }}
         />
+        {pricingPrototype && <PricingPrototypeCard search={pricingPrototype.search} />}
       </div>
 
       <section id="player-history" className="scroll-mt-28">
