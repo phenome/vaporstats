@@ -205,7 +205,7 @@ export function PriceHistoryChart({
 
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-zinc-900 pb-3">
         <div className="flex items-center gap-2">
-          <span className="w-2 h-2 bg-orange-500 inline-block"></span>
+          <span className="w-2 h-2 bg-emerald-500 inline-block"></span>
           <h2 className="text-xs font-mono font-semibold text-zinc-200 uppercase tracking-wider">
             Price History
           </h2>
@@ -228,9 +228,9 @@ export function PriceHistoryChart({
                   setRange(item);
                 }}
                 aria-pressed={active}
-                className={`min-h-[44px] min-w-[44px] px-2.5 py-1 inline-flex items-center justify-center text-[11px] font-mono uppercase tracking-wider transition-colors rounded-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-orange-500 ${
+                className={`min-h-[44px] min-w-[44px] px-2.5 py-1 inline-flex items-center justify-center text-[11px] font-mono uppercase tracking-wider transition-colors rounded-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 ${
                   active
-                    ? "bg-orange-600 text-white font-semibold"
+                    ? "bg-emerald-600 text-white font-semibold"
                     : "bg-zinc-900 text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 border border-zinc-800"
                 }`}
               >
@@ -266,7 +266,7 @@ export function PriceHistoryChart({
           </div>
           <div className="border border-zinc-900 bg-zinc-900/40 p-2">
             <span className="text-zinc-500 text-[10px] uppercase block">All-Time Low</span>
-            <span className="text-orange-400 font-bold tabular-nums">
+            <span className="text-emerald-400 font-bold tabular-nums">
               {allTimeLow
                 ? `${formatPriceCents(allTimeLow.price_cents, allTimeLow.currency)}${allTimeLow.discount_percent > 0 ? ` (-${allTimeLow.discount_percent}%)` : ""}`
                 : (periodLowCents !== null ? formatPriceCents(periodLowCents, currentPrice?.currency ?? "USD") : "No data")}
@@ -331,14 +331,14 @@ export function PriceHistoryChart({
                   <text x={geometry.padLeft} y={geometry.height - 10} textAnchor="start" fill="#71717a" fontSize="10" fontFamily="monospace">{formatAxisDate(domain.start)}</text>
                   <text x={geometry.width - geometry.padRight} y={geometry.height - 10} textAnchor="end" fill="#71717a" fontSize="10" fontFamily="monospace">{formatAxisDate(domain.end)}</text>
                   {geometry.savingsAreas.map((area, index) => (
-                    <path key={`savings-${index}`} d={area.d} fill="#fb923c" opacity="0.2" data-testid="price-savings-area" aria-label={`Savings area ${formatPriceCents(area.savingsCents, area.from.currency)}`} />
+                    <path key={`savings-${index}`} d={area.d} fill="#4ade80" opacity="0.2" data-testid="price-savings-area" aria-label={`Savings area ${formatPriceCents(area.savingsCents, area.from.currency)}`} />
                   ))}
                   {geometry.paths.map((path, index) => (
                     <path
                       key={`line-${index}`}
                       d={path.d}
                       fill="none"
-                      stroke={path.inferred ? "#a1a1aa" : "#fb923c"}
+                      stroke={path.inferred ? "#a1a1aa" : "#22c55e"}
                       strokeWidth="2"
                       strokeDasharray={path.inferred ? "6 5" : undefined}
                       strokeLinecap="round"
@@ -357,7 +357,7 @@ export function PriceHistoryChart({
                         cx={coordinate.x}
                         cy={coordinate.y}
                         r={focused || isolated ? 4 : 7}
-                        fill={focused || isolated ? "#fb923c" : "transparent"}
+                        fill={focused || isolated ? "#22c55e" : "transparent"}
                         stroke={focused ? "#fff7ed" : isolated ? "#18181b" : "transparent"}
                         strokeWidth="2"
                         tabIndex={0}
@@ -382,7 +382,7 @@ export function PriceHistoryChart({
                           y1={geometry.coordinates[hoveredIndex].y!}
                           x2={geometry.coordinates[hoveredIndex].x}
                           y2={geometry.coordinates[hoveredIndex].y!}
-                          stroke="#ea580c"
+                          stroke="#16a34a"
                           strokeDasharray="3 3"
                           strokeWidth="1"
                         />
@@ -391,7 +391,7 @@ export function PriceHistoryChart({
                           y={geometry.coordinates[hoveredIndex].y! - 7}
                           width={44}
                           height={14}
-                          fill="#ea580c"
+                          fill="#16a34a"
                           rx={2}
                         />
                         <text
@@ -416,15 +416,15 @@ export function PriceHistoryChart({
                     <p className="font-mono tabular-nums">{formatPointPrice(hoveredPoint)}</p>
                     <p className="mt-1 text-zinc-400">{pointDescription(hoveredPoint)}</p>
                     {hoveredPoint.isDiscounted && hoveredPoint.savingsCents !== null && (
-                      <p className="mt-1 text-orange-300">Save {formatPriceCents(hoveredPoint.savingsCents, hoveredPoint.currency)}</p>
+                      <p className="mt-1 text-emerald-300">Save {formatPriceCents(hoveredPoint.savingsCents, hoveredPoint.currency)}</p>
                     )}
                   </div>
                 )}
               </div>
               <div className="flex flex-wrap gap-x-4 gap-y-1 text-[10px] text-zinc-500" aria-label="Price history legend">
-                <span><i className="mr-1 inline-block h-2 w-2 bg-orange-400" />Observed</span>
+                <span><i className="mr-1 inline-block h-2 w-2 bg-green-500" />Observed</span>
                 <span><i className="mr-1 inline-block h-2 w-2 border border-zinc-500" />Carried forward; not a new observation</span>
-                {geometry.savingsAreas.length > 0 && <span><i className="mr-1 inline-block h-2 w-2 bg-orange-300/40" />Savings</span>}
+                {geometry.savingsAreas.length > 0 && <span><i className="mr-1 inline-block h-2 w-2 bg-green-300/40" />Savings</span>}
                 {currentIsOffer && <span className="text-orange-300">Current offer savings shown above</span>}
               </div>
             </div>

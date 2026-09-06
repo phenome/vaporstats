@@ -93,11 +93,14 @@ export function PriceSummary({
           {" "}
           <span className="hidden sm:inline">(US / USD)</span>
         </p>
-        {offer && (
-          <span className="border border-orange-400/40 px-1.5 py-0.5 text-[10px] text-orange-200">
-            -{discount}%
-          </span>
-        )}
+        <span className="flex items-center gap-2">
+          {offer && (
+            <span className="border border-orange-400/40 px-1.5 py-0.5 text-[10px] text-orange-200">
+              -{discount}%
+            </span>
+          )}
+          <span aria-hidden="true" className="w-2 h-2 bg-emerald-500 inline-block shrink-0"></span>
+        </span>
       </div>
       <div className="pt-2">
         <div className="flex flex-wrap items-baseline justify-between gap-2">
