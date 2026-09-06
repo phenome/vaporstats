@@ -399,6 +399,7 @@ describe("Player History and Rankings", () => {
       [103, "Daily Game"],
       [104, "Unknown Tier Game"],
       [105, "Untracked Game"],
+      [106, "Untracked Hourly Game"],
     ] as const) {
       await db.prepare("INSERT INTO apps (appid, name, slug) VALUES (?, ?, ?)").bind(appid, name, name.toLowerCase().replaceAll(" ", "-")).run();
     }
@@ -425,6 +426,10 @@ describe("Player History and Rankings", () => {
       [104, 6, at(-59 * minute)],
       [105, 8, at(-120 * minute)],
       [105, 9, at(-80 * minute)],
+      [106, 50, at(-4 * hourly)],
+      [106, 51, at(-3 * hourly)],
+      [106, 52, at(-2 * hourly)],
+      [106, 53, at(-1 * hourly)],
     ] as const;
     for (const [appid, players, observedAt] of observations) {
       await db.prepare("INSERT INTO observations (appid, current_players, observed_at) VALUES (?, ?, ?)").bind(appid, players, observedAt).run();
@@ -448,6 +453,11 @@ describe("Player History and Rankings", () => {
     // No tracked row is conservative too; the hourly row must not affect this appid.
     const untrackedHistory = await getPlayerHistory(db, 105, "24h", anchor);
     expect(untrackedHistory.points.map((point) => point.players)).toEqual([8, null, 9]);
+
+    // Untracked game with recurring hourly cadence does not inject false gaps between regular samples
+    const untrackedHourlyHistory = await getPlayerHistory(db, 106, "24h", anchor);
+    expect(untrackedHourlyHistory.points.map((point) => point.players)).toEqual([50, 51, 52, 53]);
+    expect(untrackedHourlyHistory.points.some((point) => point.is_gap)).toBe(false);
   });
 
   // G4: player charts expose labels, values, gaps, and a numeric time domain

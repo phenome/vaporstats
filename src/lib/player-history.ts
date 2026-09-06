@@ -446,10 +446,6 @@ export async function getPlayerHistory(
       .bind(appid)
       .first<{ tier: string | null }>();
     const tier = trackedGame?.tier;
-    if (tier === "fast" || tier === "hourly" || tier === "daily") {
-      // Allow 50% scheduling tolerance, but preserve the existing 30-minute floor.
-      rawGapThresholdMs = Math.max(30 * 60 * 1000, 1.5 * CADENCE_MS[tier]);
-    }
     const result = await db
       .prepare(
         "SELECT id, current_players, observed_at FROM observations" +
@@ -458,7 +454,30 @@ export async function getPlayerHistory(
       )
       .bind(appid, cutoffIso!, anchorTimeIso)
       .all<RawObservationRow>();
-    bucketPoints = (result.results ?? []).map((row) => ({
+    const rows = result.results ?? [];
+
+    if (tier === "fast" || tier === "hourly" || tier === "daily") {
+      // Allow 50% scheduling tolerance, but preserve the existing 30-minute floor.
+      rawGapThresholdMs = Math.max(30 * 60 * 1000, 1.5 * CADENCE_MS[tier]);
+    } else if (rows.length >= 3) {
+      // Infer cadence from actual observation intervals for untracked or unclassified games
+      const intervals: number[] = [];
+      for (let i = 1; i < rows.length; i++) {
+        const diff = new Date(rows[i].observed_at).getTime() - new Date(rows[i - 1].observed_at).getTime();
+        if (diff > 0) intervals.push(diff);
+      }
+      if (intervals.length > 0) {
+        intervals.sort((a, b) => a - b);
+        const medianInterval = intervals[Math.floor(intervals.length / 2)];
+        if (medianInterval >= 45 * 60 * 1000 && medianInterval <= 90 * 60 * 1000) {
+          rawGapThresholdMs = Math.max(30 * 60 * 1000, 1.5 * CADENCE_MS.hourly);
+        } else if (medianInterval > 90 * 60 * 1000) {
+          rawGapThresholdMs = Math.max(30 * 60 * 1000, 1.5 * CADENCE_MS.daily);
+        }
+      }
+    }
+
+    bucketPoints = rows.map((row) => ({
       timestamp: row.observed_at,
       players: row.current_players,
       is_rollup: false,
