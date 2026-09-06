@@ -6,6 +6,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "prototype:prices": "bun --bun vite --port 4317 --strictPort --host 127.0.0.1 --open /games/730-counter-strike-2?variant=A",
     "images:optimize": "bun scripts/optimize-images.ts",
     "build": "bun scripts/optimize-images.ts && vite build",
     "start": "bun dist/server/server.js",

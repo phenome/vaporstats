@@ -11,14 +11,15 @@ import { PlayerHistoryChart } from "./player-history";
 import { PriceHistoryChart } from "./price-history";
 import { RelatedApps } from "./related-apps";
 import { AppLink } from "./app-link";
+import { PricingPrototype, type PricingPrototypeProps } from "./pricing-prototype";
 import { LifecycleHistorySection } from "./lifecycle-history";
-
 export interface GamePageProps {
   game: GameDetail;
   related?: GroupedRelatedApps;
   playerHistory?: PlayerHistoryResult;
   price?: PriceState | null;
   priceHistory?: PriceHistoryResult | null;
+  pricingPrototype?: PricingPrototypeProps;
 }
 
 export function GamePageView({
@@ -27,8 +28,10 @@ export function GamePageView({
   playerHistory,
   price,
   priceHistory,
+  pricingPrototype,
 }: GamePageProps) {
   const overviewEvents = getLifecycleOverviewEvents(game);
+
   const mainReleaseDate = getMainReleaseDate(game);
   return (
     <div className="max-w-7xl mx-auto px-4 py-8 space-y-6">
@@ -157,6 +160,7 @@ export function GamePageView({
         <PlayerPanel
           key={game.appid}
           appid={game.appid}
+          showPrice={!pricingPrototype}
           initialData={{
             appid: game.appid,
             latest_players: game.latest_players,
@@ -167,7 +171,6 @@ export function GamePageView({
       </div>
 
       <section id="player-history" className="scroll-mt-28">
-      {/* Player History Chart Deck (Default 30d) */}
       <PlayerHistoryChart
         key={game.appid}
         appid={game.appid}
@@ -177,13 +180,16 @@ export function GamePageView({
       </section>
 
       <section id="price-history" className="scroll-mt-28">
-      {/* Price History Chart Deck (Default All) */}
-      <PriceHistoryChart
-        key={`price-${game.appid}`}
-        appid={game.appid}
-        initialRange="all"
-        initialData={priceHistory ?? undefined}
-      />
+      {pricingPrototype ? (
+        <PricingPrototype {...pricingPrototype} />
+      ) : (
+        <PriceHistoryChart
+          key={`price-${game.appid}`}
+          appid={game.appid}
+          initialRange="all"
+          initialData={priceHistory ?? undefined}
+        />
+      )}
       </section>
       {/* Related Content Deck */}
       {related && (

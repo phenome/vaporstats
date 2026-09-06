@@ -17,11 +17,11 @@ function imageOptimizerPlugin() {
   };
 }
 
-export default defineConfig({
+export default defineConfig(({ command }) => ({
   plugins: [
     tanstackStart({
       server: {
-        entry: "./server",
+        entry: command === "build" ? "./server" : path.resolve(import.meta.dirname, "node_modules/@tanstack/react-start/src/default-entry/server.ts"),
       },
       prerender: {
         enabled: false,
@@ -43,8 +43,8 @@ export default defineConfig({
   environments: {
     ssr: {
       optimizeDeps: {
-        include: ["react-dom/server"],
+        include: ["react", "react/jsx-runtime", "react/jsx-dev-runtime", "react-dom", "react-dom/client", "react-dom/server"],
       },
     },
   },
-});
+}));

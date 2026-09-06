@@ -14,7 +14,7 @@ import { GamePageView } from "../components/game-page";
 import { GamePageSkeleton } from "../components/route-skeletons";
 import { AppLink } from "../components/app-link";
 import type { GameDetailResponseData } from "./api.games.$appid.detail";
-
+import { PROTOTYPE_GAME_FALLBACK, type PrototypeSearchState } from "../components/pricing-prototype";
 export async function fetchGameDetail(appid: number): Promise<GameDetailResponseData> {
   const response = await fetch(`/api/games/${appid}/detail`);
   if (!response.ok) {
@@ -35,6 +35,16 @@ export function gameDetailQueryOptions(appid: number) {
 }
 
 export const Route = createFileRoute("/games/$game")({
+  validateSearch: (search: Record<string, unknown>): PrototypeSearchState => ({
+    variant: typeof search.variant === "string" ? search.variant : undefined,
+    scenario: typeof search.scenario === "string" ? search.scenario : undefined,
+    card: typeof search.card === "string" ? search.card : undefined,
+    header: typeof search.header === "string" ? search.header : undefined,
+    range: typeof search.range === "string" ? search.range : undefined,
+    carry: typeof search.carry === "string" ? search.carry : undefined,
+    area: typeof search.area === "string" ? search.area : undefined,
+    free: typeof search.free === "string" ? search.free : undefined,
+  }),
   headers: () => getEntityCacheHeaders(),
   loader: ({ params, context }) => {
     const parsed = parseGameSlug(params.game);
@@ -51,9 +61,27 @@ export const Route = createFileRoute("/games/$game")({
 
 function GameRouteComponent() {
   const { appid, slug } = Route.useLoaderData();
+  const search = Route.useSearch();
+  const navigate = Route.useNavigate();
   const { data, isLoading, isError } = useQuery(gameDetailQueryOptions(appid));
+  const prototypeEnabled = import.meta.env.DEV && appid === 730 && (search.variant !== undefined || search.scenario !== undefined);
+  const prototypeProps = prototypeEnabled
+    ? {
+        search,
+        onChange: (patch: Partial<PrototypeSearchState>) => {
+          void navigate({
+            search: (previous) => ({ ...previous, ...patch }),
+            replace: true,
+            resetScroll: false,
+          });
+        },
+      }
+    : undefined;
 
   if (isError) {
+    if (prototypeEnabled) {
+      return <GamePageView {...PROTOTYPE_GAME_FALLBACK} pricingPrototype={prototypeProps} />;
+    }
     return <GameNotFoundComponent />;
   }
 
@@ -80,6 +108,7 @@ function GameRouteComponent() {
       playerHistory={playerHistory}
       price={price}
       priceHistory={priceHistory}
+      pricingPrototype={prototypeProps}
     />
   );
 }
