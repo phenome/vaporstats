@@ -548,7 +548,7 @@ export function GamePageView({
           {activityCards}
         </div>
       ) : activityCards}
-      <ScoreHistory />
+      <ScoreHistory appid={game.appid} />
 
       <section id="player-history" className="scroll-mt-28">
         <PlayerHistoryChart

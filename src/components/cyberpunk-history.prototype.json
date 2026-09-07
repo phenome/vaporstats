@@ -1,0 +1,357 @@
+{
+  "source": "https://store.steampowered.com/appreviewhistogram/1091500?l=english",
+  "fetchedAt": "2026-09-07T20:39:56.951Z",
+  "metric": "Monthly Steam review approval",
+  "data": [
+    {
+      "date": "2020-12-01",
+      "positive": 227472,
+      "total": 290805
+    },
+    {
+      "date": "2021-01-01",
+      "positive": 30673,
+      "total": 40554
+    },
+    {
+      "date": "2021-02-01",
+      "positive": 7848,
+      "total": 11329
+    },
+    {
+      "date": "2021-03-01",
+      "positive": 5513,
+      "total": 9318
+    },
+    {
+      "date": "2021-04-01",
+      "positive": 5177,
+      "total": 7619
+    },
+    {
+      "date": "2021-05-01",
+      "positive": 3936,
+      "total": 5979
+    },
+    {
+      "date": "2021-06-01",
+      "positive": 3444,
+      "total": 5492
+    },
+    {
+      "date": "2021-07-01",
+      "positive": 3559,
+      "total": 5142
+    },
+    {
+      "date": "2021-08-01",
+      "positive": 3713,
+      "total": 5546
+    },
+    {
+      "date": "2021-09-01",
+      "positive": 3439,
+      "total": 4747
+    },
+    {
+      "date": "2021-10-01",
+      "positive": 2537,
+      "total": 3478
+    },
+    {
+      "date": "2021-11-01",
+      "positive": 22124,
+      "total": 26430
+    },
+    {
+      "date": "2021-12-01",
+      "positive": 8281,
+      "total": 11237
+    },
+    {
+      "date": "2022-01-01",
+      "positive": 5386,
+      "total": 7006
+    },
+    {
+      "date": "2022-02-01",
+      "positive": 7466,
+      "total": 9876
+    },
+    {
+      "date": "2022-03-01",
+      "positive": 5293,
+      "total": 10435
+    },
+    {
+      "date": "2022-04-01",
+      "positive": 3155,
+      "total": 3842
+    },
+    {
+      "date": "2022-05-01",
+      "positive": 3109,
+      "total": 3654
+    },
+    {
+      "date": "2022-06-01",
+      "positive": 2832,
+      "total": 3487
+    },
+    {
+      "date": "2022-07-01",
+      "positive": 3356,
+      "total": 4005
+    },
+    {
+      "date": "2022-08-01",
+      "positive": 3206,
+      "total": 3759
+    },
+    {
+      "date": "2022-09-01",
+      "positive": 13058,
+      "total": 15013
+    },
+    {
+      "date": "2022-10-01",
+      "positive": 12220,
+      "total": 13626
+    },
+    {
+      "date": "2022-11-01",
+      "positive": 14795,
+      "total": 16009
+    },
+    {
+      "date": "2022-12-01",
+      "positive": 9982,
+      "total": 11140
+    },
+    {
+      "date": "2023-01-01",
+      "positive": 10445,
+      "total": 12057
+    },
+    {
+      "date": "2023-02-01",
+      "positive": 4942,
+      "total": 5846
+    },
+    {
+      "date": "2023-03-01",
+      "positive": 4659,
+      "total": 5311
+    },
+    {
+      "date": "2023-04-01",
+      "positive": 5627,
+      "total": 7058
+    },
+    {
+      "date": "2023-05-01",
+      "positive": 3622,
+      "total": 4181
+    },
+    {
+      "date": "2023-06-01",
+      "positive": 5250,
+      "total": 6290
+    },
+    {
+      "date": "2023-07-01",
+      "positive": 6616,
+      "total": 7464
+    },
+    {
+      "date": "2023-08-01",
+      "positive": 6129,
+      "total": 6841
+    },
+    {
+      "date": "2023-09-01",
+      "positive": 15504,
+      "total": 17942
+    },
+    {
+      "date": "2023-10-01",
+      "positive": 19547,
+      "total": 21742
+    },
+    {
+      "date": "2023-11-01",
+      "positive": 9705,
+      "total": 10546
+    },
+    {
+      "date": "2023-12-01",
+      "positive": 14012,
+      "total": 15334
+    },
+    {
+      "date": "2024-01-01",
+      "positive": 10317,
+      "total": 11097
+    },
+    {
+      "date": "2024-02-01",
+      "positive": 8055,
+      "total": 8774
+    },
+    {
+      "date": "2024-03-01",
+      "positive": 7616,
+      "total": 8227
+    },
+    {
+      "date": "2024-04-01",
+      "positive": 6628,
+      "total": 7092
+    },
+    {
+      "date": "2024-05-01",
+      "positive": 8090,
+      "total": 8577
+    },
+    {
+      "date": "2024-06-01",
+      "positive": 5984,
+      "total": 6326
+    },
+    {
+      "date": "2024-07-01",
+      "positive": 7733,
+      "total": 8594
+    },
+    {
+      "date": "2024-08-01",
+      "positive": 6835,
+      "total": 7291
+    },
+    {
+      "date": "2024-09-01",
+      "positive": 7242,
+      "total": 7709
+    },
+    {
+      "date": "2024-10-01",
+      "positive": 6435,
+      "total": 6778
+    },
+    {
+      "date": "2024-11-01",
+      "positive": 7333,
+      "total": 7750
+    },
+    {
+      "date": "2024-12-01",
+      "positive": 12369,
+      "total": 13127
+    },
+    {
+      "date": "2025-01-01",
+      "positive": 11997,
+      "total": 12625
+    },
+    {
+      "date": "2025-02-01",
+      "positive": 8082,
+      "total": 8459
+    },
+    {
+      "date": "2025-03-01",
+      "positive": 8862,
+      "total": 9351
+    },
+    {
+      "date": "2025-04-01",
+      "positive": 6308,
+      "total": 6603
+    },
+    {
+      "date": "2025-05-01",
+      "positive": 7419,
+      "total": 7919
+    },
+    {
+      "date": "2025-06-01",
+      "positive": 7342,
+      "total": 7750
+    },
+    {
+      "date": "2025-07-01",
+      "positive": 12930,
+      "total": 13717
+    },
+    {
+      "date": "2025-08-01",
+      "positive": 11867,
+      "total": 12666
+    },
+    {
+      "date": "2025-09-01",
+      "positive": 7961,
+      "total": 8492
+    },
+    {
+      "date": "2025-10-01",
+      "positive": 8210,
+      "total": 8713
+    },
+    {
+      "date": "2025-11-01",
+      "positive": 6003,
+      "total": 6370
+    },
+    {
+      "date": "2025-12-01",
+      "positive": 11035,
+      "total": 11707
+    },
+    {
+      "date": "2026-01-01",
+      "positive": 9483,
+      "total": 10085
+    },
+    {
+      "date": "2026-02-01",
+      "positive": 6285,
+      "total": 6651
+    },
+    {
+      "date": "2026-03-01",
+      "positive": 7041,
+      "total": 7448
+    },
+    {
+      "date": "2026-04-01",
+      "positive": 6805,
+      "total": 7193
+    },
+    {
+      "date": "2026-05-01",
+      "positive": 6721,
+      "total": 7119
+    },
+    {
+      "date": "2026-06-01",
+      "positive": 8941,
+      "total": 9543
+    },
+    {
+      "date": "2026-07-01",
+      "positive": 14495,
+      "total": 15267
+    },
+    {
+      "date": "2026-08-01",
+      "positive": 11473,
+      "total": 12128
+    },
+    {
+      "date": "2026-09-01",
+      "positive": 1624,
+      "total": 1722
+    }
+  ]
+}

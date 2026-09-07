@@ -1,14 +1,28 @@
 import { useMemo, useState } from "react";
 import { Area, AreaChart, CartesianGrid, ReferenceLine, XAxis, YAxis } from "recharts";
+import cyberpunkHistory from "./cyberpunk-history.prototype.json";
 import { ChartContainer, ChartTooltip, ChartTooltipContent } from "./ui/chart";
 
 export const scorePrototypeEnabled = import.meta.env.DEV || import.meta.env.VITE_PROTOTYPE === "true";
 
 type ScoreRange = "24h" | "7d" | "30d" | "90d" | "all";
-type ScoreObservation = { timestamp: number; score: number; reviews: number };
+type ScoreObservation = {
+  timestamp: number;
+  score: number;
+  reviews: number;
+  partial?: boolean;
+};
+type HistoryEventKind = "majorPatch" | "expansion" | "edition";
+type HistoryEvent = {
+  date: string;
+  kind: HistoryEventKind;
+  label: string;
+  sourceUrl: string;
+};
 
 // Fixed to the fixture's reference date so prototype ranges do not drift with the wall clock.
 const REFERENCE_TIME = Date.parse("2026-09-07T00:00:00Z");
+const CYBERPUNK_APPID = 1091500;
 const CURRENT_SCORE = 84;
 const CURRENT_REVIEW_COUNT = 2841;
 const observations: readonly ScoreObservation[] = [
@@ -19,6 +33,20 @@ const observations: readonly ScoreObservation[] = [
   { timestamp: Date.parse("2026-07-14T18:00:00Z"), score: 86, reviews: 1426 },
   { timestamp: Date.parse("2026-09-06T14:05:00Z"), score: CURRENT_SCORE, reviews: CURRENT_REVIEW_COUNT },
 ];
+const cyberpunkObservations: readonly ScoreObservation[] = cyberpunkHistory.data.map((point, index, all) => ({
+  timestamp: Date.parse(point.date + "T00:00:00Z"),
+  score: 100 * point.positive / point.total,
+  reviews: point.total,
+  partial: index === all.length - 1,
+}));
+const cyberpunkEvents: readonly HistoryEvent[] = [
+  { date: "2022-02-15", kind: "majorPatch", label: "Patch 1.5", sourceUrl: "https://www.cyberpunk.net/en/news/41435/patch-1-5-next-generation-update-list-of-changes" },
+  { date: "2022-09-06", kind: "majorPatch", label: "Edgerunners · 1.6", sourceUrl: "https://www.cyberpunk.net/en/news/45280/edgerunners-update-patch-1-6-list-of-changes" },
+  { date: "2023-09-21", kind: "majorPatch", label: "Update 2.0", sourceUrl: "https://www.cyberpunk.net/en/news/49060/update-2-0" },
+  { date: "2023-09-25", kind: "expansion", label: "Phantom Liberty · PC", sourceUrl: "https://www.cyberpunk.net/en/news/49150/cyberpunk-2077-phantom-liberty-out-now" },
+  { date: "2023-12-05", kind: "edition", label: "Ultimate Edition", sourceUrl: "https://www.cyberpunk.net/en/news/49696/cyberpunk-2077-ultimate-edition-is-out-now" },
+  { date: "2023-12-05", kind: "majorPatch", label: "Update 2.1", sourceUrl: "https://www.cyberpunk.net/en/news/49597/update-2-1-patch-notes" },
+];
 const scoreRanges: readonly ScoreRange[] = ["24h", "7d", "30d", "90d", "all"];
 const rangeSpans: Record<Exclude<ScoreRange, "all">, number> = {
   "24h": 24 * 60 * 60 * 1000,
@@ -26,81 +54,73 @@ const rangeSpans: Record<Exclude<ScoreRange, "all">, number> = {
   "30d": 30 * 24 * 60 * 60 * 1000,
   "90d": 90 * 24 * 60 * 60 * 1000,
 };
+const EVENT_KIND_LABELS: Record<HistoryEventKind, string> = {
+  majorPatch: "Major patch",
+  expansion: "Expansion",
+  edition: "Edition",
+};
+const SHORT_EVENT_LABELS: Record<string, string> = {
+  "Patch 1.5": "1.5",
+  "Edgerunners · 1.6": "1.6",
+  "Update 2.0": "2.0",
+  "Phantom Liberty · PC": "PL",
+  "Ultimate Edition": "UE",
+  "Update 2.1": "2.1",
+};
 
 const formatNumber = (value: number) => new Intl.NumberFormat(undefined, { maximumFractionDigits: 1 }).format(value);
 const formatDate = (timestamp: number) => new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric" }).format(timestamp);
-const formatTooltipDate = (timestamp: number) => new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(timestamp);
+const formatTooltipDate = (timestamp: number) => new Intl.DateTimeFormat(undefined, { dateStyle: "medium" }).format(timestamp);
+const formatEventDate = (date: string) => new Intl.DateTimeFormat(undefined, { dateStyle: "long" }).format(Date.parse(date + "T00:00:00Z"));
 const formatRange = (range: ScoreRange) => range === "all" ? "All" : range;
 
-function scoreDomain(range: ScoreRange): [number, number] {
+function scoreDomain(range: ScoreRange, allPoints: readonly ScoreObservation[]): [number, number] {
   if (range === "all") {
-    return [observations[0].timestamp, observations[observations.length - 1].timestamp];
+    return [allPoints[0].timestamp, allPoints[allPoints.length - 1].timestamp];
   }
   return [REFERENCE_TIME - rangeSpans[range], REFERENCE_TIME];
-}
-
-function ScoreBadge() {
-  return (
-    <div className="flex shrink-0 flex-col items-center">
-      <div
-        className="h-20 w-20 bg-violet-300 p-px"
-        style={{ clipPath: "polygon(0 8px, 8px 0, calc(100% - 8px) 0, 100% 8px, 100% calc(100% - 8px), calc(100% - 8px) 100%, 8px 100%, 0 calc(100% - 8px))" }}
-      >
-        <div
-          className="grid h-full w-full place-items-center bg-zinc-950"
-          style={{ clipPath: "polygon(0 8px, 8px 0, calc(100% - 8px) 0, 100% 8px, 100% calc(100% - 8px), calc(100% - 8px) 100%, 8px 100%, 0 calc(100% - 8px))" }}
-        >
-          <strong
-            className="font-mono text-3xl font-bold leading-none tabular-nums text-violet-200"
-            title="Current Player Score: 84"
-            aria-label="Current Player Score: 84"
-          >
-            {CURRENT_SCORE}
-          </strong>
-        </div>
-      </div>
-      <span
-        className="mt-2 cursor-help text-center font-mono text-[11px] text-zinc-400"
-        title="Qualifying player reviews represented by the current score"
-        tabIndex={0}
-        aria-label={formatNumber(CURRENT_REVIEW_COUNT) + " qualifying player reviews"}
-      >
-        {formatNumber(CURRENT_REVIEW_COUNT)} reviews
-      </span>
-    </div>
-  );
 }
 
 export function ScoreHero() {
   if (!scorePrototypeEnabled) return null;
   return (
-    <section id="player-score" className="h-full scroll-mt-28 border border-zinc-800 bg-zinc-950 p-5" aria-labelledby="score-hero-title">
-      <div className="flex items-center gap-2">
-        <span className="inline-block h-2 w-2 bg-violet-500" aria-hidden="true" />
-        <h2 id="score-hero-title" className="font-mono text-xs font-semibold uppercase tracking-wider text-zinc-200">
+    <section id="player-score" className="h-full border border-zinc-800 bg-zinc-950 p-5 space-y-3" aria-labelledby="score-hero-title">
+      <div className="flex items-center justify-between">
+        <h2 id="score-hero-title" className="text-[11px] font-mono text-zinc-400 uppercase tracking-wider">
           Current Player Score
         </h2>
+        <span className="w-2 h-2 rounded-none bg-violet-500 inline-block" aria-hidden="true" />
       </div>
-      <div className="mt-5 flex items-center gap-4">
-        <ScoreBadge />
+      <div className="pt-2 text-right">
+        <div className="font-mono text-3xl font-bold leading-none tabular-nums text-violet-200" aria-label="Current Player Score: 84">
+          {CURRENT_SCORE}
+        </div>
+        <p className="mt-2 text-[11px] font-mono text-zinc-400" title="Qualifying player reviews represented by the current score">
+          {formatNumber(CURRENT_REVIEW_COUNT)} reviews
+        </p>
       </div>
     </section>
   );
 }
 
-function ScoreMetrics({ range, points }: { range: ScoreRange; points: readonly ScoreObservation[] }) {
+function ScoreMetrics({ range, points, allPoints }: {
+  range: ScoreRange;
+  points: readonly ScoreObservation[];
+  allPoints: readonly ScoreObservation[];
+}) {
   const values = points.map(point => point.score);
   const minimum = values.length ? Math.min(...values) : null;
   const maximum = values.length ? Math.max(...values) : null;
   const average = values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : null;
-  const allTimePeak = Math.max(...observations.map(point => point.score));
+  const allTimePeak = allPoints.length ? Math.max(...allPoints.map(point => point.score)) : null;
+  const latest = points.length ? points[points.length - 1].score : null;
   const metric = (value: number | null) => value === null ? "—" : formatNumber(value);
   const periodName = range.toUpperCase();
   return (
     <div className="grid grid-cols-2 gap-2 pt-1 text-xs font-mono sm:grid-cols-4">
       <div className="border border-zinc-900 bg-zinc-900/40 p-2">
-        <span className="block text-[10px] uppercase text-zinc-500">Current</span>
-        <span className="font-bold tabular-nums text-zinc-100">{formatNumber(CURRENT_SCORE)}</span>
+        <span className="block text-[10px] uppercase text-zinc-500">Latest</span>
+        <span className="font-bold tabular-nums text-zinc-100">{metric(latest)}</span>
       </div>
       <div className="border border-zinc-900 bg-zinc-900/40 p-2">
         <span className="block text-[10px] uppercase text-zinc-500">{range === "all" ? "All-Time Low" : periodName + " Low"}</span>
@@ -112,26 +132,80 @@ function ScoreMetrics({ range, points }: { range: ScoreRange; points: readonly S
       </div>
       <div className="border border-zinc-900 bg-zinc-900/40 p-2">
         <span className="block text-[10px] uppercase text-zinc-500">All-Time Peak</span>
-        <span className="font-bold tabular-nums text-violet-300">{formatNumber(allTimePeak)}</span>
+        <span className="font-bold tabular-nums text-violet-300">{metric(allTimePeak)}</span>
       </div>
     </div>
   );
 }
 
-function ScoreChart({ points, domain }: { points: ScoreObservation[]; domain: [number, number] }) {
+type EventWithLayout = HistoryEvent & { timestamp: number; lane: number };
+
+function HistoryEventLabel({ viewBox, event, edge, active, tooltipId, onActivate, onDeactivate }: {
+  viewBox?: { x?: number; y?: number };
+  event: EventWithLayout;
+  edge: boolean;
+  active: boolean;
+  tooltipId: string;
+  onActivate: (keyboard?: boolean) => void;
+  onDeactivate: () => void;
+}) {
+  const shortLabel = SHORT_EVENT_LABELS[event.label] ?? event.label.slice(0, 4);
+  return (
+    <foreignObject x={(viewBox?.x ?? 0) + (edge ? -46 : 3)} y={(viewBox?.y ?? 0) + event.lane * 26} width={44} height={26}>
+      <button
+        type="button"
+        className="score-event-label pointer-events-auto block h-6 w-11 truncate border border-violet-400/50 bg-zinc-950 px-1 text-left font-mono text-[10px] font-semibold text-violet-200 hover:bg-violet-500/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400"
+        aria-label={event.label + " · " + formatEventDate(event.date)}
+        aria-describedby={active ? tooltipId : undefined}
+        onMouseEnter={() => onActivate(false)}
+        onFocus={() => onActivate(true)}
+        onClick={() => onActivate(false)}
+        onBlur={onDeactivate}
+        onMouseLeave={target => { if (document.activeElement !== target.currentTarget) onDeactivate(); }}
+        onKeyDown={keyboardEvent => { if (keyboardEvent.key === "Escape") { keyboardEvent.preventDefault(); onDeactivate(); } }}
+      >
+        {shortLabel}
+      </button>
+    </foreignObject>
+  );
+}
+
+function ScoreChart({ points, domain, metricLabel, events, appid }: {
+  points: ScoreObservation[];
+  domain: [number, number];
+  metricLabel: string;
+  events: readonly HistoryEvent[];
+  appid: number;
+}) {
+  const [activeEvent, setActiveEvent] = useState<number | null>(null);
   const [hoveredValue, setHoveredValue] = useState<number | null>(null);
+  const [markerFromKeyboard, setMarkerFromKeyboard] = useState(false);
+  const historyStart = points[0]?.timestamp ?? domain[0];
+  const historyEnd = points[points.length - 1]?.timestamp ?? domain[1];
+  const laneEnds = [-Infinity, -Infinity, -Infinity, -Infinity];
+  const laidOutEvents: EventWithLayout[] = events.flatMap(event => {
+    const timestamp = Date.parse(event.date + "T00:00:00Z");
+    if (!Number.isFinite(timestamp) || timestamp < historyStart || timestamp > historyEnd) return [];
+    const fraction = (timestamp - historyStart) / Math.max(1, historyEnd - historyStart);
+    const laneIndex = laneEnds.findIndex(previous => fraction - previous > 0.16);
+    const lane = laneIndex < 0 ? laneEnds.length - 1 : laneIndex;
+    laneEnds[lane] = fraction;
+    return [{ ...event, timestamp, lane }];
+  });
+  const selectedEvent = activeEvent === null ? undefined : laidOutEvents[activeEvent];
+  const tooltipId = `score-event-tooltip-${appid}`;
   return (
     <div className="relative" data-x-domain-start={domain[0]} data-x-domain-end={domain[1]}>
-      <ChartContainer config={{ score: { label: "Current Player Score", color: "#a78bfa" } }} className="h-[240px] w-full aspect-auto">
+      <ChartContainer config={{ score: { label: metricLabel, color: "#a78bfa" } }} className="h-[240px] w-full aspect-auto">
         <AreaChart
           data={points}
           accessibilityLayer
           margin={{ top: 12, right: 18, left: 0, bottom: 0 }}
           onMouseMove={state => setHoveredValue(typeof state?.activePayload?.[0]?.value === "number" ? state.activePayload[0].value : null)}
-          onMouseLeave={() => setHoveredValue(null)}
+          onMouseLeave={() => { setHoveredValue(null); if (!document.activeElement?.classList.contains("score-event-label")) setActiveEvent(null); }}
         >
           <defs>
-            <linearGradient id="score-area" x1="0" y1="0" x2="0" y2="1">
+            <linearGradient id={`score-area-${appid}`} x1="0" y1="0" x2="0" y2="1">
               <stop offset="5%" stopColor="#a78bfa" stopOpacity={0.3} />
               <stop offset="95%" stopColor="#a78bfa" stopOpacity={0.02} />
             </linearGradient>
@@ -150,22 +224,48 @@ function ScoreChart({ points, domain }: { points: ScoreObservation[]; domain: [n
             tickFormatter={value => formatDate(Number(value))}
           />
           <YAxis domain={[0, 100]} ticks={[0, 50, 100]} width={34} tickLine={false} axisLine={false} stroke="#71717a" fontSize={10} />
-          {hoveredValue !== null && <ReferenceLine y={hoveredValue} stroke="#a78bfa" strokeDasharray="3 3" />}
+          {laidOutEvents.map((event, index) => (
+            <ReferenceLine
+              key={event.kind + event.date}
+              x={event.timestamp}
+              stroke="#a78bfa"
+              strokeDasharray="3 3"
+              onMouseEnter={() => { setActiveEvent(index); setMarkerFromKeyboard(false); }}
+              onClick={() => { setActiveEvent(index); setMarkerFromKeyboard(false); }}
+              onMouseLeave={() => { if (!document.activeElement?.classList.contains("score-event-label")) setActiveEvent(null); }}
+              label={<HistoryEventLabel
+                event={event}
+                edge={event.timestamp > historyStart + (historyEnd - historyStart) * 0.88}
+                active={activeEvent === index}
+                tooltipId={tooltipId}
+                onActivate={keyboard => { setActiveEvent(index); setMarkerFromKeyboard(!!keyboard); }}
+                onDeactivate={() => setActiveEvent(null)}
+              />}
+            />
+          ))}
+          {hoveredValue !== null && !selectedEvent && <ReferenceLine y={hoveredValue} stroke="#a78bfa" strokeDasharray="3 3" />}
           <ChartTooltip
+            {...(selectedEvent ? { active: true, ...(markerFromKeyboard ? { position: { x: 42, y: 118 } } : {}), wrapperStyle: { visibility: "visible" as const } } : {})}
             isAnimationActive={false}
-            cursor={{ stroke: "#71717a", strokeDasharray: "3 3" }}
-            content={<ChartTooltipContent
-              className="!bg-zinc-950 !opacity-100 border-zinc-700 text-zinc-100 shadow-2xl"
-              labelFormatter={(_, payload) => {
-                const timestamp = payload?.[0]?.payload?.timestamp;
-                return typeof timestamp === "number" ? formatTooltipDate(timestamp) : "";
-              }}
-              formatter={(value, _, item) => (
-                <span><strong className="text-violet-300">{formatNumber(Number(value))}</strong> · {formatNumber(Number(item.payload.reviews))} reviews</span>
-              )}
-            />}
+            cursor={selectedEvent ? false : { stroke: "#71717a", strokeDasharray: "3 3" }}
+            content={props => (
+              <div id={selectedEvent ? tooltipId : undefined} role={selectedEvent ? "tooltip" : undefined}>
+                <ChartTooltipContent
+                  label={selectedEvent ? selectedEvent.label : props.label}
+                  active={selectedEvent ? true : props.active}
+                  payload={selectedEvent ? [{ dataKey: "score", name: "event", value: selectedEvent.label, color: "#a78bfa", payload: selectedEvent }] : props.payload}
+                  className="!bg-zinc-950 !opacity-100 border-zinc-700 shadow-2xl text-zinc-100"
+                  labelFormatter={(_, payload) => selectedEvent
+                    ? selectedEvent.label
+                    : formatTooltipDate(payload?.[0]?.payload?.timestamp ?? 0)}
+                  formatter={(value, _, item) => selectedEvent
+                    ? <span>{EVENT_KIND_LABELS[selectedEvent.kind]} · {formatEventDate(selectedEvent.date)}</span>
+                    : <span><strong className="text-violet-300">{formatNumber(Number(value))}%</strong> · {formatNumber(Number(item.payload.reviews))} reviews{item.payload.partial ? " · latest month partial" : ""}</span>}
+                />
+              </div>
+            )}
           />
-          <Area dataKey="score" type="monotone" stroke="var(--color-score)" strokeWidth={1.8} fill="url(#score-area)" dot={points.length === 1 ? { r: 3 } : false} activeDot={{ r: 3 }} isAnimationActive={false} connectNulls={false} />
+          <Area dataKey="score" type="monotone" stroke="var(--color-score)" strokeWidth={1.8} fill={`url(#score-area-${appid})`} dot={points.length === 1 ? { r: 3 } : false} activeDot={{ r: 3 }} isAnimationActive={false} connectNulls={false} />
         </AreaChart>
       </ChartContainer>
       {points.length === 0 && (
@@ -177,12 +277,38 @@ function ScoreChart({ points, domain }: { points: ScoreObservation[]; domain: [n
   );
 }
 
-export function ScoreHistory() {
-  const [range, setRange] = useState<ScoreRange>("90d");
-  const domain = useMemo(() => scoreDomain(range), [range]);
+function MilestonesDetails({ events }: { events: readonly HistoryEvent[] }) {
+  if (!events.length) return null;
+  return (
+    <details className="mt-3 border-t border-zinc-900 pt-3 text-xs text-zinc-400">
+      <summary className="cursor-pointer font-mono text-violet-300 underline decoration-violet-500/50 underline-offset-4 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400">
+        Milestones
+      </summary>
+      <ol className="mt-3 space-y-2">
+        {events.map(event => (
+          <li key={event.kind + event.date} className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
+            <time dateTime={event.date} className="font-mono text-zinc-500">{formatEventDate(event.date)}</time>
+            <span className="text-zinc-300">{event.label}</span>
+            <span className="text-zinc-500">({EVENT_KIND_LABELS[event.kind]})</span>
+            <a href={event.sourceUrl} target="_blank" rel="noreferrer" className="text-violet-300 underline decoration-violet-500/50 underline-offset-2 hover:text-violet-200">
+              Source ↗
+            </a>
+          </li>
+        ))}
+      </ol>
+    </details>
+  );
+}
+
+export function ScoreHistory({ appid }: { appid: number }) {
+  const history = appid === CYBERPUNK_APPID
+    ? { points: cyberpunkObservations, metricLabel: cyberpunkHistory.metric, note: "Observed monthly Steam totals, not historical Current Player Scores. Latest month is incomplete.", source: cyberpunkHistory.source, events: cyberpunkEvents }
+    : { points: observations, metricLabel: "Illustrative Current Player Score", note: "Illustrative score observations with a fixed reference time of September 7, 2026 UTC.", source: null, events: [] as readonly HistoryEvent[] };
+  const [range, setRange] = useState<ScoreRange>("all");
+  const domain = useMemo(() => scoreDomain(range, history.points), [range, history.points]);
   const points = useMemo(
-    () => observations.filter(point => point.timestamp >= domain[0] && point.timestamp <= domain[1]),
-    [domain]
+    () => history.points.filter(point => point.timestamp >= domain[0] && point.timestamp <= domain[1]),
+    [domain, history.points]
   );
   if (!scorePrototypeEnabled) return null;
   return (
@@ -190,7 +316,10 @@ export function ScoreHistory() {
       <header className="flex flex-col justify-between gap-3 border-b border-zinc-900 pb-3 sm:flex-row sm:items-center">
         <div className="flex items-center gap-2">
           <span className="inline-block h-2 w-2 bg-violet-500" aria-hidden="true" />
-          <h2 id="score-history-title" className="font-mono text-xs font-semibold uppercase tracking-wider text-zinc-200">Score History</h2>
+          <div>
+            <h2 id="score-history-title" className="font-mono text-xs font-semibold uppercase tracking-wider text-zinc-200">Score History</h2>
+            <p className="mt-1 text-[11px] font-mono text-zinc-500">{history.metricLabel}</p>
+          </div>
         </div>
         <div className="flex items-center space-x-1" role="group" aria-label="Score history time ranges">
           {scoreRanges.map(item => {
@@ -209,22 +338,22 @@ export function ScoreHistory() {
           })}
         </div>
       </header>
-      <ScoreMetrics range={range} points={points} />
+      <ScoreMetrics range={range} points={points} allPoints={history.points} />
       <div className="mt-4 overflow-hidden" data-testid="score-history-chart">
-        <ScoreChart points={points} domain={domain} />
+        <ScoreChart points={points} domain={domain} metricLabel={history.metricLabel} events={history.events} appid={appid} />
       </div>
+      <MilestonesDetails events={history.events} />
       <details className="mt-3 border-t border-zinc-900 pt-3 text-xs text-zinc-400">
         <summary className="cursor-pointer font-mono text-violet-300 underline decoration-violet-500/50 underline-offset-4 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400">
-          Score methodology
+          Score details
         </summary>
         <div className="mt-3 space-y-2 leading-relaxed">
-          <p>This prototype uses illustrative score observations with a fixed reference time of September 7, 2026 UTC.</p>
-          <p>The score estimates Steam player approval from recent reviews, supported by up to 20 effective historical reviews. Small samples are less certain; each new review contributes to the estimate.</p>
-          <p>The shaded area follows the score line. It does not represent uncertainty or missing observations.</p>
+          <p>{history.note}</p>
+          {history.source && (
+            <p>Data source: <a href={history.source} target="_blank" rel="noreferrer" className="text-violet-300 underline decoration-violet-500/50 underline-offset-2 hover:text-violet-200">Steam review histogram ↗</a></p>
+          )}
         </div>
       </details>
     </section>
   );
 }
-
-
