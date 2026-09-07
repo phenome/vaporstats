@@ -3,6 +3,8 @@ import "./rankings-prototype.css";
 import { AppLink } from "./app-link";
 import { getCanonicalGamePath } from "../lib/slug";
 import cyberpunkHistory from "./cyberpunk-history.prototype.json";
+import { LineChart, Line, XAxis, YAxis, CartesianGrid, ReferenceLine } from "recharts";
+import { ChartContainer, ChartTooltip, ChartTooltipContent } from "./ui/chart";
 
 /** Throwaway A/B podium comparison; ranking fixtures are not live scores. */
 export type RankingsPrototypeVariant = "A" | "B";
@@ -558,62 +560,84 @@ function ScoreCell({ game, mode, prominent = false }: { game: RankedFixture; mod
     </div>
   );
 }
-
+function HistoryEventLabel({ viewBox, event, edge, active, tooltipId, shortLabel, onActivate, onDeactivate }: {
+  viewBox?: { x?: number; y?: number };
+  event: HistoryEvent & { lane: number };
+  edge: boolean;
+  active: boolean;
+  tooltipId: string;
+  shortLabel: string;
+  onActivate: () => void;
+  onDeactivate: () => void;
+}) {
+  return <foreignObject x={(viewBox?.x ?? 0) + (edge ? -46 : 3)} y={(viewBox?.y ?? 0) + event.lane * 26} width={44} height={26}>
+    <button type="button" className="rp-event-label" aria-label={event.label + " · " + formatEventDate(event.date)}
+      aria-describedby={active ? tooltipId : undefined}
+      onMouseEnter={onActivate} onFocus={onActivate} onClick={onActivate} onBlur={onDeactivate}
+      onMouseLeave={event => { if (document.activeElement !== event.currentTarget) onDeactivate(); }}
+      onKeyDown={event => { if (event.key === "Escape") { event.preventDefault(); onDeactivate(); } }}>
+      {shortLabel}
+    </button>
+  </foreignObject>;
+}
 function HistoryChart({ game }: { game: RankedFixture }) {
-  const chartId = `history-${game.appid}`;
+  const [activeEvent, setActiveEvent] = useState<number | null>(null);
+  const [hoveredValue, setHoveredValue] = useState<number | null>(null);
   const historySamples = game.history
-    .map((point) => ({ ...point, timestamp: parseTimelineDate(point.date) }))
+    .map(point => ({ ...point, timestamp: parseTimelineDate(point.date) }))
     .filter((point): point is HistoryPoint & { timestamp: number } => point.timestamp !== null);
-  if (historySamples.length === 0) {
-    return <p className="rp-no-history">No recorded history yet.</p>;
-  }
-  const values = historySamples.map((point) => point.value);
-  const min = Math.max(0, Math.min(...values) - 4);
-  const max = Math.min(100, Math.max(...values) + 4);
-  const domainStart = Math.min(...historySamples.map((point) => point.timestamp));
-  const domainEnd = Math.max(...historySamples.map((point) => point.timestamp));
-  const timeToX = (timestamp: number) => domainEnd === domainStart ? 50 : ((timestamp - domainStart) / (domainEnd - domainStart)) * 100;
-  const points = historySamples
-    .map((point) => {
-      const x = timeToX(point.timestamp);
-      const y = 92 - ((point.value - min) / Math.max(1, max - min)) * 76;
-      return `${x},${y}`;
-    })
-    .join(" ");
-  const events = (game.events ?? [])
-    .map((event) => ({ ...event, timestamp: parseTimelineDate(event.date) }))
-    .filter((event): event is HistoryEvent & { timestamp: number } => event.timestamp !== null && event.timestamp >= domainStart && event.timestamp <= domainEnd);
+  if (!historySamples.length) return <p className="rp-no-history">No recorded history yet.</p>;
+  const start = historySamples[0].timestamp;
+  const end = historySamples[historySamples.length - 1].timestamp;
+  const laneEnds = [-Infinity, -Infinity, -Infinity, -Infinity];
+  const events = (game.events ?? []).flatMap(event => {
+    const timestamp = parseTimelineDate(event.date);
+    if (timestamp === null || timestamp < start || timestamp > end) return [];
+    const fraction = (timestamp - start) / Math.max(1, end - start);
+    const available = laneEnds.findIndex(previous => fraction - previous > .16);
+    const lane = available < 0 ? 3 : available;
+    laneEnds[lane] = fraction;
+    return [{ ...event, timestamp, lane }];
+  });
+  const selectedEvent = activeEvent === null ? undefined : events[activeEvent];
+  const metricLabel = game.historyLabel ?? "Illustrative Current Player Score";
+  const shortLabels: Record<string, string> = { "Patch 1.5": "1.5", "Edgerunners · 1.6": "1.6", "Update 2.0": "2.0", "Phantom Liberty · PC": "PL", "Ultimate Edition": "UE", "Update 2.1": "2.1", "Major Update": "Patch", "Early Access entry": "EA", "Version 1.0": "1.0" };
   return (
     <div className="rp-history-chart">
-      <svg viewBox="0 0 100 100" role="img" aria-labelledby={`${chartId}-title`} preserveAspectRatio="none">
-        <title id={chartId + "-title"}>{game.title} reception history, values from {formatHistoryDate(historySamples[0].date)} to {formatHistoryDate(historySamples[historySamples.length - 1].date)}</title>
-        <line x1="0" y1="92" x2="100" y2="92" className="rp-chart-axis" />
-        {events.map((event) => {
-          const x = timeToX(event.timestamp);
-          return (
-            <g key={event.kind + event.date} className="rp-chart-event">
-              <line x1={x} y1="8" x2={x} y2="92" data-kind={event.kind} />
-              <title>{EVENT_KIND_LABELS[event.kind]}: {event.label} · {formatEventDate(event.date)}</title>
-            </g>
-          );
-        })}
-        <polyline points={points} className="rp-chart-line" />
-      </svg>
-      <div className="rp-chart-legend" aria-label="History chart legend">
-        <span><i className="rp-chart-key rp-chart-key-score" aria-hidden="true" />{game.historyLabel ?? "Illustrative Current Player Score"}</span>
-        {events.map((event) => (
-          <span key={event.kind + event.date}><i className={`rp-chart-key rp-chart-key-${event.kind}`} aria-hidden="true" />{event.sourceUrl ? <a href={event.sourceUrl} target="_blank" rel="noreferrer">{event.label}</a> : event.label} · <time dateTime={event.date}>{formatEventDate(event.date)}</time></span>
-        ))}
-      </div>
+      <ChartContainer config={{ value: { label: metricLabel, color: "#a78bfa" } }} className="rp-recharts-container w-full h-[240px] aspect-auto">
+        <LineChart data={historySamples} accessibilityLayer margin={{ top: 12, right: 18, left: 0, bottom: 0 }}
+          onMouseMove={state => setHoveredValue(typeof state?.activePayload?.[0]?.value === "number" ? state.activePayload[0].value : null)}
+          onMouseLeave={() => { setHoveredValue(null); if (!document.activeElement?.classList.contains("rp-event-label")) setActiveEvent(null); }}>
+          <CartesianGrid strokeDasharray="3 3" stroke="#27272a" vertical={false} />
+          <XAxis dataKey="timestamp" type="number" domain={[start, end]} allowDataOverflow tickLine={false} axisLine={false}
+            stroke="#71717a" fontSize={10} minTickGap={40} tickFormatter={value => formatHistoryDate(new Date(value).toISOString().slice(0, 10))} />
+          <YAxis domain={[0, 100]} ticks={[0, 50, 100]} width={34} tickLine={false} axisLine={false} stroke="#71717a" fontSize={10} tickFormatter={value => formatNumber(value)} />
+          {events.map((event, index) => (
+            <ReferenceLine key={event.kind + event.date} x={event.timestamp} stroke="#a78bfa" strokeDasharray="3 3"
+              onMouseEnter={() => setActiveEvent(index)} onClick={() => setActiveEvent(index)}
+              onMouseLeave={() => { if (!document.activeElement?.classList.contains("rp-event-label")) setActiveEvent(null); }}
+              label={<HistoryEventLabel event={event} edge={event.timestamp > start + (end - start) * .88}
+                active={activeEvent === index} tooltipId={"event-tooltip-" + game.appid}
+                shortLabel={shortLabels[event.label] ?? event.label.slice(0, 4)}
+                onActivate={() => setActiveEvent(index)} onDeactivate={() => setActiveEvent(null)} />} />
+          ))}
+          {hoveredValue !== null && !selectedEvent && <ReferenceLine y={hoveredValue} stroke="#a78bfa" strokeDasharray="3 3" />}
+          <ChartTooltip {...(selectedEvent ? { active: true, position: { x: 42, y: 118 }, wrapperStyle: { visibility: "visible" as const } } : {})}
+            isAnimationActive={false}
+            cursor={selectedEvent ? false : { stroke: "#71717a", strokeDasharray: "3 3" }}
+            content={props => <div id={selectedEvent ? "event-tooltip-" + game.appid : undefined} role="tooltip"><ChartTooltipContent label={props.label}
+              active={selectedEvent ? true : props.active}
+              payload={selectedEvent ? [{ dataKey: "value", name: "event", value: formatEventDate(selectedEvent.date), color: "#a78bfa", payload: selectedEvent }] : props.payload}
+              className="!bg-zinc-950 !opacity-100 border-zinc-700 shadow-2xl text-zinc-100"
+              labelFormatter={(_, payload) => selectedEvent ? selectedEvent.label : formatHistoryDate(payload?.[0]?.payload?.date ?? "")}
+              formatter={value => selectedEvent
+                ? <span>{EVENT_KIND_LABELS[selectedEvent.kind]} · {formatEventDate(selectedEvent.date)}</span>
+                : <span><strong className="text-violet-300">{formatScore(Number(value))}</strong> · {metricLabel}</span>} /></div>} />
+          <Line dataKey="value" type="linear" stroke="var(--color-value)" strokeWidth={1.8} dot={false} activeDot={selectedEvent ? false : { r: 3 }} isAnimationActive={false} connectNulls={false} />
+        </LineChart>
+      </ChartContainer>
+      <div className="rp-chart-legend"><span><i className="rp-chart-key rp-chart-key-score" aria-hidden="true" />{metricLabel}</span></div>
       <p className="rp-chart-note">{game.historyNote ?? "Illustrative reception and milestone data, not verified history."}</p>
-      <ol className="rp-chart-labels">
-        {historySamples.filter((_, index) => index === 0 || index === Math.floor((historySamples.length - 1) / 2) || index === historySamples.length - 1).map((point) => (
-          <li key={point.date}>
-            <span>{formatHistoryDate(point.date)}</span>
-            <strong>{formatScore(point.value)}</strong>
-          </li>
-        ))}
-      </ol>
     </div>
   );
 }
@@ -625,7 +649,7 @@ function EvidenceDetails({ game, mode }: { game: RankedFixture; mode: RankingMod
         <div><h3>{game.title}</h3><p>{gateLabel(game, mode)} · score evidence {game.scoreAge}</p></div>
         <AppLink href={getCanonicalGamePath(game.appid, game.title)}>Game details ↗</AppLink>
       </div>
-      <HistoryChart game={game} />
+      <HistoryChart key={game.appid} game={game} />
     </div>
   );
 }
@@ -766,7 +790,14 @@ function VariantA({ view, controls, podium }: { view: View; controls: ReactNode;
                 <div className="rp-a-hero-body">
                   <div className="rp-a-hero-art">
                     <img src={game.art} alt="" loading="lazy" />
-                    <span className="rp-a-hero-rank">#{index + 1}</span>
+                    <span className="rp-a-hero-rank" role="img" aria-label={`Rank ${index + 1}`}>
+                      <svg viewBox="0 0 64 64" aria-hidden="true">
+                        <circle cx="32" cy="32" r="29" fill="#171125" />
+                        <circle cx="32" cy="32" r="28" fill="none" stroke="currentColor" strokeWidth="2" pathLength="100" strokeDasharray="22 3" transform="rotate(-40 32 32)" />
+                        <circle cx="32" cy="32" r="22" fill="none" stroke="currentColor" strokeOpacity=".35" strokeWidth=".7" />
+                        <text x="32" y="33" textAnchor="middle" dominantBaseline="middle" fill="currentColor">{index + 1}</text>
+                      </svg>
+                    </span>
                   </div>
                   <div className="rp-a-hero-content">
                     <p className="rp-kicker">#{index + 1} IN THIS VIEW</p>
