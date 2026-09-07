@@ -6,8 +6,7 @@ import cyberpunkHistory from "./cyberpunk-history.prototype.json";
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, ReferenceLine } from "recharts";
 import { ChartContainer, ChartTooltip, ChartTooltipContent } from "./ui/chart";
 
-/** Throwaway A/B podium comparison; ranking fixtures are not live scores. */
-export type RankingsPrototypeVariant = "A" | "B";
+/** Selected compact podium prototype; ranking fixtures are not live scores. */
 
 type RankingMode = "now" | "allTime";
 type Genre = "All" | "Action" | "RPG" | "Puzzle" | "Strategy";
@@ -551,11 +550,16 @@ function Header({ mode, rankedCount, scope }: { mode: RankingMode; rankedCount: 
 }
 
 function ScoreCell({ game, mode, prominent = false }: { game: RankedFixture; mode: RankingMode; prominent?: boolean }) {
+  const metric = mode === "now" ? "Current Player Score" : "Lifetime Approval";
+  const reviewContext = `${formatNumber(game.qualifyingCount)} qualifying Steam reviews ${mode === "now" ? "in the last 90 days" : "over the lifetime"}; ${formatNumber(game.gate)} required for this ranking.`;
   return (
     <div className={prominent ? "rp-score rp-score-prominent" : "rp-score"}>
       <div className="rp-score-slot is-active">
-        <strong>{formatScore(game.metric)}</strong>
-        <span>{mode === "now" ? "Current Player Score" : "Lifetime Approval"}</span>
+        <strong title={`${metric}: ${formatScore(game.metric)}`} aria-label={`${metric}: ${formatScore(game.metric)}`}>{formatScore(game.metric)}</strong>
+        <span className="rp-review-count" tabIndex={0} title={reviewContext} aria-describedby={`review-context-${game.appid}`}>
+          {formatNumber(game.qualifyingCount)}
+          <span id={`review-context-${game.appid}`} className="sr-only">{mode === "now" ? "qualifying Steam reviews in the last 90 days" : "qualifying lifetime Steam reviews"}</span>
+        </span>
       </div>
     </div>
   );
@@ -567,13 +571,13 @@ function HistoryEventLabel({ viewBox, event, edge, active, tooltipId, shortLabel
   active: boolean;
   tooltipId: string;
   shortLabel: string;
-  onActivate: () => void;
+  onActivate: (keyboard?: boolean) => void;
   onDeactivate: () => void;
 }) {
   return <foreignObject x={(viewBox?.x ?? 0) + (edge ? -46 : 3)} y={(viewBox?.y ?? 0) + event.lane * 26} width={44} height={26}>
     <button type="button" className="rp-event-label" aria-label={event.label + " · " + formatEventDate(event.date)}
       aria-describedby={active ? tooltipId : undefined}
-      onMouseEnter={onActivate} onFocus={onActivate} onClick={onActivate} onBlur={onDeactivate}
+      onMouseEnter={() => onActivate(false)} onFocus={() => onActivate(true)} onClick={() => onActivate(false)} onBlur={onDeactivate}
       onMouseLeave={event => { if (document.activeElement !== event.currentTarget) onDeactivate(); }}
       onKeyDown={event => { if (event.key === "Escape") { event.preventDefault(); onDeactivate(); } }}>
       {shortLabel}
@@ -583,6 +587,7 @@ function HistoryEventLabel({ viewBox, event, edge, active, tooltipId, shortLabel
 function HistoryChart({ game }: { game: RankedFixture }) {
   const [activeEvent, setActiveEvent] = useState<number | null>(null);
   const [hoveredValue, setHoveredValue] = useState<number | null>(null);
+  const [markerFromKeyboard, setMarkerFromKeyboard] = useState(false);
   const historySamples = game.history
     .map(point => ({ ...point, timestamp: parseTimelineDate(point.date) }))
     .filter((point): point is HistoryPoint & { timestamp: number } => point.timestamp !== null);
@@ -614,15 +619,15 @@ function HistoryChart({ game }: { game: RankedFixture }) {
           <YAxis domain={[0, 100]} ticks={[0, 50, 100]} width={34} tickLine={false} axisLine={false} stroke="#71717a" fontSize={10} tickFormatter={value => formatNumber(value)} />
           {events.map((event, index) => (
             <ReferenceLine key={event.kind + event.date} x={event.timestamp} stroke="#a78bfa" strokeDasharray="3 3"
-              onMouseEnter={() => setActiveEvent(index)} onClick={() => setActiveEvent(index)}
+              onMouseEnter={() => { setActiveEvent(index); setMarkerFromKeyboard(false); }} onClick={() => { setActiveEvent(index); setMarkerFromKeyboard(false); }}
               onMouseLeave={() => { if (!document.activeElement?.classList.contains("rp-event-label")) setActiveEvent(null); }}
               label={<HistoryEventLabel event={event} edge={event.timestamp > start + (end - start) * .88}
                 active={activeEvent === index} tooltipId={"event-tooltip-" + game.appid}
                 shortLabel={shortLabels[event.label] ?? event.label.slice(0, 4)}
-                onActivate={() => setActiveEvent(index)} onDeactivate={() => setActiveEvent(null)} />} />
+                onActivate={keyboard => { setActiveEvent(index); setMarkerFromKeyboard(!!keyboard); }} onDeactivate={() => setActiveEvent(null)} />} />
           ))}
           {hoveredValue !== null && !selectedEvent && <ReferenceLine y={hoveredValue} stroke="#a78bfa" strokeDasharray="3 3" />}
-          <ChartTooltip {...(selectedEvent ? { active: true, position: { x: 42, y: 118 }, wrapperStyle: { visibility: "visible" as const } } : {})}
+          <ChartTooltip {...(selectedEvent ? { active: true, ...(markerFromKeyboard ? { position: { x: 42, y: 118 } } : {}), wrapperStyle: { visibility: "visible" as const } } : {})}
             isAnimationActive={false}
             cursor={selectedEvent ? false : { stroke: "#71717a", strokeDasharray: "3 3" }}
             content={props => <div id={selectedEvent ? "event-tooltip-" + game.appid : undefined} role="tooltip"><ChartTooltipContent label={props.label}
@@ -633,7 +638,7 @@ function HistoryChart({ game }: { game: RankedFixture }) {
               formatter={value => selectedEvent
                 ? <span>{EVENT_KIND_LABELS[selectedEvent.kind]} · {formatEventDate(selectedEvent.date)}</span>
                 : <span><strong className="text-violet-300">{formatScore(Number(value))}</strong> · {metricLabel}</span>} /></div>} />
-          <Line dataKey="value" type="linear" stroke="var(--color-value)" strokeWidth={1.8} dot={false} activeDot={selectedEvent ? false : { r: 3 }} isAnimationActive={false} connectNulls={false} />
+          <Line dataKey="value" type="monotone" stroke="var(--color-value)" strokeWidth={1.8} dot={false} activeDot={selectedEvent ? false : { r: 3 }} isAnimationActive={false} connectNulls={false} />
         </LineChart>
       </ChartContainer>
       <div className="rp-chart-legend"><span><i className="rp-chart-key rp-chart-key-score" aria-hidden="true" />{metricLabel}</span></div>
@@ -775,7 +780,7 @@ function UnrankedCatalog({ games, earlyAccess, mode }: { games: RankedFixture[];
   );
 }
 
-function VariantA({ view, controls, podium }: { view: View; controls: ReactNode; podium: RankingsPrototypeVariant }) {
+function CompactRankings({ view, controls }: { view: View; controls: ReactNode }) {
   const topThree = view.ranked.slice(0, 3);
   const remaining = view.ranked.slice(3);
   return (
@@ -784,7 +789,7 @@ function VariantA({ view, controls, podium }: { view: View; controls: ReactNode;
       {controls}
       {view.ranked.length === 0 ? <EmptyState onReset={view.onReset} /> : (
         <>
-          <section className={`rp-a-hero-grid rp-podium-${podium.toLowerCase()}`} aria-label={`${modeLabel(view.mode)} top three`}>
+          <section className="rp-a-hero-grid" aria-label={`${modeLabel(view.mode)} top three`}>
             {topThree.map((game, index) => (
               <article className={`rp-a-hero rp-a-hero-${index + 1}`} key={game.appid}>
                 <div className="rp-a-hero-body">
@@ -803,12 +808,9 @@ function VariantA({ view, controls, podium }: { view: View; controls: ReactNode;
                     <p className="rp-kicker">#{index + 1} IN THIS VIEW</p>
                     <h2>{game.title}</h2>
                     {formatReleaseDate(game.releaseDate) && <span className="rp-release-date">{formatReleaseDate(game.releaseDate)}</span>}
-                    <Tags game={game} />
-                    <ScoreCell game={game} mode={view.mode} prominent={index === 0} />
-                    <div className="rp-a-hero-qualifying">
-                      <span>Qualifying reviews</span>
-                      <strong>{formatNumber(game.qualifyingCount)}</strong>
-                      <small>{view.mode === "now" ? "90-day window" : "lifetime window"}</small>
+                    <div className="rp-hero-summary">
+                      <Tags game={game} />
+                      <ScoreCell game={game} mode={view.mode} prominent={index === 0} />
                     </div>
                   </div>
                 </div>
@@ -818,14 +820,13 @@ function VariantA({ view, controls, podium }: { view: View; controls: ReactNode;
           <PodiumHistory games={topThree} mode={view.mode} />
           {remaining.length > 0 && (
             <section className="rp-a-table rp-a-remaining" aria-label="Remaining ranked games">
-              <div className="rp-a-table-head"><span>Ranked 4+</span><span>Game</span><span>Scores</span><span>Qualifying reviews</span></div>
+              <div className="rp-a-table-head"><span>Rank</span><span>Game</span><span>Score</span></div>
               {remaining.map((game, index) => (
                 <details className="rp-a-row" key={game.appid}>
                   <summary>
                     <span className="rp-a-rank">{index + 4}</span>
                     <GameIdentity game={game} />
                     <ScoreCell game={game} mode={view.mode} />
-                    <span className="rp-a-qualifying">{formatNumber(game.qualifyingCount)}<small>{view.mode === "now" ? "90-day reviews" : "lifetime reviews"}</small></span>
                   </summary>
                   <EvidenceDetails game={game} mode={view.mode} />
                 </details>
@@ -849,7 +850,7 @@ type View = {
   onReset: () => void;
 };
 
-export function RankingsPrototype({ variant }: { variant: RankingsPrototypeVariant }) {
+export function RankingsPrototype() {
   const [mode, setMode] = useState<RankingMode>("now");
   const [genre, setGenre] = useState<Genre>("All");
   const [tag, setTag] = useState<Tag>("All");
@@ -862,13 +863,12 @@ export function RankingsPrototype({ variant }: { variant: RankingsPrototypeVaria
 
   useEffect(() => {
     console.info("[RankingsPrototype] state", {
-      variant,
       mode,
       genre,
       tag,
       rankedAppIds: ranked.map((game) => game.appid),
     });
-  }, [variant, mode, genre, tag, ranked]);
+  }, [mode, genre, tag, ranked]);
 
   const scope = isGlobalScope(genre, tag) ? "global" : `${genre === "All" ? "all genres" : genre}${tag === "All" ? "" : ` · ${tag}`}`;
   const onReset = () => {
@@ -897,8 +897,8 @@ export function RankingsPrototype({ variant }: { variant: RankingsPrototypeVaria
   };
 
   return (
-    <section className="rankings-prototype" data-variant={variant} data-mode={mode} data-genre={genre} data-tag={tag}>
-      <VariantA view={view} controls={controls} podium={variant} />
+    <section className="rankings-prototype" data-mode={mode} data-genre={genre} data-tag={tag}>
+      <CompactRankings view={view} controls={controls} />
     </section>
   );
 }

@@ -13,7 +13,6 @@ import { RouteDataError } from "../components/route-state";
 import { RankingsSkeleton } from "../components/route-skeletons";
 import { RankingsPageView } from "../components/rankings-page";
 import { RankingsPrototype } from "../components/rankings-prototype";
-import { PrototypeSwitcher } from "../components/prototype-switcher";
 
 export async function fetchMostPlayedRankings(): Promise<{ games: RankedGame[] }> {
   const response = await fetch("/api/rankings?type=most_played&limit=100");
@@ -37,32 +36,10 @@ export const Route = createFileRoute("/rankings/")({
   },
   errorComponent: RouteDataError,
   component: RankingsRouteComponent,
-  validateSearch: (search: Record<string, unknown>): { variant?: "A" | "B" } => ({
-    variant: search.variant === "A" || search.variant === "B" ? search.variant : undefined,
-  }),
 });
 
 function RankingsRouteComponent() {
-  const { variant } = Route.useSearch();
-  const navigate = Route.useNavigate();
-  // Two podium alternatives on the real route; normal fetching stays intact.
-  if (import.meta.env.DEV && variant) {
-    return <>
-      <RankingsPrototype variant={variant} />
-      <PrototypeSwitcher
-        variants={[
-          { key: "A", name: "Compact podium" },
-          { key: "B", name: "Winner + challengers" },
-        ]}
-        current={variant}
-        onChange={next => void navigate({
-          search: { variant: next as "A" | "B" },
-          replace: true,
-          resetScroll: false,
-        })}
-      />
-    </>;
-  }
+  if (import.meta.env.MODE === "prototype") return <RankingsPrototype />;
   return <MostPlayedRouteContent />;
 }
 
