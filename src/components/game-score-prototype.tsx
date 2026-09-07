@@ -131,7 +131,14 @@ function CriticReception({ appid }: { appid: number }) {
   const selected = comparisons[comparison as keyof typeof comparisons];
   return (
     <aside id="critic-reception" className="min-w-0 self-start border border-zinc-800 bg-zinc-950 p-5 xl:flex xl:flex-col xl:self-stretch" aria-labelledby="critic-reception-title">
-      <h2 id="critic-reception-title" className="border-b border-zinc-900 pb-3 font-mono text-xs font-semibold uppercase tracking-wider text-zinc-200">Critic reception</h2>
+      <h2 id="critic-reception-title" className="border-b border-zinc-900 pb-3 font-mono text-xs font-semibold uppercase tracking-wider text-zinc-200">Reception</h2>
+      <div className="border-b border-zinc-800 py-3">
+        <div className="flex items-center justify-between gap-3">
+          <div><p className="text-sm text-zinc-200">Current Player Score</p><p className="mt-1 font-mono text-[10px] uppercase text-zinc-500">Steam · PC</p></div>
+          <p className="font-mono text-3xl font-bold tabular-nums text-violet-200">{formatNumber(CURRENT_SCORE)}</p>
+        </div>
+        <p className="mt-1 font-mono text-xs text-zinc-500">{formatNumber(CURRENT_REVIEW_COUNT)} reviews</p>
+      </div>
       {appid === CYBERPUNK_APPID ? <>
         <div className="mt-3 flex items-center justify-between gap-4">
           <div><a href="https://www.metacritic.com/game/cyberpunk-2077/critic-reviews/?platform=pc" target="_blank" rel="noreferrer" className="text-sm text-zinc-200 hover:underline">Metacritic ↗</a><p className="mt-1 font-mono text-[10px] uppercase text-zinc-500">PC · Metascore</p></div>
