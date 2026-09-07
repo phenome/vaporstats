@@ -148,8 +148,8 @@ function CriticReception({ appid }: { appid: number }) {
         <section className="mt-3 border-t border-zinc-800 pt-3 xl:flex-1" aria-labelledby="reception-alignment-title" aria-live="polite">
           <h3 id="reception-alignment-title" className={"text-sm font-semibold " + (comparison === "unavailable" ? "text-zinc-400" : "text-violet-200")}>{selected.title}</h3>
           <dl className="mt-2 space-y-1 text-xs">
-            <div className="flex justify-between gap-3"><dt className="text-zinc-500">Current players</dt><dd className="text-zinc-200">{selected.player}</dd></div>
-            <div className="flex justify-between gap-3"><dt className="text-zinc-500">Metacritic record</dt><dd className="text-zinc-200">{selected.critic}</dd></div>
+            <div className="flex justify-between gap-3"><dt className="text-zinc-500">Current players</dt><dd className={selected.player === "Favorable" ? "text-emerald-300/75" : selected.player === "Unfavorable" ? "text-rose-300/75" : "text-zinc-200"}>{selected.player}</dd></div>
+            <div className="flex justify-between gap-3"><dt className="text-zinc-500">Metacritic record</dt><dd className={selected.critic === "Favorable" ? "text-emerald-300/75" : selected.critic === "Unfavorable" ? "text-rose-300/75" : "text-zinc-200"}>{selected.critic}</dd></div>
           </dl>
         </section>
         <details className="mt-3 border-t border-zinc-900 pt-2 text-xs text-zinc-400">
