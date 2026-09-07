@@ -6,6 +6,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "prototype:score": "bun scripts/run-score-prototype.ts",
     "images:optimize": "bun scripts/optimize-images.ts",
     "build": "bun scripts/optimize-images.ts && vite build",
     "start": "bun dist/server/server.js",

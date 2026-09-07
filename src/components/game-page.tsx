@@ -14,6 +14,7 @@ import { PriceHistoryChart } from "./price-history";
 import { RelatedApps } from "./related-apps";
 import { AppLink } from "./app-link";
 import { LifecycleHistorySection } from "./lifecycle-history";
+import { GameScorePrototype } from "./game-score-prototype";
 
 // The sentinel, the hero flow wrapper, and the first section below it are
 // siblings spaced by the container's space-y-6 rhythm, so the sentinel sits
@@ -509,6 +510,9 @@ export function GamePageView({
         aria-label="Game page sections"
         className="flex min-h-[44px] items-center overflow-x-auto border border-zinc-800 bg-zinc-950 px-1 font-mono"
       >
+        <a href="#player-score" className="inline-flex min-h-[44px] shrink-0 items-center px-3 text-xs uppercase tracking-wider text-zinc-300 hover:bg-zinc-900 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500">
+          Player Score
+        </a>
         <a href="#activity" className="inline-flex min-h-[44px] shrink-0 items-center px-3 text-xs uppercase tracking-wider text-zinc-300 hover:bg-zinc-900 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-orange-500">
           Activity
         </a>
@@ -524,6 +528,7 @@ export function GamePageView({
           </a>
         )}
       </nav>
+      <GameScorePrototype />
 
       <div id="activity" className="grid scroll-mt-28 grid-cols-2 gap-3 sm:gap-4 max-w-3xl">
         <PlayerPanel
