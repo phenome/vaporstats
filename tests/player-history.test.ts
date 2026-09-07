@@ -461,6 +461,35 @@ describe("Player History and Rankings", () => {
     expect(untrackedHourlyHistory.points.some((point) => point.is_gap)).toBe(false);
   });
 
+  test("does not inject false gaps when a game transitions from hourly to fast tier", async () => {
+    const db = await createFreshDb();
+    const anchor = new Date("2026-09-07T00:00:00.000Z");
+    const appid = 107;
+    await db.prepare("INSERT INTO apps (appid, name, slug) VALUES (?, ?, ?)").bind(appid, "Promoted Game", "promoted-game").run();
+    // Current tier is fast
+    await db.prepare("INSERT INTO tracked_games (appid, tier, next_due_at) VALUES (?, 'fast', ?)").bind(appid, anchor.toISOString()).run();
+
+    // Earlier 6 hours: hourly samples (60m apart)
+    // Later 6 hours: fast samples (15m apart)
+    const observations: Array<[number, string]> = [];
+    const startMs = anchor.getTime() - 12 * 60 * 60 * 1000;
+    for (let h = 0; h <= 6; h++) {
+      observations.push([50000 + h * 100, new Date(startMs + h * 60 * 60 * 1000).toISOString()]);
+    }
+    const fastStartMs = startMs + 6 * 60 * 60 * 1000;
+    for (let m = 15; m <= 6 * 60; m += 15) {
+      observations.push([51000 + m * 10, new Date(fastStartMs + m * 60 * 1000).toISOString()]);
+    }
+
+    for (const [players, observedAt] of observations) {
+      await db.prepare("INSERT INTO observations (appid, current_players, observed_at) VALUES (?, ?, ?)").bind(appid, players, observedAt).run();
+    }
+
+    const history = await getPlayerHistory(db, appid, "24h", anchor);
+    expect(history.points.some((p) => p.is_gap)).toBe(false);
+    expect(history.points.filter((p) => p.players !== null)).toHaveLength(observations.length);
+  });
+
   // G4: player charts expose labels, values, gaps, and a numeric time domain
   test("accessible gap-preserving chart", async () => {
     // 1. Render chart with valid points and an explicit gap
