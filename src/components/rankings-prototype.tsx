@@ -1,15 +1,18 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import "./rankings-prototype.css";
+import { AppLink } from "./app-link";
+import { getCanonicalGamePath } from "../lib/slug";
+import cyberpunkHistory from "./cyberpunk-history.prototype.json";
 
-/** UI-only throwaway Wayfinder prototype: three ranking layouts over synthetic Steam aggregates. */
-export type RankingsPrototypeVariant = "A" | "B" | "C";
+/** Throwaway A/B podium comparison; ranking fixtures are not live scores. */
+export type RankingsPrototypeVariant = "A" | "B";
 
 type RankingMode = "now" | "allTime";
 type Genre = "All" | "Action" | "RPG" | "Puzzle" | "Strategy";
 type Tag = "All" | "Open World" | "Single-player" | "Indie" | "Co-op" | "Simulation";
 type HistoryPoint = { date: string; value: number };
-type HistoryEventKind = "majorPatch" | "earlyAccessEntry" | "version1";
-type HistoryEvent = { date: string; kind: HistoryEventKind; label: string };
+type HistoryEventKind = "majorPatch" | "earlyAccessEntry" | "version1" | "expansion" | "edition";
+type HistoryEvent = { date: string; kind: HistoryEventKind; label: string; sourceUrl?: string };
 
 type Fixture = {
   appid: number;
@@ -34,6 +37,8 @@ type Fixture = {
   source: string;
   history: readonly HistoryPoint[];
   events?: readonly HistoryEvent[];
+  historyLabel?: string;
+  historyNote?: string;
 };
 
 type RankedFixture = Fixture & {
@@ -52,6 +57,8 @@ const EVENT_KIND_LABELS: Record<HistoryEventKind, string> = {
   majorPatch: "Major patch",
   earlyAccessEntry: "Early Access entry",
   version1: "Version 1.0",
+  expansion: "Expansion",
+  edition: "Edition",
 };
 
 // Deliberately synthetic aggregate fixtures. Counts are disjoint buckets, not individual reviews.
@@ -77,15 +84,16 @@ const FIXTURES: readonly Fixture[] = [
     scoreAge: "2026-09-07",
     updateAnchor: "Major Update · 2026-06-09",
     source: "Steam aggregate · off-topic excluded",
-    history: [
-      { date: "2025-12", value: 78 },
-      { date: "2026-03", value: 82 },
-      { date: "2026-06", value: 86 },
-      { date: "2026-09", value: 89.9723 },
-    ],
+    history: cyberpunkHistory.data.map(point => ({ date: point.date, value: 100 * point.positive / point.total })),
+    historyLabel: "Monthly Steam review approval",
+    historyNote: "Observed monthly Steam totals, not historical Current Player Scores. Verified event dates; timing does not prove causation. Latest month is incomplete.",
     events: [
-      { date: "2026-06-09", kind: "majorPatch", label: "Major Update" },
-      { date: "2026-09-01", kind: "version1", label: "Version 1.0" },
+      { date: "2022-02-15", kind: "majorPatch", label: "Patch 1.5", sourceUrl: "https://www.cyberpunk.net/en/news/41435/patch-1-5-next-generation-update-list-of-changes" },
+      { date: "2022-09-06", kind: "majorPatch", label: "Edgerunners · 1.6", sourceUrl: "https://www.cyberpunk.net/en/news/45280/edgerunners-update-patch-1-6-list-of-changes" },
+      { date: "2023-09-21", kind: "majorPatch", label: "Update 2.0", sourceUrl: "https://www.cyberpunk.net/en/news/49060/update-2-0" },
+      { date: "2023-09-25", kind: "expansion", label: "Phantom Liberty · PC", sourceUrl: "https://www.cyberpunk.net/en/news/49150/cyberpunk-2077-phantom-liberty-out-now" },
+      { date: "2023-12-05", kind: "edition", label: "Ultimate Edition", sourceUrl: "https://www.cyberpunk.net/en/news/49696/cyberpunk-2077-ultimate-edition-is-out-now" },
+      { date: "2023-12-05", kind: "majorPatch", label: "Update 2.1", sourceUrl: "https://www.cyberpunk.net/en/news/49597/update-2-1-patch-notes" },
     ],
   },
   {
@@ -541,19 +549,11 @@ function Header({ mode, rankedCount, scope }: { mode: RankingMode; rankedCount: 
 }
 
 function ScoreCell({ game, mode, prominent = false }: { game: RankedFixture; mode: RankingMode; prominent?: boolean }) {
-  const slots = [
-    { label: "Current Player Score", value: game.currentScore, active: mode === "now" },
-    { label: "Lifetime Approval", value: game.lifetimeApproval, active: mode === "allTime" },
-  ];
   return (
     <div className={prominent ? "rp-score rp-score-prominent" : "rp-score"}>
-      <div className="rp-score-slots">
-        {slots.map((slot) => (
-          <div className={slot.active ? "rp-score-slot is-active" : "rp-score-slot"} key={slot.label}>
-            <strong>{formatScore(slot.value)}</strong>
-            <span>{slot.label}</span>
-          </div>
-        ))}
+      <div className="rp-score-slot is-active">
+        <strong>{formatScore(game.metric)}</strong>
+        <span>{mode === "now" ? "Current Player Score" : "Lifetime Approval"}</span>
       </div>
     </div>
   );
@@ -600,14 +600,14 @@ function HistoryChart({ game }: { game: RankedFixture }) {
         <polyline points={points} className="rp-chart-line" />
       </svg>
       <div className="rp-chart-legend" aria-label="History chart legend">
-        <span><i className="rp-chart-key rp-chart-key-score" aria-hidden="true" />Player score</span>
+        <span><i className="rp-chart-key rp-chart-key-score" aria-hidden="true" />{game.historyLabel ?? "Illustrative Current Player Score"}</span>
         {events.map((event) => (
-          <span key={event.kind + event.date}><i className={`rp-chart-key rp-chart-key-${event.kind}`} aria-hidden="true" />{event.label} · <time dateTime={event.date}>{formatEventDate(event.date)}</time></span>
+          <span key={event.kind + event.date}><i className={`rp-chart-key rp-chart-key-${event.kind}`} aria-hidden="true" />{event.sourceUrl ? <a href={event.sourceUrl} target="_blank" rel="noreferrer">{event.label}</a> : event.label} · <time dateTime={event.date}>{formatEventDate(event.date)}</time></span>
         ))}
       </div>
-      <p className="rp-chart-note">Illustrative milestones provide context only; they do not establish causation.</p>
+      <p className="rp-chart-note">{game.historyNote ?? "Illustrative reception and milestone data, not verified history."}</p>
       <ol className="rp-chart-labels">
-        {historySamples.map((point) => (
+        {historySamples.filter((_, index) => index === 0 || index === Math.floor((historySamples.length - 1) / 2) || index === historySamples.length - 1).map((point) => (
           <li key={point.date}>
             <span>{formatHistoryDate(point.date)}</span>
             <strong>{formatScore(point.value)}</strong>
@@ -619,38 +619,45 @@ function HistoryChart({ game }: { game: RankedFixture }) {
 }
 
 function EvidenceDetails({ game, mode }: { game: RankedFixture; mode: RankingMode }) {
-  const historicalWeight = Math.min(20, game.historicalReviews);
   return (
-    <div className="rp-evidence">
-      <div className="rp-evidence-copy">
-        <p className="rp-evidence-kicker">Evidence detail</p>
-        <p>{game.description}</p>
+    <div className="rp-evidence rp-reception-preview">
+      <div className="rp-preview-heading">
+        <div><h3>{game.title}</h3><p>{gateLabel(game, mode)} · score evidence {game.scoreAge}</p></div>
+        <AppLink href={getCanonicalGamePath(game.appid, game.title)}>Game details ↗</AppLink>
       </div>
-      <dl className="rp-evidence-grid">
-        <div>
-          <dt>Current scoring bucket</dt>
-          <dd>{formatNumber(game.currentPositive)} positive / {formatNumber(game.currentReviews)} total</dd>
-          <small>{game.evidenceWindow}</small>
-        </div>
-        <div>
-          <dt>Historical support</dt>
-          <dd>{formatNumber(game.historicalPositive)} positive / {formatNumber(game.historicalReviews)} total</dd>
-          <small>{game.historicalWindow} · effective weight {formatNumber(historicalWeight)}</small>
-        </div>
-        <div>
-          <dt>Eligibility evidence</dt>
-          <dd>{gateLabel(game, mode)}</dd>
-          <small>Separate from the patch-aware scoring window</small>
-        </div>
-        <div>
-          <dt>Provenance</dt>
-          <dd>{game.source}</dd>
-          <small>Score age: {game.scoreAge}</small>
-        </div>
-      </dl>
-      <p className="rp-anchor-note">{game.updateAnchor}. Aggregate history is retained for context; association with an event does not establish causation.</p>
       <HistoryChart game={game} />
     </div>
+  );
+}
+
+function PodiumHistory({ games, mode }: { games: RankedFixture[]; mode: RankingMode }) {
+  const [selectedId, setSelectedId] = useState(games[0]?.appid);
+  const selected = games.find(game => game.appid === selectedId) ?? games[0];
+  if (!selected) return null;
+  return (
+    <details className="rp-podium-history">
+      <summary>Evidence &amp; history</summary>
+      <div role="tablist" aria-label="Podium game history" className="rp-history-tabs">
+        {games.map((game, index) => (
+          <button type="button" role="tab" key={game.appid} id={`history-tab-${game.appid}`}
+            aria-selected={selected.appid === game.appid} aria-controls="podium-history-panel"
+            tabIndex={selected.appid === game.appid ? 0 : -1}
+            onClick={() => setSelectedId(game.appid)}
+            onKeyDown={event => {
+              if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+              event.preventDefault();
+              const next = event.key === "Home" ? 0 : event.key === "End" ? games.length - 1 : (index + (event.key === "ArrowRight" ? 1 : -1) + games.length) % games.length;
+              setSelectedId(games[next].appid);
+              document.getElementById(`history-tab-${games[next].appid}`)?.focus();
+            }}>
+            <span>#{index + 1}</span> {game.title}
+          </button>
+        ))}
+      </div>
+      <section role="tabpanel" id="podium-history-panel" aria-labelledby={`history-tab-${selected.appid}`} tabIndex={0}>
+        <EvidenceDetails game={selected} mode={mode} />
+      </section>
+    </details>
   );
 }
 
@@ -774,13 +781,10 @@ function VariantA({ view, controls, podium }: { view: View; controls: ReactNode;
                     </div>
                   </div>
                 </div>
-                <details className="rp-a-hero-evidence">
-                  <summary>Evidence &amp; history</summary>
-                  <EvidenceDetails game={game} mode={view.mode} />
-                </details>
               </article>
             ))}
           </section>
+          <PodiumHistory games={topThree} mode={view.mode} />
           {remaining.length > 0 && (
             <section className="rp-a-table rp-a-remaining" aria-label="Remaining ranked games">
               <div className="rp-a-table-head"><span>Ranked 4+</span><span>Game</span><span>Scores</span><span>Qualifying reviews</span></div>

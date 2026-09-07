@@ -37,15 +37,15 @@ export const Route = createFileRoute("/rankings/")({
   },
   errorComponent: RouteDataError,
   component: RankingsRouteComponent,
-  validateSearch: (search: Record<string, unknown>): { variant?: "A" | "B" | "C" } => ({
-    variant: search.variant === "A" || search.variant === "B" || search.variant === "C" ? search.variant : undefined,
+  validateSearch: (search: Record<string, unknown>): { variant?: "A" | "B" } => ({
+    variant: search.variant === "A" || search.variant === "B" ? search.variant : undefined,
   }),
 });
 
 function RankingsRouteComponent() {
   const { variant } = Route.useSearch();
   const navigate = Route.useNavigate();
-  // Three throwaway layouts on the real route; normal fetching stays intact.
+  // Two podium alternatives on the real route; normal fetching stays intact.
   if (import.meta.env.DEV && variant) {
     return <>
       <RankingsPrototype variant={variant} />
@@ -53,11 +53,10 @@ function RankingsRouteComponent() {
         variants={[
           { key: "A", name: "Compact podium" },
           { key: "B", name: "Winner + challengers" },
-          { key: "C", name: "Center stage" },
         ]}
         current={variant}
         onChange={next => void navigate({
-          search: { variant: next as "A" | "B" | "C" },
+          search: { variant: next as "A" | "B" },
           replace: true,
           resetScroll: false,
         })}

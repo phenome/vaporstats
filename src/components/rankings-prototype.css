@@ -1363,17 +1363,11 @@
   width: 100%;
 }
 
-.rp-score-slots {
-  display: grid;
-  gap: 0.65rem;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  width: 100%;
-}
 
 .rp-score-slot {
   display: grid;
   gap: 0.16rem;
-  min-width: 0;
+  min-width: 10rem;
   text-align: right;
   border-top: 2px solid transparent;
   padding-top: 0.3rem;
@@ -1431,33 +1425,23 @@
 .rp-a-hero-content > .rp-score { border-top: 1px solid var(--rp-border); padding-top: .65rem; }
 .rp-a-hero-qualifying { display: flex; align-items: baseline; flex-wrap: wrap; gap: .4rem; justify-content: space-between; margin-top: .65rem; color: var(--rp-muted); font-size: .65rem; }
 .rp-a-hero-qualifying strong { color: var(--rp-text); font: 600 .85rem ui-monospace, monospace; }
-.rp-a-hero-evidence { border-top: 1px solid var(--rp-border); }
-.rp-a-hero-evidence > summary { color: var(--rp-violet-strong); cursor: pointer; font-size: .7rem; min-height: 44px; padding: .8rem 1rem; }
-.rp-a-hero-evidence > .rp-evidence { border-top: 1px solid var(--rp-border); }
 .rp-a-remaining { margin-top: 1rem; }
 /* Runner-up artwork is always subordinate to the winner, not another banner. */
-.rp-a-hero:not(.rp-a-hero-1) .rp-a-hero-body { grid-template-columns: 104px minmax(0, 1fr); }
+ .rp-a-hero:not(.rp-a-hero-1) .rp-a-hero-body { grid-template-columns: 38% minmax(0, 1fr); height: 100%; }
+ .rp-a-hero:not(.rp-a-hero-1) .rp-a-hero-art { background: #09090b; }
+ .rp-a-hero:not(.rp-a-hero-1) .rp-a-hero-art img { object-fit: contain; }
 .rp-a-hero:not(.rp-a-hero-1) .rp-a-hero-content { padding: .8rem; }
 .rp-a-hero:not(.rp-a-hero-1) h2 { font-size: 1.15rem; }
 .rp-a-hero:not(.rp-a-hero-1) .rp-kicker { display: none; }
 .rp-a-hero:not(.rp-a-hero-1) .rp-tags { margin: .4rem 0 .55rem; }
 .rp-a-hero:not(.rp-a-hero-1) .rp-score-slot strong { font-size: 1.15rem; }
 /* B: the winner owns the large left column, challengers stack at right. */
-.rp-podium-b { grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr); }
+.rp-podium-b { grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr); grid-template-rows: repeat(2, minmax(0, 1fr)); align-items: stretch; }
 .rp-podium-b .rp-a-hero-1 { grid-column: 1; grid-row: 1 / span 2; }
 .rp-podium-b .rp-a-hero-2 { grid-column: 2; grid-row: 1; }
 .rp-podium-b .rp-a-hero-3 { grid-column: 2; grid-row: 2; }
-.rp-podium-b .rp-a-hero-1 .rp-a-hero-body { display: block; }
+.rp-podium-b .rp-a-hero-1 .rp-a-hero-body { display: grid; grid-template-columns: 1fr; grid-template-rows: 220px minmax(0, 1fr); height: 100%; }
 .rp-podium-b .rp-a-hero-1 .rp-a-hero-art { height: 220px; }
-/* C: the winner rises above quieter flanking cards. DOM order remains rank order. */
-.rp-podium-c { grid-template-columns: minmax(0, 1fr) minmax(0, 1.65fr) minmax(0, 1fr); align-items: end; }
-.rp-podium-c .rp-a-hero-1 { grid-column: 2; grid-row: 1; }
-.rp-podium-c .rp-a-hero-2 { grid-column: 1; grid-row: 1; }
-.rp-podium-c .rp-a-hero-3 { grid-column: 3; grid-row: 1; }
-.rp-podium-c .rp-a-hero .rp-a-hero-body { display: block; }
-.rp-podium-c .rp-a-hero-1 .rp-a-hero-art { height: 230px; }
-.rp-podium-c .rp-a-hero:not(.rp-a-hero-1) .rp-a-hero-art { height: 100px; }
-.rp-podium-c .rp-a-hero-1 h2 { font-size: 2rem; }
 
 .rp-chart-line {
   stroke: var(--rp-violet);
@@ -1538,20 +1522,38 @@
   .rp-a-hero:not(.rp-a-hero-1) .rp-a-hero-content { padding: .6rem; }
   .rp-a-hero:not(.rp-a-hero-1) .rp-tags { min-height: 2rem; }
   .rp-a-hero-content .rp-tags span { font-size: .5rem; }
-  .rp-score-slots { gap: .35rem; }
   .rp-score-slot span { font-size: .5rem; }
   .rp-score-slot strong { font-size: 1rem; }
   .rp-score-prominent .rp-score-slot strong { font-size: 1.6rem; }
   .rp-a-hero-qualifying { font-size: .6rem; }
   .rp-a-hero-qualifying > span { display: none; }
-  .rp-a-hero-evidence > summary { padding: .75rem .5rem; font-size: .65rem; }
-  .rp-a-hero-grid .rp-a-hero:has(.rp-a-hero-evidence[open]) { grid-column: 1 / -1; }
-  .rp-a-hero-evidence > .rp-evidence { padding: .75rem; }
   .rp-a-remaining { margin: 1rem; }
   /* Stacked challenger rows distinguish B on a phone without shrinking the winner. */
   .rp-podium-b .rp-a-hero:not(.rp-a-hero-1) { grid-column: 1 / -1; }
   .rp-podium-b .rp-a-hero:not(.rp-a-hero-1) .rp-a-hero-body { display: grid; grid-template-columns: 80px minmax(0, 1fr); }
   .rp-podium-b .rp-a-hero:not(.rp-a-hero-1) .rp-a-hero-art { height: auto; }
-  .rp-podium-c .rp-a-hero-1 { margin: 0 .7rem; }
-  .rp-podium-c .rp-a-hero-1 .rp-a-hero-art { height: 200px; }
+  .rp-podium-b { grid-template-rows: auto; }
+  .rp-podium-b .rp-a-hero-1 .rp-a-hero-body { grid-template-rows: auto; }
+  .rp-podium-b .rp-a-hero:not(.rp-a-hero-1) .rp-a-hero-body { grid-template-columns: 38% minmax(0, 1fr); }
+  .rp-score-slot { min-width: 0; }
+}
+
+.rp-podium-history { margin: 1rem 2.25rem; border: 1px solid var(--rp-border-bright); background: var(--rp-panel); }
+.rp-podium-history > summary { padding: .9rem 1rem; cursor: pointer; color: var(--rp-violet-strong); font-size: .8rem; }
+.rp-history-tabs { display: flex; border-block: 1px solid var(--rp-border); overflow-x: auto; }
+.rp-history-tabs button { min-height: 44px; padding: .7rem 1rem; border: 0; border-bottom: 2px solid transparent; background: none; color: var(--rp-muted); flex: 1; white-space: nowrap; font-size: .75rem; }
+.rp-history-tabs button[aria-selected="true"] { border-bottom-color: var(--rp-violet); color: var(--rp-violet-strong); background: #a78bfa0a; }
+.rp-history-tabs button span { color: var(--rp-dim); margin-right: .4rem; }
+.rp-preview-heading { display: flex; align-items: center; justify-content: space-between; gap: 1rem; margin-bottom: .8rem; }
+.rp-preview-heading h3 { font-size: 1rem; margin: 0; }
+.rp-preview-heading p { color: var(--rp-muted); font-size: .65rem; margin: .35rem 0 0; }
+.rp-preview-heading a { font-size: .75rem; color: var(--rp-violet-strong); white-space: nowrap; }
+.rp-reception-preview .rp-history-chart { width: 100%; max-width: none; }
+.rp-reception-preview .rp-history-chart svg { width: 100%; height: 170px; }
+.rp-reception-preview .rp-chart-labels { justify-content: space-between; }
+@media (max-width: 680px) {
+  .rp-podium-history { margin: 1rem; }
+  .rp-preview-heading { align-items: flex-start; }
+  .rp-reception-preview { padding: .8rem; }
+  .rp-reception-preview .rp-history-chart svg { height: 150px; }
 }
