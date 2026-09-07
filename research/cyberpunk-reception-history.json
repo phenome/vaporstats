@@ -1,0 +1,452 @@
+{
+  "game": {
+    "name": "Cyberpunk 2077",
+    "steamAppId": 1091500
+  },
+  "metric": "Monthly Steam review approval",
+  "source": {
+    "url": "https://store.steampowered.com/appreviewhistogram/1091500?l=english",
+    "endpoint": "Steam public appreviewhistogram",
+    "rollupType": "month"
+  },
+  "population": {
+    "positive": "recommendations_up",
+    "total": "recommendations_up + recommendations_down",
+    "filter": "l=english",
+    "caveats": [
+      "Counts are Steam user-review recommendation votes aggregated by the endpoint, not player counts and not Steam’s all-time/current review summary.",
+      "The API returns calendar-month rollups; the first (2020-12) and latest (2026-09) buckets are partial periods relative to the response coverage.",
+      "No individual reviews were collected."
+    ]
+  },
+  "coverage": {
+    "responseStart": "2020-12-10T00:00:00.000Z",
+    "responseEnd": "2026-09-07T00:00:00.000Z",
+    "firstRollup": "2020-12-01",
+    "lastRollup": "2026-09-01",
+    "bucketCount": 70
+  },
+  "fetchedAt": "2026-09-07T20:39:56.951Z",
+  "data": [
+    {
+      "date": "2020-12-01",
+      "positive": 227472,
+      "total": 290805,
+      "approval": 0.782215
+    },
+    {
+      "date": "2021-01-01",
+      "positive": 30673,
+      "total": 40554,
+      "approval": 0.75635
+    },
+    {
+      "date": "2021-02-01",
+      "positive": 7848,
+      "total": 11329,
+      "approval": 0.692735
+    },
+    {
+      "date": "2021-03-01",
+      "positive": 5513,
+      "total": 9318,
+      "approval": 0.591651
+    },
+    {
+      "date": "2021-04-01",
+      "positive": 5177,
+      "total": 7619,
+      "approval": 0.679485
+    },
+    {
+      "date": "2021-05-01",
+      "positive": 3936,
+      "total": 5979,
+      "approval": 0.658304
+    },
+    {
+      "date": "2021-06-01",
+      "positive": 3444,
+      "total": 5492,
+      "approval": 0.627094
+    },
+    {
+      "date": "2021-07-01",
+      "positive": 3559,
+      "total": 5142,
+      "approval": 0.692143
+    },
+    {
+      "date": "2021-08-01",
+      "positive": 3713,
+      "total": 5546,
+      "approval": 0.669492
+    },
+    {
+      "date": "2021-09-01",
+      "positive": 3439,
+      "total": 4747,
+      "approval": 0.724458
+    },
+    {
+      "date": "2021-10-01",
+      "positive": 2537,
+      "total": 3478,
+      "approval": 0.729442
+    },
+    {
+      "date": "2021-11-01",
+      "positive": 22124,
+      "total": 26430,
+      "approval": 0.837079
+    },
+    {
+      "date": "2021-12-01",
+      "positive": 8281,
+      "total": 11237,
+      "approval": 0.73694
+    },
+    {
+      "date": "2022-01-01",
+      "positive": 5386,
+      "total": 7006,
+      "approval": 0.76877
+    },
+    {
+      "date": "2022-02-01",
+      "positive": 7466,
+      "total": 9876,
+      "approval": 0.755974
+    },
+    {
+      "date": "2022-03-01",
+      "positive": 5293,
+      "total": 10435,
+      "approval": 0.507235
+    },
+    {
+      "date": "2022-04-01",
+      "positive": 3155,
+      "total": 3842,
+      "approval": 0.821187
+    },
+    {
+      "date": "2022-05-01",
+      "positive": 3109,
+      "total": 3654,
+      "approval": 0.850848
+    },
+    {
+      "date": "2022-06-01",
+      "positive": 2832,
+      "total": 3487,
+      "approval": 0.812159
+    },
+    {
+      "date": "2022-07-01",
+      "positive": 3356,
+      "total": 4005,
+      "approval": 0.837953
+    },
+    {
+      "date": "2022-08-01",
+      "positive": 3206,
+      "total": 3759,
+      "approval": 0.852886
+    },
+    {
+      "date": "2022-09-01",
+      "positive": 13058,
+      "total": 15013,
+      "approval": 0.86978
+    },
+    {
+      "date": "2022-10-01",
+      "positive": 12220,
+      "total": 13626,
+      "approval": 0.896815
+    },
+    {
+      "date": "2022-11-01",
+      "positive": 14795,
+      "total": 16009,
+      "approval": 0.924168
+    },
+    {
+      "date": "2022-12-01",
+      "positive": 9982,
+      "total": 11140,
+      "approval": 0.89605
+    },
+    {
+      "date": "2023-01-01",
+      "positive": 10445,
+      "total": 12057,
+      "approval": 0.866302
+    },
+    {
+      "date": "2023-02-01",
+      "positive": 4942,
+      "total": 5846,
+      "approval": 0.845364
+    },
+    {
+      "date": "2023-03-01",
+      "positive": 4659,
+      "total": 5311,
+      "approval": 0.877236
+    },
+    {
+      "date": "2023-04-01",
+      "positive": 5627,
+      "total": 7058,
+      "approval": 0.797251
+    },
+    {
+      "date": "2023-05-01",
+      "positive": 3622,
+      "total": 4181,
+      "approval": 0.8663
+    },
+    {
+      "date": "2023-06-01",
+      "positive": 5250,
+      "total": 6290,
+      "approval": 0.834658
+    },
+    {
+      "date": "2023-07-01",
+      "positive": 6616,
+      "total": 7464,
+      "approval": 0.886388
+    },
+    {
+      "date": "2023-08-01",
+      "positive": 6129,
+      "total": 6841,
+      "approval": 0.895922
+    },
+    {
+      "date": "2023-09-01",
+      "positive": 15504,
+      "total": 17942,
+      "approval": 0.864118
+    },
+    {
+      "date": "2023-10-01",
+      "positive": 19547,
+      "total": 21742,
+      "approval": 0.899043
+    },
+    {
+      "date": "2023-11-01",
+      "positive": 9705,
+      "total": 10546,
+      "approval": 0.920254
+    },
+    {
+      "date": "2023-12-01",
+      "positive": 14012,
+      "total": 15334,
+      "approval": 0.913786
+    },
+    {
+      "date": "2024-01-01",
+      "positive": 10317,
+      "total": 11097,
+      "approval": 0.929711
+    },
+    {
+      "date": "2024-02-01",
+      "positive": 8055,
+      "total": 8774,
+      "approval": 0.918053
+    },
+    {
+      "date": "2024-03-01",
+      "positive": 7616,
+      "total": 8227,
+      "approval": 0.925732
+    },
+    {
+      "date": "2024-04-01",
+      "positive": 6628,
+      "total": 7092,
+      "approval": 0.934574
+    },
+    {
+      "date": "2024-05-01",
+      "positive": 8090,
+      "total": 8577,
+      "approval": 0.94322
+    },
+    {
+      "date": "2024-06-01",
+      "positive": 5984,
+      "total": 6326,
+      "approval": 0.945937
+    },
+    {
+      "date": "2024-07-01",
+      "positive": 7733,
+      "total": 8594,
+      "approval": 0.899814
+    },
+    {
+      "date": "2024-08-01",
+      "positive": 6835,
+      "total": 7291,
+      "approval": 0.937457
+    },
+    {
+      "date": "2024-09-01",
+      "positive": 7242,
+      "total": 7709,
+      "approval": 0.939421
+    },
+    {
+      "date": "2024-10-01",
+      "positive": 6435,
+      "total": 6778,
+      "approval": 0.949395
+    },
+    {
+      "date": "2024-11-01",
+      "positive": 7333,
+      "total": 7750,
+      "approval": 0.946194
+    },
+    {
+      "date": "2024-12-01",
+      "positive": 12369,
+      "total": 13127,
+      "approval": 0.942256
+    },
+    {
+      "date": "2025-01-01",
+      "positive": 11997,
+      "total": 12625,
+      "approval": 0.950257
+    },
+    {
+      "date": "2025-02-01",
+      "positive": 8082,
+      "total": 8459,
+      "approval": 0.955432
+    },
+    {
+      "date": "2025-03-01",
+      "positive": 8862,
+      "total": 9351,
+      "approval": 0.947706
+    },
+    {
+      "date": "2025-04-01",
+      "positive": 6308,
+      "total": 6603,
+      "approval": 0.955323
+    },
+    {
+      "date": "2025-05-01",
+      "positive": 7419,
+      "total": 7919,
+      "approval": 0.936861
+    },
+    {
+      "date": "2025-06-01",
+      "positive": 7342,
+      "total": 7750,
+      "approval": 0.947355
+    },
+    {
+      "date": "2025-07-01",
+      "positive": 12930,
+      "total": 13717,
+      "approval": 0.942626
+    },
+    {
+      "date": "2025-08-01",
+      "positive": 11867,
+      "total": 12666,
+      "approval": 0.936918
+    },
+    {
+      "date": "2025-09-01",
+      "positive": 7961,
+      "total": 8492,
+      "approval": 0.937471
+    },
+    {
+      "date": "2025-10-01",
+      "positive": 8210,
+      "total": 8713,
+      "approval": 0.94227
+    },
+    {
+      "date": "2025-11-01",
+      "positive": 6003,
+      "total": 6370,
+      "approval": 0.942386
+    },
+    {
+      "date": "2025-12-01",
+      "positive": 11035,
+      "total": 11707,
+      "approval": 0.942598
+    },
+    {
+      "date": "2026-01-01",
+      "positive": 9483,
+      "total": 10085,
+      "approval": 0.940307
+    },
+    {
+      "date": "2026-02-01",
+      "positive": 6285,
+      "total": 6651,
+      "approval": 0.944971
+    },
+    {
+      "date": "2026-03-01",
+      "positive": 7041,
+      "total": 7448,
+      "approval": 0.945354
+    },
+    {
+      "date": "2026-04-01",
+      "positive": 6805,
+      "total": 7193,
+      "approval": 0.946059
+    },
+    {
+      "date": "2026-05-01",
+      "positive": 6721,
+      "total": 7119,
+      "approval": 0.944093
+    },
+    {
+      "date": "2026-06-01",
+      "positive": 8941,
+      "total": 9543,
+      "approval": 0.936917
+    },
+    {
+      "date": "2026-07-01",
+      "positive": 14495,
+      "total": 15267,
+      "approval": 0.949433
+    },
+    {
+      "date": "2026-08-01",
+      "positive": 11473,
+      "total": 12128,
+      "approval": 0.945993
+    },
+    {
+      "date": "2026-09-01",
+      "positive": 1624,
+      "total": 1722,
+      "approval": 0.943089
+    }
+  ]
+}
