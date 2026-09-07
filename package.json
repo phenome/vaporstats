@@ -6,6 +6,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "prototype:rankings": "bun node_modules/vite/bin/vite.js --mode prototype --host 127.0.0.1 --port 4310",
     "images:optimize": "bun scripts/optimize-images.ts",
     "build": "bun scripts/optimize-images.ts && vite build",
     "start": "bun dist/server/server.js",

@@ -12,6 +12,8 @@ import { getLiveApiCacheHeaders, getPageCacheHeaders } from "../lib/cache";
 import { RouteDataError } from "../components/route-state";
 import { RankingsSkeleton } from "../components/route-skeletons";
 import { RankingsPageView } from "../components/rankings-page";
+import { RankingsPrototype } from "../components/rankings-prototype";
+import { PrototypeSwitcher } from "../components/prototype-switcher";
 
 export async function fetchMostPlayedRankings(): Promise<{ games: RankedGame[] }> {
   const response = await fetch("/api/rankings?type=most_played&limit=100");
@@ -30,24 +32,45 @@ export const Route = createFileRoute("/rankings/")({
   ssr: false,
   headers: () => getPageCacheHeaders(),
   loader: ({ context }) => {
-    // Start unawaited prefetch so navigation/hover proceeds immediately
+    // Start unawaited prefetch so navigation/hover proceeds immediately.
     void context.queryClient.prefetchQuery(rankingsQueryOptions);
   },
   errorComponent: RouteDataError,
   component: RankingsRouteComponent,
+  validateSearch: (search: Record<string, unknown>): { variant?: "A" | "B" | "C" } => ({
+    variant: search.variant === "A" || search.variant === "B" || search.variant === "C" ? search.variant : undefined,
+  }),
 });
 
 function RankingsRouteComponent() {
+  const { variant } = Route.useSearch();
+  const navigate = Route.useNavigate();
+  // Three throwaway layouts on the real route; normal fetching stays intact.
+  if (import.meta.env.DEV && variant) {
+    return <>
+      <RankingsPrototype variant={variant} />
+      <PrototypeSwitcher
+        variants={[
+          { key: "A", name: "Compact leaderboard" },
+          { key: "B", name: "Genre explorer" },
+          { key: "C", name: "Reception workbench" },
+        ]}
+        current={variant}
+        onChange={next => void navigate({
+          search: { variant: next as "A" | "B" | "C" },
+          replace: true,
+          resetScroll: false,
+        })}
+      />
+    </>;
+  }
+  return <MostPlayedRouteContent />;
+}
+
+function MostPlayedRouteContent() {
   const { data, isLoading, isError } = useQuery(rankingsQueryOptions);
-
-  if (isError) {
-    return <RouteDataError />;
-  }
-
-  if (isLoading || !data) {
-    return <RankingsSkeleton />;
-  }
-
+  if (isError) return <RouteDataError />;
+  if (isLoading || !data) return <RankingsSkeleton />;
   return <RankingsPageView games={data.games} />;
 }
 /**
