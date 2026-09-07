@@ -375,38 +375,43 @@ export function PriceHistoryChart({
                   })}
                   {hoveredIndex !== null &&
                     geometry.coordinates[hoveredIndex] &&
-                    geometry.coordinates[hoveredIndex].y !== null && (
-                      <g data-testid="price-hover-guide">
-                        <line
-                          x1={geometry.padLeft}
-                          y1={geometry.coordinates[hoveredIndex].y!}
-                          x2={geometry.coordinates[hoveredIndex].x}
-                          y2={geometry.coordinates[hoveredIndex].y!}
-                          stroke="#16a34a"
-                          strokeDasharray="3 3"
-                          strokeWidth="1"
-                        />
-                        <rect
-                          x={geometry.padLeft - 50}
-                          y={geometry.coordinates[hoveredIndex].y! - 7}
-                          width={44}
-                          height={14}
-                          fill="#16a34a"
-                          rx={2}
-                        />
-                        <text
-                          x={geometry.padLeft - 28}
-                          y={geometry.coordinates[hoveredIndex].y! + 4}
-                          textAnchor="middle"
-                          fill="#ffffff"
-                          fontSize="9"
-                          fontFamily="monospace"
-                          fontWeight="bold"
-                        >
-                          {formatPointPrice(geometry.coordinates[hoveredIndex].point)}
-                        </text>
-                      </g>
-                    )}
+                    geometry.coordinates[hoveredIndex].y !== null && (() => {
+                      const priceLabel = formatPointPrice(geometry.coordinates[hoveredIndex].point);
+                      const badgeWidth = Math.max(44, priceLabel.length * 6 + 10);
+                      const badgeX = geometry.padLeft - 6 - badgeWidth;
+                      return (
+                        <g data-testid="price-hover-guide">
+                          <line
+                            x1={geometry.padLeft}
+                            y1={geometry.coordinates[hoveredIndex].y!}
+                            x2={geometry.coordinates[hoveredIndex].x}
+                            y2={geometry.coordinates[hoveredIndex].y!}
+                            stroke="#16a34a"
+                            strokeDasharray="3 3"
+                            strokeWidth="1"
+                          />
+                          <rect
+                            x={badgeX}
+                            y={geometry.coordinates[hoveredIndex].y! - 7}
+                            width={badgeWidth}
+                            height={14}
+                            fill="#16a34a"
+                            rx={2}
+                          />
+                          <text
+                            x={badgeX + badgeWidth / 2}
+                            y={geometry.coordinates[hoveredIndex].y! + 4}
+                            textAnchor="middle"
+                            fill="#ffffff"
+                            fontSize="9"
+                            fontFamily="monospace"
+                            fontWeight="bold"
+                          >
+                            {priceLabel}
+                          </text>
+                        </g>
+                      );
+                    })()}
                 </svg>
                 {hoveredPoint && (
                   <div

@@ -185,7 +185,7 @@ export function buildPriceChartGeometry(
 ): PriceChartGeometry {
   const width = options.width ?? 900;
   const height = options.height ?? 260;
-  const padLeft = options.padLeft ?? 44;
+  const padLeft = options.padLeft ?? 72;
   const padRight = options.padRight ?? 18;
   const padTop = options.padTop ?? 18;
   const padBottom = options.padBottom ?? 34;
