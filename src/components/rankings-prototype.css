@@ -152,8 +152,8 @@
 }
 
 .rp-mode-buttons button[aria-pressed="true"] {
-  background: var(--rp-accent);
-  border-color: var(--rp-accent);
+  background: var(--rp-violet);
+  border-color: var(--rp-violet);
   color: #18181b;
   font-weight: 800;
 }
@@ -178,7 +178,6 @@
 }
 
 .rp-reset:hover,
-.rp-mode-buttons button:hover,
 .rp-genre-list button:hover {
   border-color: var(--rp-accent);
   color: var(--rp-accent-strong);
@@ -1308,9 +1307,15 @@
   --rp-violet-strong: #c4b5fd;
 }
 
-.rp-mode-buttons button[aria-pressed="true"] {
-  background: var(--rp-violet);
+.rp-mode-buttons button:hover {
   border-color: var(--rp-violet);
+  color: var(--rp-violet-strong);
+}
+
+.rp-mode-buttons button[aria-pressed="true"]:hover {
+  background: var(--rp-violet-strong);
+  border-color: var(--rp-violet-strong);
+  color: #18181b;
 }
 
 .rp-release-date {
