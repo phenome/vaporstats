@@ -8,3 +8,4 @@ data/
 *.log
 GATES.md
 .unlazy/
+.worktrees/
