@@ -84,3 +84,19 @@ _Avoid_: Medium tier, standard tier
 **Daily tier**:
 The baseline catalog sampling tier, tracking games ranked 251–1,000 once every 24 hours distributed across 96 quarter-hour slots.
 _Avoid_: Low tier, cold tier, background tier
+
+**Living Game Score**:
+A dynamic 0–100 quality estimate for a playable game that updates as player sentiment evolves, significant patches release, and critic consensus matures.
+_Avoid_: Review average, meta score, composite rating
+
+**Approval-to-Quality Calibration**:
+A mathematical mapping translating percentage-based player approval (e.g. Steam positive review rate, median ~80–85%) onto the conventional 0–100 quality scale so it aligns with press evaluations.
+
+**Bayesian Score Blend**:
+A weighted quality calculation combining historical player sentiment, post-patch review windows, and critic aggregates using pseudo-review counts, structured so player evidence maintains at least two-thirds of the total weight.
+
+**Score Confidence Level**:
+A classification (`Provisional`, `Established`, `Authoritative`) assigned to a living score based on review sample volume and historical depth.
+
+**Catalog Rank**:
+An ordinal rank assigned to an eligible playable game on global or category leaderboards, gated by minimum evidence thresholds (e.g. 50 reviews for category boards, 250 reviews for global boards).
