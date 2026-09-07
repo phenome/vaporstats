@@ -1337,3 +1337,337 @@
     transition: none !important;
   }
 }
+
+
+/* Variant A refinement: fixed score slots and a ranked top-three hero. */
+.rankings-prototype {
+  --rp-violet: #a78bfa;
+  --rp-violet-strong: #c4b5fd;
+}
+
+.rp-mode-buttons button[aria-pressed="true"] {
+  background: var(--rp-violet);
+  border-color: var(--rp-violet);
+}
+
+.rp-release-date {
+  color: var(--rp-dim);
+  display: block;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.62rem;
+  margin-top: 0.25rem;
+}
+
+.rp-score {
+  min-width: 0;
+  width: 100%;
+}
+
+.rp-score-slots {
+  display: grid;
+  gap: 0.65rem;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  width: 100%;
+}
+
+.rp-score-slot {
+  display: grid;
+  gap: 0.16rem;
+  min-width: 0;
+  text-align: right;
+  border-top: 2px solid transparent;
+  padding-top: 0.3rem;
+}
+
+.rp-score-slot strong {
+  color: var(--rp-violet);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 1.2rem;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+
+.rp-score-slot span {
+  color: var(--rp-muted);
+  font-family: ui-sans-serif, system-ui, sans-serif;
+  font-size: 0.58rem;
+  line-height: 1.15;
+}
+
+.rp-score-slot.is-active {
+  border-top-color: var(--rp-violet);
+}
+
+.rp-score-slot.is-active strong {
+  color: var(--rp-violet-strong);
+}
+
+.rp-score-prominent .rp-score-slot strong {
+  font-size: 2.05rem;
+}
+
+.rp-a-hero-grid {
+  display: grid;
+  gap: 1rem;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin: 1.5rem 2.25rem 0;
+}
+
+.rp-a-hero {
+  background: #151518;
+  border: 1px solid var(--rp-border-bright);
+  min-width: 0;
+  overflow: hidden;
+}
+
+.rp-a-hero-1 {
+  grid-column: 1 / -1;
+}
+
+.rp-a-hero-body {
+  display: grid;
+  grid-template-columns: minmax(12rem, 0.8fr) minmax(0, 1.2fr);
+  min-width: 0;
+}
+
+.rp-a-hero:not(.rp-a-hero-1) .rp-a-hero-body {
+  display: block;
+}
+
+.rp-a-hero-art {
+  min-width: 0;
+  position: relative;
+}
+
+.rp-a-hero-art img {
+  background: var(--rp-panel);
+  display: block;
+  height: 100%;
+  min-height: 12rem;
+  object-fit: cover;
+  width: 100%;
+}
+
+.rp-a-hero:not(.rp-a-hero-1) .rp-a-hero-art img {
+  aspect-ratio: 16 / 8;
+  height: auto;
+  min-height: 0;
+}
+
+.rp-a-hero-rank {
+  background: var(--rp-accent);
+  bottom: 0;
+  color: #18181b;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.78rem;
+  font-weight: 800;
+  left: 0;
+  padding: 0.35rem 0.55rem;
+  position: absolute;
+}
+
+.rp-a-hero-content {
+  min-width: 0;
+  padding: 1.15rem;
+}
+
+.rp-a-hero-content h2 {
+  font-size: clamp(1.35rem, 3vw, 2.6rem);
+  letter-spacing: -0.05em;
+  line-height: 0.95;
+  margin: 0;
+}
+
+.rp-a-hero:not(.rp-a-hero-1) .rp-a-hero-content h2 {
+  font-size: 1.4rem;
+}
+
+.rp-a-hero-content .rp-tags {
+  margin: 0.7rem 0 1rem;
+}
+
+.rp-a-hero-content > .rp-score {
+  border-top: 1px solid var(--rp-border);
+  padding-top: 0.75rem;
+}
+
+.rp-a-hero-qualifying {
+  align-items: baseline;
+  border-top: 1px solid var(--rp-border);
+  display: flex;
+  gap: 0.5rem;
+  justify-content: space-between;
+  margin-top: 0.8rem;
+  padding-top: 0.7rem;
+}
+
+.rp-a-hero-qualifying span,
+.rp-a-hero-qualifying small {
+  color: var(--rp-dim);
+  font-size: 0.62rem;
+}
+
+.rp-a-hero-qualifying strong {
+  color: var(--rp-text);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.9rem;
+}
+
+.rp-a-hero-evidence {
+  border-top: 1px solid var(--rp-border);
+}
+
+.rp-a-hero-evidence > summary {
+  color: var(--rp-violet-strong);
+  cursor: pointer;
+  font-size: 0.7rem;
+  padding: 0.75rem 1rem;
+}
+
+.rp-a-hero-evidence > .rp-evidence {
+  border-top: 1px solid var(--rp-border);
+}
+
+.rp-a-remaining {
+  margin-top: 1rem;
+}
+
+.rp-chart-line {
+  stroke: var(--rp-violet);
+}
+
+.rp-chart-event line {
+  stroke: var(--rp-violet-strong);
+  stroke-dasharray: 2 2;
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
+}
+
+.rp-chart-event line[data-kind="earlyAccessEntry"] {
+  stroke: var(--rp-accent-strong);
+}
+
+.rp-chart-event line[data-kind="version1"] {
+  stroke: var(--rp-violet);
+}
+
+.rp-chart-legend {
+  align-items: center;
+  color: var(--rp-muted);
+  display: flex;
+  flex-wrap: wrap;
+  font-size: 0.6rem;
+  gap: 0.65rem;
+  margin-top: 0.5rem;
+}
+
+.rp-chart-legend span {
+  align-items: center;
+  display: inline-flex;
+  gap: 0.25rem;
+}
+
+.rp-chart-key {
+  border: 1px solid currentColor;
+  display: inline-block;
+  height: 0.55rem;
+  width: 0.55rem;
+}
+
+.rp-chart-key-score {
+  background: var(--rp-violet);
+  color: var(--rp-violet);
+}
+
+.rp-chart-key-majorPatch {
+  color: var(--rp-violet-strong);
+}
+
+.rp-chart-key-earlyAccessEntry {
+  color: var(--rp-accent-strong);
+}
+
+.rp-chart-key-version1 {
+  color: var(--rp-violet);
+}
+
+.rp-chart-note {
+  color: var(--rp-dim);
+  font-size: 0.62rem;
+  margin: 0.45rem 0 0;
+}
+
+@media (max-width: 680px) {
+  .rp-a-hero-grid {
+    gap: 0.65rem;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    margin: 1rem;
+  }
+
+  .rp-a-hero-1 .rp-a-hero-body {
+    display: block;
+  }
+
+  .rp-a-hero-1 .rp-a-hero-art img {
+    aspect-ratio: 16 / 7;
+    height: auto;
+    min-height: 0;
+  }
+
+  .rp-a-hero-content {
+    padding: 0.75rem;
+  }
+
+  .rp-a-hero-content h2,
+  .rp-a-hero:not(.rp-a-hero-1) .rp-a-hero-content h2 {
+    font-size: 1rem;
+  }
+
+  .rp-a-hero-content .rp-kicker {
+    font-size: 0.55rem;
+  }
+
+  .rp-a-hero-content .rp-tags {
+    gap: 0.2rem;
+    margin: 0.5rem 0 0.7rem;
+  }
+
+  .rp-a-hero-content .rp-tags span {
+    font-size: 0.5rem;
+  }
+
+  .rp-score-slots {
+    gap: 0.35rem;
+  }
+
+  .rp-score-slot strong,
+  .rp-score-prominent .rp-score-slot strong {
+    font-size: 1rem;
+  }
+
+  .rp-score-slot span {
+    font-size: 0.5rem;
+  }
+
+  .rp-a-hero-qualifying {
+    display: block;
+  }
+
+  .rp-a-hero-qualifying strong,
+  .rp-a-hero-qualifying small {
+    display: block;
+    margin-top: 0.2rem;
+  }
+
+  .rp-a-hero:has(.rp-a-hero-evidence[open]) {
+    grid-column: 1 / -1;
+  }
+
+  .rp-a-hero-evidence > .rp-evidence {
+    padding: 0.75rem;
+  }
+
+  .rp-a-remaining {
+    margin: 1rem;
+  }
+}

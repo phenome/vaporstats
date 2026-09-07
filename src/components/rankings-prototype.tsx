@@ -8,6 +8,8 @@ type RankingMode = "now" | "allTime";
 type Genre = "All" | "Action" | "RPG" | "Puzzle" | "Strategy";
 type Tag = "All" | "Open World" | "Single-player" | "Indie" | "Co-op" | "Simulation";
 type HistoryPoint = { date: string; value: number };
+type HistoryEventKind = "majorPatch" | "earlyAccessEntry" | "version1";
+type HistoryEvent = { date: string; kind: HistoryEventKind; label: string };
 
 type Fixture = {
   appid: number;
@@ -17,6 +19,7 @@ type Fixture = {
   art: string;
   description: string;
   status: "released" | "earlyAccess";
+  releaseDate?: string | null;
   currentPositive: number;
   currentReviews: number;
   historicalPositive: number;
@@ -30,6 +33,7 @@ type Fixture = {
   updateAnchor: string;
   source: string;
   history: readonly HistoryPoint[];
+  events?: readonly HistoryEvent[];
 };
 
 type RankedFixture = Fixture & {
@@ -44,6 +48,12 @@ type RankedFixture = Fixture & {
 const GENRES: Genre[] = ["All", "Action", "RPG", "Puzzle", "Strategy"];
 const TAGS: Tag[] = ["All", "Open World", "Single-player", "Indie", "Co-op", "Simulation"];
 
+const EVENT_KIND_LABELS: Record<HistoryEventKind, string> = {
+  majorPatch: "Major patch",
+  earlyAccessEntry: "Early Access entry",
+  version1: "Version 1.0",
+};
+
 // Deliberately synthetic aggregate fixtures. Counts are disjoint buckets, not individual reviews.
 const FIXTURES: readonly Fixture[] = [
   {
@@ -54,6 +64,7 @@ const FIXTURES: readonly Fixture[] = [
     art: "https://shared.fastly.steamstatic.com/store_item_assets/steam/apps/1091500/header.jpg",
     description: "Synthetic fixture with a large current evidence bucket.",
     status: "released",
+    releaseDate: "2020-12-10",
     currentPositive: 6480,
     currentReviews: 7200,
     historicalPositive: 16,
@@ -72,6 +83,10 @@ const FIXTURES: readonly Fixture[] = [
       { date: "2026-06", value: 86 },
       { date: "2026-09", value: 89.9723 },
     ],
+    events: [
+      { date: "2026-06-09", kind: "majorPatch", label: "Major Update" },
+      { date: "2026-09-01", kind: "version1", label: "Version 1.0" },
+    ],
   },
   {
     appid: 1086940,
@@ -81,6 +96,7 @@ const FIXTURES: readonly Fixture[] = [
     art: "https://shared.fastly.steamstatic.com/store_item_assets/steam/apps/1086940/header.jpg",
     description: "Synthetic fixture with a large, steady evidence bucket.",
     status: "released",
+    releaseDate: "2023-08-03",
     currentPositive: 4700,
     currentReviews: 5000,
     historicalPositive: 19,
@@ -99,6 +115,7 @@ const FIXTURES: readonly Fixture[] = [
       { date: "2026-06", value: 93.1 },
       { date: "2026-09", value: 94.004 },
     ],
+    events: [{ date: "2026-06-09", kind: "majorPatch", label: "Major Update" }],
   },
   {
     appid: 1145350,
@@ -108,6 +125,7 @@ const FIXTURES: readonly Fixture[] = [
     art: "https://shared.fastly.steamstatic.com/store_item_assets/steam/apps/1145350/header.jpg",
     description: "Synthetic category fixture with 120 recent reviews.",
     status: "released",
+    releaseDate: "2024-05-06",
     currentPositive: 108,
     currentReviews: 120,
     historicalPositive: 10,
@@ -126,6 +144,7 @@ const FIXTURES: readonly Fixture[] = [
       { date: "2026-06", value: 89 },
       { date: "2026-09", value: 89.394 },
     ],
+    events: [{ date: "2025-12-01", kind: "earlyAccessEntry", label: "Early Access entry" }],
   },
   {
     appid: 1716740,
@@ -135,6 +154,7 @@ const FIXTURES: readonly Fixture[] = [
     art: "https://shared.fastly.steamstatic.com/store_item_assets/steam/apps/1716740/header.jpg",
     description: "Synthetic fixture with a large current evidence bucket.",
     status: "released",
+    releaseDate: "2023-09-06",
     currentPositive: 6500,
     currentReviews: 10000,
     historicalPositive: 18,
@@ -153,6 +173,7 @@ const FIXTURES: readonly Fixture[] = [
       { date: "2026-06", value: 79 },
       { date: "2026-09", value: 65.0499 },
     ],
+    events: [{ date: "2026-06-09", kind: "majorPatch", label: "Major Update" }],
   },
   {
     appid: 275850,
@@ -162,6 +183,7 @@ const FIXTURES: readonly Fixture[] = [
     art: "https://shared.fastly.steamstatic.com/store_item_assets/steam/apps/275850/header.jpg",
     description: "Post-update current evidence is small; the 90-day eligibility count remains separate.",
     status: "released",
+    releaseDate: "2016-08-12",
     currentPositive: 10,
     currentReviews: 12,
     historicalPositive: 15,
@@ -180,6 +202,7 @@ const FIXTURES: readonly Fixture[] = [
       { date: "2026-06", value: 75 },
       { date: "2026-09", value: 78.125 },
     ],
+    events: [{ date: "2026-08-12", kind: "majorPatch", label: "Major Update" }],
   },
   {
     appid: 620,
@@ -189,6 +212,7 @@ const FIXTURES: readonly Fixture[] = [
     art: "https://shared.fastly.steamstatic.com/store_item_assets/steam/apps/620/header.jpg",
     description: "Older fixture with retained historical support and low recent activity.",
     status: "released",
+    releaseDate: "2011-04-18",
     currentPositive: 0,
     currentReviews: 0,
     historicalPositive: 19,
@@ -215,6 +239,7 @@ const FIXTURES: readonly Fixture[] = [
     art: "https://shared.fastly.steamstatic.com/store_item_assets/steam/apps/870780/header.jpg",
     description: "Synthetic category fixture with 80 recent reviews.",
     status: "released",
+    releaseDate: "2019-08-27",
     currentPositive: 62,
     currentReviews: 80,
     historicalPositive: 6,
@@ -242,6 +267,7 @@ const FIXTURES: readonly Fixture[] = [
     art: "https://shared.fastly.steamstatic.com/store_item_assets/steam/apps/835960/header.jpg",
     description: "No compatible aggregate evidence in this fixture.",
     status: "released",
+    releaseDate: null,
     currentPositive: 0,
     currentReviews: 0,
     historicalPositive: 0,
@@ -264,6 +290,7 @@ const FIXTURES: readonly Fixture[] = [
     art: "https://shared.fastly.steamstatic.com/store_item_assets/steam/apps/2868840/header.jpg",
     description: "Early Access fixture shown outside official rankings.",
     status: "earlyAccess",
+    releaseDate: "2026-03-05",
     currentPositive: 74,
     currentReviews: 90,
     historicalPositive: 5,
@@ -297,10 +324,32 @@ function formatNumber(value: number) {
 function formatScore(value: number | null) {
   return value === null ? "—" : oneDecimalFormat.format(value);
 }
+
 const historyDateFormat = new Intl.DateTimeFormat(undefined, { month: "short", year: "numeric", timeZone: "UTC" });
+const releaseDateFormat = new Intl.DateTimeFormat(undefined, { month: "short", year: "numeric", timeZone: "UTC" });
+const eventDateFormat = new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", year: "numeric", timeZone: "UTC" });
+
+function parseTimelineDate(value: string) {
+  const normalized = /^\d{4}-\d{2}$/.test(value) ? value + "-01" : value;
+  const timestamp = Date.parse(normalized + "T00:00:00Z");
+  return Number.isFinite(timestamp) ? timestamp : null;
+}
 
 function formatHistoryDate(value: string) {
-  return historyDateFormat.format(new Date(value + "-01T00:00:00Z"));
+  const timestamp = parseTimelineDate(value);
+  return timestamp === null ? value : historyDateFormat.format(new Date(timestamp));
+}
+
+function formatReleaseDate(value?: string | null) {
+  const timestamp = value ? parseTimelineDate(value) : null;
+  if (timestamp === null) return null;
+  const date = new Date(timestamp);
+  return date.getUTCFullYear() === new Date().getUTCFullYear() ? releaseDateFormat.format(date) : String(date.getUTCFullYear());
+}
+
+function formatEventDate(value: string) {
+  const timestamp = parseTimelineDate(value);
+  return timestamp === null ? value : eventDateFormat.format(new Date(timestamp));
 }
 
 function currentPlayerScore(game: Fixture) {
@@ -358,9 +407,6 @@ function gateLabel(game: RankedFixture, mode: RankingMode) {
   return `${formatNumber(game.qualifyingCount)} ${window} reviews · ${game.gate === 250 ? "global" : "category"} gate ${formatNumber(game.gate)}`;
 }
 
-function statusLabel(game: Fixture) {
-  return game.status === "earlyAccess" ? "Early Access" : "Released";
-}
 
 function PrototypeControls({
   mode,
@@ -495,39 +541,73 @@ function Header({ mode, rankedCount, scope }: { mode: RankingMode; rankedCount: 
 }
 
 function ScoreCell({ game, mode, prominent = false }: { game: RankedFixture; mode: RankingMode; prominent?: boolean }) {
+  const slots = [
+    { label: "Current Player Score", value: game.currentScore, active: mode === "now" },
+    { label: "Lifetime Approval", value: game.lifetimeApproval, active: mode === "allTime" },
+  ];
   return (
     <div className={prominent ? "rp-score rp-score-prominent" : "rp-score"}>
-      <strong>{formatScore(game.metric)}</strong>
-      <span>{mode === "now" ? "current score" : "lifetime approval"}</span>
-      {mode === "allTime" && <small>Current Player Score {formatScore(game.currentScore)}</small>}
+      <div className="rp-score-slots">
+        {slots.map((slot) => (
+          <div className={slot.active ? "rp-score-slot is-active" : "rp-score-slot"} key={slot.label}>
+            <strong>{formatScore(slot.value)}</strong>
+            <span>{slot.label}</span>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
 
 function HistoryChart({ game }: { game: RankedFixture }) {
   const chartId = `history-${game.appid}`;
-  if (game.history.length === 0) {
+  const historySamples = game.history
+    .map((point) => ({ ...point, timestamp: parseTimelineDate(point.date) }))
+    .filter((point): point is HistoryPoint & { timestamp: number } => point.timestamp !== null);
+  if (historySamples.length === 0) {
     return <p className="rp-no-history">No recorded history yet.</p>;
   }
-  const values = game.history.map((point) => point.value);
+  const values = historySamples.map((point) => point.value);
   const min = Math.max(0, Math.min(...values) - 4);
   const max = Math.min(100, Math.max(...values) + 4);
-  const points = game.history
-    .map((point, index) => {
-      const x = game.history.length === 1 ? 50 : (index / (game.history.length - 1)) * 100;
+  const domainStart = Math.min(...historySamples.map((point) => point.timestamp));
+  const domainEnd = Math.max(...historySamples.map((point) => point.timestamp));
+  const timeToX = (timestamp: number) => domainEnd === domainStart ? 50 : ((timestamp - domainStart) / (domainEnd - domainStart)) * 100;
+  const points = historySamples
+    .map((point) => {
+      const x = timeToX(point.timestamp);
       const y = 92 - ((point.value - min) / Math.max(1, max - min)) * 76;
       return `${x},${y}`;
     })
     .join(" ");
+  const events = (game.events ?? [])
+    .map((event) => ({ ...event, timestamp: parseTimelineDate(event.date) }))
+    .filter((event): event is HistoryEvent & { timestamp: number } => event.timestamp !== null && event.timestamp >= domainStart && event.timestamp <= domainEnd);
   return (
     <div className="rp-history-chart">
       <svg viewBox="0 0 100 100" role="img" aria-labelledby={`${chartId}-title`} preserveAspectRatio="none">
-        <title id={chartId + "-title"}>{game.title} reception history, values from {formatHistoryDate(game.history[0]?.date ?? "")} to {formatHistoryDate(game.history[game.history.length - 1]?.date ?? "")}</title>
+        <title id={chartId + "-title"}>{game.title} reception history, values from {formatHistoryDate(historySamples[0].date)} to {formatHistoryDate(historySamples[historySamples.length - 1].date)}</title>
         <line x1="0" y1="92" x2="100" y2="92" className="rp-chart-axis" />
+        {events.map((event) => {
+          const x = timeToX(event.timestamp);
+          return (
+            <g key={event.kind + event.date} className="rp-chart-event">
+              <line x1={x} y1="8" x2={x} y2="92" data-kind={event.kind} />
+              <title>{EVENT_KIND_LABELS[event.kind]}: {event.label} · {formatEventDate(event.date)}</title>
+            </g>
+          );
+        })}
         <polyline points={points} className="rp-chart-line" />
       </svg>
+      <div className="rp-chart-legend" aria-label="History chart legend">
+        <span><i className="rp-chart-key rp-chart-key-score" aria-hidden="true" />Player score</span>
+        {events.map((event) => (
+          <span key={event.kind + event.date}><i className={`rp-chart-key rp-chart-key-${event.kind}`} aria-hidden="true" />{event.label} · <time dateTime={event.date}>{formatEventDate(event.date)}</time></span>
+        ))}
+      </div>
+      <p className="rp-chart-note">Illustrative milestones provide context only; they do not establish causation.</p>
       <ol className="rp-chart-labels">
-        {game.history.map((point) => (
+        {historySamples.map((point) => (
           <li key={point.date}>
             <span>{formatHistoryDate(point.date)}</span>
             <strong>{formatScore(point.value)}</strong>
@@ -579,23 +659,24 @@ function Tags({ game }: { game: Fixture }) {
     <div className="rp-tags">
       <span>{game.genre}</span>
       {game.tags.slice(0, 2).map((tag) => <span key={tag}>{tag}</span>)}
-      <span className={game.status === "earlyAccess" ? "rp-status-wip" : "rp-status-released"}>{statusLabel(game)}</span>
+      {game.status === "earlyAccess" && <span className="rp-status-wip">Early Access</span>}
     </div>
   );
 }
 
 function GameIdentity({ game, rank }: { game: Fixture; rank?: number }) {
+  const releaseDate = formatReleaseDate(game.releaseDate);
   return (
     <div className="rp-game-identity">
       {rank !== undefined && <span className="rp-rank">{rank}</span>}
       <img src={game.art} alt="" loading="lazy" />
       <div>
         <strong>{game.title}</strong>
+        {releaseDate && <span className="rp-release-date">{releaseDate}</span>}
         <Tags game={game} />
       </div>
     </div>
   );
-
 }
 function EmptyState({ onReset, message = "No games match these filters." }: { onReset: () => void; message?: string }) {
   return (
@@ -664,30 +745,65 @@ function UnrankedCatalog({ games, earlyAccess, mode }: { games: RankedFixture[];
 }
 
 function VariantA({ view, controls }: { view: View; controls: ReactNode }) {
+  const topThree = view.ranked.slice(0, 3);
+  const remaining = view.ranked.slice(3);
   return (
     <div className="rp-variant rp-variant-a">
       <Header mode={view.mode} rankedCount={view.ranked.length} scope={view.scope} />
       {controls}
-      <div className="rp-a-table" aria-label={`${modeLabel(view.mode)} dense leaderboard`}>
-        <div className="rp-a-table-head"><span>Rank</span><span>Game</span><span>Score</span><span>Qualifying evidence</span></div>
-        {view.ranked.length === 0 ? <EmptyState onReset={view.onReset} /> : view.ranked.map((game, index) => (
-          <details className="rp-a-row" key={game.appid}>
-            <summary>
-              <span className="rp-a-rank">{index + 1}</span>
-              <GameIdentity game={game} />
-              <ScoreCell game={game} mode={view.mode} />
-              <span className="rp-a-qualifying">{formatNumber(game.qualifyingCount)}<small>{view.mode === "now" ? "90-day reviews" : "lifetime reviews"}</small></span>
-            </summary>
-            <EvidenceDetails game={game} mode={view.mode} />
-          </details>
-        ))}
-      </div>
+      {view.ranked.length === 0 ? <EmptyState onReset={view.onReset} /> : (
+        <>
+          <section className="rp-a-hero-grid" aria-label={`${modeLabel(view.mode)} top three`}>
+            {topThree.map((game, index) => (
+              <article className={`rp-a-hero rp-a-hero-${index + 1}`} key={game.appid}>
+                <div className="rp-a-hero-body">
+                  <div className="rp-a-hero-art">
+                    <img src={game.art} alt="" loading="lazy" />
+                    <span className="rp-a-hero-rank">#{index + 1}</span>
+                  </div>
+                  <div className="rp-a-hero-content">
+                    <p className="rp-kicker">#{index + 1} IN THIS VIEW</p>
+                    <h2>{game.title}</h2>
+                    {formatReleaseDate(game.releaseDate) && <span className="rp-release-date">{formatReleaseDate(game.releaseDate)}</span>}
+                    <Tags game={game} />
+                    <ScoreCell game={game} mode={view.mode} prominent={index === 0} />
+                    <div className="rp-a-hero-qualifying">
+                      <span>Qualifying reviews</span>
+                      <strong>{formatNumber(game.qualifyingCount)}</strong>
+                      <small>{view.mode === "now" ? "90-day window" : "lifetime window"}</small>
+                    </div>
+                  </div>
+                </div>
+                <details className="rp-a-hero-evidence">
+                  <summary>Evidence &amp; history</summary>
+                  <EvidenceDetails game={game} mode={view.mode} />
+                </details>
+              </article>
+            ))}
+          </section>
+          {remaining.length > 0 && (
+            <section className="rp-a-table rp-a-remaining" aria-label="Remaining ranked games">
+              <div className="rp-a-table-head"><span>Ranked 4+</span><span>Game</span><span>Scores</span><span>Qualifying reviews</span></div>
+              {remaining.map((game, index) => (
+                <details className="rp-a-row" key={game.appid}>
+                  <summary>
+                    <span className="rp-a-rank">{index + 4}</span>
+                    <GameIdentity game={game} />
+                    <ScoreCell game={game} mode={view.mode} />
+                    <span className="rp-a-qualifying">{formatNumber(game.qualifyingCount)}<small>{view.mode === "now" ? "90-day reviews" : "lifetime reviews"}</small></span>
+                  </summary>
+                  <EvidenceDetails game={game} mode={view.mode} />
+                </details>
+              ))}
+            </section>
+          )}
+        </>
+      )}
       <UnrankedCatalog games={view.excluded} earlyAccess={view.earlyAccess} mode={view.mode} />
       <Methodology mode={view.mode} />
     </div>
   );
 }
-
 function VariantB({ view, controls }: { view: View; controls: ReactNode }) {
   const first = view.ranked[0];
   return (
@@ -777,7 +893,7 @@ function VariantC({ view, controls }: { view: View; controls: ReactNode }) {
             <article>
               <div className="rp-c-detail-header">
                 <img src={view.selected.art} alt="" loading="lazy" />
-                <div><p className="rp-kicker">{statusLabel(view.selected)} · {view.selected.genre}</p><h2>{view.selected.title}</h2><Tags game={view.selected} /></div>
+                <div><p className="rp-kicker">{view.selected.status === "earlyAccess" ? "Early Access · " : ""}{view.selected.genre}</p><h2>{view.selected.title}</h2>{formatReleaseDate(view.selected.releaseDate) && <span className="rp-release-date">{formatReleaseDate(view.selected.releaseDate)}</span>}<Tags game={view.selected} /></div>
                 <ScoreCell game={view.selected} mode={view.mode} prominent />
               </div>
               <p className="rp-c-detail-description">{view.selected.description}</p>
