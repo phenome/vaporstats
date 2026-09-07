@@ -744,7 +744,7 @@ function UnrankedCatalog({ games, earlyAccess, mode }: { games: RankedFixture[];
   );
 }
 
-function VariantA({ view, controls }: { view: View; controls: ReactNode }) {
+function VariantA({ view, controls, podium }: { view: View; controls: ReactNode; podium: RankingsPrototypeVariant }) {
   const topThree = view.ranked.slice(0, 3);
   const remaining = view.ranked.slice(3);
   return (
@@ -753,7 +753,7 @@ function VariantA({ view, controls }: { view: View; controls: ReactNode }) {
       {controls}
       {view.ranked.length === 0 ? <EmptyState onReset={view.onReset} /> : (
         <>
-          <section className="rp-a-hero-grid" aria-label={`${modeLabel(view.mode)} top three`}>
+          <section className={`rp-a-hero-grid rp-podium-${podium.toLowerCase()}`} aria-label={`${modeLabel(view.mode)} top three`}>
             {topThree.map((game, index) => (
               <article className={`rp-a-hero rp-a-hero-${index + 1}`} key={game.appid}>
                 <div className="rp-a-hero-body">
@@ -804,111 +804,6 @@ function VariantA({ view, controls }: { view: View; controls: ReactNode }) {
     </div>
   );
 }
-function VariantB({ view, controls }: { view: View; controls: ReactNode }) {
-  const first = view.ranked[0];
-  return (
-    <div className="rp-variant rp-variant-b">
-      <div className="rp-b-sidebar">
-        <div className="rp-b-sidebar-title">
-          <p className="rp-kicker">DISCOVER</p>
-          <h1>Top rated</h1>
-          <p>Browse reception by mode, genre, and tag.</p>
-        </div>
-        {controls}
-        <Methodology mode={view.mode} />
-      </div>
-      <main className="rp-b-main">
-        <div className="rp-b-main-heading">
-          <div>
-            <p className="rp-kicker">{view.scope.toUpperCase()} / {view.mode === "now" ? "LATEST 90 DAYS" : "LIFETIME"}</p>
-            <h2>{modeLabel(view.mode)}</h2>
-          </div>
-          <span>{formatNumber(view.ranked.length)} ranked</span>
-        </div>
-        {!first ? <EmptyState onReset={view.onReset} /> : (
-          <>
-            <article className="rp-b-lead">
-              <img src={first.art} alt="" loading="lazy" />
-              <div className="rp-b-lead-copy">
-                <p className="rp-kicker">#1 IN THIS VIEW</p>
-                <h3>{first.title}</h3>
-                <p>{first.description}</p>
-                <Tags game={first} />
-                <div className="rp-b-lead-metrics"><ScoreCell game={first} mode={view.mode} prominent /><span>{gateLabel(first, view.mode)}</span></div>
-              </div>
-              <details className="rp-b-lead-evidence">
-                <summary>View evidence</summary>
-                <EvidenceDetails game={first} mode={view.mode} />
-              </details>
-            </article>
-            <ol className="rp-b-editorial-list" start={2}>
-              {view.ranked.slice(1).map((game, index) => (
-                <li key={game.appid}>
-                  <article className="rp-b-editorial-row">
-                    <GameIdentity game={game} rank={index + 2} />
-                    <div className="rp-b-editorial-copy"><p>{game.description}</p><span>{gateLabel(game, view.mode)}</span></div>
-                    <ScoreCell game={game} mode={view.mode} />
-                    <details><summary>Evidence</summary><EvidenceDetails game={game} mode={view.mode} /></details>
-                  </article>
-                </li>
-              ))}
-            </ol>
-          </>
-        )}
-        <UnrankedCatalog games={view.excluded} earlyAccess={view.earlyAccess} mode={view.mode} />
-      </main>
-    </div>
-  );
-}
-
-function VariantC({ view, controls }: { view: View; controls: ReactNode }) {
-  return (
-    <div className="rp-variant rp-variant-c">
-      <Header mode={view.mode} rankedCount={view.ranked.length} scope={view.scope} />
-      {controls}
-      <div className="rp-c-shell">
-        <nav className="rp-c-master" aria-label="Ranked games">
-          <div className="rp-c-master-heading"><span>Ranked games</span><strong>{formatNumber(view.ranked.length)}</strong></div>
-          {view.ranked.map((game, index) => (
-            <button type="button" aria-pressed={view.selected?.appid === game.appid} className={view.selected?.appid === game.appid ? "is-selected" : ""} key={game.appid} onClick={() => view.onSelect(game.appid)}>
-              <span>{index + 1}</span><span>{game.title}</span><strong>{formatScore(game.metric)}</strong>
-            </button>
-          ))}
-          {view.ranked.length === 0 && <EmptyState onReset={view.onReset} />}
-          {view.excluded.length > 0 && <div className="rp-c-subheading">Not ranked</div>}
-          {view.excluded.map((game) => (
-            <button type="button" aria-pressed={view.selected?.appid === game.appid} className={view.selected?.appid === game.appid ? "is-selected rp-is-unranked" : "rp-is-unranked"} key={game.appid} onClick={() => view.onSelect(game.appid)}>
-              <span>—</span><span>{game.title}</span><strong>{game.metric === null ? "—" : formatScore(game.metric)}</strong>
-            </button>
-          ))}
-          {view.earlyAccess.length > 0 && <div className="rp-c-subheading">Early Access · unranked</div>}
-          {view.earlyAccess.map((game) => (
-            <button type="button" aria-pressed={view.selected?.appid === game.appid} className={view.selected?.appid === game.appid ? "is-selected rp-is-unranked" : "rp-is-unranked"} key={game.appid} onClick={() => view.onSelect(game.appid)}>
-              <span>—</span><span>{game.title}</span><strong>WIP</strong>
-            </button>
-          ))}
-        </nav>
-        <section className="rp-c-detail" aria-live="polite">
-          {view.selected ? (
-            <article>
-              <div className="rp-c-detail-header">
-                <img src={view.selected.art} alt="" loading="lazy" />
-                <div><p className="rp-kicker">{view.selected.status === "earlyAccess" ? "Early Access · " : ""}{view.selected.genre}</p><h2>{view.selected.title}</h2>{formatReleaseDate(view.selected.releaseDate) && <span className="rp-release-date">{formatReleaseDate(view.selected.releaseDate)}</span>}<Tags game={view.selected} /></div>
-                <ScoreCell game={view.selected} mode={view.mode} prominent />
-              </div>
-              <p className="rp-c-detail-description">{view.selected.description}</p>
-              <div className="rp-c-detail-rule" />
-              <EvidenceDetails game={view.selected} mode={view.mode} />
-            </article>
-          ) : (
-            <EmptyState onReset={view.onReset} message="Select a title to inspect its evidence." />
-          )}
-        </section>
-      </div>
-      <Methodology mode={view.mode} />
-    </div>
-  );
-}
 
 type View = {
   mode: RankingMode;
@@ -916,8 +811,6 @@ type View = {
   ranked: RankedFixture[];
   excluded: RankedFixture[];
   earlyAccess: RankedFixture[];
-  selected: RankedFixture | null;
-  onSelect: (appid: number) => void;
   onReset: () => void;
 };
 
@@ -925,20 +818,12 @@ export function RankingsPrototype({ variant }: { variant: RankingsPrototypeVaria
   const [mode, setMode] = useState<RankingMode>("now");
   const [genre, setGenre] = useState<Genre>("All");
   const [tag, setTag] = useState<Tag>("All");
-  const [selectedId, setSelectedId] = useState<number | null>(FIXTURES[0]?.appid ?? null);
 
   const matching = useMemo(() => FIXTURES.filter((game) => matchesFilter(game, genre, tag)), [genre, tag]);
   const derived = useMemo(() => matching.map((game) => deriveGame(game, mode, genre, tag)), [matching, mode, genre, tag]);
   const ranked = useMemo(() => derived.filter((game) => game.eligible).sort((a, b) => sortRanked(a, b, mode)), [derived, mode]);
   const excluded = useMemo(() => derived.filter((game) => game.status === "released" && !game.eligible).sort((a, b) => sortRanked(a, b, mode)), [derived, mode]);
   const earlyAccess = useMemo(() => derived.filter((game) => game.status === "earlyAccess"), [derived]);
-  const candidateIds = useMemo(() => new Set(derived.map((game) => game.appid)), [derived]);
-  const selected = derived.find((game) => game.appid === selectedId) ?? null;
-
-  useEffect(() => {
-    if (selectedId !== null && candidateIds.has(selectedId)) return;
-    setSelectedId(ranked[0]?.appid ?? excluded[0]?.appid ?? earlyAccess[0]?.appid ?? null);
-  }, [candidateIds, excluded, earlyAccess, ranked, selectedId]);
 
   useEffect(() => {
     console.info("[RankingsPrototype] state", {
@@ -947,9 +832,8 @@ export function RankingsPrototype({ variant }: { variant: RankingsPrototypeVaria
       genre,
       tag,
       rankedAppIds: ranked.map((game) => game.appid),
-      selectedAppId: selected?.appid ?? null,
     });
-  }, [variant, mode, genre, tag, ranked, selected]);
+  }, [variant, mode, genre, tag, ranked]);
 
   const scope = isGlobalScope(genre, tag) ? "global" : `${genre === "All" ? "all genres" : genre}${tag === "All" ? "" : ` · ${tag}`}`;
   const onReset = () => {
@@ -966,7 +850,6 @@ export function RankingsPrototype({ variant }: { variant: RankingsPrototypeVaria
       onGenreChange={setGenre}
       onTagChange={setTag}
       onReset={onReset}
-      sidebar={variant === "B"}
     />
   );
   const view: View = {
@@ -975,16 +858,12 @@ export function RankingsPrototype({ variant }: { variant: RankingsPrototypeVaria
     ranked,
     excluded,
     earlyAccess,
-    selected,
-    onSelect: setSelectedId,
     onReset,
   };
 
   return (
     <section className="rankings-prototype" data-variant={variant} data-mode={mode} data-genre={genre} data-tag={tag}>
-      {variant === "A" && <VariantA view={view} controls={controls} />}
-      {variant === "B" && <VariantB view={view} controls={controls} />}
-      {variant === "C" && <VariantC view={view} controls={controls} />}
+      <VariantA view={view} controls={controls} podium={variant} />
     </section>
   );
 }

@@ -51,9 +51,9 @@ function RankingsRouteComponent() {
       <RankingsPrototype variant={variant} />
       <PrototypeSwitcher
         variants={[
-          { key: "A", name: "Compact leaderboard" },
-          { key: "B", name: "Genre explorer" },
-          { key: "C", name: "Reception workbench" },
+          { key: "A", name: "Compact podium" },
+          { key: "B", name: "Winner + challengers" },
+          { key: "C", name: "Center stage" },
         ]}
         current={variant}
         onChange={next => void navigate({
