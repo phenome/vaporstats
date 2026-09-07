@@ -6,6 +6,7 @@ import {
   type CollectionTickResult,
   type DiscoveryResult,
 } from "./player-collector";
+import { reRankTrackedTiers } from "../src/lib/player";
 import { runDailyRollupJob, type RollupJobResult } from "./player-rollups";
 import {
   runHourlyPriceFeedTick,
@@ -130,6 +131,8 @@ async function performIngestionTick(options: IngestionTickOptions): Promise<Inge
       customFetch,
       alreadyAttemptedInTick: tick.attempted,
     });
+  } else if (anchorTime.getUTCMinutes() === 0 && trackedGame) {
+    await reRankTrackedTiers(options.db, anchorTime);
   }
   if (dailyCycleDue) {
     rollups = await runDailyRollupJob(options.db, { anchorTime, targetDate });
@@ -224,7 +227,14 @@ export function startIngestionScheduler(options: IngestionSchedulerOptions): unk
     }));
   }
   if (options.runImmediately) {
-    void runIngestionTick(options);
+    void (async () => {
+      try {
+        await reRankTrackedTiers(options.db);
+      } catch (err) {
+        console.error("Startup re-rank error:", err);
+      }
+      await runIngestionTick(options);
+    })();
   }
   return cron;
 }

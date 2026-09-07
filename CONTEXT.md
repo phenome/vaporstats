@@ -68,3 +68,19 @@ The lowest recorded price for an application across its entire tracked pricing h
 
 **Chart Transition State**:
 An active revalidation state during which existing period data remains visible with muted presentation while next-period data is fetched, preventing layout collapse.
+
+**Tracking tier**:
+A classification assigned to a tracked game (`fast`, `hourly`, `daily`) that governs its observation sampling frequency.
+_Avoid_: Priority queue, poll interval, refresh tier
+
+**Fast tier**:
+The highest-frequency sampling tier, tracking the top 50 games on a 15-minute cadence.
+_Avoid_: High priority, 10m tier, hot games
+
+**Hourly tier**:
+The secondary sampling tier, tracking games ranked 51–250 on a 60-minute cadence distributed across 4 quarter-hour slots.
+_Avoid_: Medium tier, standard tier
+
+**Daily tier**:
+The baseline catalog sampling tier, tracking games ranked 251–1,000 once every 24 hours distributed across 96 quarter-hour slots.
+_Avoid_: Low tier, cold tier, background tier

@@ -299,11 +299,11 @@ describe("operating triggers", () => {
   });
 
   it("verifies hard ingestion constants are bounded and inspectable", () => {
-    expect(TICK_REQUEST_CAP).toBe(100);
-    expect(DAILY_REQUEST_CAP).toBe(5000);
-    expect(TIER_FAST_MAX).toBe(10);
-    expect(TIER_HOURLY_MAX).toBe(90);
-    expect(TIER_DAILY_MAX).toBe(900);
+    expect(TICK_REQUEST_CAP).toBe(150);
+    expect(DAILY_REQUEST_CAP).toBe(80000);
+    expect(TIER_FAST_MAX).toBe(50);
+    expect(TIER_HOURLY_MAX).toBe(200);
+    expect(TIER_DAILY_MAX).toBe(750);
     expect(MAX_TRACKED_GAMES).toBe(1000);
     expect(CONCURRENCY_LIMIT).toBe(6);
 

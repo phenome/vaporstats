@@ -153,6 +153,20 @@ export async function runPlayerCollectionTick(
   const remainingDaily = Math.max(0, dailyCap - currentDaily);
 
   if (remainingDaily === 0) {
+    // Advance overdue games to next deterministic slot to prevent midnight stampede
+    const overdueGames = await getDueTrackedGames(db, anchorTime, tickCap);
+    if (overdueGames.length > 0) {
+      const stmts = overdueGames.map((g) =>
+        db
+          .prepare(
+            `UPDATE tracked_games
+             SET next_due_at = ?, updated_at = CURRENT_TIMESTAMP
+             WHERE appid = ?`
+          )
+          .bind(calculateNextDueAt(anchorTime, g.tier, g.appid).toISOString(), g.appid)
+      );
+      await db.batch(stmts);
+    }
     return {
       anchorTime: anchorTime.toISOString(),
       attempted: 0,

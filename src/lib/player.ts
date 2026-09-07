@@ -4,13 +4,13 @@ import type { AppDatabase, AppPreparedStatement } from "./db";
 /**
  * Player activity collection limits and tier configurations.
  */
-export const TIER_FAST_MAX = 10;
-export const TIER_HOURLY_MAX = 90;
-export const TIER_DAILY_MAX = 900;
+export const TIER_FAST_MAX = 50;
+export const TIER_HOURLY_MAX = 200;
+export const TIER_DAILY_MAX = 750;
 export const MAX_TRACKED_GAMES = 1000;
 
-export const DAILY_REQUEST_CAP = 5000;
-export const TICK_REQUEST_CAP = 100;
+export const DAILY_REQUEST_CAP = 80000;
+export const TICK_REQUEST_CAP = 150;
 export const CONCURRENCY_LIMIT = 6;
 
 export const CADENCE_MINUTES = {
@@ -288,9 +288,9 @@ export async function registerTrackedGame(
 
 /**
  * Re-ranks tracked games according to latest successful count:
- * Top 10 -> fast tier (15m)
- * Next 90 -> hourly tier (60m)
- * Remaining up to 900 -> daily tier (24h)
+ * Top 50 -> fast tier (15m)
+ * Next 200 -> hourly tier (60m)
+ * Remaining up to 750 -> daily tier (24h)
  * Enforces at most 1,000 tracked games.
  */
 export async function reRankTrackedTiers(

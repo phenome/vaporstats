@@ -4,8 +4,18 @@ import type { AppDatabase, AppPreparedStatement } from "../src/lib/db";
 import { applyMigrations } from "../src/lib/migrations";
 import { runIngestionTick, startIngestionScheduler, type IngestionCron } from "../workers/ingestion";
 import { runDailyRollupJob } from "../workers/player-rollups";
-import { calculateDeterministicSlot, calculateNextDueAt, CADENCE_MINUTES } from "../src/lib/player";
-
+import { runPlayerCollectionTick } from "../workers/player-collector";
+import {
+  calculateDeterministicSlot,
+  calculateNextDueAt,
+  CADENCE_MINUTES,
+  reRankTrackedTiers,
+  TIER_FAST_MAX,
+  TIER_HOURLY_MAX,
+  TIER_DAILY_MAX,
+  DAILY_REQUEST_CAP,
+  TICK_REQUEST_CAP,
+} from "../src/lib/player";
 function createAppDatabase(): AppDatabase {
   const native = new Database(":memory:");
   applyMigrations(native);
@@ -246,5 +256,69 @@ describe("Bun ingestion scheduling and player rollups", () => {
 
     const nextDue3 = calculateNextDueAt(new Date("2026-09-06T12:15:00.000Z"), "fast", 1245620);
     expect(nextDue3.toISOString()).toBe("2026-09-06T12:30:00.000Z");
+  });
+
+  test("re-ranks top 50 to fast tier, next 200 to hourly tier, and remaining to daily", async () => {
+    const db = createAppDatabase();
+    const anchor = new Date("2026-09-07T00:00:00.000Z");
+    expect(TIER_FAST_MAX).toBe(50);
+    expect(TIER_HOURLY_MAX).toBe(200);
+    expect(TIER_DAILY_MAX).toBe(750);
+    expect(DAILY_REQUEST_CAP).toBe(80000);
+    expect(TICK_REQUEST_CAP).toBe(150);
+
+    // Seed 260 games with descending player counts
+    const stmts: AppPreparedStatement[] = [];
+    for (let i = 1; i <= 260; i++) {
+      stmts.push(
+        db
+          .prepare(
+            "INSERT INTO tracked_games (appid, tier, slot, next_due_at, latest_players) VALUES (?, 'daily', 0, ?, ?)"
+          )
+          .bind(i, anchor.toISOString(), 100000 - i * 100)
+      );
+    }
+    await db.batch(stmts);
+
+    const result = await reRankTrackedTiers(db, anchor);
+    expect(result.fastCount).toBe(50);
+    expect(result.hourlyCount).toBe(200);
+    expect(result.dailyCount).toBe(10);
+
+    const fastGame = await db.prepare("SELECT tier FROM tracked_games WHERE appid = 50").first<{ tier: string }>();
+    expect(fastGame?.tier).toBe("fast");
+
+    const hourlyGame = await db.prepare("SELECT tier FROM tracked_games WHERE appid = 51").first<{ tier: string }>();
+    expect(hourlyGame?.tier).toBe("hourly");
+
+    const hourlyGameLast = await db.prepare("SELECT tier FROM tracked_games WHERE appid = 250").first<{ tier: string }>();
+    expect(hourlyGameLast?.tier).toBe("hourly");
+
+    const dailyGame = await db.prepare("SELECT tier FROM tracked_games WHERE appid = 251").first<{ tier: string }>();
+    expect(dailyGame?.tier).toBe("daily");
+  });
+
+  test("advances overdue games to next deterministic slot when daily cap is reached", async () => {
+    const db = createAppDatabase();
+    const anchor = new Date("2026-09-07T12:00:00.000Z");
+    await db
+      .prepare(
+        "INSERT INTO tracked_games (appid, tier, slot, next_due_at, latest_players) VALUES (1172470, 'fast', 0, '2026-09-07T11:45:00.000Z', 60000)"
+      )
+      .run();
+
+    const tickRes = await runPlayerCollectionTick(db, {
+      anchorTime: anchor,
+      dailyCap: 0,
+    });
+
+    expect(tickRes.reason).toBe("daily_cap_reached");
+    expect(tickRes.attempted).toBe(0);
+
+    const updated = await db
+      .prepare("SELECT next_due_at FROM tracked_games WHERE appid = 1172470")
+      .first<{ next_due_at: string }>();
+    expect(new Date(updated!.next_due_at).getTime()).toBeGreaterThan(anchor.getTime());
+    expect(updated?.next_due_at).toBe("2026-09-07T12:15:00.000Z");
   });
 });
