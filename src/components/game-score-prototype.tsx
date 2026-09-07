@@ -138,7 +138,7 @@ function CriticReception({ appid }: { appid: number }) {
           <p className="font-mono text-3xl font-bold tabular-nums text-zinc-100">86<span className="text-xs font-normal text-zinc-500"> / 100</span></p>
         </div>
         <p className="mt-1 font-mono text-xs text-zinc-500">106 listed critic reviews</p>
-        <section className="mt-3 border-t border-zinc-800 pt-3 xl:flex xl:flex-1 xl:flex-col xl:justify-center" aria-labelledby="reception-alignment-title" aria-live="polite">
+        <section className="mt-3 border-t border-zinc-800 pt-3 xl:flex-1" aria-labelledby="reception-alignment-title" aria-live="polite">
           <h3 id="reception-alignment-title" className={"text-sm font-semibold " + (comparison === "unavailable" ? "text-zinc-400" : "text-violet-200")}>{selected.title}</h3>
           <dl className="mt-2 space-y-1 text-xs">
             <div className="flex justify-between gap-3"><dt className="text-zinc-500">Current players</dt><dd className="text-zinc-200">{selected.player}</dd></div>
