@@ -194,7 +194,7 @@
 .rp-a-row > summary {
   align-items: center;
   display: grid;
-  grid-template-columns: 3.3rem minmax(0, 1fr) 6rem;
+  grid-template-columns: 3.3rem minmax(0, 1fr) 6rem 2rem;
   gap: 0.8rem;
 }
 
@@ -231,19 +231,11 @@
   display: none;
 }
 
-.rp-a-row > summary::after {
-  color: var(--rp-dim);
-  content: "+";
-  font-size: 1.1rem;
-  grid-column: 4;
-  justify-self: end;
-  margin-right: -0.2rem;
-  position: absolute;
-}
-
-.rp-a-row[open] > summary::after {
-  content: "–";
-}
+.rp-disclosure { display: grid; place-items: center; width: 2rem; min-height: 2rem; color: var(--rp-violet); opacity: .7; }
+.rp-disclosure svg { transition: transform 140ms ease; }
+.rp-a-row[open] > summary .rp-disclosure svg { transform: rotate(180deg); }
+.rp-a-row > summary:hover .rp-disclosure { opacity: 1; }
+.rp-a-table-head > span:nth-child(3) { text-align: right; }
 
 .rp-a-row > summary {
   position: relative;
@@ -1036,7 +1028,7 @@
 @media (max-width: 900px) {
   .rp-a-table-head,
   .rp-a-row > summary {
-    grid-template-columns: 2.5rem minmax(0, 1fr) 5rem;
+    grid-template-columns: 2.5rem minmax(0, 1fr) 6rem 2rem;
   }
 
   .rp-evidence-grid {
@@ -1111,22 +1103,19 @@
 
   .rp-a-table-head,
   .rp-a-row > summary {
-    grid-template-columns: 1.2rem minmax(0, 1fr) 5rem;
+    grid-template-columns: 1.1rem minmax(0, 1fr) 5.25rem 1.5rem;
     min-width: 0;
     gap: 0.5rem;
     padding: 0.8rem 1rem 0.8rem 0.5rem;
   }
 
 
-  .rp-a-row > summary::after {
-    right: 0.15rem;
-  }
 
   .rp-a-row .rp-game-identity {
     display: block;
   }
 
-  .rp-a-row .rp-game-identity img {
+  .rp-a-row .rp-game-art-link {
     display: none;
   }
 
@@ -1390,7 +1379,9 @@
   display: grid;
   gap: 1rem;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  margin: 1.5rem 2.25rem 0;
+  width: calc(100% - 4.5rem);
+  max-width: 1136px;
+  margin: 1.5rem auto 0;
   align-items: start;
 }
 .rp-a-hero {
@@ -1408,22 +1399,29 @@
 .rp-a-hero-rank svg { width: 100%; height: 100%; display: block; }
 .rp-a-hero-rank text { font: 600 23px ui-monospace, monospace; }
 .rp-a-hero-1 .rp-a-hero-rank { width: 64px; height: 64px; }
-.rp-a-hero-content { min-width: 0; padding: 1.1rem; }
+.rp-a-hero-content { min-width: 0; padding: 1.1rem; display: grid; grid-template-columns: minmax(0, 1fr) auto; grid-template-rows: auto auto 1fr; column-gap: .8rem; }
+.rp-a-hero-content > h2 { grid-column: 1; grid-row: 1; }
+.rp-a-hero-content > .rp-release-date { grid-column: 1; grid-row: 2; align-self: start; }
+.rp-a-hero-content .rp-tags { grid-column: 1; grid-row: 3; align-self: start; margin-top: .45rem; }
+.rp-a-hero-content .rp-score { grid-column: 2; grid-row: 1 / span 3; align-self: end; }
 .rp-a-hero-content h2 { font-size: clamp(1.5rem, 2.8vw, 2.6rem); letter-spacing: -.045em; line-height: 1.1; margin: 0; }
-.rp-hero-summary { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: .75rem; margin-top: .65rem; }
+.rp-hero-summary { display: contents; }
 .rp-hero-summary .rp-tags { margin: 0; min-width: 0; }
 .rp-hero-summary .rp-tags span { white-space: normal; overflow-wrap: anywhere; }
 .rp-hero-summary .rp-score { width: auto; }
-.rp-score-slot .rp-review-count { font: 500 .7rem/1.35 ui-monospace, monospace; color: var(--rp-muted); padding-top: .25rem; cursor: help; }
+.rp-score-slot .rp-review-count { display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: baseline; gap: 0 .25rem; max-width: 100%; font: 500 .7rem/1.35 ui-monospace, monospace; color: var(--rp-muted); padding-top: .25rem; cursor: help; }
+.rp-review-count .rp-review-unit { font: inherit; font-size: .6rem; color: var(--rp-dim); }
 .rp-review-count:focus-visible { outline: 1px solid var(--rp-violet); outline-offset: 2px; }
 .rp-a-remaining { margin-top: 1rem; }
 /* Runner-up artwork is always subordinate to the winner, not another banner. */
+.rp-a-hero:not(.rp-a-hero-1) { width: 100%; max-width: 560px; }
+.rp-a-hero-2 { justify-self: end; }
+.rp-a-hero-3 { justify-self: start; }
 .rp-a-hero:not(.rp-a-hero-1) .rp-a-hero-body { grid-template-columns: 44% minmax(0, 1fr); }
- .rp-a-hero:not(.rp-a-hero-1) .rp-a-hero-art { background: #09090b; }
+.rp-a-hero:not(.rp-a-hero-1) .rp-a-hero-art { width: 100%; aspect-ratio: 460 / 215; align-self: center; background: #09090b; }
  .rp-a-hero:not(.rp-a-hero-1) .rp-a-hero-art img { object-fit: contain; }
 .rp-a-hero:not(.rp-a-hero-1) .rp-a-hero-content { padding: .65rem; }
 .rp-a-hero:not(.rp-a-hero-1) h2 { font-size: 1.15rem; }
-.rp-a-hero:not(.rp-a-hero-1) .rp-kicker { display: none; }
 .rp-a-hero:not(.rp-a-hero-1) .rp-tags { margin: 0; }
 .rp-a-hero:not(.rp-a-hero-1) .rp-score-slot strong { width: 56px; }
 .rp-a-hero:not(.rp-a-hero-1) .rp-score-slot strong { font-size: 1.15rem; }
@@ -1476,7 +1474,7 @@
 }
 
 @media (max-width: 680px) {
-  .rp-a-hero-grid { margin: 1rem; gap: .65rem; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .rp-a-hero-grid { width: calc(100% - 2rem); margin: 1rem auto; gap: .65rem; grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .rp-a-hero-grid .rp-a-hero { grid-row: auto; grid-column: auto; }
   .rp-a-hero-grid .rp-a-hero-1 { grid-column: 1 / -1; }
   .rp-a-hero-grid .rp-a-hero-1 .rp-a-hero-body { display: block; min-height: 0; }
@@ -1486,7 +1484,12 @@
   .rp-a-hero-grid .rp-a-hero:not(.rp-a-hero-1) .rp-a-hero-art { height: auto; aspect-ratio: 460 / 215; }
   .rp-a-hero-grid .rp-a-hero:not(.rp-a-hero-1) h2 { font-size: 1rem; min-height: 2.2rem; }
   .rp-a-hero-content { padding: .8rem; }
-  .rp-a-hero:not(.rp-a-hero-1) .rp-a-hero-content { padding: .6rem; }
+  .rp-a-hero:not(.rp-a-hero-1) { max-width: none; justify-self: stretch; }
+  .rp-a-hero:not(.rp-a-hero-1) .rp-a-hero-content { display: block; padding: .6rem; }
+  .rp-a-hero:not(.rp-a-hero-1) .rp-hero-summary { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: .5rem; margin-top: .5rem; }
+  .rp-a-hero:not(.rp-a-hero-1) .rp-hero-summary .rp-tags { grid-row: auto; grid-column: auto; margin: 0; }
+  .rp-a-hero:not(.rp-a-hero-1) .rp-score { grid-row: auto; grid-column: auto; }
+  .rp-disclosure { width: 1.5rem; }
   .rp-a-hero:not(.rp-a-hero-1) .rp-tags { min-height: 0; }
   .rp-a-hero-content .rp-tags span { font-size: .5rem; }
   .rp-score-slot span { font-size: .5rem; }
@@ -1496,7 +1499,7 @@
   .rp-score-slot { min-width: 0; }
 }
 
-.rp-podium-history { margin: 1rem 2.25rem; border: 1px solid var(--rp-border-bright); background: var(--rp-panel); }
+.rp-podium-history { width: calc(100% - 4.5rem); max-width: 1136px; margin: 1rem auto; border: 1px solid var(--rp-border-bright); background: var(--rp-panel); }
 .rp-podium-history > summary { padding: .9rem 1rem; cursor: pointer; color: var(--rp-violet-strong); font-size: .8rem; }
 .rp-history-tabs { display: flex; border-block: 1px solid var(--rp-border); overflow-x: auto; }
 .rp-history-tabs button { min-height: 44px; padding: .7rem 1rem; border: 0; border-bottom: 2px solid transparent; background: none; color: var(--rp-muted); flex: 1; white-space: nowrap; font-size: .75rem; }
@@ -1513,7 +1516,7 @@
 .rp-recharts-container .recharts-tooltip-wrapper { z-index: 5; max-width: calc(100% - 48px); }
 .rp-reception-preview .rp-chart-labels { justify-content: space-between; }
 @media (max-width: 680px) {
-  .rp-podium-history { margin: 1rem; }
+  .rp-podium-history { width: calc(100% - 2rem); margin: 1rem auto; }
   .rp-preview-heading { align-items: flex-start; }
   .rp-reception-preview { padding: .8rem; }
   .rp-recharts-container { height: 240px; }
@@ -1522,3 +1525,10 @@
   .rp-a-hero-rank { width: 38px; height: 38px; bottom: .35rem; left: .35rem; }
   .rp-a-hero-1 .rp-a-hero-rank { width: 52px; height: 52px; }
 }
+
+.rp-hero-art-link { position: absolute; inset: 0; display: block; }
+.rp-a-hero-rank { pointer-events: none; }
+.rp-game-art-link { display: block; flex: 0 0 auto; line-height: 0; }
+.rp-game-title-link { color: inherit; text-decoration: none; }
+.rp-game-title-link:hover { color: var(--rp-violet-strong); text-decoration: underline; text-underline-offset: 3px; }
+.rankings-prototype a:focus-visible { outline: 2px solid var(--rp-violet); outline-offset: 3px; }

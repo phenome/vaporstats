@@ -5,6 +5,7 @@ import { getCanonicalGamePath } from "../lib/slug";
 import cyberpunkHistory from "./cyberpunk-history.prototype.json";
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, ReferenceLine } from "recharts";
 import { ChartContainer, ChartTooltip, ChartTooltipContent } from "./ui/chart";
+import { CaretDown } from "@phosphor-icons/react";
 
 /** Selected compact podium prototype; ranking fixtures are not live scores. */
 
@@ -557,7 +558,7 @@ function ScoreCell({ game, mode, prominent = false }: { game: RankedFixture; mod
       <div className="rp-score-slot is-active">
         <strong title={`${metric}: ${formatScore(game.metric)}`} aria-label={`${metric}: ${formatScore(game.metric)}`}>{formatScore(game.metric)}</strong>
         <span className="rp-review-count" tabIndex={0} title={reviewContext} aria-describedby={`review-context-${game.appid}`}>
-          {formatNumber(game.qualifyingCount)}
+          {formatNumber(game.qualifyingCount)} <span className="rp-review-unit" aria-hidden="true">reviews</span>
           <span id={`review-context-${game.appid}`} className="sr-only">{mode === "now" ? "qualifying Steam reviews in the last 90 days" : "qualifying lifetime Steam reviews"}</span>
         </span>
       </div>
@@ -705,9 +706,9 @@ function GameIdentity({ game, rank }: { game: Fixture; rank?: number }) {
   return (
     <div className="rp-game-identity">
       {rank !== undefined && <span className="rp-rank">{rank}</span>}
-      <img src={game.art} alt="" loading="lazy" />
+      <AppLink href={getCanonicalGamePath(game.appid, game.title)} className="rp-game-art-link" aria-label={`${game.title} game details`}><img src={game.art} alt="" loading="lazy" /></AppLink>
       <div>
-        <strong>{game.title}</strong>
+        <strong><AppLink href={getCanonicalGamePath(game.appid, game.title)} className="rp-game-title-link">{game.title}</AppLink></strong>
         {releaseDate && <span className="rp-release-date">{releaseDate}</span>}
         <Tags game={game} />
       </div>
@@ -794,7 +795,7 @@ function CompactRankings({ view, controls }: { view: View; controls: ReactNode }
               <article className={`rp-a-hero rp-a-hero-${index + 1}`} key={game.appid}>
                 <div className="rp-a-hero-body">
                   <div className="rp-a-hero-art">
-                    <img src={game.art} alt="" loading="lazy" />
+                    <AppLink href={getCanonicalGamePath(game.appid, game.title)} className="rp-hero-art-link" aria-label={`${game.title} game details`}><img src={game.art} alt="" loading="lazy" /></AppLink>
                     <span className="rp-a-hero-rank" role="img" aria-label={`Rank ${index + 1}`}>
                       <svg viewBox="0 0 64 64" aria-hidden="true">
                         <circle cx="32" cy="32" r="29" fill="#171125" />
@@ -805,8 +806,7 @@ function CompactRankings({ view, controls }: { view: View; controls: ReactNode }
                     </span>
                   </div>
                   <div className="rp-a-hero-content">
-                    <p className="rp-kicker">#{index + 1} IN THIS VIEW</p>
-                    <h2>{game.title}</h2>
+                    <h2><AppLink href={getCanonicalGamePath(game.appid, game.title)} className="rp-game-title-link">{game.title}</AppLink></h2>
                     {formatReleaseDate(game.releaseDate) && <span className="rp-release-date">{formatReleaseDate(game.releaseDate)}</span>}
                     <div className="rp-hero-summary">
                       <Tags game={game} />
@@ -820,13 +820,14 @@ function CompactRankings({ view, controls }: { view: View; controls: ReactNode }
           <PodiumHistory games={topThree} mode={view.mode} />
           {remaining.length > 0 && (
             <section className="rp-a-table rp-a-remaining" aria-label="Remaining ranked games">
-              <div className="rp-a-table-head"><span>Rank</span><span>Game</span><span>Score</span></div>
+              <div className="rp-a-table-head"><span>Rank</span><span>Game</span><span>Score</span><span className="sr-only">History</span></div>
               {remaining.map((game, index) => (
                 <details className="rp-a-row" key={game.appid}>
                   <summary>
                     <span className="rp-a-rank">{index + 4}</span>
                     <GameIdentity game={game} />
                     <ScoreCell game={game} mode={view.mode} />
+                    <span className="rp-disclosure"><CaretDown size={16} weight="bold" aria-hidden="true" /><span className="sr-only">Show or hide reception history</span></span>
                   </summary>
                   <EvidenceDetails game={game} mode={view.mode} />
                 </details>
