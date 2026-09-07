@@ -133,26 +133,26 @@ function CriticReception({ appid }: { appid: number }) {
     <aside id="critic-reception" className="min-w-0 self-start border border-zinc-800 bg-zinc-950 p-5" aria-labelledby="critic-reception-title">
       <h2 id="critic-reception-title" className="border-b border-zinc-900 pb-3 font-mono text-xs font-semibold uppercase tracking-wider text-zinc-200">Critic reception</h2>
       {appid === CYBERPUNK_APPID ? <>
-        <div className="mt-5 flex items-center justify-between gap-4">
+        <div className="mt-3 flex items-center justify-between gap-4">
           <div><a href="https://www.metacritic.com/game/cyberpunk-2077/critic-reviews/?platform=pc" target="_blank" rel="noreferrer" className="text-sm text-zinc-200 hover:underline">Metacritic ↗</a><p className="mt-1 font-mono text-[10px] uppercase text-zinc-500">PC · Metascore</p></div>
           <p className="font-mono text-3xl font-bold tabular-nums text-zinc-100">86<span className="text-xs font-normal text-zinc-500"> / 100</span></p>
         </div>
-        <p className="mt-4 text-sm text-zinc-300">Generally favorable</p>
         <p className="mt-1 font-mono text-xs text-zinc-500">106 listed critic reviews</p>
-        <section className="mt-5 border-y border-zinc-800 py-4" aria-labelledby="reception-alignment-title" aria-live="polite">
-          <h3 id="reception-alignment-title" className="font-mono text-[10px] uppercase tracking-wider text-zinc-500">Reception alignment</h3>
-          <p className={"mt-2 text-base font-semibold " + (comparison === "unavailable" ? "text-zinc-400" : "text-violet-200")}>{selected.title}</p>
-          <dl className="mt-3 space-y-2 text-xs">
+        <section className="mt-3 border-t border-zinc-800 pt-3" aria-labelledby="reception-alignment-title" aria-live="polite">
+          <h3 id="reception-alignment-title" className={"text-sm font-semibold " + (comparison === "unavailable" ? "text-zinc-400" : "text-violet-200")}>{selected.title}</h3>
+          <dl className="mt-2 space-y-1 text-xs">
             <div className="flex justify-between gap-3"><dt className="text-zinc-500">Current players</dt><dd className="text-zinc-200">{selected.player}</dd></div>
             <div className="flex justify-between gap-3"><dt className="text-zinc-500">Metacritic record</dt><dd className="text-zinc-200">{selected.critic}</dd></div>
           </dl>
-          <p className="mt-3 text-xs leading-relaxed text-zinc-400">{selected.note}</p>
-          <details className="mt-3 text-xs text-zinc-500"><summary className="cursor-pointer text-zinc-400">At review time</summary><p className="mt-2 leading-relaxed">A comparison is unavailable without the critic review dates and a player snapshot from that period.</p></details>
         </section>
-        <dl className="mt-5 space-y-3 border-t border-zinc-900 pt-4 text-xs">
-          <div><dt className="text-zinc-500">Review period</dt><dd className="mt-1 text-zinc-300">Dates unavailable</dd></div>
-          <div><dt className="text-zinc-500">Last checked</dt><dd className="mt-1 text-zinc-300">September 7, 2026</dd></div>
-        </dl>
+        <details className="mt-3 border-t border-zinc-900 pt-2 text-xs text-zinc-400">
+          <summary className="cursor-pointer py-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400">Comparison details</summary>
+          <div className="mt-2 space-y-2 leading-relaxed">
+            <p>{selected.note}</p>
+            <p>Review-time comparison unavailable: critic review dates and a matching player snapshot are missing.</p>
+            <p className="text-zinc-500">Metacritic checked September 7, 2026.</p>
+          </div>
+        </details>
         <nav aria-label="Comparison prototype scenarios" className="fixed bottom-4 left-1/2 z-50 flex max-w-[calc(100vw-2rem)] -translate-x-1/2 items-center gap-2 rounded border border-zinc-600 bg-zinc-100 px-3 py-2 text-xs text-zinc-950 shadow-xl">
           <label htmlFor="comparison-scenario" className="shrink-0 font-mono">Sample comparison</label>
           <select id="comparison-scenario" value={comparison} onChange={event => setComparison(event.target.value)} className="min-w-0 rounded border border-zinc-400 bg-white p-2 text-zinc-950">
