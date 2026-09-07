@@ -14,7 +14,7 @@ import { PriceHistoryChart } from "./price-history";
 import { RelatedApps } from "./related-apps";
 import { AppLink } from "./app-link";
 import { LifecycleHistorySection } from "./lifecycle-history";
-import { GameScorePrototype } from "./game-score-prototype";
+import { ScoreHero, ScoreHistory, scorePrototypeEnabled } from "./game-score-prototype";
 
 // The sentinel, the hero flow wrapper, and the first section below it are
 // siblings spaced by the container's space-y-6 rhythm, so the sentinel sits
@@ -315,6 +315,20 @@ export function GamePageView({
     willChange: "transform",
     ["--hero-morph-progress"]: progress,
   } as React.CSSProperties & Record<string, string | number | undefined>;
+  const activityCards = (
+    <div id="activity" className="grid min-w-0 scroll-mt-28 grid-cols-2 gap-3 sm:gap-4">
+      <PlayerPanel
+        key={game.appid}
+        appid={game.appid}
+        initialData={{
+          appid: game.appid,
+          latest_players: game.latest_players,
+          observed_at: game.last_observed_at,
+          current_price: price ?? null,
+        }}
+      />
+    </div>
+  );
 
   return (
     <div className="game-page-container max-w-7xl mx-auto px-4 py-8 space-y-6">
@@ -528,20 +542,13 @@ export function GamePageView({
           </a>
         )}
       </nav>
-      <GameScorePrototype />
-
-      <div id="activity" className="grid scroll-mt-28 grid-cols-2 gap-3 sm:gap-4 max-w-3xl">
-        <PlayerPanel
-          key={game.appid}
-          appid={game.appid}
-          initialData={{
-            appid: game.appid,
-            latest_players: game.latest_players,
-            observed_at: game.last_observed_at,
-            current_price: price ?? null,
-          }}
-        />
-      </div>
+      {scorePrototypeEnabled ? (
+        <div className="grid min-w-0 gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,2fr)]">
+          <ScoreHero />
+          {activityCards}
+        </div>
+      ) : activityCards}
+      <ScoreHistory />
 
       <section id="player-history" className="scroll-mt-28">
         <PlayerHistoryChart
