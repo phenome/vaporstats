@@ -1,4 +1,6 @@
 import { useEffect, useState } from "react";
+import { LineChart, Line, XAxis, YAxis, CartesianGrid, ReferenceLine, ReferenceArea } from "recharts";
+import { ChartContainer, ChartTooltip, ChartTooltipContent } from "./ui/chart";
 
 // Three game-page score/history variants, switchable via ?variant=A|B|C.
 type Variant = "A" | "B" | "C";
@@ -38,32 +40,30 @@ function ScoreDetails({ compact = false }: { compact?: boolean }) {
 }
 
 function ScorePlot({ compact = false }: { compact?: boolean }) {
-  const path = observations.map((point, index) => `${index ? "L" : "M"}${point.x},${point.y}`).join(" ");
+  const [hoveredValue, setHoveredValue] = useState<number | null>(null);
+  const samples = observations.map(point => ({ ...point, timestamp: Date.parse(point.date.replace(" ", "T").replace(" UTC", ":00Z")) }));
+  const formatDate = (value: number) => new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", year: "numeric" }).format(value);
   return (
     <figure className="min-w-0" aria-labelledby={compact ? "compact-score-chart" : "score-chart-title"}>
-      {!compact && <figcaption id="score-chart-title" className="mb-3 font-mono text-xs uppercase tracking-wider text-zinc-400">Player score history · Steam only</figcaption>}
-      <div className="overflow-x-auto" role="region" aria-label="Scrollable score history">
-        <svg viewBox="0 0 100 100" className={compact ? "h-28 min-w-[340px] w-full" : "h-64 min-w-[620px] w-full"} role="img" aria-labelledby={compact ? "compact-score-chart" : "score-chart-title"}>
-          {compact && <title id="compact-score-chart">Current Player Score history</title>}
-          <defs>
-            <pattern id="score-reconstruction" width="4" height="4" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><line x1="0" y1="0" x2="0" y2="4" stroke="#a78bfa" strokeOpacity=".4" /></pattern>
-          </defs>
-          {[25, 50, 75].map((y) => <line key={y} x1="5" y1={y} x2="96" y2={y} stroke="#3f3f46" strokeDasharray="1 3" vectorEffect="non-scaling-stroke" />)}
-          <rect x="24" y="18" width="14" height="65" fill="url(#score-reconstruction)" opacity=".75"><title>Reconstructed interval: no direct score observation was recorded from 19 January through 21 March.</title></rect>
-          <line x1="39" y1="12" x2="39" y2="86" stroke="#a1a1aa" strokeDasharray="3 2" vectorEffect="non-scaling-stroke"><title>Verified milestone: Major Update, 22 March 2026. Temporal marker only; no causal claim.</title></line>
-          <text x="40" y="10" fill="#d4d4d8" fontSize="4">PATCH</text>
-          <line x1="55" y1="12" x2="55" y2="86" stroke="#8b5cf6" strokeDasharray="1 2" vectorEffect="non-scaling-stroke"><title>Evidence boundary: current-review window begins.</title></line>
-          <text x="56" y="17" fill="#c4b5fd" fontSize="4">BOUNDARY</text>
-          <path d={path} fill="none" stroke="#8b5cf6" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" vectorEffect="non-scaling-stroke" />
-          {observations.map((point) => (
-            <circle key={point.date} cx={point.x} cy={point.y} r="2.2" fill="#18181b" stroke="#c4b5fd" strokeWidth="1.5" tabIndex={0} className="outline-none focus:stroke-white" vectorEffect="non-scaling-stroke">
-              <title>{`Observed score: ${point.score}% positive, ${point.reviews} qualifying Steam reviews, ${point.date}`}</title>
-            </circle>
-          ))}
-          <text x="5" y="96" fill="#71717a" fontSize="4">NOV 2025</text>
-          <text x="78" y="96" fill="#71717a" fontSize="4">SEP 2026</text>
-        </svg>
-      </div>
+      <figcaption id={compact ? "compact-score-chart" : "score-chart-title"} className={compact ? "sr-only" : "mb-3 font-mono text-xs uppercase tracking-wider text-zinc-400"}>Player score history · Steam only</figcaption>
+      <ChartContainer config={{ score: { label: "Current Player Score", color: "#a78bfa" } }} className={compact ? "h-[180px] w-full aspect-auto" : "h-[260px] w-full aspect-auto"}>
+        <LineChart data={samples} accessibilityLayer margin={{ top: 24, right: 18, left: 0, bottom: 0 }}
+          onMouseMove={state => setHoveredValue(typeof state?.activePayload?.[0]?.value === "number" ? state.activePayload[0].value : null)}
+          onMouseLeave={() => setHoveredValue(null)}>
+          <CartesianGrid strokeDasharray="3 3" stroke="#27272a" vertical={false} />
+          <XAxis dataKey="timestamp" type="number" domain={[samples[0].timestamp, samples[samples.length - 1].timestamp]} allowDataOverflow tickLine={false} axisLine={false} stroke="#71717a" fontSize={10} minTickGap={40} tickFormatter={formatDate} />
+          <YAxis domain={[0, 100]} ticks={[0, 50, 100]} width={34} tickLine={false} axisLine={false} stroke="#71717a" fontSize={10} />
+          <ReferenceArea x1={samples[1].timestamp} x2={samples[2].timestamp} fill="#a78bfa" fillOpacity={0.08} stroke="#a78bfa" strokeDasharray="3 3" />
+          <ReferenceLine x={samples[2].timestamp} stroke="#a1a1aa" strokeDasharray="3 3" label={{ value: "PATCH", position: "insideTopRight", fill: "#d4d4d8", fontSize: 10 }} />
+          <ReferenceLine x={samples[3].timestamp} stroke="#a78bfa" strokeDasharray="1 3" label={{ value: "BOUNDARY", position: "insideTopRight", fill: "#c4b5fd", fontSize: 10 }} />
+          {hoveredValue !== null && <ReferenceLine y={hoveredValue} stroke="#a78bfa" strokeDasharray="3 3" />}
+          <ChartTooltip isAnimationActive={false} cursor={{ stroke: "#71717a", strokeDasharray: "3 3" }} content={<ChartTooltipContent
+            className="!bg-zinc-950 !opacity-100 border-zinc-700 shadow-2xl text-zinc-100"
+            labelFormatter={(_, payload) => payload?.[0]?.payload?.date ?? ""}
+            formatter={(value, _, item) => <span><strong className="text-violet-300">{new Intl.NumberFormat(undefined, { maximumFractionDigits: 1 }).format(Number(value))}</strong> · {item.payload.reviews} qualifying Steam reviews</span>} />} />
+          <Line dataKey="score" type="monotone" stroke="var(--color-score)" strokeWidth={1.8} dot={false} activeDot={{ r: 3 }} isAnimationActive={false} connectNulls={false} />
+        </LineChart>
+      </ChartContainer>
       <div className="mt-2 flex flex-wrap gap-x-5 gap-y-2 font-mono text-[10px] uppercase text-zinc-400" aria-label="Score history legend">
         <span><i className="mr-2 inline-block w-5 border-t-2 border-violet-500" />Observed score</span>
         <span><i className="mr-2 inline-block h-2 w-5 border border-dashed border-violet-400/70 bg-violet-500/10" />Reconstructed interval</span>
