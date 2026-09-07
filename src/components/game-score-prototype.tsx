@@ -142,7 +142,7 @@ function CriticReception({ appid }: { appid: number }) {
       {appid === CYBERPUNK_APPID ? <>
         <div className="mt-3 flex items-center justify-between gap-4">
           <div><a href="https://www.metacritic.com/game/cyberpunk-2077/critic-reviews/?platform=pc" target="_blank" rel="noreferrer" className="text-sm text-zinc-200 hover:underline">Metacritic ↗</a><p className="mt-1 font-mono text-[10px] uppercase text-zinc-500">PC · Metascore</p></div>
-          <p className="font-mono text-3xl font-bold tabular-nums text-zinc-100">86<span className="text-xs font-normal text-zinc-500"> / 100</span></p>
+          <p className="font-mono text-3xl font-bold tabular-nums text-zinc-100">86</p>
         </div>
         <p className="mt-1 font-mono text-xs text-zinc-500">106 listed critic reviews</p>
         <section className="mt-3 border-t border-zinc-800 pt-3 xl:flex-1" aria-labelledby="reception-alignment-title" aria-live="polite">
