@@ -103,38 +103,39 @@ export function ScoreHero() {
   );
 }
 
-function ScoreMetrics({ range, points, allPoints }: {
-  range: ScoreRange;
-  points: readonly ScoreObservation[];
-  allPoints: readonly ScoreObservation[];
-}) {
-  const values = points.map(point => point.score);
-  const minimum = values.length ? Math.min(...values) : null;
-  const maximum = values.length ? Math.max(...values) : null;
-  const average = values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : null;
-  const allTimePeak = allPoints.length ? Math.max(...allPoints.map(point => point.score)) : null;
-  const latest = points.length ? points[points.length - 1].score : null;
-  const metric = (value: number | null) => value === null ? "—" : formatNumber(value);
-  const periodName = range.toUpperCase();
+function ScoreMetrics({ points, monthly }: { points: readonly ScoreObservation[]; monthly: boolean }) {
+  const latest = points.at(-1)?.score;
   return (
-    <div className="grid grid-cols-2 gap-2 pt-1 text-xs font-mono sm:grid-cols-4">
+    <div className="grid grid-cols-2 gap-2 pt-1 text-xs font-mono">
       <div className="border border-zinc-900 bg-zinc-900/40 p-2">
-        <span className="block text-[10px] uppercase text-zinc-500">Latest</span>
-        <span className="font-bold tabular-nums text-zinc-100">{metric(latest)}</span>
+        <span className="block text-[10px] uppercase text-zinc-500">{monthly ? "Latest approval" : "Latest score"}</span>
+        <span className="font-bold tabular-nums text-violet-300">{latest === undefined ? "—" : formatNumber(latest) + (monthly ? "%" : "")}</span>
       </div>
       <div className="border border-zinc-900 bg-zinc-900/40 p-2">
-        <span className="block text-[10px] uppercase text-zinc-500">{range === "all" ? "All-Time Low" : periodName + " Low"}</span>
-        <span className="tabular-nums text-zinc-300">{metric(minimum)}</span>
-      </div>
-      <div className="border border-zinc-900 bg-zinc-900/40 p-2">
-        <span className="block text-[10px] uppercase text-zinc-500">{range === "all" ? "All-Time Avg" : periodName + " Peak"}</span>
-        <span className="font-bold tabular-nums text-violet-300">{metric(range === "all" ? average : maximum)}</span>
-      </div>
-      <div className="border border-zinc-900 bg-zinc-900/40 p-2">
-        <span className="block text-[10px] uppercase text-zinc-500">All-Time Peak</span>
-        <span className="font-bold tabular-nums text-violet-300">{metric(allTimePeak)}</span>
+        <span className="block text-[10px] uppercase text-zinc-500">{monthly ? "Reviews in period" : "Reviews at latest observation"}</span>
+        <span className="tabular-nums text-zinc-300" title={monthly ? "Reviews in the displayed monthly buckets; the latest month is incomplete." : undefined}>{formatNumber(monthly ? points.reduce((total, point) => total + point.reviews, 0) : points.at(-1)?.reviews ?? 0)}</span>
       </div>
     </div>
+  );
+}
+
+function CriticReception({ appid }: { appid: number }) {
+  return (
+    <aside id="critic-reception" className="min-w-0 self-start border border-zinc-800 bg-zinc-950 p-5" aria-labelledby="critic-reception-title">
+      <h2 id="critic-reception-title" className="border-b border-zinc-900 pb-3 font-mono text-xs font-semibold uppercase tracking-wider text-zinc-200">Critic reception</h2>
+      {appid === CYBERPUNK_APPID ? <>
+        <div className="mt-5 flex items-center justify-between gap-4">
+          <div><a href="https://www.metacritic.com/game/cyberpunk-2077/critic-reviews/?platform=pc" target="_blank" rel="noreferrer" className="text-sm text-zinc-200 hover:underline">Metacritic ↗</a><p className="mt-1 font-mono text-[10px] uppercase text-zinc-500">PC · Metascore</p></div>
+          <p className="font-mono text-3xl font-bold tabular-nums text-zinc-100">86<span className="text-xs font-normal text-zinc-500"> / 100</span></p>
+        </div>
+        <p className="mt-4 text-sm text-zinc-300">Generally favorable</p>
+        <p className="mt-1 font-mono text-xs text-zinc-500">106 listed critic reviews</p>
+        <dl className="mt-5 space-y-3 border-t border-zinc-900 pt-4 text-xs">
+          <div><dt className="text-zinc-500">Review period</dt><dd className="mt-1 text-zinc-300">Dates unavailable</dd></div>
+          <div><dt className="text-zinc-500">Last checked</dt><dd className="mt-1 text-zinc-300">September 7, 2026</dd></div>
+        </dl>
+      </> : <p className="mt-5 text-sm text-zinc-500">No critic coverage yet.</p>}
+    </aside>
   );
 }
 
@@ -312,7 +313,8 @@ export function ScoreHistory({ appid }: { appid: number }) {
   );
   if (!scorePrototypeEnabled) return null;
   return (
-    <section id="score-history" className="scroll-mt-28 border border-zinc-800 bg-zinc-950 p-5" aria-labelledby="score-history-title">
+    <div className="grid items-start gap-4 xl:grid-cols-[minmax(0,1fr)_17rem]">
+    <section id="score-history" className="min-w-0 scroll-mt-28 border border-zinc-800 bg-zinc-950 p-5" aria-labelledby="score-history-title">
       <header className="flex flex-col justify-between gap-3 border-b border-zinc-900 pb-3 sm:flex-row sm:items-center">
         <div className="flex items-center gap-2">
           <span className="inline-block h-2 w-2 bg-violet-500" aria-hidden="true" />
@@ -338,7 +340,7 @@ export function ScoreHistory({ appid }: { appid: number }) {
           })}
         </div>
       </header>
-      <ScoreMetrics range={range} points={points} allPoints={history.points} />
+      <ScoreMetrics points={points} monthly={appid === CYBERPUNK_APPID} />
       <div className="mt-4 overflow-hidden" data-testid="score-history-chart">
         <ScoreChart points={points} domain={domain} metricLabel={history.metricLabel} events={history.events} appid={appid} />
       </div>
@@ -355,5 +357,7 @@ export function ScoreHistory({ appid }: { appid: number }) {
         </div>
       </details>
     </section>
+      <CriticReception appid={appid} />
+    </div>
   );
 }
