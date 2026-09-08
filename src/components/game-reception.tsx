@@ -140,22 +140,24 @@ function MilestoneLabel({
   viewBox,
   milestone,
   active,
+  alignLeft,
   onActivate,
   onDeactivate,
 }: {
   viewBox?: { x?: number; y?: number };
   milestone: ScoreMilestone;
   active: boolean;
+  alignLeft: boolean;
   onActivate: () => void;
   onDeactivate: () => void;
 }) {
-  const x = (viewBox?.x ?? 0) + 3;
+  const x = (viewBox?.x ?? 0) + (alignLeft ? -65 : 3);
   const y = (viewBox?.y ?? 0) + 3;
   return (
     <foreignObject x={x} y={y} width={62} height={25}>
       <button
         type="button"
-        className="score-event-label block h-6 max-w-[62px] truncate border border-violet-400/50 bg-zinc-950 px-1 text-left font-mono text-[10px] font-semibold text-violet-200 hover:bg-violet-500/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400"
+        className={`score-event-label block h-6 max-w-[62px] truncate border border-violet-400/50 bg-zinc-950 px-1 text-left font-mono text-[10px] font-semibold text-violet-200 hover:bg-violet-500/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400 ${alignLeft ? "ml-auto" : ""}`}
         aria-label={`${milestone.display_label} · ${formatDateOnly(milestone.event_time)}`}
         aria-describedby={active ? `score-milestone-${milestone.event_id}` : undefined}
         onMouseEnter={onActivate}
@@ -182,6 +184,7 @@ function ScoreChart({ history, appid, isUpdating }: { history: GameScoreHistory 
   const points = useMemo(() => historyPoints(history), [history]);
   const milestones = useMemo(() => historyMilestones(history), [history]);
   const domain = useMemo(() => historyDomain(history, points), [history, points]);
+  const domainMidpoint = (domain[0] + domain[1]) / 2;
   const visibleMilestones = milestones.filter((milestone) => {
     const timestamp = Date.parse(milestone.event_time);
     return timestamp >= domain[0] && timestamp <= domain[1];
@@ -215,20 +218,23 @@ function ScoreChart({ history, appid, isUpdating }: { history: GameScoreHistory 
           <CartesianGrid strokeDasharray="3 3" stroke="#27272a" vertical={false} />
           <XAxis dataKey="timestamp" type="number" domain={domain} allowDataOverflow tickLine={false} axisLine={false} stroke="#71717a" fontSize={10} minTickGap={40} tickFormatter={(value) => formatDateOnly(new Date(Number(value)).toISOString())} />
           <YAxis domain={[0, 100]} ticks={[0, 50, 100]} width={34} tickLine={false} axisLine={false} stroke="#71717a" fontSize={10} />
-          {visibleMilestones.map((milestone) => (
-            <ReferenceLine
-              key={milestone.event_id}
-              x={Date.parse(milestone.event_time)}
-              stroke={SCORE_COLOR}
-              strokeDasharray="3 3"
-              onMouseEnter={() => setActiveMilestone(milestone.event_id)}
-              onClick={() => setActiveMilestone(milestone.event_id)}
-              onMouseLeave={() => {
-                if (!document.activeElement?.classList.contains("score-event-label")) setActiveMilestone(null);
-              }}
-              label={<MilestoneLabel milestone={milestone} active={activeMilestone === milestone.event_id} onActivate={() => setActiveMilestone(milestone.event_id)} onDeactivate={() => setActiveMilestone(null)} />}
-            />
-          ))}
+          {visibleMilestones.map((milestone) => {
+            const timestamp = Date.parse(milestone.event_time);
+            return (
+              <ReferenceLine
+                key={milestone.event_id}
+                x={timestamp}
+                stroke={SCORE_COLOR}
+                strokeDasharray="3 3"
+                onMouseEnter={() => setActiveMilestone(milestone.event_id)}
+                onClick={() => setActiveMilestone(milestone.event_id)}
+                onMouseLeave={() => {
+                  if (!document.activeElement?.classList.contains("score-event-label")) setActiveMilestone(null);
+                }}
+                label={<MilestoneLabel milestone={milestone} alignLeft={timestamp >= domainMidpoint} active={activeMilestone === milestone.event_id} onActivate={() => setActiveMilestone(milestone.event_id)} onDeactivate={() => setActiveMilestone(null)} />}
+              />
+            );
+          })}
           {hoveredValue !== null && active === null && <ReferenceLine y={hoveredValue} stroke={SCORE_COLOR} strokeDasharray="3 3" />}
           <ChartTooltip
             content={
@@ -238,10 +244,12 @@ function ScoreChart({ history, appid, isUpdating }: { history: GameScoreHistory 
                   const timestamp = payload?.[0]?.payload?.timestamp;
                   return typeof timestamp === "number" ? formatLocalDateTime(new Date(timestamp)) : "";
                 }}
-                formatter={(value, _name, item) => [
-                  formatNumber(Number(value), { maximumFractionDigits: 1 }) + "%",
-                  formatNumber(item?.payload?.reviews) + " reviews",
-                ]}
+                formatter={(value, _name, item) => (
+                  <div className="flex w-full items-center justify-between gap-3">
+                    <span className="font-mono font-medium text-violet-200">{formatNumber(Number(value), { maximumFractionDigits: 1 })}</span>
+                    <span className="text-zinc-400">{formatNumber(item?.payload?.reviews)} reviews</span>
+                  </div>
+                )}
               />
             }
           />
