@@ -534,7 +534,7 @@ function alignmentValueLabel(value: ScoreCriticAlignment["alignment"]): string {
 
 function alignmentReasonLabel(reason: string): string {
   switch (reason) {
-    case "permission_missing": return "authorized critic evidence is unavailable";
+    case "permission_missing": return "critic evidence is unavailable";
     case "identity_unverified": return "critic identity is not verified";
     case "appid_mismatch": return "critic identity does not match this game";
     case "platform_not_pc": return "critic coverage is not verified for PC";

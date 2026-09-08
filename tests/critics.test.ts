@@ -38,7 +38,7 @@ function makeRecord(overrides: Partial<CriticRecord> = {}): CriticRecord {
     reviewPeriodStart: "2024-01-01",
     reviewPeriodEnd: "2024-01-31",
     observedAt: "2026-09-01T00:00:00Z",
-    collectionBasis: "authorized_api",
+    collectionBasis: "public_page",
     matchedIdentity: {
       steamAppId: 10,
       platformScope: "pc",
@@ -123,17 +123,16 @@ describe("source-native critic categories", () => {
 });
 
 describe("critic identity and evidence gates", () => {
-  test("accepts authorized critic evidence when exact PC edition identity is verified", () => {
+  test("accepts public-page critic evidence when exact PC edition identity is verified", () => {
     const record = normalizeCriticRecord(makeRecord());
     expect(record).not.toBeNull();
     expect(record && evaluateCriticAlignment(record, makeContext()).state).toBe("classified");
   });
 
-  test("does not classify otherwise valid public-page critic evidence", () => {
-    const record = makeRecord({ collectionBasis: "public_page" });
+  test("does not classify critic evidence when collection basis is unavailable", () => {
+    const record = makeRecord({ collectionBasis: "unavailable" });
     const outcome = evaluateCriticAlignment(record, makeContext());
 
-    expect(classifyCriticRecord(record)).toBeNull();
     expect(outcome.state).toBe("unavailable");
     expect(outcome.alignment).toBeNull();
     expect(outcome.currentContrast.state).toBe("unavailable");
@@ -144,7 +143,7 @@ describe("critic identity and evidence gates", () => {
     expect(outcome.currentContrast.reasons).not.toContain("critic_metric_missing");
   });
 
-  test("reports missing metrics when authorized calibration cannot classify", () => {
+  test("reports missing metrics when calibration cannot classify", () => {
     const outcome = evaluateCriticAlignment(makeRecord({ score: null }), makeContext());
     expect(outcome.state).toBe("unavailable");
     expect(outcome.currentContrast.state).toBe("unavailable");

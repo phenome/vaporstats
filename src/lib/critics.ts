@@ -297,7 +297,7 @@ export function validateCriticRecord(input: unknown, expectedSteamAppId?: number
   if (!record.sourceId) pushReason(reasons, "source_id_missing");
   if (!record.sourceUrl) pushReason(reasons, "source_url_missing");
   if (!record.title) pushReason(reasons, "title_missing");
-  if (record.collectionBasis !== "authorized_api") pushReason(reasons, "permission_missing");
+  if (record.collectionBasis === "unavailable") pushReason(reasons, "permission_missing");
   if (!record.identityVerified) pushReason(reasons, "identity_unverified");
   if (expectedSteamAppId !== undefined && record.steamAppId !== expectedSteamAppId) pushReason(reasons, "appid_mismatch");
   if (!record.matchedIdentity) {
@@ -378,7 +378,6 @@ export function classifyPlayerScore(score: number | null | undefined): Reception
 
 /** Source-native category mapping; no scores are subtracted or blended. */
 export function classifyCriticRecord(record: CriticRecord): ReceptionDirection | null {
-  if (record.collectionBasis !== "authorized_api") return null;
   if (record.source === "metacritic") {
     if (typeof record.score !== "number" || !Number.isFinite(record.score) || record.score < 0 || record.score > 100) return null;
     if (record.score < 50) return "unfavorable";
@@ -424,7 +423,7 @@ function currentContrast(
   const criticDirection = classifyCriticRecord(record);
   const playerDirection = classifyPlayerScore(currentPlayer?.score);
   if (!hasAtLeastReviews(record.reviewCount, MIN_CRITIC_REVIEW_COUNT)) pushReason(reasons, "critic_reviews_insufficient");
-  if (record.collectionBasis === "authorized_api" && criticDirection === null) pushReason(reasons, "critic_metric_missing");
+  if (criticDirection === null) pushReason(reasons, "critic_metric_missing");
   if (!playerSignalValid(currentPlayer)) pushReason(reasons, "player_reviews_insufficient");
   if (playerDirection === null) pushReason(reasons, "player_score_missing");
   if (freshness.state === "unknown") {
@@ -496,7 +495,7 @@ export function evaluateCriticAlignment(
   const playerDirection = classifyPlayerScore(reviewSnapshot?.score);
 
   if (!hasAtLeastReviews(canonicalRecord.reviewCount, MIN_CRITIC_REVIEW_COUNT)) pushReason(reasons, "critic_reviews_insufficient");
-  if (canonicalRecord.collectionBasis === "authorized_api" && criticDirection === null) pushReason(reasons, "critic_metric_missing");
+  if (criticDirection === null) pushReason(reasons, "critic_metric_missing");
   if (!canonicalRecord.reviewPeriodStart || !canonicalRecord.reviewPeriodEnd) {
     pushReason(reasons, "review_dates_missing");
   } else if (!dateWindow(canonicalRecord)) {
