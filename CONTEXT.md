@@ -85,18 +85,39 @@ _Avoid_: Medium tier, standard tier
 The baseline catalog sampling tier, tracking games ranked 251–1,000 once every 24 hours distributed across 96 quarter-hour slots.
 _Avoid_: Low tier, cold tier, background tier
 
-**Living Game Score**:
-A dynamic 0–100 quality estimate for a playable game that updates as player sentiment evolves, significant patches release, and critic consensus matures.
-_Avoid_: Review average, meta score, composite rating
+**Current Player Score**:
+A 0–100 estimate of current Steam reviewer approval, informed by current and historical player evidence. It is distinct from lifetime approval, a critic quality grade, and catalog rank.
+_Avoid_: Living Game Score, meta score, composite rating
 
-**Approval-to-Quality Calibration**:
-A mathematical mapping translating percentage-based player approval (e.g. Steam positive review rate, median ~80–85%) onto the conventional 0–100 quality scale so it aligns with press evaluations.
+**Reception Alignment**:
+A game-level comparison of player and critic reception that respects their different scales, populations, and dates. Disagreement alone does not establish reviewer bias.
 
-**Bayesian Score Blend**:
-A weighted quality calculation combining historical player sentiment, post-patch review windows, and critic aggregates using pseudo-review counts, structured so player evidence maintains at least two-thirds of the total weight.
+**Recent Reception**:
+A comparison of Steam reviewer approval in the latest four completed weeks with the preceding eight weeks. It is distinct from Current Player Score, catalog rank, and evidence that a patch caused reception to change.
 
-**Score Confidence Level**:
-A classification (`Provisional`, `Established`, `Authoritative`) assigned to a living score based on review sample volume and historical depth.
+**Historical Player Evidence**:
+Player reception preceding the current evidence window, distinct from the reviews within that window. It supplies context for estimating current approval rather than a separate critic contribution.
+
+**Major Update Event**:
+A Steam event classified by its publisher as a Major Update. It is a source-selected communication category, not independent proof of patch significance or build deployment.
+
+**Score Anchor**:
+The major-update event boundary used to separate current player evidence from earlier reception. It is distinct from the first complete evidence bucket available after that boundary.
+
+**Sentiment History**:
+The retained evolution of player reception across a game’s lifetime, including evidence no longer influencing its Current Player Score. Recorded scores and later reconstructions are distinct historical claims.
+
+**Recorded Player Score**:
+A Current Player Score calculated from the evidence available at its observation time. Later source corrections do not change what was recorded then.
+
+**Reconstructed Player Score**:
+An estimate for an earlier period calculated using information available later. It is distinct from the score recorded at that time.
+
+**Review Population**:
+The set of Steam reviews represented by an aggregate, distinguished by source, language, purchase origin, and filtering. Unknown filtering does not establish compatibility with another population.
+
+**Score Evidence Strength**:
+The support available for a Current Player Score, including its review sample and historical context. It is distinct from the score itself and from leaderboard eligibility.
 
 **Catalog Rank**:
 An ordinal rank assigned to an eligible playable game on global or category leaderboards, gated by minimum evidence thresholds (e.g. 50 reviews for category boards, 250 reviews for global boards).
