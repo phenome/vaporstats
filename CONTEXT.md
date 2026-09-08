@@ -89,6 +89,9 @@ _Avoid_: Low tier, cold tier, background tier
 A 0–100 estimate of current Steam reviewer approval, informed by current and historical player evidence. It is distinct from lifetime approval, a critic quality grade, and catalog rank.
 _Avoid_: Living Game Score, meta score, composite rating
 
+**Lifetime Approval**:
+The proportion of positive Steam reviews in the compatible filtered lifetime review population. It describes lifetime reception, not the current post-update estimate.
+
 **Reception Alignment**:
 A game-level comparison of player and critic reception that respects their different scales, populations, and dates. Disagreement alone does not establish reviewer bias.
 
@@ -117,13 +120,13 @@ An estimate for an earlier period calculated using information available later. 
 The set of Steam reviews represented by an aggregate, distinguished by source, language, purchase origin, and filtering. Unknown filtering does not establish compatibility with another population.
 
 **Score Evidence Strength**:
-The support available for a Current Player Score, including its review sample and historical context. It is distinct from the score itself and from leaderboard eligibility.
+The support available for a Current Player Score, including its review sample and historical context. It is distinct from the score itself and from leaderboard eligibility; a score of 100 does not imply strong evidence or certainty.
 
 **Catalog Rank**:
 An ordinal rank assigned to an eligible playable game on global or category leaderboards, gated by minimum evidence thresholds (e.g. 50 reviews for category boards, 250 reviews for global boards).
 
 **Top Rated Now**:
-Standings of full-release games ordered by Current Player Score, with eligibility based on reviews in the latest 90 days. Historical support and the Score Anchor do not satisfy that review-volume requirement.
+Standings of full-release games ordered by Current Player Score, with eligibility based on actual reviews in a rolling 90-day window independent of the patch-sensitive scoring window. A Score Anchor does not reset eligibility, and historical-support weighting does not add qualifying reviews.
 
 **Top Rated All Time**:
 Standings of full-release games ordered by filtered lifetime Steam approval. It is distinct from Current Player Score and uses lifetime review volume for eligibility.

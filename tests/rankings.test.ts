@@ -76,7 +76,18 @@ function addApp(native: Database, appid: number, name = `Game ${appid}`): void {
   native.query("INSERT INTO apps (appid, name, slug) VALUES (?, ?, ?)").run(appid, name, name.toLowerCase().replaceAll(" ", "-"));
 }
 
-function addScore(native: Database, appid: number, value: number, observedAt = "2026-09-07T00:00:00.000Z"): void {
+function addScore(
+  native: Database,
+  appid: number,
+  value: number,
+  observedAt = "2026-09-07T00:00:00.000Z",
+  anchorEventId: string | null = null,
+  anchorAt: string | null = null,
+): void {
+  const currentWindowStart = anchorAt ?? "2026-06-10T00:00:00.000Z";
+  const currentEvidenceIntervals = anchorAt
+    ? JSON.stringify([{ start: anchorAt, end: observedAt, granularity: "day" }])
+    : "[]";
   native.query(`
     INSERT INTO player_score_history
       (appid, observed_at, score, formula_version,
@@ -85,10 +96,11 @@ function addScore(native: Database, appid: number, value: number, observedAt = "
        current_evidence_intervals, historical_evidence_intervals,
        current_source_id, historical_source_id, current_evidence_observed_at, historical_evidence_observed_at,
        anchor_event_id, anchor_at, provenance)
-    VALUES (?, ?, ?, 'test', 1, 1, 0, 0, '2026-06-10T00:00:00.000Z', ?,
-            '2026-01-01T00:00:00.000Z', '2026-06-10T00:00:00.000Z', '[]', '[]', ?, NULL, ?, NULL, NULL, NULL, '{}')
-  `).run(appid, observedAt, value, observedAt, HISTOGRAM_SOURCE, observedAt);
+    VALUES (?, ?, ?, 'test', 1, 1, 0, 0, ?, ?,
+            '2026-01-01T00:00:00.000Z', '2026-06-10T00:00:00.000Z', ?, '[]', ?, NULL, ?, NULL, ?, ?, '{}')
+  `).run(appid, observedAt, value, currentWindowStart, observedAt, currentEvidenceIntervals, HISTOGRAM_SOURCE, observedAt, anchorEventId, anchorAt);
 }
+
 
 function addBuckets(native: Database, appid: number, total: number, start = "2026-06-10T00:00:00.000Z"): void {
   const perDay = Math.floor(total / 90);
@@ -241,6 +253,48 @@ describe("reception ranking query domain", () => {
       purchase_type: null,
       filter_offtopic_activity: null,
     });
+    native.close(true);
+  });
+  test("keeps anchored Now eligibility on rolling evidence until reviews age out", async () => {
+    const { db, native } = freshDb();
+    const appid = 30;
+    addApp(native, appid, "Anchored Game");
+    addGenre(native, appid, 9);
+    addBuckets(native, appid, 250);
+    addScore(native, appid, 78, "2026-08-31T00:00:00.000Z");
+    addScore(native, appid, 12, "2026-09-02T00:00:00.000Z", "major-update", "2026-09-01T00:00:00.000Z");
+    native.query(
+      "INSERT INTO review_summary_snapshots (appid, source_id, observed_at, lifetime_positive_count, lifetime_total_count) VALUES (?, ?, ?, ?, ?)",
+    ).run(appid, SUMMARY_SOURCE, "2026-09-07T00:00:00.000Z", 300, 500);
+
+    const afterPostpatchReview = await getGameReceptionEligibility(db, appid, EVALUATED_AT);
+    expect(afterPostpatchReview?.now.qualifying_reviews).toBe(250);
+    expect(afterPostpatchReview?.now.global).toEqual({ minimum_reviews: 250, eligible: true, reasons: [] });
+    expect(afterPostpatchReview?.now.filtered).toEqual({ minimum_reviews: 50, eligible: true, reasons: [] });
+    expect(afterPostpatchReview?.all_time.global).toEqual({ minimum_reviews: 250, eligible: true, reasons: [] });
+    expect(afterPostpatchReview?.all_time.filtered).toEqual({ minimum_reviews: 50, eligible: true, reasons: [] });
+
+    const now = await getReceptionRankings(db, { type: "top_rated_now", evaluatedAt: EVALUATED_AT });
+    expect(now.data.minimum_reviews).toBe(250);
+    expect(now.data.items.map((item) => item.game.appid)).toEqual([appid]);
+    expect(now.data.items[0]?.metric).toMatchObject({ kind: "current_player_score", value: 12, observed_at: "2026-09-02T00:00:00.000Z" });
+    expect(now.data.items[0]?.eligibility.qualifying_reviews).toBe(250);
+
+    const agedAt = "2026-12-08T00:00:00.000Z";
+    const afterReviewsAgeOut = await getGameReceptionEligibility(db, appid, agedAt);
+    expect(afterReviewsAgeOut?.now.qualifying_reviews).toBeNull();
+    expect(afterReviewsAgeOut?.now.global).toMatchObject({ minimum_reviews: 250, eligible: false });
+    expect(afterReviewsAgeOut?.now.filtered).toMatchObject({ minimum_reviews: 50, eligible: false });
+    expect(afterReviewsAgeOut?.all_time.global).toEqual({ minimum_reviews: 250, eligible: true, reasons: [] });
+    expect(afterReviewsAgeOut?.all_time.filtered).toEqual({ minimum_reviews: 50, eligible: true, reasons: [] });
+
+    const nowAfterReviewsAgeOut = await getReceptionRankings(db, { type: "top_rated_now", evaluatedAt: agedAt });
+    expect(nowAfterReviewsAgeOut.data.minimum_reviews).toBe(250);
+    expect(nowAfterReviewsAgeOut.data.items).toEqual([]);
+    const allTimeAfterReviewsAgeOut = await getReceptionRankings(db, { type: "top_rated_all_time", evaluatedAt: agedAt });
+    expect(allTimeAfterReviewsAgeOut.data.minimum_reviews).toBe(250);
+    expect(allTimeAfterReviewsAgeOut.data.items.map((item) => item.game.appid)).toEqual([appid]);
+    expect(allTimeAfterReviewsAgeOut.data.items[0]?.eligibility.qualifying_reviews).toBe(500);
     native.close(true);
   });
 });
