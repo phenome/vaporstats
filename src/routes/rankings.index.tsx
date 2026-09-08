@@ -1,6 +1,6 @@
 import React from "react";
 import { renderToString } from "react-dom/server";
-import { createFileRoute } from "@tanstack/react-router";
+import { createFileRoute, stripSearchParams } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
 import { getDb } from "../lib/db-access";
 import type { AppDatabase } from "../lib/db";
@@ -91,6 +91,18 @@ export const Route = createFileRoute("/rankings/")({
   ssr: false,
   headers: () => getPageCacheHeaders(),
   validateSearch: (search: Record<string, unknown>) => rankingSearch(search),
+  search: {
+    middlewares: [
+      stripSearchParams({
+        type: "top_rated_now",
+        genre: [],
+        feature: [],
+        tag: [],
+        limit: DEFAULT_LIMIT,
+        offset: 0,
+      }),
+    ],
+  },
   loaderDeps: ({ search }) => ({ search }),
   loader: ({ deps: { search }, context }) => {
     const filters = filtersFromSearch(search);

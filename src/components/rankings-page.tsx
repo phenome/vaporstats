@@ -9,11 +9,12 @@ import type {
   ReceptionRankingItem,
 } from "../lib/rankings";
 import type { ReceptionFilters, ReceptionRankingType } from "../lib/reception-filters";
-import type { FacetDictionaryEntry, FacetGroup } from "../lib/taxonomy";
+import type { FacetDictionaryEntry } from "../lib/taxonomy";
 import { rankingComparisonQueryOptions, type RankingComparisonQuery } from "../lib/rankings-query";
 import { formatNumber } from "../lib/format";
 import { getCanonicalGamePath } from "../lib/slug";
 import { AppLink } from "./app-link";
+import { RankingFacetSelect } from "./ranking-facet-select";
 import { ChartContainer, ChartTooltip, ChartTooltipContent } from "./ui/chart";
 import "./rankings-page.css";
 
@@ -65,11 +66,6 @@ function formatCutoff(value: string): string {
   return date ? monthFormat.format(date) : value;
 }
 
-function facetGroupLabel(group: FacetGroup): string {
-  if (group === "genre") return "Genres";
-  if (group === "feature") return "Features";
-  return "Community tags";
-}
 
 function Artwork({ game, className = "" }: { game: ReceptionRankingItem["game"]; className?: string }) {
   const src = game.header_image || game.header_lqip || null;
@@ -199,21 +195,10 @@ function RankingRow({ item, query }: { item: ReceptionRankingItem; query: Rankin
   );
 }
 
-function FacetGroupControl({ group, entries, selected, onChange }: { group: FacetGroup; entries: FacetDictionaryEntry[]; selected: number[]; onChange: (values: number[]) => void }) {
-  const [search, setSearch] = useState("");
-  const visible = entries.filter((entry) => entry.facet_group === group && entry.name && entry.name.toLocaleLowerCase().includes(search.toLocaleLowerCase()));
-  return (
-    <fieldset className="facet-group">
-      <legend>{facetGroupLabel(group)}</legend>
-      <input type="search" value={search} onChange={(event) => setSearch(event.target.value)} placeholder={`Search ${facetGroupLabel(group).toLocaleLowerCase()}`} aria-label={`Search ${facetGroupLabel(group)}`} />
-      <div className="facet-options">{visible.map((entry) => { const id = Number(entry.source_id); if (!Number.isSafeInteger(id) || id <= 0 || !entry.name) return null; const checked = selected.includes(id); return <label key={`${entry.facet_group}:${entry.source_id}`}><input type="checkbox" checked={checked} onChange={() => onChange(checked ? selected.filter((value) => value !== id) : [...selected, id].sort((a, b) => a - b))} /><span>{entry.name}</span></label>; })}{!visible.length && <span className="ranking-muted">No matching facets.</span>}</div>
-    </fieldset>
-  );
-}
 
 function FacetControls({ facets, filters, onNavigate }: { facets: FacetDictionaryEntry[]; filters: ReceptionFilters; onNavigate?: (next: RankingsPageNavigation) => void }) {
   const setFilter = (group: keyof ReceptionFilters, values: number[]) => onNavigate?.({ filters: { ...filters, [group]: values }, offset: 0 });
-  return <section className="facet-controls" aria-label="Ranking filters"><FacetGroupControl group="genre" entries={facets} selected={filters.genres} onChange={(values) => setFilter("genres", values)} /><FacetGroupControl group="feature" entries={facets} selected={filters.features} onChange={(values) => setFilter("features", values)} /><FacetGroupControl group="community_tag" entries={facets} selected={filters.tags} onChange={(values) => setFilter("tags", values)} /></section>;
+  return <section className="facet-controls" aria-label="Ranking filters"><RankingFacetSelect group="genre" entries={facets} selected={filters.genres} onChange={(values) => setFilter("genres", values)} /><RankingFacetSelect group="feature" entries={facets} selected={filters.features} onChange={(values) => setFilter("features", values)} /><RankingFacetSelect group="community_tag" entries={facets} selected={filters.tags} onChange={(values) => setFilter("tags", values)} /></section>;
 }
 
 export function RankingsPageView({ data, facets = [], activeType, activeFilters, activeOffset, isFetching = false, onNavigate }: RankingsPageViewProps) {

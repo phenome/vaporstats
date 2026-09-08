@@ -21,11 +21,11 @@
 .rankings-page button:focus-visible, .rankings-page input:focus-visible, .rankings-page summary:focus-visible, .rankings-page a:focus-visible { outline: 2px solid var(--rank-violet); outline-offset: 2px; }
 .rankings-page a { color: inherit; }
 .rankings-header { align-items: end; border-bottom: 1px solid var(--rank-border); display: flex; gap: 2rem; justify-content: space-between; padding: 0 1.25rem 1.25rem; }
-.rankings-kicker { color: #fb923c; font: 700 .68rem/1.2 ui-monospace, monospace; letter-spacing: .14em; margin: 0 0 .45rem; text-transform: uppercase; }
+.rankings-kicker { color: var(--rank-violet-strong); font: 700 .68rem/1.2 ui-monospace, monospace; letter-spacing: .14em; margin: 0 0 .45rem; text-transform: uppercase; }
 .rankings-header h1 { font-size: clamp(2rem, 4vw, 3.2rem); letter-spacing: -.055em; line-height: .95; margin: 0; }
 .rankings-subtitle { color: var(--rank-muted); font-size: .9rem; margin: .8rem 0 0; }
 .rankings-stat { border-left: 1px solid var(--rank-border-bright); display: grid; gap: .25rem; min-width: 9rem; padding-left: 1rem; text-align: right; }
-.rankings-stat strong { color: #fdba74; font: 1.6rem ui-monospace, monospace; font-variant-numeric: tabular-nums; }
+.rankings-stat strong { color: var(--rank-violet-strong); font: 1.6rem ui-monospace, monospace; font-variant-numeric: tabular-nums; }
 .rankings-stat span, .mode-control legend, .facet-group legend { color: var(--rank-muted); font-size: .68rem; letter-spacing: .06em; text-transform: uppercase; }
 .rankings-controls { background: var(--rank-panel); border-bottom: 1px solid var(--rank-border); display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 1rem; margin-top: 1rem; padding: 1rem 1.25rem; }
 .mode-control { border: 0; margin: 0; min-width: 9rem; padding: 0; }
@@ -40,11 +40,6 @@
 .facet-controls { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: .75rem; min-width: 0; }
 .facet-group { border: 0; margin: 0; min-width: 0; padding: 0; }
 .facet-group legend { margin-bottom: .4rem; }
-.facet-group > input { background: var(--rank-bg); border: 1px solid var(--rank-border-bright); min-height: 2.3rem; padding: .4rem .55rem; width: 100%; }
-.facet-options { border: 1px solid var(--rank-border); display: flex; flex-wrap: wrap; gap: .25rem; margin-top: .4rem; max-height: 5.2rem; min-height: 2rem; overflow: auto; padding: .35rem; }
-.facet-options label { align-items: center; background: var(--rank-bg); border: 1px solid var(--rank-border); display: inline-flex; gap: .3rem; padding: .22rem .35rem; white-space: nowrap; }
-.facet-options label:has(input:checked) { border-color: var(--rank-violet); color: var(--rank-violet-strong); }
-.facet-options input { accent-color: var(--rank-violet); }
 .rankings-status { color: var(--rank-dim); font: .7rem ui-monospace, monospace; margin: 1rem auto 0; max-width: 1136px; text-align: right; }
 .rankings-muted { color: var(--rank-muted); font-size: .75rem; line-height: 1.45; }
 .rankings-empty { border: 1px dashed var(--rank-border-bright); margin: 1rem auto; max-width: 1136px; padding: 2.5rem 1.5rem; text-align: center; }
@@ -63,9 +58,11 @@
 .podium-card-1 .podium-card-body { min-height: 270px; }
 .podium-card:not(.podium-card-1) .podium-art-wrap { align-self: center; aspect-ratio: 460 / 215; background: var(--rank-bg); }
 .podium-card:not(.podium-card-1) .ranking-artwork img { object-fit: contain; }
-.rank-medallion { align-items: center; background: #171125; border: 1px dashed var(--rank-violet-strong); border-radius: 50%; bottom: .65rem; color: var(--rank-violet-strong); display: flex; font: 600 1.25rem ui-monospace, monospace; height: 3rem; justify-content: center; left: .65rem; position: absolute; width: 3rem; }
-.rank-medallion::after { border: 1px solid #a78bfa55; border-radius: 50%; content: ""; inset: .35rem; position: absolute; }
-.rank-medallion-1 { font-size: 1.65rem; height: 4rem; width: 4rem; }
+.rank-medallion { align-items: center; background: #171125; border: 0; border-radius: 50% !important; bottom: .65rem; color: var(--rank-violet-strong); display: flex; font: 600 1.08rem ui-monospace, monospace; height: 3rem; isolation: isolate; justify-content: center; left: .65rem; position: absolute; width: 3rem; }
+.rank-medallion::before { -webkit-mask: radial-gradient(circle closest-side, transparent calc(100% - 2px), #000 calc(100% - 1px)); background: repeating-conic-gradient(from -40deg, currentColor 0 79.2deg, transparent 79.2deg 90deg); border-radius: 50%; content: ""; inset: 0; mask: radial-gradient(circle closest-side, transparent calc(100% - 2px), #000 calc(100% - 1px)); pointer-events: none; position: absolute; }
+.rank-medallion::after { border: 1px solid #a78bfa55; border-radius: 50%; content: ""; inset: .35rem; pointer-events: none; position: absolute; }
+.rank-medallion-1 { font-size: 1.44rem; height: 4rem; width: 4rem; }
+@layer base { .rankings-page .rank-medallion { border-radius: 50% !important; } }
 .podium-content { display: grid; grid-template-columns: minmax(0, 1fr) auto; grid-template-rows: auto 1fr; min-width: 0; padding: 1.1rem; }
 .podium-content h2 { font-size: clamp(1.5rem, 2.8vw, 2.6rem); grid-column: 1; letter-spacing: -.045em; line-height: 1.1; margin: 0; }
 .podium-content h2 a, .table-game strong a { text-decoration: none; }
@@ -144,6 +141,8 @@
   .podium-card-1 { grid-column: 1 / -1; }
   .podium-card-1 .podium-card-body { display: block; min-height: 0; }
   .podium-card-1 .podium-art-wrap { height: 160px; }
+  .rank-medallion { bottom: .35rem; font-size: .85rem; height: 2.375rem; left: .35rem; width: 2.375rem; }
+  .rank-medallion-1 { font-size: 1.17rem; height: 3.25rem; width: 3.25rem; }
   .podium-card-1 .podium-content h2 { font-size: 1.65rem; }
   .podium-card:not(.podium-card-1) .podium-card-body { display: block; }
   .podium-card:not(.podium-card-1) .podium-art-wrap { aspect-ratio: 460 / 215; height: auto; }
