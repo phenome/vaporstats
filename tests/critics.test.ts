@@ -38,7 +38,7 @@ function makeRecord(overrides: Partial<CriticRecord> = {}): CriticRecord {
     reviewPeriodStart: "2024-01-01",
     reviewPeriodEnd: "2024-01-31",
     observedAt: "2026-09-01T00:00:00Z",
-    collectionBasis: "public_page",
+    collectionBasis: "authorized_api",
     matchedIdentity: {
       steamAppId: 10,
       platformScope: "pc",
@@ -123,10 +123,23 @@ describe("source-native critic categories", () => {
 });
 
 describe("critic identity and evidence gates", () => {
-  test("accepts a public aggregate page when exact PC edition identity is verified", () => {
+  test("accepts authorized critic evidence when exact PC edition identity is verified", () => {
     const record = normalizeCriticRecord(makeRecord());
     expect(record).not.toBeNull();
     expect(record && evaluateCriticAlignment(record, makeContext()).state).toBe("classified");
+  });
+
+  test("does not classify otherwise valid public-page critic evidence", () => {
+    const record = makeRecord({ collectionBasis: "public_page" });
+    const outcome = evaluateCriticAlignment(record, makeContext());
+
+    expect(classifyCriticRecord(record)).toBeNull();
+    expect(outcome.state).toBe("unavailable");
+    expect(outcome.alignment).toBeNull();
+    expect(outcome.currentContrast.state).toBe("unavailable");
+    expect(outcome.currentContrast.alignment).toBeNull();
+    expect(outcome.reasons).toContain("permission_missing");
+    expect(outcome.currentContrast.reasons).toContain("permission_missing");
   });
 
   test("does not treat a mixed-platform OpenCritic aggregate as PC evidence", () => {

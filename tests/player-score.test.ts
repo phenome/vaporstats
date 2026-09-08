@@ -146,6 +146,23 @@ describe("Recent reception", () => {
     expect(result.reasons).toEqual([]);
   });
 
+  test("uses same-day observations but excludes evidence collected after evaluation", () => {
+    const buckets = [
+      ...dailyBuckets("2025-03-04T00:00:00Z", 28, 950, 50),
+      ...dailyBuckets("2025-01-07T00:00:00Z", 56, 900, 100),
+    ].map((bucket) => ({ ...bucket, observedAt: "2025-04-01T08:00:00Z" }));
+    const input = { evaluatedAt: "2025-04-01T12:00:00Z", buckets };
+    const known = evaluateRecentReception(input);
+    expect(known.cutoff).toBe("2025-04-01T00:00:00.000Z");
+    expect(known.state).toBe("more_positive");
+
+    buckets[0].observedAt = "2025-04-01T13:00:00Z";
+    const future = evaluateRecentReception(input);
+    expect(future.recent.coverageComplete).toBe(false);
+    expect(future.reasons).toContain("recent:missing_coverage");
+    expect(future.state).toBe("insufficient_evidence");
+  });
+
   test("requires full coverage and reports all applicable period-qualified causes", () => {
     const buckets = [
       ...dailyBuckets("2025-03-04T00:00:00Z", 28, 50, 0),

@@ -126,7 +126,7 @@ export function evaluateRecentReception(input: RecentReceptionInput): RecentRece
   const cutoffMs = utcDayStart(evaluatedAtMs);
   const recentWindow = { start: iso(cutoffMs - RECENT_DAYS * DAY_MS), end: iso(cutoffMs) };
   const previousWindow = { start: iso(cutoffMs - (RECENT_DAYS + PREVIOUS_DAYS) * DAY_MS), end: recentWindow.start };
-  const selectionOptions = { sourceId: input.sourceId, asOf: iso(cutoffMs) };
+  const selectionOptions = { sourceId: input.sourceId, asOf: iso(evaluatedAtMs) };
   const recentSelection = selectWholeBuckets(input.buckets, recentWindow, selectionOptions);
   const previousSelection = selectWholeBuckets(input.buckets, previousWindow, selectionOptions);
   const recent = periodFromSelection(recentSelection, recentWindow);
