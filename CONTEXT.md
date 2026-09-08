@@ -111,10 +111,10 @@ The major-update event boundary used to separate current player evidence from ea
 The retained evolution of player reception across a game’s lifetime, including evidence no longer influencing its Current Player Score. Recorded scores and later reconstructions are distinct historical claims.
 
 **Recorded Player Score**:
-A Current Player Score calculated from the evidence available at its observation time. Later source corrections do not change what was recorded then.
+A Current Player Score retained as an immutable historical record from the evidence available at its observation time. Later source corrections do not change it.
 
 **Reconstructed Player Score**:
-An estimate for an earlier period calculated using information available later. It is distinct from the score recorded at that time.
+An estimate for an earlier period calculated later from subsequently available evidence. It does not replace a Recorded Player Score.
 
 **Review Population**:
 The set of Steam reviews represented by an aggregate, distinguished by source, language, purchase origin, and filtering. Unknown filtering does not establish compatibility with another population.
@@ -135,4 +135,4 @@ Standings of full-release games ordered by filtered lifetime Steam approval. It 
 A source-identified genre, Steam feature, or community tag. The three classifications remain distinct even when their labels are identical.
 
 **Monthly Score Comparison**:
-An earlier score comparison for the games eligible in a selected catalog group now. Missing historical observations remain missing; the comparison does not assert that the same games were eligible then.
+An earlier score comparison for the games eligible in a selected catalog group now. It may use a Reconstructed Player Score when no Recorded Player Score exists; missing historical evidence remains missing, and the comparison does not assert that the same games were eligible then.

@@ -23,6 +23,8 @@ import {
   type ReviewInterval,
   type WholeBucketSelection,
 } from "./review-evidence";
+import { reconstructPlayerScoreAt } from "./score-reconstruction";
+import type { PlayerScoreCandidate, ScoreAnchor } from "./player-score";
 
 import type { HistoryRange } from "./player-history";
 
@@ -152,6 +154,13 @@ export interface RecentReceptionPeriodPayload {
 
 
 export interface GameScoreSummary {
+  lifetime_approval: {
+    value: number;
+    positive_reviews: number;
+    total_reviews: number;
+    observed_at: string;
+    population_ref: ScorePopulationReference | null;
+  } | null;
   game: CatalogEntity;
   score: GameScoreValue | null;
   eligibility: GameReceptionEligibility;
@@ -163,6 +172,35 @@ export interface GameScoreSummary {
 export interface RecordedScore {
   observation_id: number;
   observed_at: string;
+  value: number;
+  formula_version: string;
+  anchor: ScoreAnchorPayload | null;
+  score_window: ScoreEvidenceWindow;
+  evidence_start: string | null;
+  evidence_end: string | null;
+  current_positive_reviews: number;
+  current_total_reviews: number;
+  current_reviews: number;
+  current_evidence_intervals: readonly ReviewInterval[];
+  current_evidence_observed_at: string | null;
+  historical_evidence_intervals: readonly ReviewInterval[];
+  historical_evidence_window: ScoreEvidenceWindow;
+  historical_evidence_observed_at: string | null;
+  historical_support: {
+    actual_reviews: number;
+    effective_reviews: number;
+    positive_reviews: number;
+    total_reviews: number;
+  };
+  population_ref: ScorePopulationReference | null;
+  historical_population_ref: ScorePopulationReference | null;
+  provenance: unknown;
+}
+export interface ReconstructedScore {
+  kind: "reconstructed";
+  score_at: string;
+  evaluated_at: string;
+  observed_at: string | null;
   value: number;
   formula_version: string;
   anchor: ScoreAnchorPayload | null;
@@ -230,6 +268,7 @@ export interface GameScoreHistory {
   range_start: string | null;
   range_end: string | null;
   recorded_scores: readonly RecordedScore[];
+  reconstructed_scores: readonly ReconstructedScore[];
   approval_buckets: readonly ApprovalBucket[];
   milestones: readonly ScoreMilestone[];
   populations: readonly ScorePopulationReference[];
@@ -524,6 +563,81 @@ function scorePayload(row: RawScore, sources: ReadonlyMap<string, SourceRow>): G
     provenance: safeJson(row.provenance),
   };
 }
+function anchorPayload(anchor: ScoreAnchor | null): ScoreAnchorPayload | null {
+  if (!anchor) return null;
+  const start = parseUtc(anchor.start);
+  if (start === null) return null;
+  return {
+    category: 14,
+    start: iso(start),
+    event_id: anchor.eventId ?? null,
+    source_id: anchor.sourceId ?? null,
+  };
+}
+
+function reconstructedPayload(
+  candidate: PlayerScoreCandidate,
+  evaluatedAt: string,
+  source: SourceRow | null,
+): ReconstructedScore | null {
+  const scoreWindow = candidate.scoreWindow;
+  if (!scoreWindow) return null;
+  const current = candidate.inputs.current;
+  const historical = candidate.inputs.historical;
+  const currentEvidence = intervalBounds(current.selectedIntervals);
+  const historicalWindow = historical?.requested ?? {
+    start: iso(parseUtc(scoreWindow.start)! - NINETY_DAYS),
+    end: scoreWindow.start,
+  };
+  const currentObservedAt = current.observedAt ?? current.observationTimes.at(-1) ?? null;
+  const historicalObservedAt = historical?.observedAt ?? historical?.observationTimes.at(-1) ?? null;
+  return {
+    kind: "reconstructed",
+    score_at: scoreWindow.end,
+    evaluated_at: evaluatedAt,
+    observed_at: candidate.observedAt,
+    value: candidate.score,
+    formula_version: candidate.formulaVersion,
+    anchor: anchorPayload(candidate.anchor),
+    score_window: { start: scoreWindow.start, end: scoreWindow.end },
+    evidence_start: currentEvidence.start,
+    evidence_end: currentEvidence.end,
+    current_positive_reviews: current.positiveReviews ?? 0,
+    current_total_reviews: candidate.currentReviews,
+    current_reviews: candidate.currentReviews,
+    current_evidence_intervals: [...current.selectedIntervals],
+    current_evidence_observed_at: currentObservedAt,
+    historical_evidence_intervals: historical ? [...historical.selectedIntervals] : [],
+    historical_evidence_window: historicalWindow,
+    historical_evidence_observed_at: historicalObservedAt,
+    historical_support: {
+      actual_reviews: candidate.historicalReviews,
+      effective_reviews: candidate.historicalEffectiveReviews,
+      positive_reviews: historical?.positiveReviews ?? 0,
+      total_reviews: candidate.historicalReviews,
+    },
+    population_ref: sourceRef(source),
+    historical_population_ref: historical ? sourceRef(source) : null,
+    provenance: {
+      kind: "reconstructed",
+      evaluated_at: evaluatedAt,
+      score_at: scoreWindow.end,
+      observed_at: candidate.observedAt,
+      source_id: source?.id ?? current.sourceId,
+      current_source_id: current.sourceId,
+      historical_source_id: historical?.sourceId ?? null,
+      score_window: { start: scoreWindow.start, end: scoreWindow.end },
+      historical_window: historicalWindow,
+      current_evidence_intervals: [...current.selectedIntervals],
+      current_observation_times: [...current.observationTimes],
+      historical_observation_times: historical ? [...historical.observationTimes] : [],
+      current_gaps: [...current.gaps],
+      historical_evidence_intervals: historical ? [...historical.selectedIntervals] : [],
+      historical_gaps: historical ? [...historical.gaps] : [],
+      formula_version: candidate.formulaVersion,
+    },
+  };
+}
 
 
 function domainBucket(row: StoredReviewBucket): ReviewBucket {
@@ -617,6 +731,15 @@ function milestone(row: StoredSteamEvent): ScoreMilestone | null {
     source_url: row.url,
     display_label: displayLabel,
   };
+}
+function reconstructionAnchor(row: StoredSteamEvent): ScoreAnchor | null {
+  let rawCategory: unknown = null;
+  const provenance = safeJson(row.provenance);
+  if (isRecord(provenance)) rawCategory = provenance.rawCategory;
+  const major = row.category === "major_update" || row.category === "14" || rawCategory === 14 || rawCategory === "14";
+  const start = row.start_at ? parseUtc(row.start_at) : null;
+  if (!major || start === null) return null;
+  return { category: 14, start: iso(start), eventId: row.event_id, sourceId: row.source };
 }
 
 function criticPayload(record: CriticRecord): ScoreCriticRecord {
@@ -849,9 +972,23 @@ export async function getGameScoreSummary(
     ...summaryRows.map((row) => row.observed_at),
     ...validCritics.map((record) => record.observedAt),
   ]);
+  const lifetimeSourceId = eligibility.all_time.population_ref?.source_id ?? null;
+  const lifetimeRow = lifetimeSourceId
+    ? summaryRows.find((row) => row.source_id === lifetimeSourceId && row.lifetime_total_count > 0 && row.lifetime_positive_count >= 0 && row.lifetime_positive_count <= row.lifetime_total_count)
+    : undefined;
+  const lifetimeApproval = lifetimeRow
+    ? {
+        value: (100 * lifetimeRow.lifetime_positive_count) / lifetimeRow.lifetime_total_count,
+        positive_reviews: lifetimeRow.lifetime_positive_count,
+        total_reviews: lifetimeRow.lifetime_total_count,
+        observed_at: lifetimeRow.observed_at,
+        population_ref: sourceRef(lifetimeRow.source),
+      }
+    : null;
   return {
     data: {
       game,
+      lifetime_approval: lifetimeApproval,
       score: scoreRow ? scorePayload(scoreRow, sources) : null,
       eligibility,
       critics: validCritics.map(criticPayload),
@@ -880,15 +1017,19 @@ export async function getGameScoreHistory(
     rangeStart = iso(atMs - HISTORY_DURATIONS[range]);
     rangeEnd = at;
   }
-  const [scoreRows, bucketRows, events] = range === "all"
+  const reconstructionStart = rangeStart === null ? null : iso(parseUtc(rangeStart)! - 2 * NINETY_DAYS);
+  const [scoreRows, contextBucketRows, events] = range === "all"
     ? await Promise.all([loadScoresThrough(db, appid, at), loadBucketsThrough(db, appid, at), loadMilestones(db, appid, null, null, at)])
-    : await Promise.all([loadScoresInRange(db, appid, rangeStart!, rangeEnd!), loadBucketsInRange(db, appid, rangeStart!, rangeEnd!, at), loadMilestones(db, appid, rangeStart, rangeEnd, at)]);
+    : await Promise.all([loadScoresInRange(db, appid, rangeStart!, rangeEnd!), loadBucketsInRange(db, appid, reconstructionStart!, rangeEnd!, at), loadMilestones(db, appid, reconstructionStart, rangeEnd, at)]);
+  const bucketRows = range === "all"
+    ? contextBucketRows
+    : contextBucketRows.filter((row) => row.period_end > rangeStart! && row.period_start < rangeEnd!);
   if (range === "all") {
-    const bounds = allBounds(scoreRows, bucketRows, events);
+    const bounds = allBounds(scoreRows, contextBucketRows, events);
     rangeStart = bounds.start;
     rangeEnd = bounds.end;
   }
-  const sources = await loadPopulationSources(db, scoreRows, bucketRows);
+  const sources = await loadPopulationSources(db, scoreRows, contextBucketRows);
   const sourceIds = new Set<string>();
   for (const row of scoreRows) {
     if (row.current_source_id) sourceIds.add(row.current_source_id);
@@ -923,6 +1064,27 @@ export async function getGameScoreHistory(
     reviewsInPeriod = metric ? { ...metric, value: metric.total_reviews } : null;
   }
   const milestones = events.map(milestone).filter((event): event is ScoreMilestone => event !== null);
+  const reconstructionDomains = contextBucketRows.map(domainBucket);
+  const reconstructionSourceId = sourceChoice(reconstructionDomains, at);
+  const reconstructionAnchors = events
+    .map(reconstructionAnchor)
+    .filter((anchor): anchor is ScoreAnchor => anchor !== null);
+  const reconstructedScores: ReconstructedScore[] = [];
+  if (reconstructionSourceId && rangeStart !== null && rangeEnd !== null && rangeStart < rangeEnd) {
+    const startMs = parseUtc(rangeStart)!;
+    const endMs = parseUtc(rangeEnd)!;
+    const endpoints = [...new Set(reconstructionDomains
+      .filter((bucket) => bucket.sourceId === reconstructionSourceId)
+      .map((bucket) => parseUtc(bucket.end))
+      .filter((endpoint): endpoint is number => endpoint !== null && endpoint >= startMs && endpoint <= endMs)
+      .map(iso))].sort((left, right) => parseUtc(left)! - parseUtc(right)!);
+    for (const endpoint of endpoints) {
+      const candidate = reconstructPlayerScoreAt(reconstructionDomains, reconstructionAnchors, endpoint, reconstructionSourceId);
+      if (!candidate) continue;
+      const payload = reconstructedPayload(candidate, endpoint, sources.get(reconstructionSourceId) ?? null);
+      if (payload) reconstructedScores.push(payload);
+    }
+  }
   const populations = [...sourceIds].map((id) => sourceRef(sources.get(id))).filter((value): value is ScorePopulationReference => value !== null);
   populations.sort((a, b) => a.source_id.localeCompare(b.source_id));
   const data: GameScoreHistory = {
@@ -931,6 +1093,7 @@ export async function getGameScoreHistory(
     range_start: rangeStart,
     range_end: rangeEnd,
     recorded_scores: scoreRows.map((row) => scorePayload(row, sources)),
+    reconstructed_scores: reconstructedScores,
     approval_buckets: approval,
     milestones,
     populations,

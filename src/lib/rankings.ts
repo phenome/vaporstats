@@ -6,6 +6,8 @@ import {
   type ReviewBucket,
   type WholeBucketSelection,
 } from "./review-evidence";
+import { reconstructPlayerScoreAt } from "./score-reconstruction";
+import type { ScoreAnchor } from "./player-score";
 import {
   normalizeReceptionFilters,
   type ReceptionFilters,
@@ -116,6 +118,9 @@ export interface ReceptionComparisonPoint {
   metric_kind: ReceptionMetricKind;
   value: number;
   observed_at: string;
+  score_window_end: string | null;
+  provenance: "recorded" | "reconstructed" | "lifetime_summary";
+  reconstructed_count: number;
   comparison_rank: number;
   compared_count: number;
 }
@@ -130,6 +135,7 @@ export interface ReceptionComparisonData {
   in_current_group: boolean;
   cutoffs: string[];
   points: ReceptionComparisonPoint[];
+  reconstructed_members: number;
 }
 
 export interface ReceptionComparisonOptions {
@@ -202,6 +208,7 @@ type ScoreRow = {
   observed_at: string;
   score: number;
   current_evidence_intervals: string;
+  score_window_end: string;
 };
 
 interface AppEvidence {
@@ -209,6 +216,7 @@ interface AppEvidence {
   histogramSource: SourceRow | null;
   summaries: SummaryRow[];
   summarySource: SourceRow | null;
+  anchors: ScoreAnchor[];
 }
 
 interface EvaluatedApp {
@@ -223,6 +231,7 @@ interface EvaluatedApp {
   nowAssessment: ReceptionEligibilityAssessment;
   allTimeAssessment: ReceptionEligibilityAssessment;
   sourceTimestamp: string | null;
+  evidence: AppEvidence;
 }
 
 function parseUtc(value: string | Date | null | undefined): number | null {
@@ -404,11 +413,9 @@ async function loadEvidence(
   mode: EvidenceMode,
 ): Promise<Map<number, AppEvidence>> {
   const evidence = new Map<number, AppEvidence>();
-  for (const appid of appids) evidence.set(appid, { histogram: [], histogramSource: null, summaries: [], summarySource: null });
+  for (const appid of appids) evidence.set(appid, { histogram: [], histogramSource: null, summaries: [], summarySource: null, anchors: [] });
   if (appids.length === 0) return evidence;
   const inList = placeholders(appids.length);
-  const evaluatedAtMs = parseUtc(evaluatedAt)!;
-  const nowStart = iso(evaluatedAtMs - NINETY_DAYS);
   const bucketResult = mode === "all_time"
     ? { results: [] as Record<string, unknown>[] }
     : await db
@@ -422,10 +429,20 @@ async function loadEvidence(
            FROM review_buckets b
            JOIN review_sources s ON s.id = b.source_id
            WHERE b.appid IN (${inList})
-             AND b.period_end > ? AND b.period_start < ?
+             AND b.period_end <= ? AND b.observed_at <= ?
              AND s.endpoint = 'appreviewhistogram'`,
         )
-        .bind(...appids, nowStart, evaluatedAt)
+        .bind(...appids, evaluatedAt, evaluatedAt)
+        .all<Record<string, unknown>>();
+  const anchorResult = mode === "all_time"
+    ? { results: [] as Record<string, unknown>[] }
+    : await db
+        .prepare(
+          `SELECT appid, event_id, category, start_at, observed_at, source, provenance
+           FROM steam_events
+           WHERE appid IN (${inList}) AND observed_at <= ? AND start_at IS NOT NULL`,
+        )
+        .bind(...appids, evaluatedAt)
         .all<Record<string, unknown>>();
   const summaryResult = mode === "now"
     ? { results: [] as Record<string, unknown>[] }
@@ -461,19 +478,35 @@ async function loadEvidence(
       filter_offtopic_activity: raw.source_filter_offtopic_activity == null ? null : Number(raw.source_filter_offtopic_activity),
     } satisfies SourceRow;
     const row: BucketRow = { source, appid,
-    sourceId: source.source_id,
-    granularity: raw.granularity === "monthly" ? "month" : "day",
-    start: String(raw.period_start),
-    end: String(raw.period_end),
-    positiveReviews: Number.isSafeInteger(raw.positive_count) ? Number(raw.positive_count) : null,
-    negativeReviews: Number.isSafeInteger(raw.negative_count) ? Number(raw.negative_count) : null,
-    observedAt: raw.observed_at == null ? null : String(raw.observed_at),
-    complete: true, };
-    const entry = evidence.get(appid);
-    if (entry) {
-      entry.histogram.push(row);
-      
+      sourceId: source.source_id,
+      granularity: raw.granularity === "monthly" ? "month" : "day",
+      start: String(raw.period_start),
+      end: String(raw.period_end),
+      positiveReviews: Number.isSafeInteger(raw.positive_count) ? Number(raw.positive_count) : null,
+      negativeReviews: Number.isSafeInteger(raw.negative_count) ? Number(raw.negative_count) : null,
+      observedAt: raw.observed_at == null ? null : String(raw.observed_at),
+      complete: true,
+    };
+    evidence.get(appid)?.histogram.push(row);
+  }
+  for (const raw of anchorResult.results ?? []) {
+    const appid = Number(raw.appid);
+    const category = String(raw.category ?? "");
+    let rawCategory: unknown = null;
+    try {
+      const parsed = JSON.parse(String(raw.provenance ?? "{}"));
+      if (typeof parsed === "object" && parsed !== null) {
+        const record = parsed as { rawCategory?: unknown };
+        rawCategory = record.rawCategory;
+      }
+    } catch {
+      rawCategory = null;
     }
+    if (category !== "major_update" && category !== "14" && rawCategory !== 14 && rawCategory !== "14") continue;
+    const start = parseUtc(typeof raw.start_at === "string" ? raw.start_at : null);
+    if (start === null) continue;
+    const entry = evidence.get(appid);
+    if (entry) entry.anchors.push({ category: 14, start: iso(start), eventId: String(raw.event_id), sourceId: String(raw.source ?? "") });
   }
   for (const raw of summaryResult.results ?? []) {
     const appid = Number(raw.appid);
@@ -494,11 +527,9 @@ async function loadEvidence(
       lifetime_total_count: Number(raw.lifetime_total_count),
       source,
     };
-    const entry = evidence.get(appid);
-    if (entry) entry.summaries.push(row);
+    evidence.get(appid)?.summaries.push(row);
   }
   for (const entry of evidence.values()) {
-    
     entry.histogramSource = chooseSource(entry.histogram, "histogram", evaluatedAt);
     entry.summarySource = chooseSource(entry.summaries, "summary", evaluatedAt);
   }
@@ -516,7 +547,7 @@ async function loadScores(
   const result = await db
     .prepare(
       "WITH appids(appid) AS (VALUES " + appids.map(() => "(?)").join(",") + ")\n" +
-      "SELECT p.appid, h.id, h.observed_at, h.score, h.current_evidence_intervals\n" +
+      "SELECT p.appid, h.id, h.observed_at, h.score, h.current_evidence_intervals, h.current_window_end AS score_window_end\n" +
       "FROM appids p JOIN player_score_history h ON h.id = (\n" +
       "  SELECT candidate.id FROM player_score_history candidate\n" +
       "  WHERE candidate.appid = p.appid AND candidate.observed_at <= ?\n" +
@@ -686,6 +717,7 @@ async function evaluateApps(
       nowAssessment,
       allTimeAssessment,
       sourceTimestamp: sourceTimestamp(...sourceTimes),
+      evidence: appEvidence,
     };
   });
 }
@@ -788,6 +820,7 @@ type HistoricalScore = {
   appid: number;
   observed_at: string;
   score: number;
+  score_window_end: string | null;
 };
 type HistoricalSummary = {
   cutoff: string;
@@ -808,7 +841,7 @@ async function loadScoreCutoffs(
   const rows = await db
     .prepare(
       "WITH cutoffs(cutoff) AS (VALUES " + cutoffs.map(() => "(?)").join(",") + "), appids(appid) AS (VALUES " + appids.map(() => "(?)").join(",") + ")\n" +
-      "SELECT c.cutoff, p.appid, h.observed_at, h.score\n" +
+      "SELECT c.cutoff, p.appid, h.observed_at, h.score, h.current_window_end AS score_window_end\n" +
       "FROM cutoffs c CROSS JOIN appids p\n" +
       "JOIN player_score_history h ON h.id = (\n" +
       "  SELECT candidate.id FROM player_score_history candidate\n" +
@@ -866,6 +899,7 @@ export async function getReceptionComparison(
   const targetInGroup = eligible.some((item) => item.app.appid === options.appid);
   const cutoffs = monthCutoffs(evaluatedAt);
   const points: ReceptionComparisonPoint[] = [];
+  const reconstructedMembers = new Set<number>();
   let comparisonTimestamp: string | null = null;
   if (targetInGroup) {
     const appids = eligible.map((item) => item.app.appid);
@@ -888,13 +922,35 @@ export async function getReceptionComparison(
       for (const [key, row] of await loadSummaryCutoffs(db, sourceByApp, cutoffs)) summaryMap.set(key, row);
     }
     for (const cutoff of cutoffs) {
-      const historical: Array<{ appid: number; value: number; observed_at: string }> = [];
+      type HistoricalValue = {
+        appid: number;
+        value: number;
+        observed_at: string;
+        score_window_end: string | null;
+        provenance: "recorded" | "reconstructed" | "lifetime_summary";
+      };
+      const historical: HistoricalValue[] = [];
       for (const item of eligible) {
         const appid = item.app.appid;
         if (type === "top_rated_now") {
           const score = scoreMap.get(cutoff + "|" + appid);
           if (score && Number.isFinite(score.score) && score.score >= 0 && score.score <= 100 && parseUtc(score.observed_at) !== null) {
-            historical.push({ appid, value: score.score, observed_at: score.observed_at });
+            historical.push({ appid, value: score.score, observed_at: score.observed_at, score_window_end: score.score_window_end, provenance: "recorded" });
+            continue;
+          }
+          const sourceId = item.nowAssessment.population_ref?.source_id;
+          const candidate = sourceId
+            ? reconstructPlayerScoreAt(item.evidence.histogram, item.evidence.anchors, cutoff, sourceId)
+            : null;
+          if (candidate && Number.isFinite(candidate.score) && candidate.score >= 0 && candidate.score <= 100 && candidate.observedAt && parseUtc(candidate.observedAt) !== null) {
+            reconstructedMembers.add(appid);
+            historical.push({
+              appid,
+              value: candidate.score,
+              observed_at: candidate.observedAt,
+              score_window_end: candidate.scoreWindow?.end ?? null,
+              provenance: "reconstructed",
+            });
           }
         } else {
           const summary = summaryMap.get(cutoff + "|" + appid);
@@ -903,11 +959,14 @@ export async function getReceptionComparison(
               appid,
               value: 100 * summary.lifetime_positive_count / summary.lifetime_total_count,
               observed_at: summary.observed_at,
+              score_window_end: null,
+              provenance: "lifetime_summary",
             });
           }
         }
       }
       historical.sort((left, right) => right.value - left.value || qualifyingCountByApp.get(right.appid)! - qualifyingCountByApp.get(left.appid)! || left.appid - right.appid);
+      const reconstructedCount = historical.filter((item) => item.provenance === "reconstructed").length;
       for (const item of historical) comparisonTimestamp = sourceTimestamp(comparisonTimestamp, item.observed_at);
       const targetPoint = historical.findIndex((item) => item.appid === options.appid);
       if (targetPoint >= 0) {
@@ -917,6 +976,9 @@ export async function getReceptionComparison(
           metric_kind: type === "top_rated_now" ? "current_player_score" : "lifetime_approval",
           value: value.value,
           observed_at: value.observed_at,
+          score_window_end: value.score_window_end,
+          provenance: value.provenance,
+          reconstructed_count: reconstructedCount,
           comparison_rank: targetPoint + 1,
           compared_count: historical.length,
         });
@@ -933,6 +995,7 @@ export async function getReceptionComparison(
     in_current_group: targetInGroup,
     cutoffs,
     points,
+    reconstructed_members: reconstructedMembers.size,
   };
   return {
     data,

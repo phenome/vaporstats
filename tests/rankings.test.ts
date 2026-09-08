@@ -121,6 +121,23 @@ function addBuckets(native: Database, appid: number, total: number, start = "202
 
 
 
+function addBucketsForDays(native: Database, appid: number, total: number, days: number, start: string, observedAt = "2026-09-07T00:00:00.000Z"): void {
+  const perDay = Math.floor(total / days);
+  let remainder = total - perDay * days;
+  const startMs = Date.parse(start);
+  const insert = native.query(`
+    INSERT INTO review_buckets
+      (appid, source_id, granularity, period_start, period_end, positive_count, negative_count, observed_at, provenance)
+    VALUES (?, ?, 'daily', ?, ?, ?, 0, ?, 'test')
+  `);
+  for (let day = 0; day < days; day += 1) {
+    const count = perDay + (remainder-- > 0 ? 1 : 0);
+    const from = new Date(startMs + day * DAY).toISOString();
+    const to = new Date(startMs + (day + 1) * DAY).toISOString();
+    insert.run(appid, HISTOGRAM_SOURCE, from, to, count, observedAt);
+  }
+}
+
 function addGenre(native: Database, appid: number, id: number): void {
   native.query("INSERT OR IGNORE INTO app_facets (facet_group, source_id, name) VALUES ('genre', ?, ?)").run(String(id), `Genre ${id}`);
   native.query(`
@@ -174,7 +191,12 @@ describe("reception ranking query domain", () => {
       type: "top_rated_now",
     });
     const september = comparison.data?.points.find((point) => point.cutoff === "2026-09-01T00:00:00.000Z");
-    expect(september).toBeUndefined();
+    expect(september).toMatchObject({
+      provenance: "reconstructed",
+      observed_at: "2026-09-07T00:00:00.000Z",
+      score_window_end: "2026-09-01T00:00:00.000Z",
+    });
+    expect(september?.value).toBeGreaterThan(99);
     native.close(true);
 
     const laterFixture = freshDb();
@@ -207,9 +229,15 @@ describe("reception ranking query domain", () => {
       type: "top_rated_now",
     });
     expect(comparison.data?.in_current_group).toBe(true);
-  
     expect(comparison.data?.cutoffs).toHaveLength(12);
-    expect(comparison.data?.points).toHaveLength(0);
+    expect(comparison.data?.points.map((point) => point.cutoff)).toEqual([
+      "2026-07-01T00:00:00.000Z",
+      "2026-08-01T00:00:00.000Z",
+      "2026-09-01T00:00:00.000Z",
+    ]);
+    expect(comparison.data?.points.every((point) => point.provenance === "reconstructed")).toBe(true);
+    expect(comparison.data?.points.every((point) => point.compared_count === 101)).toBe(true);
+    expect(comparison.data?.points.every((point) => point.comparison_rank > 100)).toBe(true);
     native.close(true);
   });
 
@@ -295,6 +323,42 @@ describe("reception ranking query domain", () => {
     expect(allTimeAfterReviewsAgeOut.data.minimum_reviews).toBe(250);
     expect(allTimeAfterReviewsAgeOut.data.items.map((item) => item.game.appid)).toEqual([appid]);
     expect(allTimeAfterReviewsAgeOut.data.items[0]?.eligibility.qualifying_reviews).toBe(500);
+    native.close(true);
+  });
+  test("reconstructs missing Now cutoffs without mixing All Time evidence", async () => {
+    const { db, native } = freshDb();
+    addApp(native, 40, "Reconstructed Game");
+    addApp(native, 41, "Recorded Game");
+    addApp(native, 42, "No Evidence Game");
+    addApp(native, 43, "Histogram Only Game");
+    addScore(native, 40, 70);
+    addScore(native, 41, 71, "2026-08-15T00:00:00.000Z");
+    addScore(native, 41, 72);
+    addScore(native, 42, 73);
+    addScore(native, 43, 74);
+    addBucketsForDays(native, 40, 300, 99, "2026-06-01T00:00:00.000Z");
+    addBucketsForDays(native, 41, 300, 99, "2026-06-01T00:00:00.000Z");
+    addBucketsForDays(native, 43, 300, 99, "2026-06-01T00:00:00.000Z");
+    native.query(
+      "INSERT INTO steam_events (event_id, appid, category, start_at, observed_at, source, provenance) VALUES (?, ?, 'major_update', ?, ?, ?, '{}')",
+    ).run("major-40", 40, "2026-08-01T00:00:00.000Z", "2026-09-07T00:00:00.000Z", "steam_news_hub");
+
+    const now = await getReceptionComparison(db, { type: "top_rated_now", appid: 40, evaluatedAt: EVALUATED_AT });
+    const september = now.data?.points.find((point) => point.cutoff === "2026-09-01T00:00:00.000Z");
+    expect(september?.provenance).toBe("reconstructed");
+    expect(september?.observed_at).toBe("2026-09-07T00:00:00.000Z");
+    expect(september?.score_window_end).toBe("2026-09-01T00:00:00.000Z");
+    expect(now.data?.reconstructed_members).toBeGreaterThan(0);
+
+    const recorded = await getReceptionComparison(db, { type: "top_rated_now", appid: 41, evaluatedAt: EVALUATED_AT });
+    expect(recorded.data?.points.find((point) => point.cutoff === "2026-09-01T00:00:00.000Z")?.provenance).toBe("recorded");
+
+    const noEvidence = await getReceptionComparison(db, { type: "top_rated_now", appid: 42, evaluatedAt: EVALUATED_AT });
+    expect(noEvidence.data?.in_current_group).toBe(false);
+    expect(noEvidence.data?.points).toEqual([]);
+    const allTime = await getReceptionComparison(db, { type: "top_rated_all_time", appid: 43, evaluatedAt: EVALUATED_AT });
+    expect(allTime.data?.in_current_group).toBe(false);
+    expect(allTime.data?.points).toEqual([]);
     native.close(true);
   });
 });

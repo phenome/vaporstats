@@ -213,6 +213,13 @@ describe("game score payload", () => {
     native.query("INSERT INTO review_summary_snapshots (appid, source_id, observed_at, lifetime_positive_count, lifetime_total_count) VALUES (10, ?, ?, 300, 300)").run(SUMMARY, AT);
     const result = await getGameScoreSummary(db, 10, { now: new Date(AT) });
     expect(result.data?.score?.value).toBe(81.25);
+    expect(result.data?.lifetime_approval).toMatchObject({
+      value: 100,
+      positive_reviews: 300,
+      total_reviews: 300,
+      observed_at: AT,
+      population_ref: { source_id: SUMMARY },
+    });
     expect(result.data?.eligibility.now.global.eligible).toBe(false);
     expect(result.data?.eligibility.now.global.reasons).toContain("below_review_threshold");
     expect(result.data?.eligibility.all_time.global.eligible).toBe(true);
@@ -270,6 +277,37 @@ describe("game score payload", () => {
     expect(result.data?.critics[0]?.platform_scope).toBe("mixed");
     expect(result.data?.alignment[0]?.state).toBe("unavailable");
     expect(result.data?.alignment[0]?.reasons).toContain("platform_not_pc");
+    native.close(true);
+  });
+  test("reconstructs mixed old buckets from preceding context without rewriting recorded scores", async () => {
+    const { db, native } = freshDb();
+    addScore(native);
+    native.query("INSERT INTO review_buckets (appid, source_id, granularity, period_start, period_end, positive_count, negative_count, observed_at, provenance) VALUES (10, ?, 'monthly', '2026-08-01T00:00:00.000Z', '2026-09-01T00:00:00.000Z', 80, 20, ?, 'test')").run(HIST, AT);
+    addDay(native, "2026-09-01T00:00:00Z", 8, 2, HIST, AT);
+    native.query("INSERT INTO steam_events (event_id, appid, category, title, url, start_at, publication_at, observed_at, source, provenance) VALUES ('major-before-range', 10, 'major_update', 'Major update', NULL, '2026-08-01T00:00:00.000Z', '2026-08-01T00:00:00.000Z', ?, 'steam', '{}')").run(AT);
+
+    const before = await getGameScoreHistory(db, 10, "7d", { now: new Date(AT) });
+    const reconstructed = before.data?.reconstructed_scores;
+    expect(reconstructed).toHaveLength(1);
+    expect(reconstructed?.[0]).toMatchObject({
+      kind: "reconstructed",
+      score_at: "2026-09-02T00:00:00.000Z",
+      evaluated_at: "2026-09-02T00:00:00.000Z",
+      observed_at: AT,
+      score_window: { start: "2026-08-01T00:00:00.000Z", end: "2026-09-02T00:00:00.000Z" },
+      anchor: { category: 14, start: "2026-08-01T00:00:00.000Z", event_id: "major-before-range" },
+      current_evidence_intervals: [
+        { start: "2026-08-01T00:00:00.000Z", end: "2026-09-01T00:00:00.000Z", granularity: "month" },
+        { start: "2026-09-01T00:00:00.000Z", end: "2026-09-02T00:00:00.000Z", granularity: "day" },
+      ],
+    });
+    expect(reconstructed?.[0]).not.toHaveProperty("observation_id");
+    const recordedBefore = before.data?.recorded_scores;
+    expect(recordedBefore).toHaveLength(1);
+
+    native.query("UPDATE review_buckets SET positive_count = 0, negative_count = 100 WHERE appid = 10 AND source_id = ? AND granularity = 'monthly'").run(HIST);
+    const after = await getGameScoreHistory(db, 10, "7d", { now: new Date(AT) });
+    expect(after.data?.recorded_scores).toEqual(recordedBefore);
     native.close(true);
   });
 });

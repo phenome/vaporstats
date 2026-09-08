@@ -126,6 +126,11 @@ function HistoryChart({ data }: { data: ReceptionComparisonData }) {
     return data.cutoffs.map((cutoff) => ({ cutoff, value: byCutoff.get(cutoff)?.value ?? null }));
   }, [data]);
   const label = metricLabel(data.points[0]?.metric_kind ?? (data.type === "top_rated_now" ? "current_player_score" : "lifetime_approval"));
+  const methodology = data.type === "top_rated_now"
+    ? data.reconstructed_members > 0
+      ? `Recorded scores are preferred; ${data.reconstructed_members} member${data.reconstructed_members === 1 ? "" : "s"} include reconstructed historical estimates from retained review evidence.`
+      : "Recorded scores are used when available; missing historical months remain unfilled."
+    : "All Time uses compatible lifetime-summary snapshots only; histogram evidence is not mixed in.";
   if (!data.cutoffs.length) return <p className="ranking-muted">No monthly comparison data yet.</p>;
   return (
     <div className="comparison-chart" tabIndex={0} aria-label={`${label} monthly comparison`} onKeyDown={(event) => { if (event.key === "Escape") { event.preventDefault(); setHovered(null); setTooltipVisible(false); } }}>
@@ -152,7 +157,7 @@ function HistoryChart({ data }: { data: ReceptionComparisonData }) {
           <Line dataKey="value" type="monotone" stroke="#a78bfa" strokeWidth={2} dot={false} activeDot={{ r: 3 }} connectNulls={false} isAnimationActive={false} />
         </LineChart>
       </ChartContainer>
-      <p className="comparison-note">Monthly comparison uses completed UTC month-end observations. Missing months remain unfilled.</p>
+      <p className="comparison-note" title={methodology}>Monthly comparison uses completed UTC month-end observations. Missing months remain unfilled. {methodology}</p>
     </div>
   );
 }
