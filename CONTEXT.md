@@ -121,3 +121,15 @@ The support available for a Current Player Score, including its review sample an
 
 **Catalog Rank**:
 An ordinal rank assigned to an eligible playable game on global or category leaderboards, gated by minimum evidence thresholds (e.g. 50 reviews for category boards, 250 reviews for global boards).
+
+**Top Rated Now**:
+Standings of full-release games ordered by Current Player Score, with eligibility based on reviews in the latest 90 days. Historical support and the Score Anchor do not satisfy that review-volume requirement.
+
+**Top Rated All Time**:
+Standings of full-release games ordered by filtered lifetime Steam approval. It is distinct from Current Player Score and uses lifetime review volume for eligibility.
+
+**Catalog Facet**:
+A source-identified genre, Steam feature, or community tag. The three classifications remain distinct even when their labels are identical.
+
+**Monthly Score Comparison**:
+An earlier score comparison for the games eligible in a selected catalog group now. Missing historical observations remain missing; the comparison does not assert that the same games were eligible then.

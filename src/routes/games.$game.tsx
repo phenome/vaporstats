@@ -1,7 +1,7 @@
 import React from "react";
 import { renderToString } from "react-dom/server";
 import { Navigate, createFileRoute, notFound } from "@tanstack/react-router";
-import { useQuery } from "@tanstack/react-query";
+import { QueryClientProvider, useQuery } from "@tanstack/react-query";
 import { getGameByAppId } from "../lib/catalog";
 import { getRelatedApps } from "../lib/related";
 import { getPlayerHistory } from "../lib/player-history";
@@ -10,6 +10,8 @@ import type { AppDatabase } from "../lib/db";
 import { getCurrentPrice, getPriceHistory } from "../lib/prices";
 import { parseGameSlug, toSlug, getCanonicalGamePath } from "../lib/slug";
 import { CACHE_POLICIES, getEntityCacheHeaders } from "../lib/cache";
+import { gameScoreHistoryQueryOptions, gameScoreSummaryQueryOptions } from "../lib/score-query";
+import { createQueryClient } from "../lib/query-client";
 import { GamePageView } from "../components/game-page";
 import { GamePageSkeleton } from "../components/route-skeletons";
 import { AppLink } from "../components/app-link";
@@ -41,8 +43,10 @@ export const Route = createFileRoute("/games/$game")({
     if (!parsed) {
       throw notFound();
     }
-    // Start unawaited prefetch so navigation/hover proceeds immediately
+    // Start unawaited prefetch so navigation/hover proceeds immediately.
     void context.queryClient.prefetchQuery(gameDetailQueryOptions(parsed.appid));
+    void context.queryClient.prefetchQuery(gameScoreSummaryQueryOptions(parsed.appid));
+    void context.queryClient.prefetchQuery(gameScoreHistoryQueryOptions(parsed.appid, "30d"));
     return { appid: parsed.appid, slug: parsed.slug };
   },
   component: GameRouteComponent,
@@ -83,6 +87,7 @@ function GameRouteComponent() {
     />
   );
 }
+
 function GameNotFoundComponent() {
   return (
     <div className="max-w-7xl mx-auto px-4 py-16 text-center space-y-4 font-mono">
@@ -160,13 +165,15 @@ export async function handleGameHttpRequest(
   ]);
   const priceHistory = await getPriceHistory(db, game.appid, "all", { currentPrice });
   const appHtml = renderToString(
-    <GamePageView
-      game={game}
-      related={related}
-      playerHistory={playerHistory}
-      price={currentPrice}
-      priceHistory={priceHistory}
-    />
+    <QueryClientProvider client={createQueryClient()}>
+      <GamePageView
+        game={game}
+        related={related}
+        playerHistory={playerHistory}
+        price={currentPrice}
+        priceHistory={priceHistory}
+      />
+    </QueryClientProvider>
   );
   return new Response(wrapHtml(`${game.name} - VaporStats`, appHtml), {
     headers: {

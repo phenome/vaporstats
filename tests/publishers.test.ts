@@ -2,6 +2,8 @@ import { describe, test, expect, beforeAll } from "bun:test";
 import { Database, type SQLQueryBindings } from "bun:sqlite";
 import { renderToString } from "react-dom/server";
 import React from "react";
+import { QueryClientProvider } from "@tanstack/react-query";
+import { createQueryClient } from "../src/lib/query-client";
 import type { AppDatabase, AppPreparedStatement } from "../src/lib/db";
 import { applyMigrations } from "../src/lib/migrations";
 import { upsertApp } from "../src/lib/catalog";
@@ -231,35 +233,39 @@ describe("publisher route handling", () => {
 describe("mention link integration", () => {
   test("renders developer and publisher links to /publisher/[slug]", () => {
     const html = renderToString(
-      React.createElement(GamePageView, {
-        game: {
-          appid: 1245620,
-          name: "ELDEN RING",
-          slug: "elden-ring",
-          type: "game",
-          is_eligible: true,
-          is_playable: true,
-          parent_appid: null,
-          release_date: "2022-02-25",
-          steam_release_date: null,
-          original_release_date: null,
-          original_steam_release_date: null,
-          release_from_early_access_date: null,
-          release_date_source: null,
-          is_early_access: null,
-          has_left_early_access: null,
-          release_status: "released",
-          description: "An action RPG.",
-          header_image: "",
-          developer: "FromSoftware Inc.",
-          publisher: "Bandai Namco Entertainment",
-          created_at: new Date().toISOString(),
-          updated_at: new Date().toISOString(),
-          latest_players: null,
-          peak_players: null,
-          last_observed_at: null,
-        },
-      })
+      React.createElement(
+        QueryClientProvider,
+        { client: createQueryClient() },
+        React.createElement(GamePageView, {
+          game: {
+            appid: 1245620,
+            name: "ELDEN RING",
+            slug: "elden-ring",
+            type: "game",
+            is_eligible: true,
+            is_playable: true,
+            parent_appid: null,
+            release_date: "2022-02-25",
+            steam_release_date: null,
+            original_release_date: null,
+            original_steam_release_date: null,
+            release_from_early_access_date: null,
+            release_date_source: null,
+            is_early_access: null,
+            has_left_early_access: null,
+            release_status: "released",
+            description: "An action RPG.",
+            header_image: "",
+            developer: "FromSoftware Inc.",
+            publisher: "Bandai Namco Entertainment",
+            created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+            latest_players: null,
+            peak_players: null,
+            last_observed_at: null,
+          },
+        }),
+      ),
     );
 
     expect(html).toContain('href="/publisher/fromsoftware-inc"');

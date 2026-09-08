@@ -14,7 +14,7 @@ import { PriceHistoryChart } from "./price-history";
 import { RelatedApps } from "./related-apps";
 import { AppLink } from "./app-link";
 import { LifecycleHistorySection } from "./lifecycle-history";
-
+import { GameReception } from "./game-reception";
 // The sentinel, the hero flow wrapper, and the first section below it are
 // siblings spaced by the container's space-y-6 rhythm, so the sentinel sits
 // HERO_ROW_GAP above the hero top and the next section sits HERO_ROW_GAP
@@ -505,12 +505,16 @@ export function GamePageView({
       </div>
 
       <LifecycleHistorySection appid={game.appid} />
+      <GameReception key={game.appid} appid={game.appid} />
       <nav
         aria-label="Game page sections"
         className="flex min-h-[44px] items-center overflow-x-auto border border-zinc-800 bg-zinc-950 px-1 font-mono"
       >
         <a href="#activity" className="inline-flex min-h-[44px] shrink-0 items-center px-3 text-xs uppercase tracking-wider text-zinc-300 hover:bg-zinc-900 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-orange-500">
           Activity
+        </a>
+        <a href="#game-reception" className="inline-flex min-h-[44px] shrink-0 items-center px-3 text-xs uppercase tracking-wider text-zinc-300 hover:bg-zinc-900 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-orange-500">
+          Reception
         </a>
         <a href="#player-history" className="inline-flex min-h-[44px] shrink-0 items-center px-3 text-xs uppercase tracking-wider text-zinc-300 hover:bg-zinc-900 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-orange-500">
           Player History

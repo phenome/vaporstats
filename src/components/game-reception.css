@@ -1,0 +1,13 @@
+.score-reception-card {
+  min-height: 0;
+}
+
+.score-event-label {
+  pointer-events: auto;
+}
+
+@media (max-width: 767px) {
+  .score-reception-card {
+    align-self: auto;
+  }
+}

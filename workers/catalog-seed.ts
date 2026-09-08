@@ -4,6 +4,14 @@ import { parsePreciseReleaseDate } from "../src/lib/releases";
 import { toSlug } from "../src/lib/slug";
 import { upsertAppRelationship } from "../src/lib/related";
 import { syncReleaseFactsFromApps } from "./release-facts";
+import {
+  mapSteamAppDetailsFacets,
+  mapSteamStoreBrowseTags,
+  parseSteamTagDictionaryResponse,
+  syncAppFacets,
+  syncFacetDictionary,
+  type FacetUpdates,
+} from "../src/lib/taxonomy";
 
 export interface SeedAppInput {
   appid: number;
@@ -31,6 +39,10 @@ export interface SeedAppInput {
   release_date_source?: ReleaseDateSource;
   is_coming_soon?: boolean | null;
   is_early_access?: boolean | null;
+  facets?: FacetUpdates;
+  metacritic_score?: number | null;
+  metacritic_url?: string | null;
+  metacritic_observed_at?: string | null;
 }
 
 export interface CuratedChildSeed {
@@ -112,6 +124,9 @@ interface SteamAppDetailsResponse {
         date: string;
       };
       detailed_description?: string;
+      genres?: unknown;
+      categories?: unknown;
+      metacritic?: { score?: unknown; url?: unknown };
     };
   };
 }
@@ -136,11 +151,14 @@ interface StoreBrowseItem {
   id?: number | string;
   release?: StoreBrowseRelease | null;
   assets?: StoreBrowseAssets | null;
+  tags?: unknown;
+  tagids?: unknown;
 }
 
 export interface StoreBrowseData {
   release: StoreBrowseRelease | null;
   assets: StoreBrowseAssets | null;
+  community_tags?: ReturnType<typeof mapSteamStoreBrowseTags>;
 }
 
 interface StoreBrowseResponse {
@@ -164,6 +182,7 @@ function isSteamRateLimitError(error: unknown): error is SteamRateLimitError {
 export const CATALOG_REFRESH_CHECKPOINT_KEY = "catalog_metadata_refresh";
 export const CATALOG_REFRESH_SUCCESS_TARGET = 10;
 export const CATALOG_REFRESH_ATTEMPT_CAP = 20;
+export const STEAM_TAG_DICTIONARY_CHECKPOINT_KEY = "steam_tag_dictionary";
 const STORE_BROWSE_BATCH_SIZE = 50;
 const STORE_BROWSE_URL = "https://api.steampowered.com/IStoreBrowseService/GetItems/v1/";
 
@@ -304,6 +323,28 @@ export async function fetchSteamAppDetails(
 
   const details = appData.data;
   const appdetailsReleaseDate = normalizeSteamReleaseDate(details.release_date?.date);
+  const facets = mapSteamAppDetailsFacets(details);
+  const metacritic = details.metacritic;
+  const scoreCandidate =
+    typeof metacritic?.score === "number" && Number.isInteger(metacritic.score)
+      ? metacritic.score
+      : typeof metacritic?.score === "string" && /^\d+$/.test(metacritic.score.trim())
+        ? Number(metacritic.score.trim())
+        : null;
+  const metacriticScore =
+    scoreCandidate !== null && scoreCandidate >= 0 && scoreCandidate <= 100 ? scoreCandidate : null;
+  const rawMetacriticUrl =
+    typeof metacritic?.url === "string" ? metacritic.url.trim() : "";
+  let metacriticUrl: string | null = null;
+  try {
+    const parsedUrl = new URL(rawMetacriticUrl);
+    if ((parsedUrl.protocol === "https:" || parsedUrl.protocol === "http:") &&
+        (parsedUrl.hostname === "metacritic.com" || parsedUrl.hostname.endsWith(".metacritic.com"))) {
+      metacriticUrl = rawMetacriticUrl;
+    }
+  } catch {
+    // Invalid provider URLs are omitted.
+  }
   return {
     appid: details.steam_appid,
     name: details.name,
@@ -322,6 +363,9 @@ export async function fetchSteamAppDetails(
     header_image: details.header_image ?? "",
     developer: details.developers?.[0] ?? "",
     publisher: details.publishers?.[0] ?? "",
+    ...(Object.keys(facets).length > 0 ? { facets } : {}),
+    ...(metacriticScore !== null ? { metacritic_score: metacriticScore } : {}),
+    ...(metacriticUrl ? { metacritic_url: metacriticUrl } : {}),
     ...(hasLeftEarlyAccessAssertion(details.detailed_description)
       ? { has_left_early_access: true }
       : {}),
@@ -347,6 +391,7 @@ export async function fetchStoreBrowseReleases(
     data_request: {
       include_release: true,
       include_assets: true,
+      include_tag_count: true,
     },
   };
   const url = `${STORE_BROWSE_URL}?input_json=${encodeURIComponent(JSON.stringify(input))}`;
@@ -364,9 +409,11 @@ export async function fetchStoreBrowseReleases(
     for (const item of items) {
       const appid = storeBrowseAppId(item);
       if (appid !== null) {
+        const communityTags = mapSteamStoreBrowseTags(item);
         releases.set(appid, {
           release: item.release ?? null,
           assets: item.assets ?? null,
+          ...(communityTags ? { community_tags: communityTags } : {}),
         });
       }
     }
@@ -390,6 +437,7 @@ type ReleaseEnrichmentRecord = {
     | "is_coming_soon"
     | "is_early_access"
     | "icon_hash"
+    | "facets"
   >
 >;
 
@@ -459,10 +507,13 @@ export async function enrichCatalogReleaseFields<T extends ReleaseEnrichmentReco
           ? existingReleaseFields(record)
           : releaseFields(null, appdetailsReleaseDate);
       const iconHash = browseData?.assets?.community_icon ?? record.icon_hash ?? null;
+      const facets = { ...(record.facets ?? {}) };
+      if (browseData?.community_tags) facets.community_tag = browseData.community_tags;
       enriched.push({
         ...record,
         ...lifecycle,
         ...(iconHash ? { icon_hash: iconHash } : {}),
+        ...(Object.keys(facets).length > 0 ? { facets } : {}),
       });
     }
   }
@@ -563,6 +614,65 @@ function readCatalogRefreshCheckpoint(checkpoint: { value: string } | null): Cat
   } catch {
     return { pending: [] };
   }
+}
+
+export interface SteamTagDictionaryRefreshOptions {
+  checkpointKey?: string;
+  fetchFn?: typeof fetch;
+  now?: Date | string;
+  force?: boolean;
+}
+
+export interface SteamTagDictionaryRefreshResult {
+  refreshed: boolean;
+  skipped: boolean;
+  successful: boolean;
+  entries: number;
+  date: string;
+}
+
+function utcDateKey(value: Date | string | undefined): string {
+  const date = value instanceof Date ? value : new Date(value ?? Date.now());
+  return date.toISOString().slice(0, 10);
+}
+
+/** Refreshes shared Steam tag names once per UTC day unless forced. */
+export async function refreshSteamTagDictionary(
+  db: AppDatabase,
+  options: SteamTagDictionaryRefreshOptions = {},
+): Promise<SteamTagDictionaryRefreshResult> {
+  const date = utcDateKey(options.now);
+  const checkpointKey = options.checkpointKey ?? STEAM_TAG_DICTIONARY_CHECKPOINT_KEY;
+  const checkpoint = await getCheckpoint(db, checkpointKey);
+  if (!options.force && checkpoint?.value === date) {
+    return { refreshed: false, skipped: true, successful: true, entries: 0, date };
+  }
+
+  let response: Response;
+  try {
+    response = await (options.fetchFn ?? fetch)(
+      "https://api.steampowered.com/IStoreService/GetTagList/v1/?language=english",
+    );
+  } catch {
+    return { refreshed: false, skipped: false, successful: false, entries: 0, date };
+  }
+  if (!response.ok) {
+    return { refreshed: false, skipped: false, successful: false, entries: 0, date };
+  }
+
+  let payload: unknown;
+  try {
+    payload = await response.json();
+  } catch {
+    return { refreshed: false, skipped: false, successful: false, entries: 0, date };
+  }
+  const entries = parseSteamTagDictionaryResponse(payload);
+  if (entries === null) {
+    return { refreshed: false, skipped: false, successful: false, entries: 0, date };
+  }
+  const count = await syncFacetDictionary(db, entries);
+  await setCheckpoint(db, checkpointKey, date, null);
+  return { refreshed: true, skipped: false, successful: true, entries: count, date };
 }
 
 export interface CatalogRefreshQueueResult {
@@ -787,6 +897,7 @@ export async function refreshCatalogBatch(
 
       try {
         await upsertApp(db, refreshedRecord);
+        await syncAppFacets(db, refreshedRecord.appid, refreshedRecord.facets);
         await syncReleaseFactsFromApps(db, { apps: [refreshedRecord] });
         successful++;
         records.push(refreshedRecord);
@@ -890,6 +1001,7 @@ export async function runBoundedCatalogImport(
     };
 
     await upsertApp(db, record);
+    await syncAppFacets(db, record.appid, record.facets);
     seededCount++;
     if (isPlayable && isEligible && !app.parent_appid) {
       playableCount++;
@@ -949,6 +1061,7 @@ export async function runBoundedCatalogImport(
     };
 
     await upsertApp(db, childInput);
+    await syncAppFacets(db, childInput.appid, childInput.facets);
     await upsertAppRelationship(db, {
       parent_appid: child.parentAppId,
       child_appid: child.appid,

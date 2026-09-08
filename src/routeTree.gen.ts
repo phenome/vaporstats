@@ -15,6 +15,7 @@ import { Route as PrivacyRouteImport } from './routes/privacy'
 import { Route as SearchRouteImport } from './routes/search'
 import { Route as ApiCatalogRouteImport } from './routes/api.catalog'
 import { Route as ApiDealsRouteImport } from './routes/api.deals'
+import { Route as ApiFacetsRouteImport } from './routes/api.facets'
 import { Route as ApiRankingsRouteImport } from './routes/api.rankings'
 import { Route as ApiReleasesRouteImport } from './routes/api.releases'
 import { Route as ApiSearchRouteImport } from './routes/api.search'
@@ -35,6 +36,7 @@ import { Route as GamesGameChildRouteImport } from './routes/games.$game_.$child
 import { Route as ApiGamesAppidDetailRouteImport } from './routes/api.games.$appid.detail'
 import { Route as ApiGamesAppidLifecycleRouteImport } from './routes/api.games.$appid.lifecycle'
 import { Route as ApiGamesAppidOverviewRouteImport } from './routes/api.games.$appid.overview'
+import { Route as ApiGamesAppidScoreRouteImport } from './routes/api.games.$appid.score'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
@@ -64,6 +66,11 @@ const ApiCatalogRoute = ApiCatalogRouteImport.update({
 const ApiDealsRoute = ApiDealsRouteImport.update({
   id: '/api/deals',
   path: '/api/deals',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ApiFacetsRoute = ApiFacetsRouteImport.update({
+  id: '/api/facets',
+  path: '/api/facets',
   getParentRoute: () => rootRouteImport,
 } as any)
 const ApiRankingsRoute = ApiRankingsRouteImport.update({
@@ -166,6 +173,11 @@ const ApiGamesAppidOverviewRoute = ApiGamesAppidOverviewRouteImport.update({
   path: '/api/games/$appid/overview',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ApiGamesAppidScoreRoute = ApiGamesAppidScoreRouteImport.update({
+  id: '/api/games/$appid/score',
+  path: '/api/games/$appid/score',
+  getParentRoute: () => rootRouteImport,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
@@ -174,6 +186,7 @@ export interface FileRoutesByFullPath {
   '/search': typeof SearchRoute
   '/api/catalog': typeof ApiCatalogRoute
   '/api/deals': typeof ApiDealsRoute
+  '/api/facets': typeof ApiFacetsRoute
   '/api/rankings': typeof ApiRankingsRoute
   '/api/releases': typeof ApiReleasesRoute
   '/api/search': typeof ApiSearchRoute
@@ -194,6 +207,7 @@ export interface FileRoutesByFullPath {
   '/api/games/$appid/detail': typeof ApiGamesAppidDetailRoute
   '/api/games/$appid/lifecycle': typeof ApiGamesAppidLifecycleRoute
   '/api/games/$appid/overview': typeof ApiGamesAppidOverviewRoute
+  '/api/games/$appid/score': typeof ApiGamesAppidScoreRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
@@ -202,6 +216,7 @@ export interface FileRoutesByTo {
   '/search': typeof SearchRoute
   '/api/catalog': typeof ApiCatalogRoute
   '/api/deals': typeof ApiDealsRoute
+  '/api/facets': typeof ApiFacetsRoute
   '/api/rankings': typeof ApiRankingsRoute
   '/api/releases': typeof ApiReleasesRoute
   '/api/search': typeof ApiSearchRoute
@@ -222,6 +237,7 @@ export interface FileRoutesByTo {
   '/api/games/$appid/detail': typeof ApiGamesAppidDetailRoute
   '/api/games/$appid/lifecycle': typeof ApiGamesAppidLifecycleRoute
   '/api/games/$appid/overview': typeof ApiGamesAppidOverviewRoute
+  '/api/games/$appid/score': typeof ApiGamesAppidScoreRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -231,6 +247,7 @@ export interface FileRoutesById {
   '/search': typeof SearchRoute
   '/api/catalog': typeof ApiCatalogRoute
   '/api/deals': typeof ApiDealsRoute
+  '/api/facets': typeof ApiFacetsRoute
   '/api/rankings': typeof ApiRankingsRoute
   '/api/releases': typeof ApiReleasesRoute
   '/api/search': typeof ApiSearchRoute
@@ -251,6 +268,7 @@ export interface FileRoutesById {
   '/api/games/$appid/detail': typeof ApiGamesAppidDetailRoute
   '/api/games/$appid/lifecycle': typeof ApiGamesAppidLifecycleRoute
   '/api/games/$appid/overview': typeof ApiGamesAppidOverviewRoute
+  '/api/games/$appid/score': typeof ApiGamesAppidScoreRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -261,6 +279,7 @@ export interface FileRouteTypes {
     | '/search'
     | '/api/catalog'
     | '/api/deals'
+    | '/api/facets'
     | '/api/rankings'
     | '/api/releases'
     | '/api/search'
@@ -281,6 +300,7 @@ export interface FileRouteTypes {
     | '/api/games/$appid/detail'
     | '/api/games/$appid/lifecycle'
     | '/api/games/$appid/overview'
+    | '/api/games/$appid/score'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
@@ -289,6 +309,7 @@ export interface FileRouteTypes {
     | '/search'
     | '/api/catalog'
     | '/api/deals'
+    | '/api/facets'
     | '/api/rankings'
     | '/api/releases'
     | '/api/search'
@@ -309,6 +330,7 @@ export interface FileRouteTypes {
     | '/api/games/$appid/detail'
     | '/api/games/$appid/lifecycle'
     | '/api/games/$appid/overview'
+    | '/api/games/$appid/score'
   id:
     | '__root__'
     | '/'
@@ -317,6 +339,7 @@ export interface FileRouteTypes {
     | '/search'
     | '/api/catalog'
     | '/api/deals'
+    | '/api/facets'
     | '/api/rankings'
     | '/api/releases'
     | '/api/search'
@@ -337,6 +360,7 @@ export interface FileRouteTypes {
     | '/api/games/$appid/detail'
     | '/api/games/$appid/lifecycle'
     | '/api/games/$appid/overview'
+    | '/api/games/$appid/score'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -346,6 +370,7 @@ export interface RootRouteChildren {
   SearchRoute: typeof SearchRoute
   ApiCatalogRoute: typeof ApiCatalogRoute
   ApiDealsRoute: typeof ApiDealsRoute
+  ApiFacetsRoute: typeof ApiFacetsRoute
   ApiRankingsRoute: typeof ApiRankingsRoute
   ApiReleasesRoute: typeof ApiReleasesRoute
   ApiSearchRoute: typeof ApiSearchRoute
@@ -366,6 +391,7 @@ export interface RootRouteChildren {
   ApiGamesAppidDetailRoute: typeof ApiGamesAppidDetailRoute
   ApiGamesAppidLifecycleRoute: typeof ApiGamesAppidLifecycleRoute
   ApiGamesAppidOverviewRoute: typeof ApiGamesAppidOverviewRoute
+  ApiGamesAppidScoreRoute: typeof ApiGamesAppidScoreRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -410,6 +436,13 @@ declare module '@tanstack/react-router' {
       path: '/api/deals'
       fullPath: '/api/deals'
       preLoaderRoute: typeof ApiDealsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/facets': {
+      id: '/api/facets'
+      path: '/api/facets'
+      fullPath: '/api/facets'
+      preLoaderRoute: typeof ApiFacetsRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/api/rankings': {
@@ -552,6 +585,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ApiGamesAppidOverviewRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/api/games/$appid/score': {
+      id: '/api/games/$appid/score'
+      path: '/api/games/$appid/score'
+      fullPath: '/api/games/$appid/score'
+      preLoaderRoute: typeof ApiGamesAppidScoreRouteImport
+      parentRoute: typeof rootRouteImport
+    }
   }
 }
 
@@ -562,6 +602,7 @@ const rootRouteChildren: RootRouteChildren = {
   SearchRoute: SearchRoute,
   ApiCatalogRoute: ApiCatalogRoute,
   ApiDealsRoute: ApiDealsRoute,
+  ApiFacetsRoute: ApiFacetsRoute,
   ApiRankingsRoute: ApiRankingsRoute,
   ApiReleasesRoute: ApiReleasesRoute,
   ApiSearchRoute: ApiSearchRoute,
@@ -582,6 +623,7 @@ const rootRouteChildren: RootRouteChildren = {
   ApiGamesAppidDetailRoute: ApiGamesAppidDetailRoute,
   ApiGamesAppidLifecycleRoute: ApiGamesAppidLifecycleRoute,
   ApiGamesAppidOverviewRoute: ApiGamesAppidOverviewRoute,
+  ApiGamesAppidScoreRoute: ApiGamesAppidScoreRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

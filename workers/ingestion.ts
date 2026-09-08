@@ -6,6 +6,14 @@ import {
   type CollectionTickResult,
   type DiscoveryResult,
 } from "./player-collector";
+import {
+  runReviewCollection,
+  type ReviewCollectionResult,
+} from "./review-collector";
+import {
+  runCriticCollection,
+  type CriticCollectionResult,
+} from "./critic-collector";
 import { reRankTrackedTiers } from "../src/lib/player";
 import { runDailyRollupJob, type RollupJobResult } from "./player-rollups";
 import {
@@ -15,8 +23,14 @@ import {
 import {
   CATALOG_REFRESH_CHECKPOINT_KEY,
   refreshCatalogBatch,
+  refreshSteamTagDictionary,
+  type SteamTagDictionaryRefreshResult,
 } from "./catalog-seed";
 import { syncReleaseFactsFromApps } from "./release-facts";
+import {
+  compactReviewEvidence,
+  type CompactReviewEvidenceResult,
+} from "../src/lib/reception-store";
 
 const INGESTION_DAILY_CHECKPOINT_KEY = "ingestion:last-daily-cycle";
 const INGESTION_CRON = "*/15 * * * *";
@@ -35,9 +49,13 @@ export interface IngestionTickResult {
   durationMs: number;
   reason?: "run_in_progress" | "error";
   tick?: CollectionTickResult;
+  reviewCollection?: ReviewCollectionResult;
+  criticCollection?: CriticCollectionResult;
   discovery?: DiscoveryResult;
   rollups?: RollupJobResult;
   prices?: HourlyPriceFeedTickResult;
+  tagDictionary?: SteamTagDictionaryRefreshResult;
+  reviewCompaction?: CompactReviewEvidenceResult;
   catalogRefresh?: {
     active: boolean;
     attempted: number;
@@ -87,6 +105,25 @@ function logCompletion(result: IngestionTickResult): void {
       failed: result.tick.failed,
       dailyCount: result.tick.dailyCount,
     },
+    reviewCollection: result.reviewCollection && {
+      selectedGames: result.reviewCollection.selectedGames,
+      attemptedGames: result.reviewCollection.attemptedGames,
+      reviewRequests: result.reviewCollection.reviewRequests,
+      newsHubRequests: result.reviewCollection.newsHubRequests,
+      persistedGames: result.reviewCollection.persistedGames,
+      ordinaryFailures: result.reviewCollection.ordinaryFailures,
+      rateLimited: result.reviewCollection.rateLimited,
+      deferredGames: result.reviewCollection.deferredGames,
+    },
+    criticCollection: result.criticCollection && {
+      requests: result.criticCollection.requests,
+      games: result.criticCollection.games,
+      successes: result.criticCollection.successes,
+      negativeLookups: result.criticCollection.negativeLookups,
+      failures: result.criticCollection.failures,
+      rateLimited: result.criticCollection.rateLimited,
+      sitemapRefreshed: result.criticCollection.sitemapRefreshed,
+    },
     discovery: result.discovery && {
       discovered: result.discovery.discovered,
       initialObservations: result.discovery.initialObservations,
@@ -105,6 +142,18 @@ function logCompletion(result: IngestionTickResult): void {
       changed: result.prices.changed,
       pending: result.prices.pending,
     },
+    tagDictionary: result.tagDictionary && {
+      refreshed: result.tagDictionary.refreshed,
+      skipped: result.tagDictionary.skipped,
+      successful: result.tagDictionary.successful,
+      entries: result.tagDictionary.entries,
+      date: result.tagDictionary.date,
+    },
+    reviewCompaction: result.reviewCompaction && {
+      monthsCompacted: result.reviewCompaction.monthsCompacted,
+      dailyBucketsDeleted: result.reviewCompaction.dailyBucketsDeleted,
+      monthlyBucketsWritten: result.reviewCompaction.monthlyBucketsWritten,
+    },
     catalogRefresh: result.catalogRefresh,
     error: result.error,
   }));
@@ -115,9 +164,13 @@ async function performIngestionTick(options: IngestionTickOptions): Promise<Inge
   const anchorTime = options.anchorTime ?? new Date();
   const customFetch = options.customFetch ?? fetch;
   const tick = await runPlayerCollectionTick(options.db, { anchorTime, customFetch });
+  const reviewCollection = await runReviewCollection(options.db, { anchorTime, customFetch });
+  const criticCollection = await runCriticCollection(options.db, { now: anchorTime, fetch: customFetch });
 
   let discovery: DiscoveryResult | undefined;
   let rollups: RollupJobResult | undefined;
+  let tagDictionary: SteamTagDictionaryRefreshResult | undefined;
+  let reviewCompaction: CompactReviewEvidenceResult | undefined;
   const targetDate = previousUtcDate(anchorTime);
   const dailyCheckpoint = await getCheckpoint(options.db, INGESTION_DAILY_CHECKPOINT_KEY);
   const trackedGame = await options.db
@@ -136,6 +189,8 @@ async function performIngestionTick(options: IngestionTickOptions): Promise<Inge
   }
   if (dailyCycleDue) {
     rollups = await runDailyRollupJob(options.db, { anchorTime, targetDate });
+    tagDictionary = await refreshSteamTagDictionary(options.db, { now: anchorTime, fetchFn: customFetch });
+    reviewCompaction = await compactReviewEvidence(options.db, anchorTime);
     await setCheckpoint(options.db, INGESTION_DAILY_CHECKPOINT_KEY, targetDate);
   }
 
@@ -162,9 +217,13 @@ async function performIngestionTick(options: IngestionTickOptions): Promise<Inge
     anchorTime: anchorTime.toISOString(),
     durationMs: Date.now() - startedAt,
     tick,
+    reviewCollection,
+    criticCollection,
     discovery,
     rollups,
     prices,
+    tagDictionary,
+    reviewCompaction,
     catalogRefresh,
   };
 }

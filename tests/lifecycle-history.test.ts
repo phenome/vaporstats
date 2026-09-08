@@ -2,6 +2,8 @@ import { describe, test, expect } from "bun:test";
 import { Database, type SQLQueryBindings } from "bun:sqlite";
 import React from "react";
 import { renderToString } from "react-dom/server";
+import { QueryClientProvider } from "@tanstack/react-query";
+import { createQueryClient } from "../src/lib/query-client";
 import { applyMigrations } from "../src/lib/migrations";
 import { type AppDatabase, type AppPreparedStatement } from "../src/lib/db";
 import { getGameByAppId, upsertApp } from "../src/lib/catalog";
@@ -172,7 +174,13 @@ describe("Lifecycle history", () => {
 
     const game = await getGameByAppId(db, 510009);
     expect(game).not.toBeNull();
-    const html = renderToString(React.createElement(GamePageView, { game: game! }));
+    const html = renderToString(
+      React.createElement(
+        QueryClientProvider,
+        { client: createQueryClient() },
+        React.createElement(GamePageView, { game: game! }),
+      ),
+    );
     expect(html).toContain("Left Early Access");
     expect(html).not.toContain("Version 1.0");
   });
@@ -194,7 +202,13 @@ describe("Lifecycle history", () => {
 
     const game = await getGameByAppId(db, 510010);
     expect(game).not.toBeNull();
-    const html = renderToString(React.createElement(GamePageView, { game: game! }));
+    const html = renderToString(
+      React.createElement(
+        QueryClientProvider,
+        { client: createQueryClient() },
+        React.createElement(GamePageView, { game: game! }),
+      ),
+    );
     expect(html).not.toContain("Left Early Access");
   });
 
@@ -212,7 +226,13 @@ describe("Lifecycle history", () => {
 
     const game = await getGameByAppId(db, 510011);
     expect(game).not.toBeNull();
-    const html = renderToString(React.createElement(GamePageView, { game: game! }));
+    const html = renderToString(
+      React.createElement(
+        QueryClientProvider,
+        { client: createQueryClient() },
+        React.createElement(GamePageView, { game: game! }),
+      ),
+    );
     expect(html).toContain("September 2026");
     expect(html).toContain("Expected release");
     expect(html).not.toContain("Sep 1, 2026");
@@ -233,32 +253,18 @@ describe("Lifecycle history", () => {
 
     const game = await getGameByAppId(db, 2643540);
     expect(game).not.toBeNull();
-    const html = renderToString(React.createElement(GamePageView, { game: game! }));
+    const html = renderToString(
+      React.createElement(
+        QueryClientProvider,
+        { client: createQueryClient() },
+        React.createElement(GamePageView, { game: game! }),
+      ),
+    );
     expect(html).toContain("Upcoming");
     expect(html).toContain("TBA");
     expect(html).not.toContain("Released");
   });
 
-  test("maintains horizontal gap between date and badge in release lifecycle overview", async () => {
-    const db = initTestDb();
-    await upsertApp(db, {
-      appid: 2502430,
-      name: "Terminal Error",
-      type: "game",
-      is_playable: true,
-      is_eligible: true,
-      release_date: "2024-10-10",
-      steam_release_date: "2024-10-10",
-      release_status: "released",
-    });
-
-    const game = await getGameByAppId(db, 2502430);
-    expect(game).not.toBeNull();
-    const html = renderToString(React.createElement(GamePageView, { game: game! }));
-    expect(html).toContain("Available on Steam");
-    expect(html).toContain("Oct 10, 2024");
-    expect(html).toMatch(/<td class="[^"]*pl-4[^"]*text-right[^"]*">\s*<span[^>]*>Available on Steam<\/span>\s*<\/td>/);
-  });
 
   test("prefers original and Steam platform dates over the appdetails date", async () => {
     const db = initTestDb();

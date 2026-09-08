@@ -1,0 +1,2730 @@
+{
+  "version": "6",
+  "dialect": "sqlite",
+  "id": "826c6f95-d72b-41a4-8049-6476cdb7af4b",
+  "prevId": "48ebc041-b9d3-42ca-aafe-84c84a4dd569",
+  "tables": {
+    "app_facet_memberships": {
+      "name": "app_facet_memberships",
+      "columns": {
+        "appid": {
+          "name": "appid",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "facet_group": {
+          "name": "facet_group",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "source_id": {
+          "name": "source_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "source_order": {
+          "name": "source_order",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "weight": {
+          "name": "weight",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "CURRENT_TIMESTAMP"
+        }
+      },
+      "indexes": {
+        "idx_app_facet_memberships_app_group_order": {
+          "name": "idx_app_facet_memberships_app_group_order",
+          "columns": [
+            "appid",
+            "facet_group",
+            "source_order"
+          ],
+          "isUnique": false
+        },
+        "idx_app_facet_memberships_group_source": {
+          "name": "idx_app_facet_memberships_group_source",
+          "columns": [
+            "facet_group",
+            "source_id"
+          ],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {
+        "app_facet_memberships_appid_apps_appid_fk": {
+          "name": "app_facet_memberships_appid_apps_appid_fk",
+          "tableFrom": "app_facet_memberships",
+          "tableTo": "apps",
+          "columnsFrom": [
+            "appid"
+          ],
+          "columnsTo": [
+            "appid"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "fk_app_facet_memberships_facet": {
+          "name": "fk_app_facet_memberships_facet",
+          "tableFrom": "app_facet_memberships",
+          "tableTo": "app_facets",
+          "columnsFrom": [
+            "facet_group",
+            "source_id"
+          ],
+          "columnsTo": [
+            "facet_group",
+            "source_id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {
+        "app_facet_memberships_appid_facet_group_source_id_pk": {
+          "columns": [
+            "appid",
+            "facet_group",
+            "source_id"
+          ],
+          "name": "app_facet_memberships_appid_facet_group_source_id_pk"
+        }
+      },
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "app_facet_memberships_group_check": {
+          "name": "app_facet_memberships_group_check",
+          "value": "\"app_facet_memberships\".\"facet_group\" IN ('genre', 'feature', 'community_tag')"
+        },
+        "app_facet_memberships_order_check": {
+          "name": "app_facet_memberships_order_check",
+          "value": "typeof(\"app_facet_memberships\".\"source_order\") = 'integer' AND \"app_facet_memberships\".\"source_order\" >= 0"
+        },
+        "app_facet_memberships_weight_check": {
+          "name": "app_facet_memberships_weight_check",
+          "value": "\"app_facet_memberships\".\"weight\" IS NULL OR (typeof(\"app_facet_memberships\".\"weight\") = 'integer' AND \"app_facet_memberships\".\"weight\" >= 0)"
+        }
+      }
+    },
+    "app_facets": {
+      "name": "app_facets",
+      "columns": {
+        "facet_group": {
+          "name": "facet_group",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "source_id": {
+          "name": "source_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "name": {
+          "name": "name",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "CURRENT_TIMESTAMP"
+        }
+      },
+      "indexes": {
+        "idx_app_facets_group_name": {
+          "name": "idx_app_facets_group_name",
+          "columns": [
+            "facet_group",
+            "name"
+          ],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {
+        "app_facets_facet_group_source_id_pk": {
+          "columns": [
+            "facet_group",
+            "source_id"
+          ],
+          "name": "app_facets_facet_group_source_id_pk"
+        }
+      },
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "app_facets_group_check": {
+          "name": "app_facets_group_check",
+          "value": "\"app_facets\".\"facet_group\" IN ('genre', 'feature', 'community_tag')"
+        },
+        "app_facets_source_id_check": {
+          "name": "app_facets_source_id_check",
+          "value": "length(trim(\"app_facets\".\"source_id\")) > 0"
+        }
+      }
+    },
+    "app_prices": {
+      "name": "app_prices",
+      "columns": {
+        "appid": {
+          "name": "appid",
+          "type": "integer",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "currency": {
+          "name": "currency",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "'USD'"
+        },
+        "initial_price": {
+          "name": "initial_price",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "final_price": {
+          "name": "final_price",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "discount_percent": {
+          "name": "discount_percent",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 0
+        },
+        "is_free": {
+          "name": "is_free",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 0
+        },
+        "is_available": {
+          "name": "is_available",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 1
+        },
+        "formatted_initial": {
+          "name": "formatted_initial",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "formatted_final": {
+          "name": "formatted_final",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "observed_at": {
+          "name": "observed_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "CURRENT_TIMESTAMP"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "CURRENT_TIMESTAMP"
+        }
+      },
+      "indexes": {
+        "idx_app_prices_discount": {
+          "name": "idx_app_prices_discount",
+          "columns": [
+            "discount_percent",
+            "is_available"
+          ],
+          "isUnique": false
+        },
+        "idx_app_prices_observed": {
+          "name": "idx_app_prices_observed",
+          "columns": [
+            "observed_at"
+          ],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {}
+    },
+    "app_relationships": {
+      "name": "app_relationships",
+      "columns": {
+        "parent_appid": {
+          "name": "parent_appid",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "child_appid": {
+          "name": "child_appid",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "relationship_type": {
+          "name": "relationship_type",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "prominence": {
+          "name": "prominence",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 0
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "CURRENT_TIMESTAMP"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "CURRENT_TIMESTAMP"
+        }
+      },
+      "indexes": {
+        "idx_app_relationships_parent": {
+          "name": "idx_app_relationships_parent",
+          "columns": [
+            "parent_appid",
+            "relationship_type"
+          ],
+          "isUnique": false
+        },
+        "idx_app_relationships_child": {
+          "name": "idx_app_relationships_child",
+          "columns": [
+            "child_appid"
+          ],
+          "isUnique": false
+        },
+        "idx_app_relationships_type": {
+          "name": "idx_app_relationships_type",
+          "columns": [
+            "relationship_type"
+          ],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {
+        "app_relationships_parent_appid_child_appid_pk": {
+          "columns": [
+            "parent_appid",
+            "child_appid"
+          ],
+          "name": "app_relationships_parent_appid_child_appid_pk"
+        }
+      },
+      "uniqueConstraints": {},
+      "checkConstraints": {}
+    },
+    "app_release_events": {
+      "name": "app_release_events",
+      "columns": {
+        "appid": {
+          "name": "appid",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "event_type": {
+          "name": "event_type",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "source": {
+          "name": "source",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "event_date": {
+          "name": "event_date",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "CURRENT_TIMESTAMP"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "CURRENT_TIMESTAMP"
+        }
+      },
+      "indexes": {
+        "idx_app_release_events_date": {
+          "name": "idx_app_release_events_date",
+          "columns": [
+            "event_date",
+            "appid"
+          ],
+          "isUnique": false
+        },
+        "idx_app_release_events_appid": {
+          "name": "idx_app_release_events_appid",
+          "columns": [
+            "appid",
+            "event_date"
+          ],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {
+        "app_release_events_appid_apps_appid_fk": {
+          "name": "app_release_events_appid_apps_appid_fk",
+          "tableFrom": "app_release_events",
+          "tableTo": "apps",
+          "columnsFrom": [
+            "appid"
+          ],
+          "columnsTo": [
+            "appid"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {
+        "app_release_events_appid_event_type_event_date_pk": {
+          "columns": [
+            "appid",
+            "event_type",
+            "event_date"
+          ],
+          "name": "app_release_events_appid_event_type_event_date_pk"
+        }
+      },
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "app_release_events_event_type_check": {
+          "name": "app_release_events_event_type_check",
+          "value": "\"app_release_events\".\"event_type\" IN ('early_access', 'full_release', 'patch')"
+        },
+        "app_release_events_source_check": {
+          "name": "app_release_events_source_check",
+          "value": "\"app_release_events\".\"source\" IN ('original_steam_release_date', 'release_from_early_access_date', 'original_release_date')"
+        }
+      }
+    },
+    "app_release_plans": {
+      "name": "app_release_plans",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "integer",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": true
+        },
+        "appid": {
+          "name": "appid",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "expected_date": {
+          "name": "expected_date",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "observed_at": {
+          "name": "observed_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "CURRENT_TIMESTAMP"
+        }
+      },
+      "indexes": {
+        "idx_app_release_plans_appid_observed_at": {
+          "name": "idx_app_release_plans_appid_observed_at",
+          "columns": [
+            "appid",
+            "\"observed_at\" asc"
+          ],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {
+        "app_release_plans_appid_apps_appid_fk": {
+          "name": "app_release_plans_appid_apps_appid_fk",
+          "tableFrom": "app_release_plans",
+          "tableTo": "apps",
+          "columnsFrom": [
+            "appid"
+          ],
+          "columnsTo": [
+            "appid"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {}
+    },
+    "apps": {
+      "name": "apps",
+      "columns": {
+        "appid": {
+          "name": "appid",
+          "type": "integer",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "name": {
+          "name": "name",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "slug": {
+          "name": "slug",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "type": {
+          "name": "type",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "'game'"
+        },
+        "is_eligible": {
+          "name": "is_eligible",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 1
+        },
+        "is_playable": {
+          "name": "is_playable",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 1
+        },
+        "parent_appid": {
+          "name": "parent_appid",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "release_date": {
+          "name": "release_date",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "release_status": {
+          "name": "release_status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "'released'"
+        },
+        "description": {
+          "name": "description",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false,
+          "default": "''"
+        },
+        "header_image": {
+          "name": "header_image",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false,
+          "default": "''"
+        },
+        "header_lqip": {
+          "name": "header_lqip",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "icon_hash": {
+          "name": "icon_hash",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "icon_lqip": {
+          "name": "icon_lqip",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "developer": {
+          "name": "developer",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false,
+          "default": "''"
+        },
+        "publisher": {
+          "name": "publisher",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false,
+          "default": "''"
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "CURRENT_TIMESTAMP"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "CURRENT_TIMESTAMP"
+        },
+        "steam_release_date": {
+          "name": "steam_release_date",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "original_release_date": {
+          "name": "original_release_date",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "original_steam_release_date": {
+          "name": "original_steam_release_date",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "release_from_early_access_date": {
+          "name": "release_from_early_access_date",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "release_date_source": {
+          "name": "release_date_source",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "is_early_access": {
+          "name": "is_early_access",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "has_left_early_access": {
+          "name": "has_left_early_access",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "metacritic_score": {
+          "name": "metacritic_score",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "metacritic_url": {
+          "name": "metacritic_url",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "metacritic_observed_at": {
+          "name": "metacritic_observed_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "idx_apps_slug": {
+          "name": "idx_apps_slug",
+          "columns": [
+            "slug"
+          ],
+          "isUnique": false
+        },
+        "idx_apps_type_playable": {
+          "name": "idx_apps_type_playable",
+          "columns": [
+            "type",
+            "is_playable",
+            "is_eligible"
+          ],
+          "isUnique": false
+        },
+        "idx_apps_parent": {
+          "name": "idx_apps_parent",
+          "columns": [
+            "parent_appid"
+          ],
+          "isUnique": false
+        },
+        "idx_apps_release_date": {
+          "name": "idx_apps_release_date",
+          "columns": [
+            "release_date"
+          ],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "apps_release_date_source_check": {
+          "name": "apps_release_date_source_check",
+          "value": "\"apps\".\"release_date_source\" IS NULL OR \"apps\".\"release_date_source\" IN ('original_release_date', 'steam_release_date', 'appdetails')"
+        },
+        "apps_is_early_access_check": {
+          "name": "apps_is_early_access_check",
+          "value": "\"apps\".\"is_early_access\" IS NULL OR \"apps\".\"is_early_access\" IN (0, 1)"
+        },
+        "apps_has_left_early_access_check": {
+          "name": "apps_has_left_early_access_check",
+          "value": "\"apps\".\"has_left_early_access\" IS NULL OR \"apps\".\"has_left_early_access\" IN (0, 1)"
+        },
+        "apps_metacritic_score_check": {
+          "name": "apps_metacritic_score_check",
+          "value": "\"apps\".\"metacritic_score\" IS NULL OR (typeof(\"apps\".\"metacritic_score\") = 'integer' AND \"apps\".\"metacritic_score\" BETWEEN 0 AND 100)"
+        }
+      }
+    },
+    "checkpoints": {
+      "name": "checkpoints",
+      "columns": {
+        "key": {
+          "name": "key",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "value": {
+          "name": "value",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "cursor": {
+          "name": "cursor",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "CURRENT_TIMESTAMP"
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {}
+    },
+    "critic_records": {
+      "name": "critic_records",
+      "columns": {
+        "appid": {
+          "name": "appid",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "source": {
+          "name": "source",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "matched_identity": {
+          "name": "matched_identity",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "platform_scope": {
+          "name": "platform_scope",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "'unknown'"
+        },
+        "edition": {
+          "name": "edition",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "native_score": {
+          "name": "native_score",
+          "type": "real",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "native_tier": {
+          "name": "native_tier",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "review_count": {
+          "name": "review_count",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "score_scale": {
+          "name": "score_scale",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "source_url": {
+          "name": "source_url",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "review_period_start": {
+          "name": "review_period_start",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "review_period_end": {
+          "name": "review_period_end",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "collection_basis": {
+          "name": "collection_basis",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "'public_page'"
+        },
+        "observed_at": {
+          "name": "observed_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "last_success_at": {
+          "name": "last_success_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "provenance": {
+          "name": "provenance",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "'{}'"
+        },
+        "basis": {
+          "name": "basis",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "'public aggregate page'"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "CURRENT_TIMESTAMP"
+        }
+      },
+      "indexes": {
+        "idx_critic_records_source_observed": {
+          "name": "idx_critic_records_source_observed",
+          "columns": [
+            "source",
+            "\"observed_at\" desc"
+          ],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {
+        "critic_records_appid_apps_appid_fk": {
+          "name": "critic_records_appid_apps_appid_fk",
+          "tableFrom": "critic_records",
+          "tableTo": "apps",
+          "columnsFrom": [
+            "appid"
+          ],
+          "columnsTo": [
+            "appid"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {
+        "critic_records_appid_source_pk": {
+          "columns": [
+            "appid",
+            "source"
+          ],
+          "name": "critic_records_appid_source_pk"
+        }
+      },
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "critic_records_source_check": {
+          "name": "critic_records_source_check",
+          "value": "\"critic_records\".\"source\" IN ('opencritic', 'metacritic')"
+        },
+        "critic_records_platform_scope_check": {
+          "name": "critic_records_platform_scope_check",
+          "value": "\"critic_records\".\"platform_scope\" IN ('pc', 'mixed', 'console', 'unknown')"
+        },
+        "critic_records_score_check": {
+          "name": "critic_records_score_check",
+          "value": "(\"critic_records\".\"native_score\" IS NULL OR (typeof(\"critic_records\".\"native_score\") IN ('integer', 'real') AND \"critic_records\".\"score_scale\" IS NOT NULL AND \"critic_records\".\"native_score\" BETWEEN 0 AND \"critic_records\".\"score_scale\")) AND (\"critic_records\".\"score_scale\" IS NULL OR (typeof(\"critic_records\".\"score_scale\") = 'integer' AND \"critic_records\".\"score_scale\" > 0))"
+        },
+        "critic_records_review_count_check": {
+          "name": "critic_records_review_count_check",
+          "value": "\"critic_records\".\"review_count\" IS NULL OR (typeof(\"critic_records\".\"review_count\") = 'integer' AND \"critic_records\".\"review_count\" >= 0)"
+        },
+        "critic_records_review_period_check": {
+          "name": "critic_records_review_period_check",
+          "value": "\"critic_records\".\"review_period_start\" IS NULL OR \"critic_records\".\"review_period_end\" IS NULL OR \"critic_records\".\"review_period_start\" <= \"critic_records\".\"review_period_end\""
+        },
+        "critic_records_collection_basis_check": {
+          "name": "critic_records_collection_basis_check",
+          "value": "\"critic_records\".\"collection_basis\" = 'public_page'"
+        }
+      }
+    },
+    "observations": {
+      "name": "observations",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "integer",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": true
+        },
+        "appid": {
+          "name": "appid",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "current_players": {
+          "name": "current_players",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "observed_at": {
+          "name": "observed_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "CURRENT_TIMESTAMP"
+        }
+      },
+      "indexes": {
+        "idx_observations_appid_observed_at": {
+          "name": "idx_observations_appid_observed_at",
+          "columns": [
+            "appid",
+            "\"observed_at\" desc"
+          ],
+          "isUnique": false
+        },
+        "idx_observations_observed_at": {
+          "name": "idx_observations_observed_at",
+          "columns": [
+            "observed_at"
+          ],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {}
+    },
+    "player_daily_requests": {
+      "name": "player_daily_requests",
+      "columns": {
+        "date": {
+          "name": "date",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "count": {
+          "name": "count",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 0
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "CURRENT_TIMESTAMP"
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {}
+    },
+    "player_rollups": {
+      "name": "player_rollups",
+      "columns": {
+        "appid": {
+          "name": "appid",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "date": {
+          "name": "date",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "min_players": {
+          "name": "min_players",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "max_players": {
+          "name": "max_players",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "avg_players": {
+          "name": "avg_players",
+          "type": "real",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "close_players": {
+          "name": "close_players",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "sample_count": {
+          "name": "sample_count",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "CURRENT_TIMESTAMP"
+        }
+      },
+      "indexes": {
+        "idx_player_rollups_date": {
+          "name": "idx_player_rollups_date",
+          "columns": [
+            "date"
+          ],
+          "isUnique": false
+        },
+        "idx_player_rollups_appid_date": {
+          "name": "idx_player_rollups_appid_date",
+          "columns": [
+            "appid",
+            "\"date\" desc"
+          ],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {
+        "player_rollups_appid_date_pk": {
+          "columns": [
+            "appid",
+            "date"
+          ],
+          "name": "player_rollups_appid_date_pk"
+        }
+      },
+      "uniqueConstraints": {},
+      "checkConstraints": {}
+    },
+    "player_score_history": {
+      "name": "player_score_history",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "integer",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": true
+        },
+        "appid": {
+          "name": "appid",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "observed_at": {
+          "name": "observed_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "score": {
+          "name": "score",
+          "type": "real",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "formula_version": {
+          "name": "formula_version",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "current_positive_count": {
+          "name": "current_positive_count",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "current_total_count": {
+          "name": "current_total_count",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "historical_positive_count": {
+          "name": "historical_positive_count",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "historical_total_count": {
+          "name": "historical_total_count",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "current_window_start": {
+          "name": "current_window_start",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "current_window_end": {
+          "name": "current_window_end",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "historical_window_start": {
+          "name": "historical_window_start",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "historical_window_end": {
+          "name": "historical_window_end",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "current_evidence_intervals": {
+          "name": "current_evidence_intervals",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "historical_evidence_intervals": {
+          "name": "historical_evidence_intervals",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "current_source_id": {
+          "name": "current_source_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "historical_source_id": {
+          "name": "historical_source_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "current_evidence_observed_at": {
+          "name": "current_evidence_observed_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "historical_evidence_observed_at": {
+          "name": "historical_evidence_observed_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "anchor_event_id": {
+          "name": "anchor_event_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "anchor_at": {
+          "name": "anchor_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "provenance": {
+          "name": "provenance",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "CURRENT_TIMESTAMP"
+        }
+      },
+      "indexes": {
+        "uq_player_score_history_id_appid": {
+          "name": "uq_player_score_history_id_appid",
+          "columns": [
+            "id",
+            "appid"
+          ],
+          "isUnique": true
+        },
+        "idx_player_score_history_appid_observed": {
+          "name": "idx_player_score_history_appid_observed",
+          "columns": [
+            "appid",
+            "\"observed_at\" desc"
+          ],
+          "isUnique": false
+        },
+        "idx_player_score_history_source_observed": {
+          "name": "idx_player_score_history_source_observed",
+          "columns": [
+            "current_source_id",
+            "\"observed_at\" desc"
+          ],
+          "isUnique": false
+        },
+        "idx_player_score_history_historical_source_observed": {
+          "name": "idx_player_score_history_historical_source_observed",
+          "columns": [
+            "historical_source_id",
+            "\"observed_at\" desc"
+          ],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {
+        "player_score_history_appid_apps_appid_fk": {
+          "name": "player_score_history_appid_apps_appid_fk",
+          "tableFrom": "player_score_history",
+          "tableTo": "apps",
+          "columnsFrom": [
+            "appid"
+          ],
+          "columnsTo": [
+            "appid"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        },
+        "player_score_history_current_source_id_review_sources_id_fk": {
+          "name": "player_score_history_current_source_id_review_sources_id_fk",
+          "tableFrom": "player_score_history",
+          "tableTo": "review_sources",
+          "columnsFrom": [
+            "current_source_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        },
+        "player_score_history_historical_source_id_review_sources_id_fk": {
+          "name": "player_score_history_historical_source_id_review_sources_id_fk",
+          "tableFrom": "player_score_history",
+          "tableTo": "review_sources",
+          "columnsFrom": [
+            "historical_source_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "player_score_history_score_check": {
+          "name": "player_score_history_score_check",
+          "value": "typeof(\"player_score_history\".\"score\") IN ('integer', 'real') AND \"player_score_history\".\"score\" BETWEEN 0 AND 100"
+        },
+        "player_score_history_current_counts_check": {
+          "name": "player_score_history_current_counts_check",
+          "value": "typeof(\"player_score_history\".\"current_positive_count\") = 'integer' AND typeof(\"player_score_history\".\"current_total_count\") = 'integer' AND \"player_score_history\".\"current_positive_count\" >= 0 AND \"player_score_history\".\"current_total_count\" >= 0 AND \"player_score_history\".\"current_positive_count\" <= \"player_score_history\".\"current_total_count\""
+        },
+        "player_score_history_historical_counts_check": {
+          "name": "player_score_history_historical_counts_check",
+          "value": "typeof(\"player_score_history\".\"historical_positive_count\") = 'integer' AND typeof(\"player_score_history\".\"historical_total_count\") = 'integer' AND \"player_score_history\".\"historical_positive_count\" >= 0 AND \"player_score_history\".\"historical_total_count\" >= 0 AND \"player_score_history\".\"historical_positive_count\" <= \"player_score_history\".\"historical_total_count\""
+        },
+        "player_score_history_window_check": {
+          "name": "player_score_history_window_check",
+          "value": "\"player_score_history\".\"current_window_start\" < \"player_score_history\".\"current_window_end\" AND \"player_score_history\".\"historical_window_start\" < \"player_score_history\".\"historical_window_end\""
+        }
+      }
+    },
+    "player_score_state": {
+      "name": "player_score_state",
+      "columns": {
+        "appid": {
+          "name": "appid",
+          "type": "integer",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "latest_score_history_id": {
+          "name": "latest_score_history_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "historical_positive_count": {
+          "name": "historical_positive_count",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "historical_total_count": {
+          "name": "historical_total_count",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "historical_source_id": {
+          "name": "historical_source_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "historical_window_start": {
+          "name": "historical_window_start",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "historical_window_end": {
+          "name": "historical_window_end",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "historical_evidence_intervals": {
+          "name": "historical_evidence_intervals",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "'[]'"
+        },
+        "historical_baseline_observed_at": {
+          "name": "historical_baseline_observed_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "eligibility_review_count": {
+          "name": "eligibility_review_count",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "eligibility_source_id": {
+          "name": "eligibility_source_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "eligibility_window_start": {
+          "name": "eligibility_window_start",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "eligibility_window_end": {
+          "name": "eligibility_window_end",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "eligibility_evidence_start": {
+          "name": "eligibility_evidence_start",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "eligibility_evidence_end": {
+          "name": "eligibility_evidence_end",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "eligibility_evidence_intervals": {
+          "name": "eligibility_evidence_intervals",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "'[]'"
+        },
+        "eligibility_observed_at": {
+          "name": "eligibility_observed_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "eligibility_provenance": {
+          "name": "eligibility_provenance",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "'{}'"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "CURRENT_TIMESTAMP"
+        }
+      },
+      "indexes": {
+        "idx_player_score_state_latest_score": {
+          "name": "idx_player_score_state_latest_score",
+          "columns": [
+            "latest_score_history_id"
+          ],
+          "isUnique": false
+        },
+        "idx_player_score_state_eligibility": {
+          "name": "idx_player_score_state_eligibility",
+          "columns": [
+            "eligibility_source_id",
+            "eligibility_evidence_start",
+            "eligibility_evidence_end"
+          ],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {
+        "player_score_state_appid_apps_appid_fk": {
+          "name": "player_score_state_appid_apps_appid_fk",
+          "tableFrom": "player_score_state",
+          "tableTo": "apps",
+          "columnsFrom": [
+            "appid"
+          ],
+          "columnsTo": [
+            "appid"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "player_score_state_historical_source_id_review_sources_id_fk": {
+          "name": "player_score_state_historical_source_id_review_sources_id_fk",
+          "tableFrom": "player_score_state",
+          "tableTo": "review_sources",
+          "columnsFrom": [
+            "historical_source_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        },
+        "player_score_state_eligibility_source_id_review_sources_id_fk": {
+          "name": "player_score_state_eligibility_source_id_review_sources_id_fk",
+          "tableFrom": "player_score_state",
+          "tableTo": "review_sources",
+          "columnsFrom": [
+            "eligibility_source_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        },
+        "fk_player_score_state_latest_score_app": {
+          "name": "fk_player_score_state_latest_score_app",
+          "tableFrom": "player_score_state",
+          "tableTo": "player_score_history",
+          "columnsFrom": [
+            "latest_score_history_id",
+            "appid"
+          ],
+          "columnsTo": [
+            "id",
+            "appid"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "player_score_state_historical_counts_check": {
+          "name": "player_score_state_historical_counts_check",
+          "value": "(\"player_score_state\".\"historical_positive_count\" IS NULL AND \"player_score_state\".\"historical_total_count\" IS NULL) OR (typeof(\"player_score_state\".\"historical_positive_count\") = 'integer' AND typeof(\"player_score_state\".\"historical_total_count\") = 'integer' AND \"player_score_state\".\"historical_positive_count\" >= 0 AND \"player_score_state\".\"historical_total_count\" >= 0 AND \"player_score_state\".\"historical_positive_count\" <= \"player_score_state\".\"historical_total_count\")"
+        },
+        "player_score_state_historical_window_check": {
+          "name": "player_score_state_historical_window_check",
+          "value": "(\"player_score_state\".\"historical_window_start\" IS NULL AND \"player_score_state\".\"historical_window_end\" IS NULL) OR (\"player_score_state\".\"historical_window_start\" IS NOT NULL AND \"player_score_state\".\"historical_window_end\" IS NOT NULL AND \"player_score_state\".\"historical_window_start\" < \"player_score_state\".\"historical_window_end\")"
+        },
+        "player_score_state_eligibility_count_check": {
+          "name": "player_score_state_eligibility_count_check",
+          "value": "\"player_score_state\".\"eligibility_review_count\" IS NULL OR (typeof(\"player_score_state\".\"eligibility_review_count\") = 'integer' AND \"player_score_state\".\"eligibility_review_count\" >= 0)"
+        },
+        "player_score_state_eligibility_window_check": {
+          "name": "player_score_state_eligibility_window_check",
+          "value": "(\"player_score_state\".\"eligibility_window_start\" IS NULL AND \"player_score_state\".\"eligibility_window_end\" IS NULL) OR (\"player_score_state\".\"eligibility_window_start\" IS NOT NULL AND \"player_score_state\".\"eligibility_window_end\" IS NOT NULL AND \"player_score_state\".\"eligibility_window_start\" < \"player_score_state\".\"eligibility_window_end\")"
+        },
+        "player_score_state_eligibility_evidence_check": {
+          "name": "player_score_state_eligibility_evidence_check",
+          "value": "(\"player_score_state\".\"eligibility_evidence_start\" IS NULL AND \"player_score_state\".\"eligibility_evidence_end\" IS NULL) OR (\"player_score_state\".\"eligibility_evidence_start\" IS NOT NULL AND \"player_score_state\".\"eligibility_evidence_end\" IS NOT NULL AND \"player_score_state\".\"eligibility_evidence_start\" < \"player_score_state\".\"eligibility_evidence_end\")"
+        }
+      }
+    },
+    "price_history": {
+      "name": "price_history",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "integer",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": true
+        },
+        "appid": {
+          "name": "appid",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "currency": {
+          "name": "currency",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "'USD'"
+        },
+        "initial_price": {
+          "name": "initial_price",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "final_price": {
+          "name": "final_price",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "discount_percent": {
+          "name": "discount_percent",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 0
+        },
+        "is_free": {
+          "name": "is_free",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 0
+        },
+        "is_available": {
+          "name": "is_available",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 1
+        },
+        "formatted_price": {
+          "name": "formatted_price",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "observed_at": {
+          "name": "observed_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "CURRENT_TIMESTAMP"
+        }
+      },
+      "indexes": {
+        "idx_price_history_appid_observed": {
+          "name": "idx_price_history_appid_observed",
+          "columns": [
+            "appid",
+            "\"observed_at\" asc"
+          ],
+          "isUnique": false
+        },
+        "idx_price_history_observed": {
+          "name": "idx_price_history_observed",
+          "columns": [
+            "observed_at"
+          ],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {}
+    },
+    "release_facts": {
+      "name": "release_facts",
+      "columns": {
+        "appid": {
+          "name": "appid",
+          "type": "integer",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "name": {
+          "name": "name",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "slug": {
+          "name": "slug",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "type": {
+          "name": "type",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "parent_appid": {
+          "name": "parent_appid",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "release_date": {
+          "name": "release_date",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "release_year": {
+          "name": "release_year",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "release_week": {
+          "name": "release_week",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "release_status": {
+          "name": "release_status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "is_precise": {
+          "name": "is_precise",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 1
+        },
+        "header_image": {
+          "name": "header_image",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false,
+          "default": "''"
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "CURRENT_TIMESTAMP"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "CURRENT_TIMESTAMP"
+        }
+      },
+      "indexes": {
+        "idx_release_facts_week": {
+          "name": "idx_release_facts_week",
+          "columns": [
+            "release_week",
+            "release_date"
+          ],
+          "isUnique": false
+        },
+        "idx_release_facts_date": {
+          "name": "idx_release_facts_date",
+          "columns": [
+            "release_date"
+          ],
+          "isUnique": false
+        },
+        "idx_release_facts_parent": {
+          "name": "idx_release_facts_parent",
+          "columns": [
+            "parent_appid"
+          ],
+          "isUnique": false
+        },
+        "idx_release_facts_type": {
+          "name": "idx_release_facts_type",
+          "columns": [
+            "type"
+          ],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {}
+    },
+    "review_buckets": {
+      "name": "review_buckets",
+      "columns": {
+        "appid": {
+          "name": "appid",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "source_id": {
+          "name": "source_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "granularity": {
+          "name": "granularity",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "period_start": {
+          "name": "period_start",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "period_end": {
+          "name": "period_end",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "positive_count": {
+          "name": "positive_count",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "negative_count": {
+          "name": "negative_count",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "observed_at": {
+          "name": "observed_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "provenance": {
+          "name": "provenance",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "idx_review_buckets_appid_period": {
+          "name": "idx_review_buckets_appid_period",
+          "columns": [
+            "appid",
+            "\"period_start\" asc",
+            "\"period_end\" asc"
+          ],
+          "isUnique": false
+        },
+        "idx_review_buckets_source_period": {
+          "name": "idx_review_buckets_source_period",
+          "columns": [
+            "source_id",
+            "\"period_start\" asc",
+            "\"period_end\" asc"
+          ],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {
+        "review_buckets_appid_apps_appid_fk": {
+          "name": "review_buckets_appid_apps_appid_fk",
+          "tableFrom": "review_buckets",
+          "tableTo": "apps",
+          "columnsFrom": [
+            "appid"
+          ],
+          "columnsTo": [
+            "appid"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "review_buckets_source_id_review_sources_id_fk": {
+          "name": "review_buckets_source_id_review_sources_id_fk",
+          "tableFrom": "review_buckets",
+          "tableTo": "review_sources",
+          "columnsFrom": [
+            "source_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {
+        "review_buckets_appid_source_id_granularity_period_start_period_end_pk": {
+          "columns": [
+            "appid",
+            "source_id",
+            "granularity",
+            "period_start",
+            "period_end"
+          ],
+          "name": "review_buckets_appid_source_id_granularity_period_start_period_end_pk"
+        }
+      },
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "review_buckets_granularity_check": {
+          "name": "review_buckets_granularity_check",
+          "value": "\"review_buckets\".\"granularity\" IN ('daily', 'monthly')"
+        },
+        "review_buckets_interval_check": {
+          "name": "review_buckets_interval_check",
+          "value": "\"review_buckets\".\"period_start\" < \"review_buckets\".\"period_end\""
+        },
+        "review_buckets_positive_count_check": {
+          "name": "review_buckets_positive_count_check",
+          "value": "typeof(\"review_buckets\".\"positive_count\") = 'integer' AND \"review_buckets\".\"positive_count\" >= 0"
+        },
+        "review_buckets_negative_count_check": {
+          "name": "review_buckets_negative_count_check",
+          "value": "typeof(\"review_buckets\".\"negative_count\") = 'integer' AND \"review_buckets\".\"negative_count\" >= 0"
+        }
+      }
+    },
+    "review_sources": {
+      "name": "review_sources",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "endpoint": {
+          "name": "endpoint",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "request_filter": {
+          "name": "request_filter",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "language": {
+          "name": "language",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "purchase_type": {
+          "name": "purchase_type",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "day_range": {
+          "name": "day_range",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "filter_offtopic_activity": {
+          "name": "filter_offtopic_activity",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "population": {
+          "name": "population",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "population_flags": {
+          "name": "population_flags",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "'{}'"
+        },
+        "interpretation_version": {
+          "name": "interpretation_version",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "identity_key": {
+          "name": "identity_key",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "CURRENT_TIMESTAMP"
+        }
+      },
+      "indexes": {
+        "uq_review_sources_identity": {
+          "name": "uq_review_sources_identity",
+          "columns": [
+            "identity_key"
+          ],
+          "isUnique": true
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "review_sources_endpoint_check": {
+          "name": "review_sources_endpoint_check",
+          "value": "\"review_sources\".\"endpoint\" IN ('appreviews', 'appreviewhistogram')"
+        },
+        "review_sources_day_range_check": {
+          "name": "review_sources_day_range_check",
+          "value": "\"review_sources\".\"day_range\" IS NULL OR (typeof(\"review_sources\".\"day_range\") = 'integer' AND \"review_sources\".\"day_range\" >= 0)"
+        },
+        "review_sources_filter_offtopic_check": {
+          "name": "review_sources_filter_offtopic_check",
+          "value": "\"review_sources\".\"filter_offtopic_activity\" IS NULL OR (typeof(\"review_sources\".\"filter_offtopic_activity\") = 'integer' AND \"review_sources\".\"filter_offtopic_activity\" IN (0, 1))"
+        },
+        "review_sources_identity_key_check": {
+          "name": "review_sources_identity_key_check",
+          "value": "length(trim(\"review_sources\".\"identity_key\")) > 0"
+        }
+      }
+    },
+    "review_summary_snapshots": {
+      "name": "review_summary_snapshots",
+      "columns": {
+        "appid": {
+          "name": "appid",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "source_id": {
+          "name": "source_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "observed_at": {
+          "name": "observed_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "lifetime_positive_count": {
+          "name": "lifetime_positive_count",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "lifetime_total_count": {
+          "name": "lifetime_total_count",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "CURRENT_TIMESTAMP"
+        }
+      },
+      "indexes": {
+        "idx_review_summaries_appid_observed": {
+          "name": "idx_review_summaries_appid_observed",
+          "columns": [
+            "appid",
+            "\"observed_at\" desc"
+          ],
+          "isUnique": false
+        },
+        "idx_review_summaries_source_observed": {
+          "name": "idx_review_summaries_source_observed",
+          "columns": [
+            "source_id",
+            "\"observed_at\" desc"
+          ],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {
+        "review_summary_snapshots_appid_apps_appid_fk": {
+          "name": "review_summary_snapshots_appid_apps_appid_fk",
+          "tableFrom": "review_summary_snapshots",
+          "tableTo": "apps",
+          "columnsFrom": [
+            "appid"
+          ],
+          "columnsTo": [
+            "appid"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "review_summary_snapshots_source_id_review_sources_id_fk": {
+          "name": "review_summary_snapshots_source_id_review_sources_id_fk",
+          "tableFrom": "review_summary_snapshots",
+          "tableTo": "review_sources",
+          "columnsFrom": [
+            "source_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {
+        "review_summary_snapshots_appid_source_id_observed_at_pk": {
+          "columns": [
+            "appid",
+            "source_id",
+            "observed_at"
+          ],
+          "name": "review_summary_snapshots_appid_source_id_observed_at_pk"
+        }
+      },
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "review_summary_positive_count_check": {
+          "name": "review_summary_positive_count_check",
+          "value": "typeof(\"review_summary_snapshots\".\"lifetime_positive_count\") = 'integer' AND \"review_summary_snapshots\".\"lifetime_positive_count\" >= 0 AND \"review_summary_snapshots\".\"lifetime_positive_count\" <= \"review_summary_snapshots\".\"lifetime_total_count\""
+        },
+        "review_summary_total_count_check": {
+          "name": "review_summary_total_count_check",
+          "value": "typeof(\"review_summary_snapshots\".\"lifetime_total_count\") = 'integer' AND \"review_summary_snapshots\".\"lifetime_total_count\" >= 0"
+        }
+      }
+    },
+    "steam_events": {
+      "name": "steam_events",
+      "columns": {
+        "event_id": {
+          "name": "event_id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "appid": {
+          "name": "appid",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "category": {
+          "name": "category",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "title": {
+          "name": "title",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "url": {
+          "name": "url",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "start_at": {
+          "name": "start_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "publication_at": {
+          "name": "publication_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "observed_at": {
+          "name": "observed_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "source": {
+          "name": "source",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "'steam_news_hub'"
+        },
+        "provenance": {
+          "name": "provenance",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "'{}'"
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "CURRENT_TIMESTAMP"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "CURRENT_TIMESTAMP"
+        }
+      },
+      "indexes": {
+        "idx_steam_events_appid_start": {
+          "name": "idx_steam_events_appid_start",
+          "columns": [
+            "appid",
+            "\"start_at\" desc"
+          ],
+          "isUnique": false
+        },
+        "idx_steam_events_appid_publication": {
+          "name": "idx_steam_events_appid_publication",
+          "columns": [
+            "appid",
+            "\"publication_at\" desc"
+          ],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {
+        "steam_events_appid_apps_appid_fk": {
+          "name": "steam_events_appid_apps_appid_fk",
+          "tableFrom": "steam_events",
+          "tableTo": "apps",
+          "columnsFrom": [
+            "appid"
+          ],
+          "columnsTo": [
+            "appid"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "steam_events_category_check": {
+          "name": "steam_events_category_check",
+          "value": "\"steam_events\".\"category\" IS NULL OR length(trim(\"steam_events\".\"category\")) > 0"
+        },
+        "steam_events_dates_check": {
+          "name": "steam_events_dates_check",
+          "value": "(\"steam_events\".\"start_at\" IS NULL OR length(trim(\"steam_events\".\"start_at\")) > 0) AND (\"steam_events\".\"publication_at\" IS NULL OR length(trim(\"steam_events\".\"publication_at\")) > 0)"
+        }
+      }
+    },
+    "tracked_games": {
+      "name": "tracked_games",
+      "columns": {
+        "appid": {
+          "name": "appid",
+          "type": "integer",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "tier": {
+          "name": "tier",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "'daily'"
+        },
+        "slot": {
+          "name": "slot",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 0
+        },
+        "next_due_at": {
+          "name": "next_due_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "last_attempted_at": {
+          "name": "last_attempted_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "last_successful_at": {
+          "name": "last_successful_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "latest_players": {
+          "name": "latest_players",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "consecutive_failures": {
+          "name": "consecutive_failures",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 0
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "CURRENT_TIMESTAMP"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "CURRENT_TIMESTAMP"
+        }
+      },
+      "indexes": {
+        "idx_tracked_games_tier_due": {
+          "name": "idx_tracked_games_tier_due",
+          "columns": [
+            "tier",
+            "next_due_at"
+          ],
+          "isUnique": false
+        },
+        "idx_tracked_games_next_due": {
+          "name": "idx_tracked_games_next_due",
+          "columns": [
+            "next_due_at"
+          ],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {}
+    }
+  },
+  "views": {},
+  "enums": {},
+  "_meta": {
+    "schemas": {},
+    "tables": {},
+    "columns": {}
+  },
+  "internal": {
+    "indexes": {
+      "idx_app_release_plans_appid_observed_at": {
+        "columns": {
+          "\"observed_at\" asc": {
+            "isExpression": true
+          }
+        }
+      },
+      "idx_critic_records_source_observed": {
+        "columns": {
+          "\"observed_at\" desc": {
+            "isExpression": true
+          }
+        }
+      },
+      "idx_observations_appid_observed_at": {
+        "columns": {
+          "\"observed_at\" desc": {
+            "isExpression": true
+          }
+        }
+      },
+      "idx_player_rollups_appid_date": {
+        "columns": {
+          "\"date\" desc": {
+            "isExpression": true
+          }
+        }
+      },
+      "idx_player_score_history_appid_observed": {
+        "columns": {
+          "\"observed_at\" desc": {
+            "isExpression": true
+          }
+        }
+      },
+      "idx_player_score_history_source_observed": {
+        "columns": {
+          "\"observed_at\" desc": {
+            "isExpression": true
+          }
+        }
+      },
+      "idx_player_score_history_historical_source_observed": {
+        "columns": {
+          "\"observed_at\" desc": {
+            "isExpression": true
+          }
+        }
+      },
+      "idx_price_history_appid_observed": {
+        "columns": {
+          "\"observed_at\" asc": {
+            "isExpression": true
+          }
+        }
+      },
+      "idx_review_buckets_appid_period": {
+        "columns": {
+          "\"period_start\" asc": {
+            "isExpression": true
+          },
+          "\"period_end\" asc": {
+            "isExpression": true
+          }
+        }
+      },
+      "idx_review_buckets_source_period": {
+        "columns": {
+          "\"period_start\" asc": {
+            "isExpression": true
+          },
+          "\"period_end\" asc": {
+            "isExpression": true
+          }
+        }
+      },
+      "idx_review_summaries_appid_observed": {
+        "columns": {
+          "\"observed_at\" desc": {
+            "isExpression": true
+          }
+        }
+      },
+      "idx_review_summaries_source_observed": {
+        "columns": {
+          "\"observed_at\" desc": {
+            "isExpression": true
+          }
+        }
+      },
+      "idx_steam_events_appid_start": {
+        "columns": {
+          "\"start_at\" desc": {
+            "isExpression": true
+          }
+        }
+      },
+      "idx_steam_events_appid_publication": {
+        "columns": {
+          "\"publication_at\" desc": {
+            "isExpression": true
+          }
+        }
+      }
+    }
+  }
+}

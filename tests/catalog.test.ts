@@ -13,6 +13,12 @@ import {
   type CatalogEntity,
 } from "../src/lib/catalog";
 import {
+  listAppFacets,
+  listFacetDictionary,
+  mapSteamAppDetailsFacets,
+  syncAppFacets,
+} from "../src/lib/taxonomy";
+import {
   CATALOG_REFRESH_CHECKPOINT_KEY,
   queueCatalogRefresh,
   refreshCatalogBatch,
@@ -830,4 +836,104 @@ describe("Catalog Foundation", () => {
 
     console.log("generation and cache boundary");
   });
+  test("facet sync preserves omitted groups and clears explicit empties", async () => {
+    const freshDb = createFreshDb();
+    await upsertApp(freshDb, { appid: 9200, name: "Facet Game", is_playable: true, is_eligible: true });
+
+    await syncAppFacets(freshDb, 9200, {
+      ...mapSteamAppDetailsFacets({
+        genres: [{ id: "1", description: "Action" }],
+        categories: [{ id: "2", description: "Co-op" }],
+      }),
+      community_tag: {
+        status: "present",
+        values: [{ facet_group: "community_tag", source_id: "99", name: null, source_order: 0, weight: 7 }],
+      },
+    });
+    await syncAppFacets(freshDb, 9200, {
+      genre: { status: "omitted", values: [] },
+      feature: { status: "present", values: [] },
+      community_tag: { status: "present", values: [] },
+    });
+
+    expect((await listAppFacets(freshDb, 9200, "genre")).map((facet) => facet.source_id)).toEqual(["1"]);
+    expect(await listAppFacets(freshDb, 9200, "feature")).toEqual([]);
+    expect(await listAppFacets(freshDb, 9200, "community_tag")).toEqual([]);
+    expect(await listFacetDictionary(freshDb, { group: "community_tag" })).toEqual([]);
+  });
+
+  test("initial catalog import persists source facets and valid Steam Metacritic evidence", async () => {
+    const freshDb = createFreshDb();
+    const mockFetch = (async (url: string | URL | Request) => {
+      const value = url.toString();
+      if (value.includes("IStoreBrowseService/GetItems")) {
+        return Response.json({
+          response: {
+            store_items: [{
+              appid: 9201,
+              release: { steam_release_date: "2024-01-01", is_early_access: false },
+              tags: Array.from({ length: 21 }, (_, index) => ({ tagid: index + 1, weight: 100 - index })),
+            }],
+          },
+        });
+      }
+      return Response.json({
+        "9201": {
+          success: true,
+          data: {
+            type: "game",
+            name: "Facet Metacritic Game",
+            steam_appid: 9201,
+            genres: [{ id: "1", description: "Action" }],
+            categories: [{ id: "2", description: "Co-op" }],
+            metacritic: { score: 88, url: "https://www.metacritic.com/game/facet-metacritic-game/" },
+            release_date: { coming_soon: false, date: "Jan 1, 2024" },
+          },
+        },
+      });
+    }) as unknown as typeof fetch;
+
+    await runBoundedCatalogImport(freshDb, { limit: 1, appIds: [9201], fetchFn: mockFetch });
+    const facets = await listAppFacets(freshDb, 9201);
+    const app = await getGameByAppId(freshDb, 9201);
+
+    expect(facets.filter((facet) => facet.facet_group === "genre").map((facet) => facet.source_id)).toEqual(["1"]);
+    expect(facets.filter((facet) => facet.facet_group === "feature").map((facet) => facet.source_id)).toEqual(["2"]);
+    expect(facets.filter((facet) => facet.facet_group === "community_tag")).toHaveLength(20);
+    expect(app).toMatchObject({
+      metacritic_score: 88,
+      metacritic_url: "https://www.metacritic.com/game/facet-metacritic-game/",
+    });
+    expect(app?.metacritic_observed_at).toEqual(expect.any(String));
+  });
+
+  test("keeps a valid standalone Steam Metacritic URL without inventing a score", async () => {
+    const freshDb = createFreshDb();
+    await upsertApp(freshDb, {
+      appid: 9202,
+      name: "URL Only Metacritic Game",
+      is_playable: true,
+      is_eligible: true,
+      metacritic_url: "https://www.metacritic.com/game/url-only/",
+    });
+    const first = await getGameByAppId(freshDb, 9202);
+    expect(first).toMatchObject({
+      metacritic_score: null,
+      metacritic_url: "https://www.metacritic.com/game/url-only/",
+    });
+    expect(first?.metacritic_observed_at).toEqual(expect.any(String));
+
+    await upsertApp(freshDb, {
+      appid: 9202,
+      name: "URL Only Metacritic Game",
+      is_playable: true,
+      is_eligible: true,
+      metacritic_score: 101,
+      metacritic_url: "https://example.com/not-metacritic/",
+    });
+    const preserved = await getGameByAppId(freshDb, 9202);
+    expect(preserved?.metacritic_score).toBeNull();
+    expect(preserved?.metacritic_url).toBe("https://www.metacritic.com/game/url-only/");
+  });
+
 });

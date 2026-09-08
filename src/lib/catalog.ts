@@ -41,6 +41,9 @@ export interface CatalogEntity {
   icon_lqip?: string | null;
   developer: string;
   publisher: string;
+  metacritic_score?: number | null;
+  metacritic_url?: string | null;
+  metacritic_observed_at?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -83,6 +86,9 @@ interface RawAppRow {
   icon_lqip: string | null;
   developer: string;
   publisher: string;
+  metacritic_score: number | null;
+  metacritic_url: string | null;
+  metacritic_observed_at: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -122,6 +128,9 @@ function mapRowToEntity(row: RawAppRow): CatalogEntity {
     icon_lqip: row.icon_lqip ?? null,
     developer: row.developer || "",
     publisher: row.publisher || "",
+    metacritic_score: row.metacritic_score ?? null,
+    metacritic_url: row.metacritic_url ?? null,
+    metacritic_observed_at: row.metacritic_observed_at ?? null,
     created_at: row.created_at,
     updated_at: row.updated_at,
   };
@@ -261,6 +270,9 @@ export async function upsertApp(
     icon_lqip?: string | null;
     developer?: string;
     publisher?: string;
+    metacritic_score?: number | null;
+    metacritic_url?: string | null;
+    metacritic_observed_at?: string | null;
   }
 ): Promise<void> {
   const slug = app.slug || toSlug(app.name);
@@ -292,6 +304,29 @@ export async function upsertApp(
   const iconLqip = app.icon_lqip ?? null;
   const developer = app.developer ?? "";
   const publisher = app.publisher ?? "";
+  const score =
+    typeof app.metacritic_score === "number" && Number.isInteger(app.metacritic_score) &&
+    app.metacritic_score >= 0 && app.metacritic_score <= 100
+      ? app.metacritic_score
+      : null;
+  const rawUrl = typeof app.metacritic_url === "string" ? app.metacritic_url.trim() : "";
+  let metacriticUrl: string | null = null;
+  try {
+    const parsedUrl = new URL(rawUrl);
+    if ((parsedUrl.protocol === "https:" || parsedUrl.protocol === "http:") &&
+        (parsedUrl.hostname === "metacritic.com" || parsedUrl.hostname.endsWith(".metacritic.com"))) {
+      metacriticUrl = rawUrl;
+    }
+  } catch {
+    // Invalid provider URLs are not persisted.
+  }
+  const metacriticScore = score;
+  const rawObservedAt = typeof app.metacritic_observed_at === "string" ? app.metacritic_observed_at.trim() : "";
+  const observedAt = rawObservedAt && !Number.isNaN(Date.parse(rawObservedAt)) ? rawObservedAt : null;
+  const metacriticObservedAt =
+    metacriticScore === null && metacriticUrl === null
+      ? null
+      : observedAt ?? new Date().toISOString();
 
   const stmt = db
     .prepare(
@@ -300,8 +335,9 @@ export async function upsertApp(
         parent_appid, release_date, steam_release_date, original_release_date,
         original_steam_release_date, release_from_early_access_date,
         release_date_source, is_early_access, has_left_early_access,
-        release_status, description, header_image, header_lqip, icon_hash, icon_lqip, developer, publisher, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        release_status, description, header_image, header_lqip, icon_hash, icon_lqip, developer, publisher,
+        metacritic_score, metacritic_url, metacritic_observed_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
       ON CONFLICT(appid) DO UPDATE SET
         name = excluded.name,
         slug = excluded.slug,
@@ -328,6 +364,13 @@ export async function upsertApp(
         icon_lqip = COALESCE(excluded.icon_lqip, apps.icon_lqip),
         developer = excluded.developer,
         publisher = excluded.publisher,
+        metacritic_score = COALESCE(excluded.metacritic_score, apps.metacritic_score),
+        metacritic_url = COALESCE(excluded.metacritic_url, apps.metacritic_url),
+        metacritic_observed_at = CASE
+          WHEN excluded.metacritic_score IS NOT NULL OR excluded.metacritic_url IS NOT NULL
+            THEN COALESCE(excluded.metacritic_observed_at, CURRENT_TIMESTAMP)
+          ELSE apps.metacritic_observed_at
+        END,
         updated_at = CURRENT_TIMESTAMP`
     )
     .bind(
@@ -353,7 +396,10 @@ export async function upsertApp(
       iconHash,
       iconLqip,
       developer,
-      publisher
+      publisher,
+      metacriticScore,
+      metacriticUrl,
+      metacriticObservedAt
     );
 
   await stmt.run();

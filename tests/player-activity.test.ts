@@ -169,7 +169,51 @@ describe("Bun ingestion scheduling and player rollups", () => {
       .first<{ current_players: number }>();
     expect(observation?.current_players).toBe(1234);
   });
+  test("collects reception without rescheduling the player cadence", async () => {
+    const db = createAppDatabase();
+    const anchorTime = new Date("2026-09-05T03:10:00.000Z");
+    await setDailyCheckpoint(db, "2026-09-04");
+    await db
+      .prepare("INSERT INTO apps (appid, name, slug, is_eligible, is_playable) VALUES (?, ?, ?, 0, 0)")
+      .bind(730, "Counter-Strike 2", "counter-strike-2")
+      .run();
+    await seedDueGame(db, 730, anchorTime.toISOString());
 
+    const customFetch = (async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("GetNumberOfCurrentPlayers")) return successfulSteamResponse();
+      if (url.includes("appreviews")) {
+        return Response.json({
+          success: 1,
+          query_summary: {
+            total_positive: 9,
+            total_negative: 1,
+            total_reviews: 10,
+            num_reviews: 0,
+            review_score: 8,
+            review_score_desc: "Very Positive",
+          },
+        });
+      }
+      if (url.includes("appreviewhistogram")) {
+        return Response.json({ success: 1, results: { rollup_type: "day", recent: [], weeks: [], start_date: null, end_date: null } });
+      }
+      return new Response("not found", { status: 404 });
+    }) as unknown as typeof fetch;
+
+    const result = await runIngestionTick({ db, anchorTime, customFetch });
+
+    expect(result.status).toBe("completed");
+    expect(result.tick?.attempted).toBe(1);
+    expect(result.reviewCollection?.attemptedGames).toBe(1);
+    expect(result.reviewCollection?.reviewRequests).toBe(2);
+    expect(result.reviewCollection?.newsHubRequests).toBe(1);
+    expect(result.criticCollection?.games).toBe(0);
+    expect(await db.prepare("SELECT COUNT(*) AS count FROM review_summary_snapshots").first<number>("count")).toBe(1);
+    expect(await db.prepare("SELECT next_due_at FROM tracked_games WHERE appid = 730").first<string>("next_due_at")).toBe(
+      calculateNextDueAt(anchorTime, "fast", 730).toISOString(),
+    );
+  });
   test("rolls up only the prior UTC day, then retains thirty days before snapshot", async () => {
     const db = createAppDatabase();
     const anchorTime = new Date("2026-09-05T00:05:00.000Z");

@@ -1,12 +1,14 @@
 import { asc, desc, sql } from "drizzle-orm";
 import {
   check,
+  foreignKey,
   index,
   integer,
   primaryKey,
   real,
   sqliteTable,
   text,
+  uniqueIndex,
 } from "drizzle-orm/sqlite-core";
 
 const currentTimestamp = sql`CURRENT_TIMESTAMP`;
@@ -39,6 +41,9 @@ export const apps = sqliteTable(
     releaseDateSource: text("release_date_source"),
     isEarlyAccess: integer("is_early_access"),
     hasLeftEarlyAccess: integer("has_left_early_access"),
+    metacriticScore: integer("metacritic_score"),
+    metacriticUrl: text("metacritic_url"),
+    metacriticObservedAt: text("metacritic_observed_at"),
   },
   (table) => [
     index("idx_apps_slug").on(table.slug),
@@ -60,6 +65,10 @@ export const apps = sqliteTable(
     check(
       "apps_has_left_early_access_check",
       sql`${table.hasLeftEarlyAccess} IS NULL OR ${table.hasLeftEarlyAccess} IN (0, 1)`,
+    ),
+    check(
+      "apps_metacritic_score_check",
+      sql`${table.metacriticScore} IS NULL OR (typeof(${table.metacriticScore}) = 'integer' AND ${table.metacriticScore} BETWEEN 0 AND 100)`,
     ),
   ],
 );
@@ -279,6 +288,425 @@ export const appReleasePlans = sqliteTable(
     index("idx_app_release_plans_appid_observed_at").on(
       table.appid,
       asc(table.observedAt),
+    ),
+  ],
+);
+
+
+export const steamEvents = sqliteTable(
+  "steam_events",
+  {
+    eventId: text("event_id").primaryKey(),
+    appid: integer("appid")
+      .notNull()
+      .references(() => apps.appid, { onDelete: "cascade" }),
+    category: text("category"),
+    title: text("title"),
+    url: text("url"),
+    startAt: text("start_at"),
+    publicationAt: text("publication_at"),
+    observedAt: text("observed_at").notNull(),
+    source: text("source").notNull().default("steam_news_hub"),
+    provenance: text("provenance").notNull().default("{}"),
+    createdAt: text("created_at").notNull().default(currentTimestamp),
+    updatedAt: text("updated_at").notNull().default(currentTimestamp),
+  },
+  (table) => [
+    check(
+      "steam_events_category_check",
+      sql`${table.category} IS NULL OR length(trim(${table.category})) > 0`,
+    ),
+    check(
+      "steam_events_dates_check",
+      sql`(${table.startAt} IS NULL OR length(trim(${table.startAt})) > 0) AND (${table.publicationAt} IS NULL OR length(trim(${table.publicationAt})) > 0)`,
+    ),
+    index("idx_steam_events_appid_start").on(table.appid, desc(table.startAt)),
+    index("idx_steam_events_appid_publication").on(
+      table.appid,
+      desc(table.publicationAt),
+    ),
+  ],
+);
+
+export const reviewSources = sqliteTable(
+  "review_sources",
+  {
+    id: text("id").primaryKey(),
+    endpoint: text("endpoint").notNull(),
+    requestFilter: text("request_filter").notNull(),
+    language: text("language"),
+    purchaseType: text("purchase_type"),
+    dayRange: integer("day_range"),
+    filterOfftopicActivity: integer("filter_offtopic_activity"),
+    population: text("population").notNull(),
+    populationFlags: text("population_flags").notNull().default("{}"),
+    interpretationVersion: text("interpretation_version").notNull(),
+    identityKey: text("identity_key").notNull(),
+    createdAt: text("created_at").notNull().default(currentTimestamp),
+  },
+  (table) => [
+    uniqueIndex("uq_review_sources_identity").on(table.identityKey),
+    check(
+      "review_sources_endpoint_check",
+      sql`${table.endpoint} IN ('appreviews', 'appreviewhistogram')`,
+    ),
+    check(
+      "review_sources_day_range_check",
+      sql`${table.dayRange} IS NULL OR (typeof(${table.dayRange}) = 'integer' AND ${table.dayRange} >= 0)`,
+    ),
+    check(
+      "review_sources_filter_offtopic_check",
+      sql`${table.filterOfftopicActivity} IS NULL OR (typeof(${table.filterOfftopicActivity}) = 'integer' AND ${table.filterOfftopicActivity} IN (0, 1))`,
+    ),
+    check(
+      "review_sources_identity_key_check",
+      sql`length(trim(${table.identityKey})) > 0`,
+    ),
+  ],
+);
+
+export const reviewBuckets = sqliteTable(
+  "review_buckets",
+  {
+    appid: integer("appid")
+      .notNull()
+      .references(() => apps.appid, { onDelete: "cascade" }),
+    sourceId: text("source_id")
+      .notNull()
+      .references(() => reviewSources.id, { onDelete: "restrict" }),
+    granularity: text("granularity").notNull(),
+    periodStart: text("period_start").notNull(),
+    periodEnd: text("period_end").notNull(),
+    positiveCount: integer("positive_count").notNull(),
+    negativeCount: integer("negative_count").notNull(),
+    observedAt: text("observed_at").notNull(),
+    provenance: text("provenance").notNull(),
+  },
+  (table) => [
+    primaryKey({
+      columns: [
+        table.appid,
+        table.sourceId,
+        table.granularity,
+        table.periodStart,
+        table.periodEnd,
+      ],
+    }),
+    check(
+      "review_buckets_granularity_check",
+      sql`${table.granularity} IN ('daily', 'monthly')`,
+    ),
+    check(
+      "review_buckets_interval_check",
+      sql`${table.periodStart} < ${table.periodEnd}`,
+    ),
+    check(
+      "review_buckets_positive_count_check",
+      sql`typeof(${table.positiveCount}) = 'integer' AND ${table.positiveCount} >= 0`,
+    ),
+    check(
+      "review_buckets_negative_count_check",
+      sql`typeof(${table.negativeCount}) = 'integer' AND ${table.negativeCount} >= 0`,
+    ),
+    index("idx_review_buckets_appid_period").on(
+      table.appid,
+      asc(table.periodStart),
+      asc(table.periodEnd),
+    ),
+    index("idx_review_buckets_source_period").on(
+      table.sourceId,
+      asc(table.periodStart),
+      asc(table.periodEnd),
+    ),
+  ],
+);
+
+export const reviewSummarySnapshots = sqliteTable(
+  "review_summary_snapshots",
+  {
+    appid: integer("appid")
+      .notNull()
+      .references(() => apps.appid, { onDelete: "cascade" }),
+    sourceId: text("source_id")
+      .notNull()
+      .references(() => reviewSources.id, { onDelete: "restrict" }),
+    observedAt: text("observed_at").notNull(),
+    lifetimePositiveCount: integer("lifetime_positive_count").notNull(),
+    lifetimeTotalCount: integer("lifetime_total_count").notNull(),
+    createdAt: text("created_at").notNull().default(currentTimestamp),
+  },
+  (table) => [
+    primaryKey({ columns: [table.appid, table.sourceId, table.observedAt] }),
+    check(
+      "review_summary_positive_count_check",
+      sql`typeof(${table.lifetimePositiveCount}) = 'integer' AND ${table.lifetimePositiveCount} >= 0 AND ${table.lifetimePositiveCount} <= ${table.lifetimeTotalCount}`,
+    ),
+    check(
+      "review_summary_total_count_check",
+      sql`typeof(${table.lifetimeTotalCount}) = 'integer' AND ${table.lifetimeTotalCount} >= 0`,
+    ),
+    index("idx_review_summaries_appid_observed").on(
+      table.appid,
+      desc(table.observedAt),
+    ),
+    index("idx_review_summaries_source_observed").on(
+      table.sourceId,
+      desc(table.observedAt),
+    ),
+  ],
+);
+
+export const appFacets = sqliteTable(
+  "app_facets",
+  {
+    facetGroup: text("facet_group").notNull(),
+    sourceId: text("source_id").notNull(),
+    name: text("name"),
+    updatedAt: text("updated_at").notNull().default(currentTimestamp),
+  },
+  (table) => [
+    primaryKey({ columns: [table.facetGroup, table.sourceId] }),
+    check(
+      "app_facets_group_check",
+      sql`${table.facetGroup} IN ('genre', 'feature', 'community_tag')`,
+    ),
+    check(
+      "app_facets_source_id_check",
+      sql`length(trim(${table.sourceId})) > 0`,
+    ),
+    index("idx_app_facets_group_name").on(table.facetGroup, table.name),
+  ],
+);
+
+export const appFacetMemberships = sqliteTable(
+  "app_facet_memberships",
+  {
+    appid: integer("appid")
+      .notNull()
+      .references(() => apps.appid, { onDelete: "cascade" }),
+    facetGroup: text("facet_group").notNull(),
+    sourceId: text("source_id").notNull(),
+    sourceOrder: integer("source_order").notNull(),
+    weight: integer("weight"),
+    updatedAt: text("updated_at").notNull().default(currentTimestamp),
+  },
+  (table) => [
+    primaryKey({ columns: [table.appid, table.facetGroup, table.sourceId] }),
+    foreignKey({
+      columns: [table.facetGroup, table.sourceId],
+      foreignColumns: [appFacets.facetGroup, appFacets.sourceId],
+      name: "fk_app_facet_memberships_facet",
+    }),
+    check(
+      "app_facet_memberships_group_check",
+      sql`${table.facetGroup} IN ('genre', 'feature', 'community_tag')`,
+    ),
+    check(
+      "app_facet_memberships_order_check",
+      sql`typeof(${table.sourceOrder}) = 'integer' AND ${table.sourceOrder} >= 0`,
+    ),
+    check(
+      "app_facet_memberships_weight_check",
+      sql`${table.weight} IS NULL OR (typeof(${table.weight}) = 'integer' AND ${table.weight} >= 0)`,
+    ),
+    index("idx_app_facet_memberships_app_group_order").on(
+      table.appid,
+      table.facetGroup,
+      table.sourceOrder,
+    ),
+    index("idx_app_facet_memberships_group_source").on(
+      table.facetGroup,
+      table.sourceId,
+    ),
+  ],
+);
+
+export const playerScoreHistory = sqliteTable(
+  "player_score_history",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    appid: integer("appid")
+      .notNull()
+      .references(() => apps.appid, { onDelete: "restrict" }),
+    observedAt: text("observed_at").notNull(),
+    score: real("score").notNull(),
+    formulaVersion: text("formula_version").notNull(),
+    currentPositiveCount: integer("current_positive_count").notNull(),
+    currentTotalCount: integer("current_total_count").notNull(),
+    historicalPositiveCount: integer("historical_positive_count").notNull(),
+    historicalTotalCount: integer("historical_total_count").notNull(),
+    currentWindowStart: text("current_window_start").notNull(),
+    currentWindowEnd: text("current_window_end").notNull(),
+    historicalWindowStart: text("historical_window_start").notNull(),
+    historicalWindowEnd: text("historical_window_end").notNull(),
+    currentEvidenceIntervals: text("current_evidence_intervals").notNull(),
+    historicalEvidenceIntervals: text("historical_evidence_intervals").notNull(),
+    currentSourceId: text("current_source_id").references(() => reviewSources.id, {
+      onDelete: "restrict",
+    }),
+    historicalSourceId: text("historical_source_id").references(() => reviewSources.id, {
+      onDelete: "restrict",
+    }),
+    currentEvidenceObservedAt: text("current_evidence_observed_at"),
+    historicalEvidenceObservedAt: text("historical_evidence_observed_at"),
+    anchorEventId: text("anchor_event_id"),
+    anchorAt: text("anchor_at"),
+    provenance: text("provenance").notNull(),
+    createdAt: text("created_at").notNull().default(currentTimestamp),
+  },
+  (table) => [
+    check(
+      "player_score_history_score_check",
+      sql`typeof(${table.score}) IN ('integer', 'real') AND ${table.score} BETWEEN 0 AND 100`,
+    ),
+    check(
+      "player_score_history_current_counts_check",
+      sql`typeof(${table.currentPositiveCount}) = 'integer' AND typeof(${table.currentTotalCount}) = 'integer' AND ${table.currentPositiveCount} >= 0 AND ${table.currentTotalCount} >= 0 AND ${table.currentPositiveCount} <= ${table.currentTotalCount}`,
+    ),
+    check(
+      "player_score_history_historical_counts_check",
+      sql`typeof(${table.historicalPositiveCount}) = 'integer' AND typeof(${table.historicalTotalCount}) = 'integer' AND ${table.historicalPositiveCount} >= 0 AND ${table.historicalTotalCount} >= 0 AND ${table.historicalPositiveCount} <= ${table.historicalTotalCount}`,
+    ),
+    check(
+      "player_score_history_window_check",
+      sql`${table.currentWindowStart} < ${table.currentWindowEnd} AND ${table.historicalWindowStart} < ${table.historicalWindowEnd}`,
+    ),
+    uniqueIndex("uq_player_score_history_id_appid").on(
+      table.id,
+      table.appid,
+    ),
+    index("idx_player_score_history_appid_observed").on(
+      table.appid,
+      desc(table.observedAt),
+    ),
+    index("idx_player_score_history_source_observed").on(
+      table.currentSourceId,
+      desc(table.observedAt),
+    ),
+    index("idx_player_score_history_historical_source_observed").on(
+      table.historicalSourceId,
+      desc(table.observedAt),
+    ),
+  ],
+);
+
+export const playerScoreState = sqliteTable(
+  "player_score_state",
+  {
+    appid: integer("appid")
+      .primaryKey()
+      .references(() => apps.appid, { onDelete: "cascade" }),
+    latestScoreHistoryId: integer("latest_score_history_id"),
+    historicalPositiveCount: integer("historical_positive_count"),
+    historicalTotalCount: integer("historical_total_count"),
+    historicalSourceId: text("historical_source_id").references(() => reviewSources.id, {
+      onDelete: "restrict",
+    }),
+    historicalWindowStart: text("historical_window_start"),
+    historicalWindowEnd: text("historical_window_end"),
+    historicalEvidenceIntervals: text("historical_evidence_intervals").notNull().default("[]"),
+    historicalBaselineObservedAt: text("historical_baseline_observed_at"),
+    eligibilityReviewCount: integer("eligibility_review_count"),
+    eligibilitySourceId: text("eligibility_source_id").references(() => reviewSources.id, {
+      onDelete: "restrict",
+    }),
+    eligibilityWindowStart: text("eligibility_window_start"),
+    eligibilityWindowEnd: text("eligibility_window_end"),
+    eligibilityEvidenceStart: text("eligibility_evidence_start"),
+    eligibilityEvidenceEnd: text("eligibility_evidence_end"),
+    eligibilityEvidenceIntervals: text("eligibility_evidence_intervals").notNull().default("[]"),
+    eligibilityObservedAt: text("eligibility_observed_at"),
+    eligibilityProvenance: text("eligibility_provenance").notNull().default("{}"),
+    updatedAt: text("updated_at").notNull().default(currentTimestamp),
+  },
+  (table) => [
+    check(
+      "player_score_state_historical_counts_check",
+      sql`(${table.historicalPositiveCount} IS NULL AND ${table.historicalTotalCount} IS NULL) OR (typeof(${table.historicalPositiveCount}) = 'integer' AND typeof(${table.historicalTotalCount}) = 'integer' AND ${table.historicalPositiveCount} >= 0 AND ${table.historicalTotalCount} >= 0 AND ${table.historicalPositiveCount} <= ${table.historicalTotalCount})`,
+    ),
+    check(
+      "player_score_state_historical_window_check",
+      sql`(${table.historicalWindowStart} IS NULL AND ${table.historicalWindowEnd} IS NULL) OR (${table.historicalWindowStart} IS NOT NULL AND ${table.historicalWindowEnd} IS NOT NULL AND ${table.historicalWindowStart} < ${table.historicalWindowEnd})`,
+    ),
+    check(
+      "player_score_state_eligibility_count_check",
+      sql`${table.eligibilityReviewCount} IS NULL OR (typeof(${table.eligibilityReviewCount}) = 'integer' AND ${table.eligibilityReviewCount} >= 0)`,
+    ),
+    check(
+      "player_score_state_eligibility_window_check",
+      sql`(${table.eligibilityWindowStart} IS NULL AND ${table.eligibilityWindowEnd} IS NULL) OR (${table.eligibilityWindowStart} IS NOT NULL AND ${table.eligibilityWindowEnd} IS NOT NULL AND ${table.eligibilityWindowStart} < ${table.eligibilityWindowEnd})`,
+    ),
+    check(
+      "player_score_state_eligibility_evidence_check",
+      sql`(${table.eligibilityEvidenceStart} IS NULL AND ${table.eligibilityEvidenceEnd} IS NULL) OR (${table.eligibilityEvidenceStart} IS NOT NULL AND ${table.eligibilityEvidenceEnd} IS NOT NULL AND ${table.eligibilityEvidenceStart} < ${table.eligibilityEvidenceEnd})`,
+    ),
+    foreignKey({
+      columns: [table.latestScoreHistoryId, table.appid],
+      foreignColumns: [playerScoreHistory.id, playerScoreHistory.appid],
+      name: "fk_player_score_state_latest_score_app",
+    }),
+    index("idx_player_score_state_latest_score").on(table.latestScoreHistoryId),
+    index("idx_player_score_state_eligibility").on(
+      table.eligibilitySourceId,
+      table.eligibilityEvidenceStart,
+      table.eligibilityEvidenceEnd,
+    ),
+  ],
+);
+
+export const criticRecords = sqliteTable(
+  "critic_records",
+  {
+    appid: integer("appid")
+      .notNull()
+      .references(() => apps.appid, { onDelete: "cascade" }),
+    source: text("source").notNull(),
+    matchedIdentity: text("matched_identity"),
+    platformScope: text("platform_scope").notNull().default("unknown"),
+    edition: text("edition"),
+    nativeScore: real("native_score"),
+    nativeTier: text("native_tier"),
+    reviewCount: integer("review_count"),
+    scoreScale: integer("score_scale"),
+    sourceUrl: text("source_url"),
+    reviewPeriodStart: text("review_period_start"),
+    reviewPeriodEnd: text("review_period_end"),
+    collectionBasis: text("collection_basis").notNull().default("public_page"),
+    observedAt: text("observed_at").notNull(),
+    lastSuccessAt: text("last_success_at"),
+    provenance: text("provenance").notNull().default("{}"),
+    basis: text("basis").notNull().default("public aggregate page"),
+    updatedAt: text("updated_at").notNull().default(currentTimestamp),
+  },
+  (table) => [
+    primaryKey({ columns: [table.appid, table.source] }),
+    check(
+      "critic_records_source_check",
+      sql`${table.source} IN ('opencritic', 'metacritic')`,
+    ),
+    check(
+      "critic_records_platform_scope_check",
+      sql`${table.platformScope} IN ('pc', 'mixed', 'console', 'unknown')`,
+    ),
+    check(
+      "critic_records_score_check",
+      sql`(${table.nativeScore} IS NULL OR (typeof(${table.nativeScore}) IN ('integer', 'real') AND ${table.scoreScale} IS NOT NULL AND ${table.nativeScore} BETWEEN 0 AND ${table.scoreScale})) AND (${table.scoreScale} IS NULL OR (typeof(${table.scoreScale}) = 'integer' AND ${table.scoreScale} > 0))`,
+    ),
+    check(
+      "critic_records_review_count_check",
+      sql`${table.reviewCount} IS NULL OR (typeof(${table.reviewCount}) = 'integer' AND ${table.reviewCount} >= 0)`,
+    ),
+    check(
+      "critic_records_review_period_check",
+      sql`${table.reviewPeriodStart} IS NULL OR ${table.reviewPeriodEnd} IS NULL OR ${table.reviewPeriodStart} <= ${table.reviewPeriodEnd}`,
+    ),
+    check(
+      "critic_records_collection_basis_check",
+      sql`${table.collectionBasis} = 'public_page'`,
+    ),
+    index("idx_critic_records_source_observed").on(
+      table.source,
+      desc(table.observedAt),
     ),
   ],
 );

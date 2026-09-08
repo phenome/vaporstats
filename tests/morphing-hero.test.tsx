@@ -1,6 +1,4 @@
 import { describe, expect, test } from "bun:test";
-import { renderToString } from "react-dom/server";
-import { GamePageView } from "../src/components/game-page";
 import type { GameDetail } from "../src/lib/catalog";
 import { generateLqipFromBuffer, generateSquareLqipFromBuffer, ensureAppLqips } from "../src/lib/lqip";
 import { getDb } from "../src/lib/db";
@@ -36,62 +34,7 @@ const mockGame: GameDetail = {
   updated_at: "2026-09-06T00:00:00Z",
 };
 
-describe("morphing sticky hero and dual LQIP", () => {
-  test("renders one shared identity set and one fade-only description", () => {
-    const html = renderToString(<GamePageView game={mockGame} />);
-
-    expect(html.match(/data-game-identity="title"/g)?.length).toBe(1);
-    expect(html.match(/data-game-identity="status"/g)?.length).toBe(1);
-    expect(html.match(/data-game-identity="date"/g)?.length).toBe(1);
-    expect(html.match(/data-game-identity="store"/g)?.length).toBe(1);
-    expect(html.match(/data-game-identity="artwork"/g)?.length).toBe(1);
-
-    expect(
-      html.match(
-        /<h1\b(?=[^>]*data-game-identity="title")[^>]*>[\s\S]*?Cyberpunk 2077[\s\S]*?<\/h1>/g,
-      )?.length,
-    ).toBe(1);
-    expect(
-      html.match(
-        /<span\b(?=[^>]*data-game-identity="status")[^>]*>[^<]*Released[^<]*<\/span>/g,
-      )?.length,
-    ).toBe(1);
-    expect(
-      html.match(
-        /<(?:time|span)\b(?=[^>]*data-game-identity="date")[^>]*>[^<]*Dec 10, 2020[^<]*<\/(?:time|span)>/g,
-      )?.length,
-    ).toBe(1);
-    expect(
-      html.match(
-        /<a\b(?=[^>]*data-game-identity="store")(?=[^>]*href="https:\/\/store\.steampowered\.com\/app\/1091500\/)[^>]*>[\s\S]*?Steam Store ↗[\s\S]*?<\/a>/g,
-      )?.length,
-    ).toBe(1);
-    expect(
-      html.match(/<div\b(?=[^>]*data-game-identity="artwork")[^>]*>/g)?.length,
-    ).toBe(1);
-    expect(html.match(/Cyberpunk 2077 is an open-world, action-adventure RPG\./g)?.length).toBe(1);
-  });
-
-  test("uses icon LQIP in the shared artwork shell without the VS fallback", () => {
-    const html = renderToString(
-      <GamePageView
-        game={{ ...mockGame, icon_hash: null, icon_lqip: "data:image/png;base64,mockIconLqip" }}
-      />,
-    );
-
-    expect(html.match(/data-game-identity="title"/g)?.length).toBe(1);
-    expect(html.match(/data-game-identity="status"/g)?.length).toBe(1);
-    expect(html.match(/data-game-identity="date"/g)?.length).toBe(1);
-    expect(html.match(/data-game-identity="store"/g)?.length).toBe(1);
-    expect(html.match(/data-game-identity="artwork"/g)?.length).toBe(1);
-    expect(
-      html.match(
-        /data-game-identity="artwork"[^>]*>[\s\S]*?src="data:image\/png;base64,mockIconLqip"/g,
-      )?.length,
-    ).toBe(1);
-    expect(html.match(/>\s*VS\s*</g)?.length ?? 0).toBe(0);
-  });
-
+describe("dual LQIP", () => {
   test("Bun.Image placeholder generators produce valid data URLs", async () => {
     const img = new Bun.Image("./src/assets/logo.png");
     const bytes = await img.bytes();

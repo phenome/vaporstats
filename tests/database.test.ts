@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { Database } from "bun:sqlite";
@@ -55,21 +55,37 @@ describe("Bun SQLite persistence", () => {
 
     expect(tables.results.map((row) => row.name)).toEqual([
       DRIZZLE_MIGRATION_TABLE,
+      "app_facet_memberships",
+      "app_facets",
       "app_prices",
       "app_relationships",
       "app_release_events",
       "app_release_plans",
       "apps",
       "checkpoints",
+      "critic_records",
       "observations",
       "player_daily_requests",
       "player_rollups",
+      "player_score_history",
+      "player_score_state",
       "price_history",
       "release_facts",
+      "review_buckets",
+      "review_sources",
+      "review_summary_snapshots",
+      "steam_events",
       "tracked_games",
     ]);
     const appColumns = await db.prepare("PRAGMA table_info(apps)").all<{ name: string }>();
-    expect(appColumns.results.map((column) => column.name)).toContain("has_left_early_access");
+    expect(appColumns.results.map((column) => column.name)).toEqual(
+      expect.arrayContaining([
+        "has_left_early_access",
+        "metacritic_score",
+        "metacritic_url",
+        "metacritic_observed_at",
+      ]),
+    );
     const releasePlanColumns = await db
       .prepare("PRAGMA table_info(app_release_plans)")
       .all<{ name: string }>();
@@ -145,26 +161,123 @@ describe("Bun SQLite persistence", () => {
     legacy.exec(
       "CREATE TABLE schema_migrations (name TEXT PRIMARY KEY, applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)"
     );
+    legacy.exec(readFileSync(join(migrationDirectory, migrationNames[0]), "utf8"));
     legacy.query("INSERT INTO schema_migrations (name) VALUES (?)").run(migrationNames[0]);
     legacy.query("INSERT INTO schema_migrations (name) VALUES (?)").run(migrationNames[2]);
+    legacy.query("INSERT INTO apps (appid, name, slug) VALUES (?, ?, ?)").run(12, "Atomic Row", "atomic-row");
     legacy.close(true);
 
     const invalid = new Database(databasePath);
-    expect(() => applyMigrations(invalid)).toThrow("unknown or gapped migration ledger");
-    invalid.close(true);
+    try {
+      expect(() => applyMigrations(invalid)).toThrow("unknown or gapped migration ledger");
+    } finally {
+      invalid.close(true);
+    }
 
     const unchanged = new Database(databasePath);
-    const rows = unchanged
-      .query<{ name: string }, []>("SELECT name FROM schema_migrations ORDER BY rowid")
-      .all();
-    const journal = unchanged
-      .query<{ name: string }, []>(
-        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = '__drizzle_migrations'"
-      )
-      .get();
-    expect(rows.map((row) => row.name)).toEqual([migrationNames[0], migrationNames[2]]);
-    expect(journal).toBeNull();
-    unchanged.close(true);
+    try {
+      const rows = unchanged
+        .query<{ name: string }, []>("SELECT name FROM schema_migrations ORDER BY rowid")
+        .all();
+      const journal = unchanged
+        .query<{ name: string }, []>(
+          "SELECT name FROM sqlite_master WHERE type = 'table' AND name = '__drizzle_migrations'"
+        )
+        .get();
+      expect(rows.map((row) => row.name)).toEqual([migrationNames[0], migrationNames[2]]);
+      expect(unchanged.query("SELECT name FROM apps WHERE appid = 12").get()).toEqual({ name: "Atomic Row" });
+      expect(journal).toBeNull();
+    } finally {
+      unchanged.close(true);
+    }
+  });
+
+
+  test("rolls back an unapplied migration failure atomically", () => {
+    const failureMigrationDirectory = join(temporaryDirectory, "failing-migrations");
+    const failureMetaDirectory = join(failureMigrationDirectory, "meta");
+    mkdirSync(failureMetaDirectory, { recursive: true });
+    for (const migrationName of migrationNames) {
+      copyFileSync(
+        join(migrationDirectory, migrationName),
+        join(failureMigrationDirectory, migrationName),
+      );
+    }
+
+    const journal = JSON.parse(
+      readFileSync(join(migrationDirectory, "meta", "_journal.json"), "utf8"),
+    ) as {
+      version: string;
+      dialect: string;
+      entries: {
+        idx: number;
+        version: string;
+        when: number;
+        tag: string;
+        breakpoints: boolean;
+      }[];
+    };
+    const lastEntry = journal.entries[journal.entries.length - 1];
+    if (!lastEntry) throw new Error("Migration journal is empty");
+    const failureTag = "0010_atomicity_failure";
+    journal.entries.push({
+      idx: journal.entries.length,
+      version: lastEntry.version,
+      when: lastEntry.when + 1,
+      tag: failureTag,
+      breakpoints: true,
+    });
+    writeFileSync(
+      join(failureMetaDirectory, "_journal.json"),
+      JSON.stringify(journal, null, 2),
+    );
+    writeFileSync(
+      join(failureMigrationDirectory, failureTag + ".sql"),
+      [
+        "CREATE TABLE migration_atomicity_probe (id INTEGER PRIMARY KEY, value TEXT NOT NULL);",
+        "--> statement-breakpoint",
+        "INSERT INTO migration_atomicity_probe (id, value) VALUES (1, 'written');",
+        "--> statement-breakpoint",
+        "INSERT INTO missing_atomicity_table (id) VALUES (1);",
+      ].join("\n"),
+    );
+
+    const databasePath = join(temporaryDirectory, "migration-failure.sqlite");
+    const database = new Database(databasePath);
+    try {
+      database.exec("PRAGMA foreign_keys = ON");
+      applyMigrations(database, migrationDirectory);
+      database
+        .query("INSERT INTO apps (appid, name, slug) VALUES (?, ?, ?)")
+        .run(70, "Atomicity Sentinel", "atomicity-sentinel");
+      database
+        .query("INSERT INTO checkpoints (key, value, cursor) VALUES (?, ?, ?)")
+        .run("atomicity-sentinel", "kept", 17);
+      const historyBefore = database
+        .query("SELECT hash, created_at FROM __drizzle_migrations ORDER BY created_at")
+        .all();
+
+      expect(() => applyMigrations(database, failureMigrationDirectory)).toThrow();
+
+      expect(
+        database
+          .query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?")
+          .get("migration_atomicity_probe"),
+      ).toBeNull();
+      expect(database.query("SELECT name FROM apps WHERE appid = 70").get()).toEqual({
+        name: "Atomicity Sentinel",
+      });
+      expect(
+        database.query("SELECT value, cursor FROM checkpoints WHERE key = ?").get("atomicity-sentinel"),
+      ).toEqual({ value: "kept", cursor: 17 });
+      expect(
+        database
+          .query("SELECT hash, created_at FROM __drizzle_migrations ORDER BY created_at")
+          .all(),
+      ).toEqual(historyBefore);
+    } finally {
+      database.close(true);
+    }
   });
 
   test("sets the required SQLite pragmas", async () => {

@@ -18,6 +18,15 @@ const expectedTables = [
   "release_facts",
   "app_release_events",
   "app_release_plans",
+  "steam_events",
+  "review_sources",
+  "review_buckets",
+  "review_summary_snapshots",
+  "app_facets",
+  "app_facet_memberships",
+  "player_score_history",
+  "player_score_state",
+  "critic_records",
 ];
 
 const temporaryDirectory = mkdtempSync(join(tmpdir(), "vaporstats-sqlite-check-"));
@@ -44,6 +53,7 @@ function verifyExistingRowsSurviveUpgrade(): void {
   if (journal.entries.length === 0) throw new Error("Migration journal is empty");
 
   const legacy = new Database(legacyDatabasePath);
+  legacy.exec("PRAGMA foreign_keys = ON");
   try {
     legacy.exec(
       "CREATE TABLE schema_migrations (name TEXT PRIMARY KEY, applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)"
@@ -62,11 +72,32 @@ function verifyExistingRowsSurviveUpgrade(): void {
     legacy
       .query("INSERT INTO checkpoints (key, value, cursor) VALUES (?, ?, ?)")
       .run("migration-preservation", "kept", 7);
+    legacy
+      .query("INSERT INTO observations (appid, current_players, observed_at) VALUES (?, ?, ?)")
+      .run(900001, 321, "2026-09-01T00:00:00.000Z");
+    legacy
+      .query("INSERT INTO app_prices (appid, final_price, observed_at) VALUES (?, ?, ?)")
+      .run(900001, 1999, "2026-09-01T00:00:00.000Z");
+    legacy
+      .query("INSERT INTO price_history (appid, final_price, observed_at) VALUES (?, ?, ?)")
+      .run(900001, 1999, "2026-08-31T00:00:00.000Z");
+    legacy
+      .query(
+        "INSERT INTO release_facts (appid, name, slug, type, release_date, release_year, release_week, release_status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+      )
+      .run(900001, "Migration Preservation Test", "migration-preservation-test", "game", "2026-09-01", 2026, "2026-W36", "released");
+    legacy
+      .query("INSERT INTO app_release_events (appid, event_type, source, event_date) VALUES (?, ?, ?, ?)")
+      .run(900001, "patch", "original_release_date", "2026-09-01");
+    legacy
+      .query("INSERT INTO app_release_plans (appid, expected_date, observed_at) VALUES (?, ?, ?)")
+      .run(900001, "2026-10-01", "2026-09-01T00:00:00.000Z");
   } finally {
     legacy.close(true);
   }
 
   const upgraded = new Database(legacyDatabasePath);
+  upgraded.exec("PRAGMA foreign_keys = ON");
   try {
     applyMigrations(upgraded, migrationDirectory);
     const app = upgraded
@@ -96,6 +127,52 @@ function verifyExistingRowsSurviveUpgrade(): void {
     if (!checkpoint || checkpoint.value !== "kept" || checkpoint.cursor !== 7) {
       throw new Error("Existing checkpoint data was not preserved during migration");
     }
+    const observation = upgraded
+      .query<{ appid: number; current_players: number }, []>(
+        "SELECT appid, current_players FROM observations WHERE appid = 900001"
+      )
+      .get();
+    if (!observation || observation.current_players !== 321) {
+      throw new Error("Existing player observation data was not preserved during migration");
+    }
+
+    const appPrice = upgraded
+      .query<{ appid: number; final_price: number }, []>(
+        "SELECT appid, final_price FROM app_prices WHERE appid = 900001"
+      )
+      .get();
+    const priceHistory = upgraded
+      .query<{ appid: number; final_price: number }, []>(
+        "SELECT appid, final_price FROM price_history WHERE appid = 900001"
+      )
+      .get();
+    if (!appPrice || appPrice.final_price !== 1999 || !priceHistory || priceHistory.final_price !== 1999) {
+      throw new Error("Existing price data was not preserved during migration");
+    }
+
+    const release = upgraded
+      .query<{ appid: number; release_date: string }, []>(
+        "SELECT appid, release_date FROM release_facts WHERE appid = 900001"
+      )
+      .get();
+    const releaseEvent = upgraded
+      .query<{ appid: number; event_type: string }, []>(
+        "SELECT appid, event_type FROM app_release_events WHERE appid = 900001"
+      )
+      .get();
+    const releasePlan = upgraded
+      .query<{ appid: number; expected_date: string }, []>(
+        "SELECT appid, expected_date FROM app_release_plans WHERE appid = 900001"
+      )
+      .get();
+    if (
+      !release || release.release_date !== "2026-09-01" ||
+      !releaseEvent || releaseEvent.event_type !== "patch" ||
+      !releasePlan || releasePlan.expected_date !== "2026-10-01"
+    ) {
+      throw new Error("Existing lifecycle data was not preserved during migration");
+    }
+
   } finally {
     upgraded.close(true);
   }
@@ -128,8 +205,10 @@ try {
   const appColumns = new Set(
     database.query<{ name: string }, []>("PRAGMA table_info(apps)").all().map((column) => column.name)
   );
-  if (!appColumns.has("has_left_early_access")) {
-    throw new Error("Missing apps.has_left_early_access column");
+  for (const column of ["has_left_early_access", "metacritic_score", "metacritic_url", "metacritic_observed_at"]) {
+    if (!appColumns.has(column)) {
+      throw new Error("Missing apps." + column + " column");
+    }
   }
   const releasePlanColumns = new Set(
     database
