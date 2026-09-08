@@ -169,7 +169,6 @@ async function performIngestionTick(options: IngestionTickOptions): Promise<Inge
 
   let discovery: DiscoveryResult | undefined;
   let rollups: RollupJobResult | undefined;
-  let tagDictionary: SteamTagDictionaryRefreshResult | undefined;
   let reviewCompaction: CompactReviewEvidenceResult | undefined;
   const targetDate = previousUtcDate(anchorTime);
   const dailyCheckpoint = await getCheckpoint(options.db, INGESTION_DAILY_CHECKPOINT_KEY);
@@ -189,10 +188,10 @@ async function performIngestionTick(options: IngestionTickOptions): Promise<Inge
   }
   if (dailyCycleDue) {
     rollups = await runDailyRollupJob(options.db, { anchorTime, targetDate });
-    tagDictionary = await refreshSteamTagDictionary(options.db, { now: anchorTime, fetchFn: customFetch });
     reviewCompaction = await compactReviewEvidence(options.db, anchorTime);
     await setCheckpoint(options.db, INGESTION_DAILY_CHECKPOINT_KEY, targetDate);
   }
+  const tagDictionary = await refreshSteamTagDictionary(options.db, { now: anchorTime, fetchFn: customFetch });
 
   let prices: HourlyPriceFeedTickResult | undefined;
   if (options.steamApiKey) {

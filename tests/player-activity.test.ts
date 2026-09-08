@@ -129,6 +129,26 @@ describe("Bun ingestion scheduling and player rollups", () => {
     expect(await db.prepare("SELECT COUNT(*) AS count FROM observations").first<number>("count")).toBe(1);
   });
 
+  test("initializes tag names after the daily cycle and avoids same-day refetches", async () => {
+    const db = createAppDatabase();
+    await setDailyCheckpoint(db, "2026-09-04");
+    let dictionaryRequests = 0;
+    const customFetch = (async (input: RequestInfo | URL) => {
+      if (String(input).includes("GetTagList")) {
+        dictionaryRequests++;
+        return Response.json({ response: { tags: [{ tagid: 19, name: "Action" }] } });
+      }
+      return new Response(null, { status: 404 });
+    }) as typeof fetch;
+
+    await runIngestionTick({ db, anchorTime: new Date("2026-09-05T03:10:00.000Z"), customFetch });
+    expect(await db.prepare("SELECT name FROM app_facets WHERE facet_group = ? AND source_id = ?")
+      .bind("community_tag", "19").first<string>("name")).toBe("Action");
+
+    await runIngestionTick({ db, anchorTime: new Date("2026-09-05T03:25:00.000Z"), customFetch });
+    expect(dictionaryRequests).toBe(1);
+  });
+
   test("skips overlapping ticks, including a blocked startup run", async () => {
     const db = createAppDatabase();
     const anchorTime = new Date("2026-09-05T03:10:00.000Z");
