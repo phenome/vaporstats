@@ -1011,8 +1011,6 @@ describe("Player History and Rankings", () => {
     // Preserves PlayerPanel
     expect(html).toContain("Current Players");
     expect(html).toContain("850");
-    expect(html).toContain('id="activity" class="grid scroll-mt-28 grid-cols-2 gap-3 sm:gap-4 max-w-3xl"');
-    expect(html).toContain("tabular-nums text-right");
     // Preserves RelatedApps structure
     expect(html).toContain("Portal 2");
 

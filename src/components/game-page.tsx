@@ -14,7 +14,7 @@ import { PriceHistoryChart } from "./price-history";
 import { RelatedApps } from "./related-apps";
 import { AppLink } from "./app-link";
 import { LifecycleHistorySection } from "./lifecycle-history";
-import { GameReception } from "./game-reception";
+import { GameReception, GameScoreHero } from "./game-reception";
 // The sentinel, the hero flow wrapper, and the first section below it are
 // siblings spaced by the container's space-y-6 rhythm, so the sentinel sits
 // HERO_ROW_GAP above the hero top and the next section sits HERO_ROW_GAP
@@ -505,7 +505,6 @@ export function GamePageView({
       </div>
 
       <LifecycleHistorySection appid={game.appid} />
-      <GameReception key={game.appid} appid={game.appid} />
       <nav
         aria-label="Game page sections"
         className="flex min-h-[44px] items-center overflow-x-auto border border-zinc-800 bg-zinc-950 px-1 font-mono"
@@ -529,7 +528,8 @@ export function GamePageView({
         )}
       </nav>
 
-      <div id="activity" className="grid scroll-mt-28 grid-cols-2 gap-3 sm:gap-4 max-w-3xl">
+      <div id="activity" className="game-activity-grid scroll-mt-28">
+        <GameScoreHero appid={game.appid} />
         <PlayerPanel
           key={game.appid}
           appid={game.appid}
@@ -541,6 +541,8 @@ export function GamePageView({
           }}
         />
       </div>
+
+      <GameReception key={game.appid} appid={game.appid} />
 
       <section id="player-history" className="scroll-mt-28">
         <PlayerHistoryChart

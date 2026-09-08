@@ -2,12 +2,79 @@
   min-height: 0;
 }
 
+.game-activity-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.75rem;
+  width: 100%;
+  max-width: 48rem;
+  align-items: stretch;
+}
+
+.game-activity-grid > * {
+  min-width: 0;
+}
+
+.game-activity-grid > #player-score {
+  grid-column: 1 / -1;
+}
+
 .score-event-label {
   pointer-events: auto;
+}
+
+.score-chart-legend {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.25rem 1rem;
+  padding: 0.35rem 0.25rem 0;
+  color: #a1a1aa;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  font-size: 0.6875rem;
+  line-height: 1rem;
+}
+
+.score-chart-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  min-width: 0;
+}
+
+.score-chart-legend-swatch {
+  display: inline-block;
+  width: 1.25rem;
+  flex: 0 0 auto;
+  border-top: 2px solid;
+}
+
+.score-chart-legend-swatch--recorded {
+  border-top-color: #a78bfa;
+}
+
+.score-chart-legend-swatch--approval {
+  border-top-style: dashed;
+}
+
+.score-chart-legend-swatch--reconstructed {
+  border-top-color: #c084fc;
+  border-top-style: dotted;
 }
 
 @media (max-width: 767px) {
   .score-reception-card {
     align-self: auto;
+  }
+}
+
+@media (min-width: 768px) {
+  .game-activity-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 1rem;
+  }
+
+  .game-activity-grid > #player-score {
+    grid-column: auto;
   }
 }

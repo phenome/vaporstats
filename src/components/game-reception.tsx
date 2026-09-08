@@ -1,5 +1,5 @@
-import React, { useMemo, useState } from "react";
-import { Area, AreaChart, CartesianGrid, ReferenceLine, XAxis, YAxis } from "recharts";
+import React, { useLayoutEffect, useMemo, useRef, useState } from "react";
+import { Area, CartesianGrid, ComposedChart, Line, ReferenceDot, ReferenceLine, XAxis, YAxis } from "recharts";
 import { useQuery } from "@tanstack/react-query";
 import type {
   GameScoreHistory,
@@ -10,9 +10,11 @@ import type {
   ScoreCriticAlignment,
   ScoreCriticRecord,
   ScoreMilestone,
+  ReconstructedScore,
   ScorePopulationReference,
 } from "../lib/score";
 import type { HistoryRange } from "../lib/player-history";
+import { buildApprovalHistorySeries, type ApprovalHistoryPoint, type ApprovalHistorySeries } from "../lib/approval-history";
 import type { ReviewInterval } from "../lib/review-evidence";
 import { formatLocalDateTime, formatNumber } from "../lib/format";
 import { wilson95 } from "../lib/recent-reception";
@@ -22,6 +24,7 @@ import "./game-reception.css";
 
 const SCORE_RANGES: readonly HistoryRange[] = ["24h", "7d", "30d", "90d", "all"];
 const SCORE_COLOR = "#a78bfa";
+const RECONSTRUCTED_COLOR = "#c084fc";
 const WILSON_RULE =
   "More positive or Less positive requires at least a 5 percentage-point difference and non-overlapping two-sided 95% Wilson intervals. Otherwise supported comparisons are No clear shift.";
 
@@ -59,7 +62,9 @@ function stateClass(value: RecentReceptionPayload["state"]): string {
   return "text-zinc-400";
 }
 
-function ScoreHero({ summary }: { summary: GameScoreSummary | null | undefined }) {
+export function GameScoreHero({ appid }: { appid: number }) {
+  const summaryQuery = useQuery(gameScoreSummaryQueryOptions(appid));
+  const summary = summaryQuery.data;
   const score = summary?.score?.value ?? null;
   const reviews = summary?.score?.current_reviews ?? null;
   return (
@@ -77,7 +82,7 @@ function ScoreHero({ summary }: { summary: GameScoreSummary | null | undefined }
           </p>
         )}
         <p className="mt-1 font-mono text-[11px] text-zinc-500">
-          {reviews === null ? "Qualifying reviews unavailable" : `${formatNumber(reviews)} qualifying reviews`}
+          {reviews === null ? "Current scoring-window evidence unavailable" : `${formatNumber(reviews)} reviews in current scoring window`}
         </p>
       </div>
     </section>
@@ -107,6 +112,32 @@ function ScoreMetrics({ history }: { history: GameScoreHistory | null | undefine
 }
 
 type ChartPoint = { timestamp: number; score: number; reviews: number };
+type ReconstructedChartPoint = { timestamp: number; score: number; entry: ReconstructedScore };
+
+type ScoreChartRow = {
+  timestamp: number;
+  score?: number;
+  reviews?: number;
+  reconstructed?: number;
+  approvalDetails: Record<string, ApprovalHistoryPoint>;
+  reconstructedDetails?: ReconstructedScore;
+  [key: string]: unknown;
+};
+
+type ChartApprovalSeries = ApprovalHistorySeries & { key: string; color: string; data: ScoreChartRow[] };
+
+const APPROVAL_COLORS = ["#67b7c4", "#60a5fa", "#38bdf8"];
+
+function approvalSourceLabel(sourceId: string): string {
+  const endpoint = sourceId.split("|", 1)[0];
+  const population = sourceId.match(/population=([^|]+)/)?.[1];
+  if (endpoint === "histogram" && population) return `Steam histogram · ${population}`;
+  return sourceId.length > 24 ? `${sourceId.slice(0, 21)}…` : sourceId;
+}
+
+function approvalLegendLabel(sourceId: string, multipleSources: boolean): string {
+  return multipleSources ? `Historical Steam approval · ${approvalSourceLabel(sourceId)}` : "Historical Steam approval";
+}
 
 function historyPoints(history: GameScoreHistory | null | undefined): ChartPoint[] {
   if (!history) return [];
@@ -114,9 +145,38 @@ function historyPoints(history: GameScoreHistory | null | undefined): ChartPoint
     const timestamp = Date.parse(entry.observed_at);
     if (!Number.isFinite(timestamp)) return [];
     return [{ timestamp, score: entry.value, reviews: entry.current_reviews }];
-  });
+  }).sort((a, b) => a.timestamp - b.timestamp);
 }
 
+function reconstructedHistoryPoints(history: GameScoreHistory | null | undefined): ReconstructedChartPoint[] {
+  const rangeStart = history?.range_start ? Date.parse(history.range_start) : NaN;
+  const rangeEnd = history?.range_end ? Date.parse(history.range_end) : NaN;
+  const seen = new Set<number>();
+  return (history?.reconstructed_scores ?? []).flatMap((entry) => {
+    const timestamp = Date.parse(entry.score_at);
+    if (!Number.isFinite(timestamp) || !Number.isFinite(entry.value)
+      || (Number.isFinite(rangeStart) && timestamp < rangeStart)
+      || (Number.isFinite(rangeEnd) && timestamp > rangeEnd)
+      || seen.has(timestamp)) return [];
+    seen.add(timestamp);
+    return [{ timestamp, score: entry.value, entry }];
+  }).sort((a, b) => a.timestamp - b.timestamp);
+}
+
+function chartPayloadValue(value: unknown): number | null {
+  if (value === null || value === undefined) return null;
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : null;
+}
+
+type ApprovalDotProps = { cx?: number; cy?: number; value?: unknown; index?: number; points?: readonly { value?: unknown }[] };
+
+function isolatedApprovalDot({ cx, cy, value, index, points }: ApprovalDotProps, color: string): React.JSX.Element {
+  const previous = index === undefined || index <= 0 ? null : points?.[index - 1]?.value;
+  const next = index === undefined ? null : points?.[index + 1]?.value;
+  if (chartPayloadValue(value) === null || chartPayloadValue(previous) !== null || chartPayloadValue(next) !== null || typeof cx !== "number" || typeof cy !== "number") return <g aria-hidden="true" />;
+  return <circle cx={cx} cy={cy} r={3} fill={color} stroke="#09090b" strokeWidth={1} />;
+}
 function historyMilestones(history: GameScoreHistory | null | undefined): ScoreMilestone[] {
   return history?.milestones.filter((milestone) => Number.isFinite(Date.parse(milestone.event_time))) ?? [];
 }
@@ -141,15 +201,17 @@ function MilestoneLabel({
   milestone,
   active,
   alignLeft,
-  onActivate,
+  onPointerActivate,
+  onFocusActivate,
   onDeactivate,
 }: {
   viewBox?: { x?: number; y?: number };
   milestone: ScoreMilestone;
   active: boolean;
   alignLeft: boolean;
-  onActivate: () => void;
-  onDeactivate: () => void;
+  onPointerActivate: (event: React.MouseEvent<HTMLButtonElement>) => void;
+  onFocusActivate: (event: React.FocusEvent<HTMLButtonElement>) => void;
+  onDeactivate: (kind: "pointer" | "focus" | "all") => void;
 }) {
   const x = (viewBox?.x ?? 0) + (alignLeft ? -65 : 3);
   const y = (viewBox?.y ?? 0) + 3;
@@ -160,17 +222,18 @@ function MilestoneLabel({
         className={`score-event-label block h-6 max-w-[62px] truncate border border-violet-400/50 bg-zinc-950 px-1 text-left font-mono text-[10px] font-semibold text-violet-200 hover:bg-violet-500/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400 ${alignLeft ? "ml-auto" : ""}`}
         aria-label={`${milestone.display_label} · ${formatDateOnly(milestone.event_time)}`}
         aria-describedby={active ? `score-milestone-${milestone.event_id}` : undefined}
-        onMouseEnter={onActivate}
-        onFocus={onActivate}
-        onClick={onActivate}
-        onBlur={onDeactivate}
-        onMouseLeave={(event) => {
-          if (document.activeElement !== event.currentTarget) onDeactivate();
+        onMouseEnter={onPointerActivate}
+        onMouseMove={onPointerActivate}
+        onFocus={onFocusActivate}
+        onClick={(event) => {
+          if (event.detail > 0) onPointerActivate(event);
         }}
+        onBlur={() => onDeactivate("focus")}
+        onMouseLeave={() => onDeactivate("pointer")}
         onKeyDown={(event) => {
           if (event.key === "Escape") {
             event.preventDefault();
-            onDeactivate();
+            onDeactivate("all");
           }
         }}
       >
@@ -180,8 +243,80 @@ function MilestoneLabel({
   );
 }
 
+type ScoreTooltipContentProps = React.ComponentProps<typeof ChartTooltipContent>;
+type ScoreTooltipItem = NonNullable<ScoreTooltipContentProps["payload"]>[number];
+type ScoreTooltipProps = ScoreTooltipContentProps & { canonicalRows: readonly ScoreChartRow[]; approvalSeries: readonly ChartApprovalSeries[] };
+
+function canonicalScoreTooltipPayload(row: ScoreChartRow, approvalSeries: readonly ChartApprovalSeries[]): ScoreTooltipItem[] {
+  const payload: ScoreTooltipItem[] = [];
+  const score = chartPayloadValue(row.score);
+  if (score !== null) payload.push({ dataKey: "score", name: "Current Player Score", value: score, payload: row, color: SCORE_COLOR });
+  const reconstructed = chartPayloadValue(row.reconstructed);
+  if (reconstructed !== null) payload.push({ dataKey: "reconstructed", name: "Reconstructed score", value: reconstructed, payload: row, color: RECONSTRUCTED_COLOR });
+  for (const series of approvalSeries) {
+    const point = row.approvalDetails[series.key];
+    const approval = chartPayloadValue(point?.approval);
+    if (!point?.bucket || approval === null) continue;
+    payload.push({ dataKey: series.key, name: approvalLegendLabel(series.sourceId, approvalSeries.length > 1), value: approval, payload: row, color: series.color });
+  }
+  return payload;
+}
+
+function ScoreTooltipContent({ canonicalRows, approvalSeries, ...props }: ScoreTooltipProps) {
+  const activeTimestamp = Number(props.label);
+  const row = Number.isFinite(activeTimestamp) ? canonicalRows.find((entry) => entry.timestamp === activeTimestamp) : undefined;
+  const payload = row ? canonicalScoreTooltipPayload(row, approvalSeries) : [];
+  return <ChartTooltipContent {...props} payload={payload} />;
+}
+
 function ScoreChart({ history, appid, isUpdating }: { history: GameScoreHistory | null | undefined; appid: number; isUpdating: boolean }) {
   const points = useMemo(() => historyPoints(history), [history]);
+  const reconstructedPoints = useMemo(() => reconstructedHistoryPoints(history), [history]);
+  const reconstructedData = useMemo(
+    () => reconstructedPoints.map((point) => ({ timestamp: point.timestamp, reconstructed: point.score, reconstructedDetails: point.entry })),
+    [reconstructedPoints],
+  );
+  const approvalSeries = useMemo<ChartApprovalSeries[]>(
+    () => buildApprovalHistorySeries(history?.approval_buckets ?? [], history?.range_start ?? null, history?.range_end ?? null)
+      .map((series, index) => {
+        const key = `approval-${index}`;
+        return {
+          ...series,
+          key,
+          color: APPROVAL_COLORS[index % APPROVAL_COLORS.length],
+          data: series.points.map((point) => ({ timestamp: point.timestamp, [key]: point.approval, approvalDetails: { [key]: point } })),
+        };
+      }),
+    [history],
+  );
+  const chartRows = useMemo<ScoreChartRow[]>(() => {
+    const byTimestamp = new Map<number, ScoreChartRow>();
+    const rowFor = (timestamp: number) => {
+      const existing = byTimestamp.get(timestamp);
+      if (existing) return existing;
+      const row: ScoreChartRow = { timestamp, approvalDetails: {} };
+      byTimestamp.set(timestamp, row);
+      return row;
+    };
+    for (const point of points) {
+      const row = rowFor(point.timestamp);
+      row.score = point.score;
+      row.reviews = point.reviews;
+    }
+    for (const point of reconstructedPoints) {
+      const row = rowFor(point.timestamp);
+      row.reconstructed = point.score;
+      row.reconstructedDetails = point.entry;
+    }
+    for (const series of approvalSeries) {
+      for (const point of series.points) {
+        const row = rowFor(point.timestamp);
+        row[series.key] = point.approval;
+        row.approvalDetails[series.key] = point;
+      }
+    }
+    return [...byTimestamp.values()].sort((a, b) => a.timestamp - b.timestamp);
+  }, [approvalSeries, points, reconstructedPoints]);
   const milestones = useMemo(() => historyMilestones(history), [history]);
   const domain = useMemo(() => historyDomain(history, points), [history, points]);
   const domainMidpoint = (domain[0] + domain[1]) / 2;
@@ -189,24 +324,145 @@ function ScoreChart({ history, appid, isUpdating }: { history: GameScoreHistory 
     const timestamp = Date.parse(milestone.event_time);
     return timestamp >= domain[0] && timestamp <= domain[1];
   });
+  const hasRecordedObservations = points.some((point) => Number.isFinite(point.score));
+  const hasReconstructedObservations = reconstructedPoints.some((point) => Number.isFinite(point.score));
+  const hasApprovalObservations = approvalSeries.some((series) => series.points.some((point) => Number.isFinite(point.approval)));
   const [hoveredValue, setHoveredValue] = useState<number | null>(null);
-  const [activeMilestone, setActiveMilestone] = useState<string | null>(null);
+  const [activeTimestamp, setActiveTimestamp] = useState<number | null>(null);
+  const [hoveredSeries, setHoveredSeries] = useState<"score" | "reconstructed" | "approval" | null>(null);
+  const [milestoneTooltip, setMilestoneTooltip] = useState<{
+    id: string;
+    modality: "pointer" | "touch" | "focus";
+    anchor: { x: number; y: number };
+  } | null>(null);
+  const focusedTooltipRef = useRef<{ id: string; anchor: { x: number; y: number } } | null>(null);
+  const tooltipRef = useRef<HTMLDivElement | null>(null);
+  const [tooltipPosition, setTooltipPosition] = useState<{ x: number; y: number } | null>(null);
+  const activeMilestone = milestoneTooltip?.id ?? null;
   const active = visibleMilestones.find((milestone) => milestone.event_id === activeMilestone) ?? null;
-  const chartConfig = { score: { label: "Current Player Score", color: SCORE_COLOR } } satisfies ChartConfig;
+  const tooltipAnchor = milestoneTooltip?.anchor ?? null;
+  type MilestonePointerEvent = { currentTarget?: EventTarget | null; clientX?: number; clientY?: number; nativeEvent?: Event };
+  const tooltipPositionFor = (event: MilestonePointerEvent | undefined, focus = false) => {
+    const target = event?.currentTarget;
+    if (!(target instanceof Element)) return null;
+    const wrapper = target.closest<HTMLElement>("[data-score-range]");
+    if (!wrapper) return null;
+    const wrapperBox = wrapper.getBoundingClientRect();
+    const targetBox = target.getBoundingClientRect();
+    return {
+      x: (focus ? targetBox.right : event?.clientX ?? targetBox.right) - wrapperBox.left,
+      y: (focus ? targetBox.top : event?.clientY ?? targetBox.top) - wrapperBox.top,
+    };
+  };
+  const activateMilestonePointer = (eventMilestoneId: string, event: MilestonePointerEvent | undefined) => {
+    const anchor = tooltipPositionFor(event);
+    if (!anchor) return;
+    const touch = event?.nativeEvent instanceof PointerEvent && event.nativeEvent.pointerType === "touch";
+    if (touch) focusedTooltipRef.current = null;
+    setMilestoneTooltip({ id: eventMilestoneId, modality: touch ? "touch" : "pointer", anchor });
+  };
+  const activateMilestoneFocus = (eventMilestoneId: string, event: React.FocusEvent<HTMLButtonElement>) => {
+    if (!event.currentTarget.matches(":focus-visible")) return;
+    const anchor = tooltipPositionFor(event, true);
+    if (!anchor) return;
+    focusedTooltipRef.current = { id: eventMilestoneId, anchor };
+    setMilestoneTooltip({ id: eventMilestoneId, modality: "focus", anchor });
+  };
+  const deactivateMilestone = (eventMilestoneId: string, kind: "pointer" | "focus" | "all") => {
+    if (kind === "focus" && focusedTooltipRef.current?.id === eventMilestoneId) focusedTooltipRef.current = null;
+    if (kind === "all") focusedTooltipRef.current = null;
+    setMilestoneTooltip((current) => {
+      if (kind === "all" || (current?.id === eventMilestoneId && current.modality === kind)) {
+        if (kind === "pointer") {
+          const focused = focusedTooltipRef.current;
+          return focused ? { ...focused, modality: "focus" } : null;
+        }
+        return null;
+      }
+      return current;
+    });
+  };
+  useLayoutEffect(() => {
+    const tooltip = tooltipRef.current;
+    const wrapper = tooltip?.closest<HTMLElement>("[data-score-range]");
+    if (!tooltip || !wrapper || !tooltipAnchor) {
+      setTooltipPosition(null);
+      return;
+    }
+    const wrapperBox = wrapper.getBoundingClientRect();
+    const tooltipBox = tooltip.getBoundingClientRect();
+    const flipX = tooltipAnchor.x + 12 + tooltipBox.width > wrapperBox.width;
+    const flipY = tooltipAnchor.y + 12 + tooltipBox.height > wrapperBox.height;
+    const preferredX = tooltipAnchor.x + (flipX ? -12 - tooltipBox.width : 12);
+    const preferredY = tooltipAnchor.y + (flipY ? -12 - tooltipBox.height : 12);
+    const x = Math.max(0, Math.min(Math.max(0, wrapperBox.width - tooltipBox.width), preferredX));
+    const y = Math.max(0, Math.min(Math.max(0, wrapperBox.height - tooltipBox.height), preferredY));
+    setTooltipPosition((current) => current?.x === x && current.y === y ? current : { x, y });
+  }, [active, tooltipAnchor]);
+  useLayoutEffect(() => {
+    if (milestoneTooltip?.modality !== "touch") return;
+    const dismissTouch = () => {
+      focusedTooltipRef.current = null;
+      setMilestoneTooltip(null);
+    };
+    const handlePointerDown = (event: PointerEvent) => {
+      const target = event.target;
+      const wrapper = tooltipRef.current?.closest<HTMLElement>("[data-score-range]");
+      if (!(target instanceof Node) || !wrapper || !wrapper.contains(target)) dismissTouch();
+    };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") dismissTouch();
+    };
+    document.addEventListener("pointerdown", handlePointerDown);
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("pointerdown", handlePointerDown);
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [milestoneTooltip]);
+  const chartConfig = useMemo<ChartConfig>(() => ({
+    score: { label: "Current Player Score", color: SCORE_COLOR },
+    reconstructed: { label: "Reconstructed score", color: RECONSTRUCTED_COLOR },
+    ...Object.fromEntries(approvalSeries.map((series) => [series.key, {
+      label: approvalLegendLabel(series.sourceId, approvalSeries.length > 1),
+      color: series.color,
+    }])),
+  }), [approvalSeries]);
   return (
     <div className={`relative transition-opacity duration-200 ${isUpdating ? "opacity-50" : "opacity-100"}`} data-score-range={history?.range ?? "none"}>
       <ChartContainer config={chartConfig} className="h-[240px] w-full aspect-auto">
-        <AreaChart
-          data={points}
+        <ComposedChart
+          data={chartRows}
           accessibilityLayer
           margin={{ top: 12, right: 18, left: 0, bottom: 0 }}
           onMouseMove={(state) => {
-            const value = Number(state.activePayload?.[0]?.value);
-            setHoveredValue(Number.isFinite(value) ? value : null);
+            const activeLabel = Number(state.activeLabel);
+            setActiveTimestamp(Number.isFinite(activeLabel) ? activeLabel : null);
+            const activeRow = Number.isFinite(activeLabel) ? chartRows.find((row) => row.timestamp === activeLabel) : undefined;
+            const activePayload = activeRow ? canonicalScoreTooltipPayload(activeRow, approvalSeries) : [];
+            const hasValue = (item: ScoreTooltipItem) => chartPayloadValue(item.value) !== null;
+            const preferred = hoveredSeries === "approval"
+              ? activePayload.find((item) => String(item.dataKey ?? "").startsWith("approval-") && hasValue(item))
+              : hoveredSeries
+                ? activePayload.find((item) => String(item.dataKey ?? "") === hoveredSeries && hasValue(item))
+                : undefined;
+            const selected = preferred
+              ?? activePayload.find((item) => String(item.dataKey ?? "").startsWith("approval-") && hasValue(item))
+              ?? activePayload.find((item) => String(item.dataKey ?? "") === "reconstructed" && hasValue(item))
+              ?? activePayload.find((item) => String(item.dataKey ?? "") === "score" && hasValue(item));
+            setHoveredValue(chartPayloadValue(selected?.value));
+            const selectedDataKey = String(selected?.dataKey ?? "");
+            setHoveredSeries(selected ? (selectedDataKey.startsWith("approval-") ? "approval" : selectedDataKey === "reconstructed" ? "reconstructed" : "score") : null);
           }}
           onMouseLeave={() => {
             setHoveredValue(null);
-            if (!document.activeElement?.classList.contains("score-event-label")) setActiveMilestone(null);
+            setActiveTimestamp(null);
+            setHoveredSeries(null);
+            setMilestoneTooltip((current) => {
+              if (current?.modality !== "pointer") return current;
+              const focused = focusedTooltipRef.current;
+              return focused ? { ...focused, modality: "focus" } : null;
+            });
           }}
         >
           <defs>
@@ -226,44 +482,133 @@ function ScoreChart({ history, appid, isUpdating }: { history: GameScoreHistory 
                 x={timestamp}
                 stroke={SCORE_COLOR}
                 strokeDasharray="3 3"
-                onMouseEnter={() => setActiveMilestone(milestone.event_id)}
-                onClick={() => setActiveMilestone(milestone.event_id)}
-                onMouseLeave={() => {
-                  if (!document.activeElement?.classList.contains("score-event-label")) setActiveMilestone(null);
-                }}
-                label={<MilestoneLabel milestone={milestone} alignLeft={timestamp >= domainMidpoint} active={activeMilestone === milestone.event_id} onActivate={() => setActiveMilestone(milestone.event_id)} onDeactivate={() => setActiveMilestone(null)} />}
+                onMouseEnter={(event) => activateMilestonePointer(milestone.event_id, event)}
+                onMouseMove={(event) => activateMilestonePointer(milestone.event_id, event)}
+                onClick={(event) => activateMilestonePointer(milestone.event_id, event)}
+                onMouseLeave={() => deactivateMilestone(milestone.event_id, "pointer")}
+                label={<MilestoneLabel milestone={milestone} alignLeft={timestamp >= domainMidpoint} active={activeMilestone === milestone.event_id} onPointerActivate={(event) => activateMilestonePointer(milestone.event_id, event)} onFocusActivate={(event) => activateMilestoneFocus(milestone.event_id, event)} onDeactivate={(kind) => deactivateMilestone(milestone.event_id, kind)} />}
               />
             );
           })}
-          {hoveredValue !== null && active === null && <ReferenceLine y={hoveredValue} stroke={SCORE_COLOR} strokeDasharray="3 3" />}
-          <ChartTooltip
+          {hoveredValue !== null && activeTimestamp !== null && active === null && <ReferenceDot x={activeTimestamp} y={hoveredValue} r={3} fill={hoveredSeries === "approval" ? APPROVAL_COLORS[0] : hoveredSeries === "reconstructed" ? RECONSTRUCTED_COLOR : SCORE_COLOR} stroke="#09090b" strokeWidth={1} />}
+          {hoveredValue !== null && active === null && <ReferenceLine y={hoveredValue} stroke={hoveredSeries === "approval" ? APPROVAL_COLORS[0] : hoveredSeries === "reconstructed" ? RECONSTRUCTED_COLOR : SCORE_COLOR} strokeDasharray="3 3" />}
+          <ChartTooltip active={active ? false : undefined}
             content={
-              <ChartTooltipContent
-                className="!bg-zinc-950 !opacity-100 border-zinc-700 shadow-2xl text-zinc-100"
+              <ScoreTooltipContent
+                canonicalRows={chartRows}
+                approvalSeries={approvalSeries}
+                className="!bg-zinc-950 !opacity-100 border-zinc-700 shadow-2xl text-zinc-100 max-w-[min(28rem,calc(100vw-2rem))]"
                 labelFormatter={(_, payload) => {
-                  const timestamp = payload?.[0]?.payload?.timestamp;
-                  return typeof timestamp === "number" ? formatLocalDateTime(new Date(timestamp)) : "";
+                  const row = payload?.[0]?.payload as ScoreChartRow | undefined;
+                  const activeKeys = new Set(payload?.map((item) => String(item?.dataKey ?? "")));
+                  if (activeKeys.has("score")) return row ? `Recorded observation · ${formatLocalDateTime(new Date(row.timestamp))}` : "";
+                  if (activeKeys.has("reconstructed")) return row ? `Reconstructed score · ${formatLocalDateTime(new Date(row.timestamp))}` : "";
+                  const historical = Object.values(row?.approvalDetails ?? {}).some((point) => point.bucket !== null);
+                  if (historical) return "Historical approval period";
+                  return row ? `Recorded observation · ${formatLocalDateTime(new Date(row.timestamp))}` : "";
                 }}
-                formatter={(value, _name, item) => (
-                  <div className="flex w-full items-center justify-between gap-3">
-                    <span className="font-mono font-medium text-violet-200">{formatNumber(Number(value), { maximumFractionDigits: 1 })}</span>
-                    <span className="text-zinc-400">{formatNumber(item?.payload?.reviews)} reviews</span>
-                  </div>
-                )}
+                formatter={(value, _name, item) => {
+                  const dataKey = String(item?.dataKey ?? "");
+                  const row = item?.payload as ScoreChartRow | undefined;
+                  if (dataKey === "score") {
+                    return (
+                      <div className="flex w-full items-center justify-between gap-3">
+                        <span className="font-mono font-medium text-violet-200">Current Player Score</span>
+                        <span className="font-mono font-medium text-violet-200">{formatNumber(Number(value), { maximumFractionDigits: 1 })}</span>
+                        <span className="text-zinc-400">{row?.reviews === undefined ? "Current scoring-window evidence unavailable" : `Current scoring-window evidence: ${formatNumber(row.reviews)} reviews`}</span>
+                      </div>
+                    );
+                  }
+                  if (dataKey === "reconstructed") {
+                    const reconstructed = row?.reconstructedDetails;
+                    if (!reconstructed) return null;
+                    return (
+                      <div className="grid w-full gap-1 text-[11px] wrap-anywhere">
+                        <div className="flex items-center justify-between gap-3">
+                          <span className="font-medium text-violet-200">Reconstructed score</span>
+                          <span className="font-mono font-medium text-violet-200">{formatNumber(Number(value), { maximumFractionDigits: 1 })}</span>
+                        </div>
+                        <p className="text-zinc-300">Score at: {formatBoundary(reconstructed.score_at)} · evaluated at: {formatBoundary(reconstructed.evaluated_at)}</p>
+                        <p className="text-zinc-400">Score window: {formatBoundary(reconstructed.score_window.start)}–{formatBoundary(reconstructed.score_window.end)}</p>
+                        <p className="text-zinc-400">Current scoring-window evidence: {formatNumber(reconstructed.current_reviews)} reviews · historical support: {formatNumber(reconstructed.historical_support.actual_reviews)} actual / {formatNumber(reconstructed.historical_support.effective_reviews)} effective</p>
+                        <p className="text-zinc-400">Source observation: {formatBoundary(reconstructed.observed_at)}</p>
+                      </div>
+                    );
+                  }
+                  const point = row?.approvalDetails[dataKey];
+                  const bucket = point?.bucket;
+                  const series = approvalSeries.find((entry) => entry.key === dataKey);
+                  if (!bucket || !series) return null;
+                  return (
+                    <div className="grid w-full gap-1 text-[11px] wrap-anywhere">
+                      <div className="flex items-center justify-between gap-3">
+                        <span className="font-medium text-cyan-200">{approvalLegendLabel(series.sourceId, approvalSeries.length > 1)}</span>
+                        <span className="font-mono font-medium text-cyan-200">{formatPercent(bucket.approval)}</span>
+                      </div>
+                      <p className="text-zinc-300">Period: {formatDateOnly(bucket.period_start)}–{formatDateOnly(bucket.period_end)} · {bucket.granularity === "daily" ? "Daily" : "Monthly"} bucket</p>
+                       <p className="text-zinc-400">{formatNumber(bucket.positive_reviews)} positive + {formatNumber(bucket.negative_reviews)} negative = {formatNumber(bucket.total_reviews)} reviews</p>
+                      <p className="text-zinc-400">Source population: {displayPopulationValue(series.populationRef?.population ?? bucket.population_ref?.population)} · {series.sourceId}</p>
+                    </div>
+                  );
+                }}
               />
             }
           />
-          <Area dataKey="score" type="monotone" stroke="var(--color-score)" strokeWidth={1.8} fill={`url(#score-area-${appid})`} dot={points.length === 1 ? { r: 3 } : false} activeDot={{ r: 3 }} isAnimationActive={false} connectNulls={false} />
-        </AreaChart>
+          <Area data={points} dataKey="score" type="monotone" stroke="var(--color-score)" strokeWidth={1.8} fill={`url(#score-area-${appid})`} dot={points.length === 1 ? { r: 3 } : false} activeDot={false} isAnimationActive={false} connectNulls={false} onMouseEnter={() => setHoveredSeries("score")} />
+          <Line
+            data={reconstructedData}
+            onMouseEnter={() => setHoveredSeries("reconstructed")}
+            dataKey="reconstructed"
+            name="Reconstructed score"
+            type="monotone"
+            stroke={RECONSTRUCTED_COLOR}
+            strokeWidth={1.8}
+            strokeDasharray="2 3"
+            dot={reconstructedPoints.length === 1 ? { r: 3 } : false}
+            activeDot={false}
+            isAnimationActive={false}
+            connectNulls={false}
+          />
+          {approvalSeries.map((series) => (
+            <Line
+              key={series.key}
+              data={series.data}
+              onMouseEnter={() => setHoveredSeries("approval")}
+              dataKey={series.key}
+              name={approvalLegendLabel(series.sourceId, approvalSeries.length > 1)}
+              type="monotone"
+              stroke={series.color}
+              strokeWidth={1.7}
+              strokeDasharray="5 4"
+              dot={(props: ApprovalDotProps) => isolatedApprovalDot(props, series.color)}
+              activeDot={false}
+              isAnimationActive={false}
+              connectNulls={false}
+            />
+          ))}
+        </ComposedChart>
       </ChartContainer>
+      <div className="score-chart-legend" aria-label="Score history legend">
+        <span className="score-chart-legend-item"><span className="score-chart-legend-swatch score-chart-legend-swatch--recorded" aria-hidden="true" />Recorded score</span>
+        {hasReconstructedObservations && <span className="score-chart-legend-item"><span className="score-chart-legend-swatch score-chart-legend-swatch--reconstructed" aria-hidden="true" />Reconstructed score</span>}
+        {approvalSeries.map((series) => <span key={series.key} className="score-chart-legend-item"><span className="score-chart-legend-swatch score-chart-legend-swatch--approval" style={{ borderTopColor: series.color }} aria-hidden="true" />{approvalLegendLabel(series.sourceId, approvalSeries.length > 1)}</span>)}
+      </div>
       {active && (
-        <div id={`score-milestone-${active.event_id}`} role="tooltip" className="pointer-events-auto absolute left-2 top-1 z-10 max-w-[min(22rem,calc(100%-1rem))] border border-violet-400/50 bg-zinc-950 p-2 text-xs text-zinc-200 shadow-xl">
+        <div
+          ref={tooltipRef}
+          id={"score-milestone-" + active.event_id}
+          role="tooltip"
+          className="pointer-events-none absolute z-10 max-w-[min(22rem,calc(100%-1rem))] border border-violet-400/50 bg-zinc-950 p-2 text-xs text-zinc-200 shadow-xl"
+          style={{
+            left: tooltipPosition?.x ?? tooltipAnchor?.x ?? 0,
+            top: tooltipPosition?.y ?? tooltipAnchor?.y ?? 0,
+          }}
+        >
           <p className="font-semibold text-violet-200">{active.title ?? active.display_label}</p>
           <p className="mt-1 text-zinc-400">{milestoneKindLabel(active.kind)} · {formatDateOnly(active.event_time)}</p>
-          {active.source_url && <a href={active.source_url} target="_blank" rel="noreferrer" className="mt-1 inline-block text-violet-300 underline underline-offset-2">Source ↗</a>}
         </div>
       )}
-      {points.length === 0 && <p className="pointer-events-none absolute inset-0 flex items-center justify-center font-mono text-xs text-zinc-500">No score observations in this range.</p>}
+      {!hasRecordedObservations && !hasReconstructedObservations && !hasApprovalObservations && <p className="pointer-events-none absolute inset-0 flex items-center justify-center font-mono text-xs text-zinc-500">No score observations in this range.</p>}
     </div>
   );
 }
@@ -296,7 +641,7 @@ function ScoreDetails({ summary, history }: { summary: GameScoreSummary | null |
         <p>Current Player Score is a player-evidence estimate. Historical observations remain separate from monthly approval buckets and do not imply that a milestone caused a change.</p>
         {score && <>
           <p>Observed at: <span className="text-zinc-300">{formatLocalDateTime(score.observed_at)}</span>; formula version: <span className="text-zinc-300">{score.formula_version}</span></p>
-          <p>Current evidence: <span className="text-zinc-300">{formatNumber(score.current_reviews)} reviews</span>; historical support: <span className="text-zinc-300">{formatNumber(score.historical_support.actual_reviews)} actual / {formatNumber(score.historical_support.effective_reviews)} effective</span></p>
+          <p>Current scoring-window evidence: <span className="text-zinc-300">{formatNumber(score.current_reviews)} reviews</span>; historical support: <span className="text-zinc-300">{formatNumber(score.historical_support.actual_reviews)} actual / {formatNumber(score.historical_support.effective_reviews)} effective</span></p>
           <p>Sampling uncertainty: <span className="text-zinc-300">{uncertainty ? `${formatPercent(uncertainty.lower)}–${formatPercent(uncertainty.upper)}` : "Unavailable"}</span> (95% Wilson interval for current raw approval). This excludes historical support and does not measure selection bias.</p>
           <p>Current reviews have full weight. Historical approval contributes at most 20 effective reviews, capped by its actual sample. Without usable history, one neutral effective review stabilizes small samples. Critic scores do not affect this estimate.</p>
           <p>Evidence window: <span className="text-zinc-300">{formatBoundary(score.evidence_start)}–{formatBoundary(score.evidence_end)}</span>; score window: <span className="text-zinc-300">{formatBoundary(score.score_window.start)}–{formatBoundary(score.score_window.end)}</span></p>
@@ -317,7 +662,7 @@ function ScoreHistoryCard({ appid, range, setRange, history, summary, isUpdating
       <header className="flex flex-col justify-between gap-3 border-b border-zinc-900 pb-3 sm:flex-row sm:items-center">
         <div className="flex items-center gap-2">
           <span className="h-2 w-2 bg-violet-400" aria-hidden="true" />
-          <div><h2 id="score-history-title" className="font-mono text-xs font-semibold uppercase tracking-wider text-zinc-200">Score History</h2><p className="mt-1 font-mono text-[11px] text-zinc-500">Recorded Current Player Score observations</p></div>
+          <div><h2 id="score-history-title" className="font-mono text-xs font-semibold uppercase tracking-wider text-zinc-200">Score History</h2><p className="mt-1 font-mono text-[11px] text-zinc-500">Player scores and historical Steam approval</p></div>
         </div>
         {isUpdating && <span className="font-mono text-[10px] text-violet-300" role="status">Updating…</span>}
         <div className="flex flex-wrap items-center gap-1" role="group" aria-label="Score history time ranges">
@@ -423,10 +768,11 @@ function RecentReception({ recent }: { recent: RecentReceptionPayload }) {
 function ReceptionCard({ summary }: { summary: GameScoreSummary | null | undefined }) {
   const score = summary?.score?.value ?? null;
   const reviews = summary?.score?.current_reviews ?? null;
+  const lifetime = summary?.lifetime_approval ?? null;
   return (
     <aside id="critic-reception" className="score-reception-card min-w-0 border border-zinc-800 bg-zinc-950 p-4 sm:p-5 xl:flex xl:flex-col xl:self-stretch" aria-labelledby="critic-reception-title">
       <h2 id="critic-reception-title" className="border-b border-zinc-900 pb-3 font-mono text-xs font-semibold uppercase tracking-wider text-zinc-200">Reception</h2>
-      <div className="border-b border-zinc-800 py-3"><div className="flex items-center justify-between gap-3"><div><p className="text-sm text-zinc-200">Current Player Score</p><p className="mt-1 font-mono text-[10px] uppercase text-zinc-500">Player evidence</p></div><p className="font-mono text-3xl font-bold tabular-nums text-violet-200">{score === null ? "—" : formatNumber(score, { maximumFractionDigits: 1 })}</p></div><p className="mt-1 font-mono text-xs text-zinc-500">{reviews === null ? "Reviews unavailable" : `${formatNumber(reviews)} reviews`}</p></div>
+      <div className="border-b border-zinc-800 py-3"><div className="flex items-center justify-between gap-3"><div><p className="text-sm text-zinc-200">Current Player Score</p><p className="mt-1 font-mono text-[10px] uppercase text-zinc-500">Player evidence</p></div><p className="font-mono text-3xl font-bold tabular-nums text-violet-200">{score === null ? "—" : formatNumber(score, { maximumFractionDigits: 1 })}</p></div><p className="mt-1 font-mono text-xs text-zinc-500">{reviews === null ? "Current scoring-window evidence unavailable" : `${formatNumber(reviews)} reviews in current scoring window`}</p></div>{lifetime && <div className="grid grid-cols-2 gap-2 border-b border-zinc-800 py-3 font-mono text-xs" aria-label="Lifetime player approval"><div><span className="block text-[10px] uppercase text-zinc-500">Lifetime approval</span><span className="font-bold tabular-nums text-violet-200">{formatPercent(lifetime.value)}</span></div><div><span className="block text-[10px] uppercase text-zinc-500">Lifetime reviews</span><span className="tabular-nums text-zinc-300">{formatNumber(lifetime.total_reviews)}</span></div></div>}
       <div className="xl:flex-1">{summary?.critics.length ? summary.critics.map((critic) => <CriticRecord key={`${critic.source}-${critic.source_id}`} critic={critic} alignment={alignmentFor(summary.alignment, critic)} />) : <p className="mt-4 text-sm text-zinc-500">No critic coverage yet.</p>}{summary?.recent_reception && <RecentReception recent={summary.recent_reception} />}</div>
       <details className="mt-3 border-t border-zinc-900 pt-2 text-xs text-zinc-400 xl:mt-auto"><summary className="cursor-pointer py-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400">Source and comparison limits</summary><div className="mt-2 space-y-2 leading-relaxed"><p>Critic records remain source-native. Scores and tiers are not blended with player evidence or subtracted from it.</p><p>Alignment is shown only when source-specific identity, PC/edition scope, player snapshot, review-time evidence, and freshness gates support it. Unknown limits remain unknown.</p></div></details>
     </aside>
@@ -441,7 +787,6 @@ export function GameReception({ appid }: { appid: number }) {
   const isUpdating = historyQuery.isFetching && historyQuery.isPlaceholderData === true;
   return (
     <section id="game-reception" className="space-y-4" aria-label="Game reception">
-      <ScoreHero summary={summaryQuery.data} />
       <div className="grid items-start gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(17rem,22rem)] xl:items-stretch">
         <ScoreHistoryCard appid={appid} range={range} setRange={setRange} history={history} summary={summaryQuery.data} isUpdating={isUpdating} />
         <ReceptionCard summary={summaryQuery.data} />
