@@ -344,7 +344,7 @@ async function markAttempt(
 }
 async function catalogApps(db: AppDatabase, now: string, limit: number): Promise<CatalogApp[]> {
   const rows = await db.prepare(
-    "SELECT apps.appid, apps.name, apps.slug, apps.release_date AS releaseDate, apps.metacritic_url AS metacriticUrl, oc.value AS opencriticAttempt, mc.value AS metacriticAttempt FROM apps LEFT JOIN tracked_games ON tracked_games.appid = apps.appid LEFT JOIN checkpoints AS oc ON oc.key = 'critic:collection:opencritic:' || apps.appid LEFT JOIN checkpoints AS mc ON mc.key = 'critic:collection:metacritic:' || apps.appid WHERE apps.is_eligible = 1 AND apps.is_playable = 1 AND ((oc.key IS NULL OR json_valid(oc.value) = 0 OR json_type(oc.value, '$.nextDueAt') IS NULL OR julianday(json_extract(oc.value, '$.nextDueAt')) IS NULL OR julianday(json_extract(oc.value, '$.nextDueAt')) <= julianday(?)) OR (mc.key IS NULL OR json_valid(mc.value) = 0 OR json_type(mc.value, '$.nextDueAt') IS NULL OR julianday(json_extract(mc.value, '$.nextDueAt')) IS NULL OR julianday(json_extract(mc.value, '$.nextDueAt')) <= julianday(?))) ORDER BY CASE WHEN tracked_games.appid IS NULL THEN 1 ELSE 0 END, tracked_games.latest_players IS NULL, tracked_games.latest_players DESC, apps.appid LIMIT ?",
+    "SELECT apps.appid, apps.name, apps.slug, apps.release_date AS releaseDate, apps.metacritic_url AS metacriticUrl, oc.value AS opencriticAttempt, mc.value AS metacriticAttempt FROM apps LEFT JOIN tracked_games ON tracked_games.appid = apps.appid LEFT JOIN checkpoints AS oc ON oc.key = 'critic:collection:opencritic:' || apps.appid LEFT JOIN checkpoints AS mc ON mc.key = 'critic:collection:metacritic:' || apps.appid WHERE apps.is_eligible = 1 AND apps.is_playable = 1 AND ((oc.key IS NULL OR json_valid(oc.value) = 0 OR json_type(oc.value, '$.nextDueAt') IS NULL OR julianday(json_extract(oc.value, '$.nextDueAt')) IS NULL OR julianday(json_extract(oc.value, '$.nextDueAt')) <= julianday(?)) OR (mc.key IS NULL OR json_valid(mc.value) = 0 OR json_type(mc.value, '$.nextDueAt') IS NULL OR julianday(json_extract(mc.value, '$.nextDueAt')) IS NULL OR julianday(json_extract(mc.value, '$.nextDueAt')) <= julianday(?) OR (apps.metacritic_url IS NOT NULL AND json_extract(mc.value, '$.lastError') = 'missing_steam_metacritic_url'))) ORDER BY CASE WHEN tracked_games.appid IS NULL THEN 1 ELSE 0 END, tracked_games.latest_players IS NULL, tracked_games.latest_players DESC, apps.appid LIMIT ?",
   ).bind(now, now, limit).all<CatalogApp>();
   return rows.results;
 }
@@ -437,7 +437,10 @@ export async function runCriticCollection(
     result.games += 1;
     const cadence = cadenceFor(app, now, recentTitleDays);
     const openDue = isDue(attempts.get(`opencritic:${app.appid}`) ?? null, now);
-    const metaDue = isDue(attempts.get(`metacritic:${app.appid}`) ?? null, now);
+    const metaAttempt = attempts.get(`metacritic:${app.appid}`) ?? null;
+    const metaDue =
+      isDue(metaAttempt, now) ||
+      (app.metacriticUrl !== null && metaAttempt?.lastError === "missing_steam_metacritic_url");
 
     if (openDue) {
       let openAvailable = true;

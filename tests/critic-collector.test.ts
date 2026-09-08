@@ -120,13 +120,36 @@ describe("critic collector", () => {
     expect(fake.urls).toHaveLength(1);
   });
 
-  test("records a negative due checkpoint for a missing Metacritic URL", async () => {
+  test("collects Metacritic after a previously missing URL becomes available", async () => {
     await insertApp(db);
-    const fake = fetchFor({ "https://opencritic.com/sitemap.xml": response("<sitemapindex/>") });
-    const result = await runCriticCollection(db, { maxRequests: 2, maxGames: 1, fetch: fake.fetch });
-    expect(result.negativeLookups).toBeGreaterThan(0);
-    const checkpoint = await db.prepare(`SELECT value FROM checkpoints WHERE key = ?`).bind("critic:collection:metacritic:1091500").first<{ value: string }>();
-    expect(JSON.parse(checkpoint?.value ?? "{}").lastStatus).toBe("missing");
+    const metacriticUrl = "https://www.metacritic.com/game/cyberpunk-2077/critic-reviews/?platform=pc";
+    const firstFake = fetchFor({
+      "https://opencritic.com/sitemap.xml": response("<sitemapindex><loc>https://opencritic.com/sitemap_games_1.xml</loc></sitemapindex>"),
+      "https://opencritic.com/sitemap_games_1.xml": response("<urlset><loc>https://opencritic.com/game/8525/cyberpunk-2077</loc></urlset>"),
+      "https://opencritic.com/game/8525/cyberpunk-2077": response(openCriticPage),
+    });
+    const first = await runCriticCollection(db, {
+      now: "2026-09-01T00:00:00Z",
+      maxRequests: 8,
+      maxGames: 1,
+      fetch: firstFake.fetch,
+    });
+    expect(first.successes).toBe(1);
+    expect(first.negativeLookups).toBe(1);
+
+    await db.prepare("UPDATE apps SET metacritic_url = ? WHERE appid = ?").bind(metacriticUrl, 1091500).run();
+    const secondFake = fetchFor({ [metacriticUrl]: response(metacriticPage) });
+    const second = await runCriticCollection(db, {
+      now: "2026-09-02T00:00:00Z",
+      maxRequests: 8,
+      maxGames: 1,
+      fetch: secondFake.fetch,
+    });
+
+    expect(second.requests).toBe(1);
+    expect(second.successes).toBe(1);
+    expect(secondFake.urls).toEqual([metacriticUrl]);
+    expect((await getCriticRecords(db, 1091500)).map((record) => record.source)).toEqual(["metacritic", "opencritic"]);
   });
 
   test("does not prove an ambiguous normalized OpenCritic title", async () => {
