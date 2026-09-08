@@ -424,7 +424,7 @@ function currentContrast(
   const criticDirection = classifyCriticRecord(record);
   const playerDirection = classifyPlayerScore(currentPlayer?.score);
   if (!hasAtLeastReviews(record.reviewCount, MIN_CRITIC_REVIEW_COUNT)) pushReason(reasons, "critic_reviews_insufficient");
-  if (criticDirection === null) pushReason(reasons, "critic_metric_missing");
+  if (record.collectionBasis === "authorized_api" && criticDirection === null) pushReason(reasons, "critic_metric_missing");
   if (!playerSignalValid(currentPlayer)) pushReason(reasons, "player_reviews_insufficient");
   if (playerDirection === null) pushReason(reasons, "player_score_missing");
   if (freshness.state === "unknown") {
@@ -496,7 +496,7 @@ export function evaluateCriticAlignment(
   const playerDirection = classifyPlayerScore(reviewSnapshot?.score);
 
   if (!hasAtLeastReviews(canonicalRecord.reviewCount, MIN_CRITIC_REVIEW_COUNT)) pushReason(reasons, "critic_reviews_insufficient");
-  if (criticDirection === null) pushReason(reasons, "critic_metric_missing");
+  if (canonicalRecord.collectionBasis === "authorized_api" && criticDirection === null) pushReason(reasons, "critic_metric_missing");
   if (!canonicalRecord.reviewPeriodStart || !canonicalRecord.reviewPeriodEnd) {
     pushReason(reasons, "review_dates_missing");
   } else if (!dateWindow(canonicalRecord)) {

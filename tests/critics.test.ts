@@ -140,6 +140,16 @@ describe("critic identity and evidence gates", () => {
     expect(outcome.currentContrast.alignment).toBeNull();
     expect(outcome.reasons).toContain("permission_missing");
     expect(outcome.currentContrast.reasons).toContain("permission_missing");
+    expect(outcome.reasons).not.toContain("critic_metric_missing");
+    expect(outcome.currentContrast.reasons).not.toContain("critic_metric_missing");
+  });
+
+  test("reports missing metrics when authorized calibration cannot classify", () => {
+    const outcome = evaluateCriticAlignment(makeRecord({ score: null }), makeContext());
+    expect(outcome.state).toBe("unavailable");
+    expect(outcome.currentContrast.state).toBe("unavailable");
+    expect(outcome.reasons).toContain("critic_metric_missing");
+    expect(outcome.currentContrast.reasons).toContain("critic_metric_missing");
   });
 
   test("does not treat a mixed-platform OpenCritic aggregate as PC evidence", () => {
