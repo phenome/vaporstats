@@ -136,3 +136,11 @@ A source-identified genre, Steam feature, or community tag. The three classifica
 
 **Monthly Score Comparison**:
 An earlier score comparison for the games eligible in a selected catalog group now. It may use a Reconstructed Player Score when no Recorded Player Score exists; missing historical evidence remains missing, and the comparison does not assert that the same games were eligible then.
+
+**Score Event Reader**:
+A temporary in-card view docked within the game reception container that renders an extracted readable representation of a selected Steam event or patch announcement, with a close control that restores the primary reception view.
+_Avoid_: News modal, news popup, article sheet, milestone drawer
+
+**Linked Range Synchronization**:
+The coordinated update of the observation window across Player History and Score History driven by the shared `range` URL search parameter, while Price History retains an independent `pricerange` parameter.
+_Avoid_: Global zoom, shared timescale, unified period selector

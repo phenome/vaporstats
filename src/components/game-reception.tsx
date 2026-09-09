@@ -1,4 +1,4 @@
-import React, { useLayoutEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Area, CartesianGrid, ComposedChart, ReferenceDot, ReferenceLine, XAxis, YAxis } from "recharts";
 import { useQuery } from "@tanstack/react-query";
 import type {
@@ -18,6 +18,8 @@ import { wilson95 } from "../lib/recent-reception";
 import { gameScoreHistoryQueryOptions, gameScoreSummaryQueryOptions } from "../lib/score-query";
 import { SCORE_MILESTONE_LABEL_GAP, SCORE_MILESTONE_LABEL_WIDTH, selectScoreMilestones } from "../lib/score-milestone-density";
 import { ChartContainer, ChartTooltip, ChartTooltipContent, type ChartConfig } from "./ui/chart";
+import { ScoreEventReader } from "./score-event-reader";
+import { isEventWithinHistoryRange } from "../lib/game-params";
 import "./game-reception.css";
 
 const SCORE_RANGES: readonly HistoryRange[] = ["24h", "7d", "30d", "90d", "all"];
@@ -152,18 +154,22 @@ function MilestoneLabel({
   viewBox,
   milestone,
   active,
+  selected,
   alignLeft,
   onPointerActivate,
   onFocusActivate,
   onDeactivate,
+  onSelect,
 }: {
   viewBox?: { x?: number; y?: number };
   milestone: ScoreMilestone;
   active: boolean;
+  selected: boolean;
   alignLeft: boolean;
   onPointerActivate: (event: React.MouseEvent<HTMLButtonElement>) => void;
   onFocusActivate: (event: React.FocusEvent<HTMLButtonElement>) => void;
   onDeactivate: (kind: "pointer" | "focus" | "all") => void;
+  onSelect?: () => void;
 }) {
   const x = (viewBox?.x ?? 0) + (alignLeft ? -(SCORE_MILESTONE_LABEL_WIDTH + SCORE_MILESTONE_LABEL_GAP) : SCORE_MILESTONE_LABEL_GAP);
   const y = (viewBox?.y ?? 0) + 3;
@@ -171,14 +177,19 @@ function MilestoneLabel({
     <foreignObject x={x} y={y} width={SCORE_MILESTONE_LABEL_WIDTH} height={25}>
       <button
         type="button"
-        className={`score-event-label block h-6 max-w-[62px] truncate border border-violet-400/50 bg-zinc-950 px-1 text-left font-mono text-[10px] font-semibold text-violet-200 hover:bg-violet-500/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400 ${alignLeft ? "ml-auto" : ""}`}
+        className={`score-event-label block h-6 max-w-[62px] truncate border px-1 text-left font-mono text-[10px] font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400 ${
+          selected
+            ? "border-violet-300 bg-violet-500/40 text-white ring-1 ring-violet-300"
+            : "border-violet-400/50 bg-zinc-950 text-violet-200 hover:bg-violet-500/20"
+        } ${alignLeft ? "ml-auto" : ""}`}
         aria-label={`${milestone.display_label} · ${formatDateOnly(milestone.event_time)}`}
         aria-describedby={active ? `score-milestone-${milestone.event_id}` : undefined}
         onMouseEnter={onPointerActivate}
         onMouseMove={onPointerActivate}
         onFocus={onFocusActivate}
         onClick={(event) => {
-          if (event.detail > 0) onPointerActivate(event);
+          onPointerActivate(event);
+          onSelect?.();
         }}
         onBlur={() => onDeactivate("focus")}
         onMouseLeave={() => onDeactivate("pointer")}
@@ -196,7 +207,19 @@ function MilestoneLabel({
 }
 
 
-function ScoreChart({ history, appid, isUpdating }: { history: GameScoreHistory | null | undefined; appid: number; isUpdating: boolean }) {
+function ScoreChart({
+  history,
+  appid,
+  isUpdating,
+  activeEventId,
+  onSelectEvent,
+}: {
+  history: GameScoreHistory | null | undefined;
+  appid: number;
+  isUpdating: boolean;
+  activeEventId?: string | null;
+  onSelectEvent?: (eventId: string | null) => void;
+}) {
   const chartData = useMemo(() => displayHistoryPoints(history), [history]);
   const milestones = useMemo(() => historyMilestones(history), [history]);
   const domain = useMemo(() => historyDomain(history, chartData), [history, chartData]);
@@ -359,17 +382,33 @@ function ScoreChart({ history, appid, isUpdating }: { history: GameScoreHistory 
           <YAxis domain={[0, 100]} ticks={[0, 50, 100]} width={SCORE_CHART_Y_AXIS_WIDTH} tickLine={false} axisLine={false} stroke="#71717a" fontSize={10} />
           {selectedMilestones.map((milestone) => {
             const timestamp = Date.parse(milestone.event_time);
+            const isSelected = activeEventId === milestone.event_id;
             return (
               <ReferenceLine
                 key={milestone.event_id}
                 x={timestamp}
-                stroke={SCORE_COLOR}
-                strokeDasharray="3 3"
+                stroke={isSelected ? "#c4b5fd" : SCORE_COLOR}
+                strokeWidth={isSelected ? 2 : 1}
+                strokeDasharray={isSelected ? undefined : "3 3"}
                 onMouseEnter={(event) => activateMilestonePointer(milestone.event_id, event)}
                 onMouseMove={(event) => activateMilestonePointer(milestone.event_id, event)}
-                onClick={(event) => activateMilestonePointer(milestone.event_id, event)}
+                onClick={(event) => {
+                  activateMilestonePointer(milestone.event_id, event);
+                  onSelectEvent?.(milestone.event_id);
+                }}
                 onMouseLeave={() => deactivateMilestone(milestone.event_id, "pointer")}
-                label={<MilestoneLabel milestone={milestone} alignLeft={timestamp >= domainMidpoint} active={activeMilestone === milestone.event_id} onPointerActivate={(event) => activateMilestonePointer(milestone.event_id, event)} onFocusActivate={(event) => activateMilestoneFocus(milestone.event_id, event)} onDeactivate={(kind) => deactivateMilestone(milestone.event_id, kind)} />}
+                label={
+                  <MilestoneLabel
+                    milestone={milestone}
+                    alignLeft={timestamp >= domainMidpoint}
+                    active={activeMilestone === milestone.event_id}
+                    selected={isSelected}
+                    onPointerActivate={(event) => activateMilestonePointer(milestone.event_id, event)}
+                    onFocusActivate={(event) => activateMilestoneFocus(milestone.event_id, event)}
+                    onDeactivate={(kind) => deactivateMilestone(milestone.event_id, kind)}
+                    onSelect={() => onSelectEvent?.(milestone.event_id)}
+                  />
+                }
               />
             );
           })}
@@ -463,7 +502,25 @@ function ScoreDetails({ summary, history }: { summary: GameScoreSummary | null |
   );
 }
 
-function ScoreHistoryCard({ appid, range, setRange, history, summary, isUpdating }: { appid: number; range: HistoryRange; setRange: (range: HistoryRange) => void; history: GameScoreHistory | null | undefined; summary: GameScoreSummary | null | undefined; isUpdating: boolean }) {
+function ScoreHistoryCard({
+  appid,
+  range,
+  setRange,
+  history,
+  summary,
+  isUpdating,
+  activeEventId,
+  onSelectEvent,
+}: {
+  appid: number;
+  range: HistoryRange;
+  setRange: (range: HistoryRange) => void;
+  history: GameScoreHistory | null | undefined;
+  summary: GameScoreSummary | null | undefined;
+  isUpdating: boolean;
+  activeEventId?: string | null;
+  onSelectEvent?: (eventId: string | null) => void;
+}) {
   const milestones = historyMilestones(history);
   return (
     <section id="score-history" className="min-w-0 border border-zinc-800 bg-zinc-950 p-4 sm:p-5" aria-labelledby="score-history-title">
@@ -478,11 +535,46 @@ function ScoreHistoryCard({ appid, range, setRange, history, summary, isUpdating
         </div>
       </header>
       <ScoreMetrics history={history} />
-      <div className="mt-4 overflow-hidden" data-testid="score-history-chart"><ScoreChart appid={appid} history={history} isUpdating={isUpdating} /></div>
+      <div className="mt-4 overflow-hidden" data-testid="score-history-chart">
+        <ScoreChart
+          appid={appid}
+          history={history}
+          isUpdating={isUpdating}
+          activeEventId={activeEventId}
+          onSelectEvent={onSelectEvent}
+        />
+      </div>
       <details className="mt-3 border-t border-zinc-900 pt-3 text-xs text-zinc-400">
         <summary className="cursor-pointer font-mono text-violet-300 underline decoration-violet-500/50 underline-offset-4 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400">Milestones</summary>
         <ol className="mt-3 space-y-2">
-          {milestones.length === 0 ? <li>No sourced milestones in this range.</li> : milestones.map((milestone) => <li key={milestone.event_id} className="flex flex-wrap items-baseline gap-x-2 gap-y-1"><time dateTime={milestone.event_time} className="font-mono text-zinc-500">{formatDateOnly(milestone.event_time)}</time><span className="text-zinc-300">{milestone.title ?? milestone.display_label}</span>{milestone.kind && <span className="text-zinc-500">({milestoneKindLabel(milestone.kind)})</span>}{milestone.source_url && <a href={milestone.source_url} target="_blank" rel="noreferrer" className="text-violet-300 underline underline-offset-2">Source ↗</a>}</li>)}
+          {milestones.length === 0 ? (
+            <li>No sourced milestones in this range.</li>
+          ) : (
+            milestones.map((milestone) => (
+              <li key={milestone.event_id} className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
+                <time dateTime={milestone.event_time} className="font-mono text-zinc-500">
+                  {formatDateOnly(milestone.event_time)}
+                </time>
+                <button
+                  type="button"
+                  onClick={() => onSelectEvent?.(milestone.event_id)}
+                  className={`cursor-pointer text-left underline-offset-2 hover:underline ${
+                    activeEventId === milestone.event_id
+                      ? "font-semibold text-violet-200 underline"
+                      : "text-zinc-300 hover:text-violet-300"
+                  }`}
+                >
+                  {milestone.title ?? milestone.display_label}
+                </button>
+                {milestone.kind && <span className="text-zinc-500">({milestoneKindLabel(milestone.kind)})</span>}
+                {milestone.source_url && (
+                  <a href={milestone.source_url} target="_blank" rel="noreferrer" className="text-violet-300 underline underline-offset-2">
+                    Source ↗
+                  </a>
+                )}
+              </li>
+            ))
+          )}
         </ol>
       </details>
       <ScoreDetails summary={summary} history={history} />
@@ -591,30 +683,136 @@ function PlayersCriticsComparison({ critics, alignments, playerScore }: { critic
 }
 
 
-function ReceptionCard({ summary }: { summary: GameScoreSummary | null | undefined }) {
+function ReceptionCard({
+  appid,
+  summary,
+  activeEventId,
+  onCloseReader,
+}: {
+  appid: number;
+  summary: GameScoreSummary | null | undefined;
+  activeEventId?: string | null;
+  onCloseReader?: () => void;
+}) {
+  if (activeEventId) {
+    return (
+      <aside
+        id="critic-reception"
+        className="score-reception-card min-w-0 border border-zinc-800 bg-zinc-950 p-4 sm:p-5 xl:flex xl:flex-col xl:self-stretch"
+        aria-label="Event article reader"
+      >
+        <ScoreEventReader
+          appid={appid}
+          eventId={activeEventId}
+          onClose={() => onCloseReader?.()}
+        />
+      </aside>
+    );
+  }
+
   const score = summary?.score?.value ?? null;
   const reviews = summary?.score?.current_reviews ?? null;
   const lifetime = summary?.lifetime_approval ?? null;
   return (
     <aside id="critic-reception" className="score-reception-card min-w-0 border border-zinc-800 bg-zinc-950 p-4 sm:p-5 xl:flex xl:flex-col xl:self-stretch" aria-labelledby="critic-reception-title">
       <h2 id="critic-reception-title" className="border-b border-zinc-900 pb-3 font-mono text-xs font-semibold uppercase tracking-wider text-zinc-200">Reception</h2>
-      <div className="border-b border-zinc-800 py-3"><div className="flex items-center justify-between gap-3"><div><p className="text-sm text-zinc-200">Current Player Score</p><p className="mt-1 font-mono text-[10px] uppercase text-zinc-500">Player evidence</p></div><p className="font-mono text-3xl font-bold tabular-nums text-violet-200">{score === null ? "—" : formatNumber(score, { maximumFractionDigits: 1 })}</p></div><p className="mt-1 font-mono text-xs text-zinc-500">{reviews === null ? "Current scoring-window evidence unavailable" : `${formatNumber(reviews)} reviews in current scoring window`}</p></div>{lifetime && <div className="grid grid-cols-2 gap-2 border-b border-zinc-800 py-3 font-mono text-xs" aria-label="Lifetime player approval"><div><span className="block text-[10px] uppercase text-zinc-500">Lifetime approval</span><span className="font-bold tabular-nums text-violet-200">{formatPercent(lifetime.value)}</span></div><div><span className="block text-[10px] uppercase text-zinc-500">Lifetime reviews</span><span className="tabular-nums text-zinc-300">{formatNumber(lifetime.total_reviews)}</span></div></div>}
+      <div className="border-b border-zinc-800 py-3"><div className="flex items-center justify-between gap-3"><div><p className="text-sm text-zinc-200">Current Player Score</p><p className="mt-1 font-mono text-[10px] uppercase text-zinc-500">Player evidence</p></div><p className="font-mono text-3xl font-bold tabular-nums text-violet-200">{score === null ? "—" : formatNumber(score, { maximumFractionDigits: 1 })}</p></div><p className="mt-1 font-mono text-xs text-zinc-500">{reviews === null ? "Current scoring-window evidence unavailable" : `${formatNumber(reviews)} reviews in current scoring window`}</p></div>{lifetime && <div className="grid grid-cols-2 gap-2 border-b border-zinc-800 py-3 font-mono text-xs" aria-label="Lifetime player approval"><div><span className="text-zinc-500">Reviews:</span> <span className="text-zinc-200">{formatNumber(lifetime.total_reviews)}</span></div><div><span className="text-zinc-500">Approval:</span> <span className="text-violet-200">{formatPercent(lifetime.value)}</span></div></div>}
       <div className="xl:flex-1">{summary?.critics.length ? summary.critics.map((critic) => <CriticRecord key={`${critic.source}-${critic.source_id}`} critic={critic} />) : <p className="mt-4 text-sm text-zinc-500">No critic coverage yet.</p>}{summary?.critics.length ? <PlayersCriticsComparison critics={summary.critics} alignments={summary.alignment} playerScore={score} /> : null}</div>
     </aside>
   );
 }
 
-export function GameReception({ appid }: { appid: number }) {
-  const [range, setRange] = useState<HistoryRange>("30d");
+export interface GameReceptionProps {
+  appid: number;
+  range?: HistoryRange;
+  onRangeChange?: (range: HistoryRange) => void;
+  activeEventId?: string | null;
+  onSelectEvent?: (eventId: string | null) => void;
+}
+
+export function GameReception({
+  appid,
+  range: rangeProp,
+  onRangeChange,
+  activeEventId,
+  onSelectEvent,
+}: GameReceptionProps) {
+  const [localRange, setLocalRange] = useState<HistoryRange>("30d");
+  const range = rangeProp ?? localRange;
   const summaryQuery = useQuery(gameScoreSummaryQueryOptions(appid));
   const historyQuery = useQuery(gameScoreHistoryQueryOptions(appid, range));
   const history = historyQuery.data;
   const isUpdating = historyQuery.isFetching && historyQuery.isPlaceholderData === true;
+  const triggeringButtonRef = useRef<HTMLElement | null>(null);
+
+  const handleSelectEvent = (eventId: string | null) => {
+    if (eventId && typeof document !== "undefined") {
+      triggeringButtonRef.current = document.activeElement as HTMLElement | null;
+    }
+    onSelectEvent?.(eventId);
+  };
+
+  const handleCloseReader = () => {
+    onSelectEvent?.(null);
+    if (triggeringButtonRef.current) {
+      triggeringButtonRef.current.focus({ preventScroll: true });
+    }
+  };
+
+  const handleSetRange = (nextRange: HistoryRange) => {
+    if (activeEventId && history?.milestones) {
+      const activeItem = history.milestones.find((m) => m.event_id === activeEventId);
+      if (activeItem) {
+        const within = isEventWithinHistoryRange(activeItem.event_time, nextRange, null, null);
+        if (!within) {
+          onSelectEvent?.(null);
+        }
+      }
+    }
+    if (onRangeChange) {
+      onRangeChange(nextRange);
+    } else {
+      setLocalRange(nextRange);
+    }
+  };
+
+  // Mobile scroll-into-view when an event reader is opened
+  useEffect(() => {
+    if (activeEventId && typeof window !== "undefined") {
+      const isMobileStacked = window.innerWidth < 1280;
+      if (isMobileStacked) {
+        const card = document.getElementById("critic-reception");
+        if (card) {
+          const targetY = window.scrollY + card.getBoundingClientRect().top - 80;
+          try {
+            window.scrollTo({ top: targetY, behavior: "smooth" });
+          } catch {
+            window.scrollTo(0, targetY);
+          }
+        }
+      }
+    }
+  }, [activeEventId]);
+
   return (
     <section id="game-reception" className="space-y-4" aria-label="Game reception">
       <div className="grid items-start gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(17rem,22rem)] xl:items-stretch">
-        <ScoreHistoryCard appid={appid} range={range} setRange={setRange} history={history} summary={summaryQuery.data} isUpdating={isUpdating} />
-        <ReceptionCard summary={summaryQuery.data} />
+        <ScoreHistoryCard
+          appid={appid}
+          range={range}
+          setRange={handleSetRange}
+          history={history}
+          summary={summaryQuery.data}
+          isUpdating={isUpdating}
+          activeEventId={activeEventId}
+          onSelectEvent={handleSelectEvent}
+        />
+        <ReceptionCard
+          appid={appid}
+          summary={summaryQuery.data}
+          activeEventId={activeEventId}
+          onCloseReader={handleCloseReader}
+        />
       </div>
       {summaryQuery.isError && <p className="font-mono text-xs text-zinc-500" role="status">Reception data unavailable.</p>}
     </section>

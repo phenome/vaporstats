@@ -16,7 +16,16 @@ import { GamePageView } from "../components/game-page";
 import { GamePageSkeleton } from "../components/route-skeletons";
 import { AppLink } from "../components/app-link";
 import type { GameDetailResponseData } from "./api.games.$appid.detail";
-
+import {
+  parseNumericRange,
+  parseNumericPriceRange,
+  cleanGameSearchParams,
+  NUMERIC_TO_HISTORY_RANGE,
+  DEFAULT_NUMERIC_RANGE,
+  DEFAULT_NUMERIC_PRICE_RANGE,
+  type NumericRange,
+  type NumericPriceRange,
+} from "../lib/game-params";
 export async function fetchGameDetail(appid: number): Promise<GameDetailResponseData> {
   const response = await fetch(`/api/games/${appid}/detail`);
   if (!response.ok) {
@@ -38,15 +47,34 @@ export function gameDetailQueryOptions(appid: number) {
 
 export const Route = createFileRoute("/games/$game")({
   headers: () => getEntityCacheHeaders(),
-  loader: ({ params, context }) => {
+  validateSearch: (search: Record<string, unknown>) => {
+    const result: { range?: number; pricerange?: number; event?: string } = {};
+    if (search.range !== undefined) {
+      const parsed = parseNumericRange(search.range);
+      if (parsed !== DEFAULT_NUMERIC_RANGE) result.range = parsed;
+    }
+    if (search.pricerange !== undefined) {
+      const parsed = parseNumericPriceRange(search.pricerange);
+      if (parsed !== DEFAULT_NUMERIC_PRICE_RANGE) result.pricerange = parsed;
+    }
+    if (typeof search.event === "string" && search.event.trim().length > 0) {
+      result.event = search.event.trim();
+    }
+    return result;
+  },
+  loaderDeps: ({ search }) => ({
+    range: parseNumericRange(search.range),
+  }),
+  loader: ({ params, deps, context }) => {
     const parsed = parseGameSlug(params.game);
     if (!parsed) {
       throw notFound();
     }
+    const historyRange = NUMERIC_TO_HISTORY_RANGE[deps.range];
     // Start unawaited prefetch so navigation/hover proceeds immediately.
     void context.queryClient.prefetchQuery(gameDetailQueryOptions(parsed.appid));
     void context.queryClient.prefetchQuery(gameScoreSummaryQueryOptions(parsed.appid));
-    void context.queryClient.prefetchQuery(gameScoreHistoryQueryOptions(parsed.appid, "30d"));
+    void context.queryClient.prefetchQuery(gameScoreHistoryQueryOptions(parsed.appid, historyRange));
     return { appid: parsed.appid, slug: parsed.slug };
   },
   component: GameRouteComponent,
@@ -55,6 +83,11 @@ export const Route = createFileRoute("/games/$game")({
 
 function GameRouteComponent() {
   const { appid, slug } = Route.useLoaderData();
+  const search = Route.useSearch();
+  const navigate = Route.useNavigate();
+  const numericRange = parseNumericRange(search.range);
+  const numericPriceRange = parseNumericPriceRange(search.pricerange);
+  const activeEvent = search.event ?? null;
   const { data, isLoading, isError } = useQuery(gameDetailQueryOptions(appid));
 
   if (isError) {
@@ -72,10 +105,47 @@ function GameRouteComponent() {
       <Navigate
         to="/games/$game"
         params={{ game: `${game.appid}-${canonicalSlug}` }}
+        search={search}
         replace
       />
     );
   }
+
+  const handleRangeChange = (nextRange: NumericRange) => {
+    const cleaned = cleanGameSearchParams({
+      range: nextRange,
+      pricerange: numericPriceRange,
+      event: activeEvent,
+    });
+    void navigate({
+      search: cleaned,
+      replace: true,
+    });
+  };
+
+  const handlePriceRangeChange = (nextPriceRange: NumericPriceRange) => {
+    const cleaned = cleanGameSearchParams({
+      range: numericRange,
+      pricerange: nextPriceRange,
+      event: activeEvent,
+    });
+    void navigate({
+      search: cleaned,
+      replace: true,
+    });
+  };
+
+  const handleEventChange = (nextEventId: string | null) => {
+    const cleaned = cleanGameSearchParams({
+      range: numericRange,
+      pricerange: numericPriceRange,
+      event: nextEventId,
+    });
+    void navigate({
+      search: cleaned,
+      replace: true,
+    });
+  };
 
   return (
     <GamePageView
@@ -84,6 +154,12 @@ function GameRouteComponent() {
       playerHistory={playerHistory}
       price={price}
       priceHistory={priceHistory}
+      range={numericRange}
+      pricerange={numericPriceRange}
+      eventId={activeEvent}
+      onRangeChange={handleRangeChange}
+      onPriceRangeChange={handlePriceRangeChange}
+      onEventChange={handleEventChange}
     />
   );
 }

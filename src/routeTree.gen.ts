@@ -37,6 +37,7 @@ import { Route as ApiGamesAppidDetailRouteImport } from './routes/api.games.$app
 import { Route as ApiGamesAppidLifecycleRouteImport } from './routes/api.games.$appid.lifecycle'
 import { Route as ApiGamesAppidOverviewRouteImport } from './routes/api.games.$appid.overview'
 import { Route as ApiGamesAppidScoreRouteImport } from './routes/api.games.$appid.score'
+import { Route as ApiGamesAppidEventsEventidReaderRouteImport } from './routes/api.games.$appid.events.$eventid.reader'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
@@ -178,6 +179,12 @@ const ApiGamesAppidScoreRoute = ApiGamesAppidScoreRouteImport.update({
   path: '/api/games/$appid/score',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ApiGamesAppidEventsEventidReaderRoute =
+  ApiGamesAppidEventsEventidReaderRouteImport.update({
+    id: '/api/games/$appid/events/$eventid/reader',
+    path: '/api/games/$appid/events/$eventid/reader',
+    getParentRoute: () => rootRouteImport,
+  } as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
@@ -208,6 +215,7 @@ export interface FileRoutesByFullPath {
   '/api/games/$appid/lifecycle': typeof ApiGamesAppidLifecycleRoute
   '/api/games/$appid/overview': typeof ApiGamesAppidOverviewRoute
   '/api/games/$appid/score': typeof ApiGamesAppidScoreRoute
+  '/api/games/$appid/events/$eventid/reader': typeof ApiGamesAppidEventsEventidReaderRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
@@ -238,6 +246,7 @@ export interface FileRoutesByTo {
   '/api/games/$appid/lifecycle': typeof ApiGamesAppidLifecycleRoute
   '/api/games/$appid/overview': typeof ApiGamesAppidOverviewRoute
   '/api/games/$appid/score': typeof ApiGamesAppidScoreRoute
+  '/api/games/$appid/events/$eventid/reader': typeof ApiGamesAppidEventsEventidReaderRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -269,6 +278,7 @@ export interface FileRoutesById {
   '/api/games/$appid/lifecycle': typeof ApiGamesAppidLifecycleRoute
   '/api/games/$appid/overview': typeof ApiGamesAppidOverviewRoute
   '/api/games/$appid/score': typeof ApiGamesAppidScoreRoute
+  '/api/games/$appid/events/$eventid/reader': typeof ApiGamesAppidEventsEventidReaderRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -301,6 +311,7 @@ export interface FileRouteTypes {
     | '/api/games/$appid/lifecycle'
     | '/api/games/$appid/overview'
     | '/api/games/$appid/score'
+    | '/api/games/$appid/events/$eventid/reader'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
@@ -331,6 +342,7 @@ export interface FileRouteTypes {
     | '/api/games/$appid/lifecycle'
     | '/api/games/$appid/overview'
     | '/api/games/$appid/score'
+    | '/api/games/$appid/events/$eventid/reader'
   id:
     | '__root__'
     | '/'
@@ -361,6 +373,7 @@ export interface FileRouteTypes {
     | '/api/games/$appid/lifecycle'
     | '/api/games/$appid/overview'
     | '/api/games/$appid/score'
+    | '/api/games/$appid/events/$eventid/reader'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -392,6 +405,7 @@ export interface RootRouteChildren {
   ApiGamesAppidLifecycleRoute: typeof ApiGamesAppidLifecycleRoute
   ApiGamesAppidOverviewRoute: typeof ApiGamesAppidOverviewRoute
   ApiGamesAppidScoreRoute: typeof ApiGamesAppidScoreRoute
+  ApiGamesAppidEventsEventidReaderRoute: typeof ApiGamesAppidEventsEventidReaderRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -592,6 +606,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ApiGamesAppidScoreRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/api/games/$appid/events/$eventid/reader': {
+      id: '/api/games/$appid/events/$eventid/reader'
+      path: '/api/games/$appid/events/$eventid/reader'
+      fullPath: '/api/games/$appid/events/$eventid/reader'
+      preLoaderRoute: typeof ApiGamesAppidEventsEventidReaderRouteImport
+      parentRoute: typeof rootRouteImport
+    }
   }
 }
 
@@ -624,6 +645,7 @@ const rootRouteChildren: RootRouteChildren = {
   ApiGamesAppidLifecycleRoute: ApiGamesAppidLifecycleRoute,
   ApiGamesAppidOverviewRoute: ApiGamesAppidOverviewRoute,
   ApiGamesAppidScoreRoute: ApiGamesAppidScoreRoute,
+  ApiGamesAppidEventsEventidReaderRoute: ApiGamesAppidEventsEventidReaderRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

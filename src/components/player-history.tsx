@@ -26,6 +26,8 @@ export interface PlayerHistoryChartProps {
   initialRange?: HistoryRange;
   initialData?: PlayerHistoryResult;
   customFetch?: typeof fetch;
+  range?: HistoryRange;
+  onRangeChange?: (range: HistoryRange) => void;
 }
 
 const playerChartConfig = {
@@ -96,8 +98,11 @@ export function PlayerHistoryChart({
   initialRange = DEFAULT_HISTORY_RANGE,
   initialData,
   customFetch,
+  range: rangeProp,
+  onRangeChange,
 }: PlayerHistoryChartProps) {
-  const [range, setRange] = useState<HistoryRange>(initialRange);
+  const [uncontrolledRange, setUncontrolledRange] = useState<HistoryRange>(initialRange);
+  const range = rangeProp ?? uncontrolledRange;
   const [hoveredPoint, setHoveredPoint] = useState<{
     players: number | null;
     fullDate: string;
@@ -307,7 +312,11 @@ export function PlayerHistoryChart({
                 type="button"
                 onClick={() => {
                   if (r === range) return;
-                  setRange(r);
+                  if (onRangeChange) {
+                    onRangeChange(r);
+                  } else {
+                    setUncontrolledRange(r);
+                  }
                 }}
                 aria-pressed={active}
                 className={`min-h-[44px] min-w-[44px] px-2.5 py-1 inline-flex items-center justify-center text-[11px] font-mono uppercase tracking-wider transition-colors rounded-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-orange-500 ${

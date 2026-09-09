@@ -67,3 +67,20 @@ export function formatLocalDateTime(
     timeStyle: "short",
   }).format(date);
 }
+
+/**
+ * Formats a date only (year, month, day) in the visitor's locale.
+ */
+export function formatDateOnly(
+  value: string | Date | null | undefined,
+  fallback = "Unknown",
+): string {
+  if (!value) return fallback;
+  const date = typeof value === "string"
+    ? (value.length === 10 ? new Date(`${value}T00:00:00Z`) : parseStoredTimestamp(value))
+    : value;
+  if (Number.isNaN(date.getTime())) return fallback;
+  return new Intl.DateTimeFormat(undefined, {
+    dateStyle: "medium",
+  }).format(date);
+}

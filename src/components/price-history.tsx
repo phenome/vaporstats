@@ -28,6 +28,8 @@ export interface PriceHistoryChartProps {
   initialRange?: PriceHistoryRange;
   initialData?: PriceHistoryResult;
   customFetch?: typeof fetch;
+  range?: PriceHistoryRange;
+  onRangeChange?: (range: PriceHistoryRange) => void;
 }
 
 type LoadStatus = "idle" | "loading" | "success" | "error";
@@ -128,8 +130,11 @@ export function PriceHistoryChart({
   initialRange = DEFAULT_PRICE_RANGE,
   initialData,
   customFetch,
+  range: rangeProp,
+  onRangeChange,
 }: PriceHistoryChartProps) {
-  const [range, setRange] = useState<PriceHistoryRange>(initialRange);
+  const [uncontrolledRange, setUncontrolledRange] = useState<PriceHistoryRange>(initialRange);
+  const range = rangeProp ?? uncontrolledRange;
   const [hoveredIndex, setHoveredIndex] = useState<number | null>(null);
   const chartContainerRef = useRef<HTMLDivElement>(null);
   const [chartWidth, setChartWidth] = useState(900);
@@ -225,7 +230,11 @@ export function PriceHistoryChart({
                 type="button"
                 onClick={() => {
                   if (item === range) return;
-                  setRange(item);
+                  if (onRangeChange) {
+                    onRangeChange(item);
+                  } else {
+                    setUncontrolledRange(item);
+                  }
                 }}
                 aria-pressed={active}
                 className={`min-h-[44px] min-w-[44px] px-2.5 py-1 inline-flex items-center justify-center text-[11px] font-mono uppercase tracking-wider transition-colors rounded-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 ${

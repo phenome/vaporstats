@@ -15,6 +15,16 @@ import { RelatedApps } from "./related-apps";
 import { AppLink } from "./app-link";
 import { LifecycleHistorySection } from "./lifecycle-history";
 import { GameReception, GameScoreHero } from "./game-reception";
+import {
+  NUMERIC_TO_HISTORY_RANGE,
+  NUMERIC_TO_PRICE_RANGE,
+  HISTORY_TO_NUMERIC_RANGE,
+  PRICE_TO_NUMERIC_RANGE,
+  DEFAULT_NUMERIC_RANGE,
+  DEFAULT_NUMERIC_PRICE_RANGE,
+  type NumericRange,
+  type NumericPriceRange,
+} from "../lib/game-params";
 // The sentinel, the hero flow wrapper, and the first section below it are
 // siblings spaced by the container's space-y-6 rhythm, so the sentinel sits
 // HERO_ROW_GAP above the hero top and the next section sits HERO_ROW_GAP
@@ -250,6 +260,12 @@ export interface GamePageProps {
   playerHistory?: PlayerHistoryResult;
   price?: PriceState | null;
   priceHistory?: PriceHistoryResult | null;
+  range?: NumericRange;
+  pricerange?: NumericPriceRange;
+  eventId?: string | null;
+  onRangeChange?: (range: NumericRange) => void;
+  onPriceRangeChange?: (pricerange: NumericPriceRange) => void;
+  onEventChange?: (eventId: string | null) => void;
 }
 
 export function GamePageView({
@@ -258,7 +274,15 @@ export function GamePageView({
   playerHistory,
   price,
   priceHistory,
+  range,
+  pricerange,
+  eventId,
+  onRangeChange,
+  onPriceRangeChange,
+  onEventChange,
 }: GamePageProps) {
+  const historyRange = NUMERIC_TO_HISTORY_RANGE[range ?? DEFAULT_NUMERIC_RANGE];
+  const priceRange = NUMERIC_TO_PRICE_RANGE[pricerange ?? DEFAULT_NUMERIC_PRICE_RANGE];
   const overviewEvents = getLifecycleOverviewEvents(game);
   const mainReleaseDate = getMainReleaseDate(game);
   const releaseStatusLabel =
@@ -542,13 +566,28 @@ export function GamePageView({
         />
       </div>
 
-      <GameReception key={game.appid} appid={game.appid} />
+      <GameReception
+        key={game.appid}
+        appid={game.appid}
+        range={historyRange}
+        onRangeChange={(r) => {
+          const nextNum = HISTORY_TO_NUMERIC_RANGE[r];
+          onRangeChange?.(nextNum);
+        }}
+        activeEventId={eventId}
+        onSelectEvent={onEventChange}
+      />
 
       <section id="player-history" className="scroll-mt-28">
         <PlayerHistoryChart
           key={game.appid}
           appid={game.appid}
-          initialRange="30d"
+          range={historyRange}
+          onRangeChange={(r) => {
+            const nextNum = HISTORY_TO_NUMERIC_RANGE[r];
+            onRangeChange?.(nextNum);
+          }}
+          initialRange={historyRange}
           initialData={playerHistory}
         />
       </section>
@@ -557,7 +596,12 @@ export function GamePageView({
         <PriceHistoryChart
           key={"price-" + game.appid}
           appid={game.appid}
-          initialRange="all"
+          range={priceRange}
+          onRangeChange={(r) => {
+            const nextNum = PRICE_TO_NUMERIC_RANGE[r];
+            onPriceRangeChange?.(nextNum);
+          }}
+          initialRange={priceRange}
           initialData={priceHistory ?? undefined}
         />
       </section>
