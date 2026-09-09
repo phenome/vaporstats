@@ -5,8 +5,6 @@ import type {
   GameScoreHistory,
   GameScoreSummary,
   HistoryMetric,
-  RecentReceptionPayload,
-  RecentReceptionPeriodPayload,
   ScoreCriticAlignment,
   ScoreCriticRecord,
   ScoreMilestone,
@@ -15,7 +13,6 @@ import type {
   ScorePopulationReference,
 } from "../lib/score";
 import type { HistoryRange } from "../lib/player-history";
-import type { ReviewInterval } from "../lib/review-evidence";
 import { formatLocalDateTime, formatNumber } from "../lib/format";
 import { wilson95 } from "../lib/recent-reception";
 import { gameScoreHistoryQueryOptions, gameScoreSummaryQueryOptions } from "../lib/score-query";
@@ -27,8 +24,6 @@ const SCORE_RANGES: readonly HistoryRange[] = ["24h", "7d", "30d", "90d", "all"]
 const SCORE_COLOR = "#a78bfa";
 const SCORE_CHART_Y_AXIS_WIDTH = 34;
 const SCORE_CHART_MARGIN_RIGHT = 18;
-const WILSON_RULE =
-  "More positive or Less positive requires at least a 5 percentage-point difference and non-overlapping two-sided 95% Wilson intervals. Otherwise supported comparisons are No clear shift.";
 
 function formatPercent(value: number | null): string {
   if (value === null) return "—";
@@ -49,20 +44,6 @@ function formatDateOnly(value: string | null): string {
   return new Intl.DateTimeFormat(undefined, { dateStyle: "medium" }).format(date);
 }
 
-function displayState(value: RecentReceptionPayload["state"]): string {
-  switch (value) {
-    case "more_positive": return "More positive";
-    case "less_positive": return "Less positive";
-    case "no_clear_shift": return "No clear shift";
-    case "insufficient_evidence": return "Not enough evidence";
-  }
-}
-
-function stateClass(value: RecentReceptionPayload["state"]): string {
-  if (value === "more_positive") return "text-emerald-300";
-  if (value === "less_positive") return "text-rose-300";
-  return "text-zinc-400";
-}
 
 export function GameScoreHero({ appid }: { appid: number }) {
   const summaryQuery = useQuery(gameScoreSummaryQueryOptions(appid));
@@ -532,59 +513,6 @@ function alignmentValueLabel(value: ScoreCriticAlignment["alignment"]): string {
   }
 }
 
-function alignmentReasonLabel(reason: string): string {
-  switch (reason) {
-    case "permission_missing": return "critic evidence is unavailable";
-    case "identity_unverified": return "critic identity is not verified";
-    case "appid_mismatch": return "critic identity does not match this game";
-    case "platform_not_pc": return "critic coverage is not verified for PC";
-    case "edition_unverified": return "critic edition is not verified";
-    case "critic_metric_missing": return "critic metric is unavailable for calibration";
-    case "critic_reviews_insufficient": return "not enough critic reviews";
-    case "player_reviews_insufficient": return "not enough player reviews";
-    case "player_score_missing": return "player score is unavailable";
-    case "review_dates_missing": return "critic review dates are unavailable";
-    case "review_dates_invalid": return "critic review dates are invalid";
-    case "player_snapshot_missing": return "no retained player snapshot covers the review period";
-    case "retrieval_timestamp_missing": return "critic freshness cannot be verified";
-    case "retrieval_timestamp_invalid": return "critic freshness timestamp is invalid";
-    case "retrieval_stale": return "critic record is stale";
-    case "record_invalid": return "critic record is invalid";
-    case "source_id_missing": return "critic source identity is unavailable";
-    case "source_url_missing": return "critic source link is unavailable";
-    case "title_missing": return "critic title is unavailable";
-    case "critic_sources_differ": return "critic sources differ";
-    default: return reason.replaceAll("_", " ");
-  }
-}
-
-function alignmentReasonText(reasons: readonly string[]): string {
-  if (reasons.length === 0) return "required evidence is unavailable";
-  return reasons.slice(0, 2).map(alignmentReasonLabel).join("; ");
-}
-
-function alignmentReasonDetails(reasons: readonly string[]): string {
-  if (reasons.length === 0) return "None";
-  return reasons.map(alignmentReasonLabel).join("; ");
-}
-
-function directionLabel(direction: string | null | undefined): string {
-  if (!direction) return "unavailable";
-  return direction;
-}
-
-function playerSnapshotDetails(snapshot: ScoreCriticAlignment["evidence"]["review_time_player_snapshot"]): string {
-  if (!snapshot) return "None retained for this review period";
-  const score = snapshot.score === null ? "score unavailable" : `score ${formatNumber(snapshot.score, { maximumFractionDigits: 1 })}`;
-  const reviews = snapshot.review_count === null ? "review count unavailable" : `${formatNumber(snapshot.review_count)} reviews`;
-  return `${score}; ${reviews}; observed ${formatLocalDateTime(snapshot.observed_at)}`;
-}
-
-function comparisonText(alignment: ScoreCriticAlignment | null, current: boolean): string {
-  const comparison = current ? alignment?.current_contrast : alignment;
-  if (comparison?.state === "classified" && comparison.alignment) return alignmentValueLabel(comparison.alignment);
-  return `Unavailable — ${alignmentReasonText(current ? alignment?.current_contrast.reasons ?? [] : alignment?.reasons ?? [])}`;
-}
 
 function comparisonClass(alignment: ScoreCriticAlignment | null, current: boolean): string {
   const comparison = current ? alignment?.current_contrast : alignment;
@@ -611,42 +539,26 @@ function PlayersCriticsComparison({ critics, alignments }: { critics: readonly S
   if (critics.length === 0) return null;
   const classifiedDirections = new Set<string>();
   for (const alignment of alignments) {
-    if (alignment.state === "classified" && alignment.critic_direction) classifiedDirections.add(alignment.critic_direction);
+    const comparison = alignment.current_contrast.state === "classified" ? alignment.current_contrast : alignment;
+    if (comparison.state === "classified" && comparison.critic_direction) classifiedDirections.add(comparison.critic_direction);
   }
   return (
     <section className="mt-3 border-t border-zinc-800 pt-3" aria-labelledby="players-critics-title">
       <div className="flex items-baseline justify-between gap-3">
         <h3 id="players-critics-title" className="font-mono text-xs font-semibold uppercase tracking-wider text-zinc-200">Players vs critics</h3>
-        <span className="font-mono text-[10px] uppercase text-zinc-500">Review-time</span>
       </div>
       {classifiedDirections.size > 1 && <p className="mt-2 text-xs text-zinc-400">Critic sources differ.</p>}
       <div className="mt-2 divide-y divide-zinc-900">
         {critics.map((critic) => {
           const alignment = alignmentFor(alignments, critic);
-          const reviewTimeReasons = alignment?.reasons ?? [];
-          const currentReasons = alignment?.current_contrast.reasons ?? [];
+          const comparison = alignment?.current_contrast.state === "classified" ? alignment.current_contrast : alignment;
+          const label = comparison?.state === "classified" && comparison.alignment ? alignmentValueLabel(comparison.alignment) : "Unavailable";
           return (
             <article key={`${critic.source}-${critic.source_id}-comparison`} className="py-2 first:pt-1 last:pb-1">
               <div className="flex items-start justify-between gap-3">
                 <p className="min-w-0 text-xs font-semibold text-zinc-300">{criticName(critic)}</p>
-                <p className={`text-right text-xs font-semibold ${comparisonClass(alignment, false)}`}>{comparisonText(alignment, false)}</p>
+                <p className={`text-right text-xs font-semibold ${comparisonClass(alignment, true)}`}>{label}</p>
               </div>
-              {alignment && alignment.current_contrast.state === "classified" && alignment.current_contrast.alignment && <p className={`mt-1 text-[11px] ${comparisonClass(alignment, true)}`}><span className="text-zinc-500">Now vs published record:</span> {alignmentValueLabel(alignment.current_contrast.alignment)}</p>}
-              <details className="mt-1 text-[11px] text-zinc-500">
-                <summary className="cursor-pointer py-1 text-violet-300 underline decoration-violet-500/50 underline-offset-4 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400">Comparison details</summary>
-                <div className="mt-1 space-y-1 leading-relaxed">
-                  <p>Review-time comparison is primary. Current comparison is a separate contrast with the published critic record. Divergence does not establish reviewer bias or causation.</p>
-                  <p>Review-time comparison: <span className="text-zinc-300">{comparisonText(alignment, false)}</span></p>
-                  {alignment && <p>Review-time directions: players {directionLabel(alignment.player_direction)}; critics {directionLabel(alignment.critic_direction)}.</p>}
-                  {alignment && <p>Review-time player snapshot: {playerSnapshotDetails(alignment.evidence.review_time_player_snapshot)}.</p>}
-                  <p>Review-time evidence: {alignmentReasonDetails(reviewTimeReasons)}.</p>
-                  <p>Current comparison: <span className="text-zinc-300">{comparisonText(alignment, true)}</span>. It compares the Current Player Score with this published critic record and does not imply current critic opinion.</p>
-                  {alignment && <p>Current directions: players {directionLabel(alignment.current_contrast.player_direction)}; critics {directionLabel(alignment.current_contrast.critic_direction)}.</p>}
-                  {alignment && <p>Current player evidence: {playerSnapshotDetails(alignment.evidence.current_player)}.</p>}
-                  <p>Current comparison evidence: {alignmentReasonDetails(currentReasons)}.</p>
-                  {alignment && <p>Critic freshness: <span className="text-zinc-300">{alignment.freshness.state}</span>{alignment.freshness.checkedAt ? ` · checked ${formatLocalDateTime(alignment.freshness.checkedAt)}` : ""}.</p>}
-                </div>
-              </details>
             </article>
           );
         })}
@@ -655,41 +567,6 @@ function PlayersCriticsComparison({ critics, alignments }: { critics: readonly S
   );
 }
 
-function intervalList(intervals: readonly ReviewInterval[]): string {
-  if (intervals.length === 0) return "None recorded";
-  return intervals.map((interval) => `${formatDateOnly(interval.start)}–${formatDateOnly(interval.end)} (${interval.granularity})`).join(", ");
-}
-
-function periodDetails(label: string, period: RecentReceptionPeriodPayload): React.ReactNode {
-  return (
-    <div className="border-l border-zinc-800 pl-2">
-      <p className="text-zinc-300">{label}: {formatBoundary(period.start)}–{formatBoundary(period.end)}</p>
-      <p>{period.positive_reviews === null || period.total_reviews === null ? "Counts unavailable" : `${formatNumber(period.positive_reviews)} positive of ${formatNumber(period.total_reviews)} reviews · ${formatPercent(period.approval)}`}</p>
-      <p>Covered intervals: {intervalList(period.covered_intervals)}; gaps: {intervalList(period.gaps)}</p>
-      {populationDetails("Population", period.population_ref, period.source_id)}
-      <p>Source observations: {period.observation_times.length ? period.observation_times.map(formatBoundary).join(", ") : "Unknown"}</p>
-    </div>
-  );
-}
-
-function RecentReception({ recent }: { recent: RecentReceptionPayload }) {
-  return (
-    <details className="mt-4 border-t border-zinc-800 pt-3 text-xs text-zinc-400" aria-labelledby="recent-reception-title">
-      <summary id="recent-reception-title" className="cursor-pointer py-1 font-mono text-xs font-semibold uppercase tracking-wider text-zinc-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400">Recent player trend</summary>
-      <div className="mt-2 space-y-2 leading-relaxed">
-        <p className={`font-mono text-xs font-semibold ${stateClass(recent.state)}`}>{displayState(recent.state)}</p>
-        <p>Recent player trend compares reviewer approval between two Steam evidence windows, not Current Player Score, critic reception, rank, quality, or patch impact. A supported result does not establish causation.</p>
-        <p>Evaluated at: <span className="text-zinc-300">{formatBoundary(recent.evaluated_at)}</span>; cutoff: <span className="text-zinc-300">{formatBoundary(recent.cutoff)}</span></p>
-        {periodDetails("Recent", recent.recent)}
-        {periodDetails("Previous", recent.previous)}
-        <p>Approval delta: <span className="text-zinc-300">{formatPercent(recent.delta_pp)} percentage points</span></p>
-        {recent.reasons.length > 0 && <p>Evidence notes: <span className="text-zinc-300">{recent.reasons.map((reason) => reason.replaceAll("_", " ")).join(", ")}</span></p>}
-        <p>{WILSON_RULE}</p>
-        <p>Both periods require complete whole-bucket coverage and at least 50 actual compatible Steam histogram reviews. A supported zero-review interval is covered; missing evidence is not zero.</p>
-      </div>
-    </details>
-  );
-}
 
 function ReceptionCard({ summary }: { summary: GameScoreSummary | null | undefined }) {
   const score = summary?.score?.value ?? null;
@@ -699,8 +576,7 @@ function ReceptionCard({ summary }: { summary: GameScoreSummary | null | undefin
     <aside id="critic-reception" className="score-reception-card min-w-0 border border-zinc-800 bg-zinc-950 p-4 sm:p-5 xl:flex xl:flex-col xl:self-stretch" aria-labelledby="critic-reception-title">
       <h2 id="critic-reception-title" className="border-b border-zinc-900 pb-3 font-mono text-xs font-semibold uppercase tracking-wider text-zinc-200">Reception</h2>
       <div className="border-b border-zinc-800 py-3"><div className="flex items-center justify-between gap-3"><div><p className="text-sm text-zinc-200">Current Player Score</p><p className="mt-1 font-mono text-[10px] uppercase text-zinc-500">Player evidence</p></div><p className="font-mono text-3xl font-bold tabular-nums text-violet-200">{score === null ? "—" : formatNumber(score, { maximumFractionDigits: 1 })}</p></div><p className="mt-1 font-mono text-xs text-zinc-500">{reviews === null ? "Current scoring-window evidence unavailable" : `${formatNumber(reviews)} reviews in current scoring window`}</p></div>{lifetime && <div className="grid grid-cols-2 gap-2 border-b border-zinc-800 py-3 font-mono text-xs" aria-label="Lifetime player approval"><div><span className="block text-[10px] uppercase text-zinc-500">Lifetime approval</span><span className="font-bold tabular-nums text-violet-200">{formatPercent(lifetime.value)}</span></div><div><span className="block text-[10px] uppercase text-zinc-500">Lifetime reviews</span><span className="tabular-nums text-zinc-300">{formatNumber(lifetime.total_reviews)}</span></div></div>}
-      <div className="xl:flex-1">{summary?.critics.length ? summary.critics.map((critic) => <CriticRecord key={`${critic.source}-${critic.source_id}`} critic={critic} />) : <p className="mt-4 text-sm text-zinc-500">No critic coverage yet.</p>}{summary?.critics.length ? <PlayersCriticsComparison critics={summary.critics} alignments={summary.alignment} /> : null}{summary?.recent_reception && <RecentReception recent={summary.recent_reception} />}</div>
-      <details className="mt-3 border-t border-zinc-900 pt-2 text-xs text-zinc-400 xl:mt-auto"><summary className="cursor-pointer py-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400">Source and comparison limits</summary><div className="mt-2 space-y-2 leading-relaxed"><p>Critic records remain source-native. Scores and tiers are not blended with player evidence or subtracted from it.</p><p>Players vs critics remains source-specific: review-time comparison is primary, while current comparison contrasts the Current Player Score with the published critic record and does not imply current critic opinion.</p><p>Comparison labels require source-specific identity, PC/edition scope, player evidence, review-time coverage, provider permission, and freshness gates. Unknown limits remain unknown.</p></div></details>
+      <div className="xl:flex-1">{summary?.critics.length ? summary.critics.map((critic) => <CriticRecord key={`${critic.source}-${critic.source_id}`} critic={critic} />) : <p className="mt-4 text-sm text-zinc-500">No critic coverage yet.</p>}{summary?.critics.length ? <PlayersCriticsComparison critics={summary.critics} alignments={summary.alignment} /> : null}</div>
     </aside>
   );
 }

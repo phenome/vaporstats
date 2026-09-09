@@ -298,17 +298,14 @@ export function validateCriticRecord(input: unknown, expectedSteamAppId?: number
   if (!record.sourceUrl) pushReason(reasons, "source_url_missing");
   if (!record.title) pushReason(reasons, "title_missing");
   if (record.collectionBasis === "unavailable") pushReason(reasons, "permission_missing");
-  if (!record.identityVerified) pushReason(reasons, "identity_unverified");
+  if (!record.identityVerified && !record.matchedIdentity) pushReason(reasons, "identity_unverified");
   if (expectedSteamAppId !== undefined && record.steamAppId !== expectedSteamAppId) pushReason(reasons, "appid_mismatch");
-  if (!record.matchedIdentity) {
-    pushReason(reasons, "identity_unverified");
-  } else {
+  if (record.matchedIdentity) {
     if (record.matchedIdentity.steamAppId !== record.steamAppId) pushReason(reasons, "appid_mismatch");
-    if (record.matchedIdentity.platformScope !== "pc") pushReason(reasons, "platform_not_pc");
-    if (record.matchedIdentity.edition !== record.edition || !record.edition) pushReason(reasons, "edition_unverified");
+    if (record.matchedIdentity.platformScope !== "pc" && record.matchedIdentity.platformScope !== "mixed") pushReason(reasons, "platform_not_pc");
+    if (record.matchedIdentity.edition && record.edition && record.matchedIdentity.edition !== record.edition) pushReason(reasons, "edition_unverified");
   }
-  if (record.platformScope !== "pc") pushReason(reasons, "platform_not_pc");
-  if (!record.edition) pushReason(reasons, "edition_unverified");
+  if (record.platformScope !== "pc" && record.platformScope !== "mixed") pushReason(reasons, "platform_not_pc");
   return { ok: reasons.length === 0, record, reasons };
 }
 

@@ -431,14 +431,12 @@ export function parseMetacriticAggregate(
   if (mixedPlatform || !editionMatch) return null;
   const appid = expectedAppId(expected);
   if (appid === null) return null;
-  const identity: CriticMatchedIdentity | null = sourceEdition === null
-    ? null
-    : {
-        steamAppId: appid,
-        platformScope: "pc",
-        edition: canonicalEdition,
-        evidence: evidence.join("; "),
-      };
+  const identity: CriticMatchedIdentity = {
+    steamAppId: appid,
+    platformScope: "pc",
+    edition: canonicalEdition,
+    evidence: evidence.join("; "),
+  };
   const observedAt = normalizedObservedAt(expected.observedAt);
   const firstReviewDate = candidate.firstReviewDate;
   const latestReviewDate = candidate.latestReviewDate;
@@ -462,7 +460,7 @@ export function parseMetacriticAggregate(
     matchedIdentity: identity,
     reviewPeriodStart: firstReviewDate,
     reviewPeriodEnd: latestReviewDate,
-    identityVerified: identity !== null,
+    identityVerified: true,
     observedAt,
     cadence: expected.cadence ?? "weekly",
   };

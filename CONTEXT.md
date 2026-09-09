@@ -93,7 +93,7 @@ _Avoid_: Living Game Score, meta score, composite rating
 The proportion of positive Steam reviews in the compatible filtered lifetime review population. It describes lifetime reception, not the current post-update estimate.
 
 **Reception Alignment**:
-A game-level comparison of player and critic reception that respects their different scales, populations, and dates. Disagreement alone does not establish reviewer bias.
+A direct comparison of a game's Current Player Score against published public critic aggregates (Metacritic score or OpenCritic tier). Disagreement describes reception differences and does not establish reviewer bias.
 
 **Recent Reception**:
 A comparison of Steam reviewer approval in the latest four completed weeks with the preceding eight weeks. It is distinct from Current Player Score, catalog rank, and evidence that a patch caused reception to change.

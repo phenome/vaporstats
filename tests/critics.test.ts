@@ -151,7 +151,7 @@ describe("critic identity and evidence gates", () => {
     expect(outcome.currentContrast.reasons).toContain("critic_metric_missing");
   });
 
-  test("does not treat a mixed-platform OpenCritic aggregate as PC evidence", () => {
+  test("accepts a mixed-platform OpenCritic aggregate", () => {
     const record = makeRecord({
       source: "opencritic",
       score: 76,
@@ -166,9 +166,9 @@ describe("critic identity and evidence gates", () => {
       },
     });
     const outcome = evaluateCriticAlignment(record, makeContext());
-    expect(outcome.state).toBe("unavailable");
-    expect(outcome.alignment).toBeNull();
-    expect(outcome.reasons).toContain("platform_not_pc");
+    expect(outcome.state).toBe("classified");
+    expect(outcome.alignment).toBe("broadly_aligned");
+    expect(outcome.reasons).not.toContain("platform_not_pc");
   });
 
   test("requires at least 20 player and 5 critic reviews", () => {

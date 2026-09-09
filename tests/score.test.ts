@@ -262,19 +262,19 @@ describe("game score payload", () => {
     expect(result.data?.milestones[0]?.date_basis).toBe("publication_at");
     native.close(true);
   });
-  test("retains a critic record but leaves alignment unavailable when PC identity is not proven", async () => {
+  test("retains a critic record but leaves alignment unavailable when platform is not proven", async () => {
     const { db, native } = freshDb();
     addScore(native);
     native.query(`INSERT INTO critic_records
       (appid, source, matched_identity, platform_scope, edition, native_score, score_scale, source_url,
        review_count, review_period_start, review_period_end, collection_basis, observed_at, provenance, basis)
-      VALUES (10, 'opencritic', ?, 'mixed', 'base', 80, 100, 'https://example.test/critic', 50,
+      VALUES (10, 'opencritic', ?, 'console', 'base', 80, 100, 'https://example.test/critic', 50,
        '2026-08-01', '2026-08-31', 'public_page', ?, ?, 'public aggregate page')`)
-      .run(JSON.stringify({ steamAppId: 10, platformScope: "mixed", edition: "base", evidence: "aggregate" }), AT,
-        JSON.stringify({ sourceId: "critic-test", title: "Test Game", slug: "test-game", platforms: ["PC", "Console"], identityVerified: true, cadence: "monthly" }));
+      .run(JSON.stringify({ steamAppId: 10, platformScope: "console", edition: "base", evidence: "aggregate" }), AT,
+        JSON.stringify({ sourceId: "critic-test", title: "Test Game", slug: "test-game", platforms: ["Console"], identityVerified: true, cadence: "monthly" }));
     const result = await getGameScoreSummary(db, 10, { now: new Date(AT) });
     expect(result.data?.critics).toHaveLength(1);
-    expect(result.data?.critics[0]?.platform_scope).toBe("mixed");
+    expect(result.data?.critics[0]?.platform_scope).toBe("console");
     expect(result.data?.alignment[0]?.state).toBe("unavailable");
     expect(result.data?.alignment[0]?.reasons).toContain("platform_not_pc");
     native.close(true);

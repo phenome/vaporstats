@@ -50,10 +50,15 @@ describe("Metacritic public aggregate source", () => {
       reviewPeriodEnd: null,
       collectionBasis: "public_page",
       edition: "",
-      identityVerified: false,
+      identityVerified: true,
     });
     expect(record?.observedAt).toBe(expectedObservedAt);
-    expect(record?.matchedIdentity).toBeNull();
+    expect(record?.matchedIdentity).toEqual({
+      steamAppId: 1091500,
+      platformScope: "pc",
+      edition: "",
+      evidence: expect.any(String),
+    });
   });
 
   it("rejects a known conflicting release year", () => {
