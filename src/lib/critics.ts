@@ -298,7 +298,6 @@ export function validateCriticRecord(input: unknown, expectedSteamAppId?: number
   if (!record.sourceUrl) pushReason(reasons, "source_url_missing");
   if (!record.title) pushReason(reasons, "title_missing");
   if (record.collectionBasis === "unavailable") pushReason(reasons, "permission_missing");
-  if (!record.identityVerified && !record.matchedIdentity) pushReason(reasons, "identity_unverified");
   if (expectedSteamAppId !== undefined && record.steamAppId !== expectedSteamAppId) pushReason(reasons, "appid_mismatch");
   if (record.matchedIdentity) {
     if (record.matchedIdentity.steamAppId !== record.steamAppId) pushReason(reasons, "appid_mismatch");
