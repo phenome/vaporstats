@@ -1,5 +1,6 @@
 import React from "react";
 import { AppLink } from "./app-link";
+import { ScrollArea } from "./ui/scroll-area";
 import type { WeeklyReleasesResult, ReleaseEntity } from "../lib/releases";
 
 export interface ReleaseCalendarProps {
@@ -152,17 +153,19 @@ function DayColumn({ dayGroup }: DayColumnProps) {
       </div>
 
       {/* Entity list: min height of one card, max ~4 cards + overflow peek, scrolls when fuller */}
-      <div className="flex-1 min-h-[128px] max-h-[560px] space-y-2 overflow-y-auto scrollbar-thin pr-1">
+      <ScrollArea className="flex-1 min-h-[128px] max-h-[560px]">
         {dayGroup.entities.length === 0 ? (
           <div className="h-full flex items-center justify-center text-[11px] font-mono text-zinc-600 py-6 text-center">
             No releases
           </div>
         ) : (
-          dayGroup.entities.map((entity) => (
-            <ReleaseCard key={entity.appid} entity={entity} />
-          ))
+          <div className="space-y-2 pr-2.5">
+            {dayGroup.entities.map((entity) => (
+              <ReleaseCard key={entity.appid} entity={entity} />
+            ))}
+          </div>
         )}
-      </div>
+      </ScrollArea>
     </div>
   );
 }
