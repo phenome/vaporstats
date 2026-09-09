@@ -86,7 +86,8 @@ describe("source-native critic categories", () => {
     ).toBe("unfavorable");
     expect(classifyCriticRecord(makeRecord({ source: "opencritic", score: null, tier: "Fair" }))).toBe("mixed");
     expect(classifyCriticRecord(makeRecord({ source: "opencritic", score: 76, tier: "Strong" }))).toBe("favorable");
-    expect(classifyCriticRecord(makeRecord({ source: "opencritic", tier: null }))).toBeNull();
+    expect(classifyCriticRecord(makeRecord({ source: "opencritic", score: null, tier: null }))).toBeNull();
+    expect(classifyCriticRecord(makeRecord({ source: "opencritic", score: 88, tier: null }))).toBe("favorable");
   });
 
   test("normalizes blank and -1 provider values to absent values", () => {

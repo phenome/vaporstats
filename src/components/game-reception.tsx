@@ -535,7 +535,24 @@ function CriticRecord({ critic }: { critic: ScoreCriticRecord }) {
   );
 }
 
-function PlayersCriticsComparison({ critics, alignments }: { critics: readonly ScoreCriticRecord[]; alignments: readonly ScoreCriticAlignment[] }) {
+function directAlignment(playerScore: number | null | undefined, critic: ScoreCriticRecord): ScoreCriticAlignment["alignment"] | null {
+  if (typeof playerScore !== "number" || !Number.isFinite(playerScore)) return null;
+  const playerDir = playerScore < 40 ? "unfavorable" : (playerScore < 70 ? "mixed" : "favorable");
+  let criticDir: "unfavorable" | "mixed" | "favorable" | null = null;
+  if (critic.native_tier === "Weak") criticDir = "unfavorable";
+  else if (critic.native_tier === "Fair") criticDir = "mixed";
+  else if (critic.native_tier === "Strong" || critic.native_tier === "Mighty") criticDir = "favorable";
+  else if (typeof critic.native_score === "number" && Number.isFinite(critic.native_score)) {
+    criticDir = critic.native_score < 50 ? "unfavorable" : (critic.native_score < 75 ? "mixed" : "favorable");
+  }
+  if (!criticDir) return null;
+  if (playerDir === criticDir) return "broadly_aligned";
+  const rank = (d: string) => d === "unfavorable" ? 0 : d === "mixed" ? 1 : 2;
+  if (Math.abs(rank(playerDir) - rank(criticDir)) === 2) return "clearly_divergent";
+  return rank(playerDir) > rank(criticDir) ? "players_more_favorable" : "critics_more_favorable";
+}
+
+function PlayersCriticsComparison({ critics, alignments, playerScore }: { critics: readonly ScoreCriticRecord[]; alignments: readonly ScoreCriticAlignment[]; playerScore?: number | null }) {
   if (critics.length === 0) return null;
   const classifiedDirections = new Set<string>();
   for (const alignment of alignments) {
@@ -552,12 +569,18 @@ function PlayersCriticsComparison({ critics, alignments }: { critics: readonly S
         {critics.map((critic) => {
           const alignment = alignmentFor(alignments, critic);
           const comparison = alignment?.current_contrast.state === "classified" ? alignment.current_contrast : alignment;
-          const label = comparison?.state === "classified" && comparison.alignment ? alignmentValueLabel(comparison.alignment) : "Unavailable";
+          const resolvedAlignment = (comparison?.state === "classified" && comparison.alignment)
+            ? comparison.alignment
+            : (comparison?.alignment ?? directAlignment(playerScore, critic));
+          const label = resolvedAlignment ? alignmentValueLabel(resolvedAlignment) : "Unavailable";
+          const resolvedClass = resolvedAlignment === "broadly_aligned"
+            ? "text-emerald-300/80"
+            : (resolvedAlignment === "clearly_divergent" ? "text-rose-300/80" : "text-zinc-300");
           return (
             <article key={`${critic.source}-${critic.source_id}-comparison`} className="py-2 first:pt-1 last:pb-1">
               <div className="flex items-start justify-between gap-3">
                 <p className="min-w-0 text-xs font-semibold text-zinc-300">{criticName(critic)}</p>
-                <p className={`text-right text-xs font-semibold ${comparisonClass(alignment, true)}`}>{label}</p>
+                <p className={`text-right text-xs font-semibold ${resolvedClass}`}>{label}</p>
               </div>
             </article>
           );
@@ -576,7 +599,7 @@ function ReceptionCard({ summary }: { summary: GameScoreSummary | null | undefin
     <aside id="critic-reception" className="score-reception-card min-w-0 border border-zinc-800 bg-zinc-950 p-4 sm:p-5 xl:flex xl:flex-col xl:self-stretch" aria-labelledby="critic-reception-title">
       <h2 id="critic-reception-title" className="border-b border-zinc-900 pb-3 font-mono text-xs font-semibold uppercase tracking-wider text-zinc-200">Reception</h2>
       <div className="border-b border-zinc-800 py-3"><div className="flex items-center justify-between gap-3"><div><p className="text-sm text-zinc-200">Current Player Score</p><p className="mt-1 font-mono text-[10px] uppercase text-zinc-500">Player evidence</p></div><p className="font-mono text-3xl font-bold tabular-nums text-violet-200">{score === null ? "—" : formatNumber(score, { maximumFractionDigits: 1 })}</p></div><p className="mt-1 font-mono text-xs text-zinc-500">{reviews === null ? "Current scoring-window evidence unavailable" : `${formatNumber(reviews)} reviews in current scoring window`}</p></div>{lifetime && <div className="grid grid-cols-2 gap-2 border-b border-zinc-800 py-3 font-mono text-xs" aria-label="Lifetime player approval"><div><span className="block text-[10px] uppercase text-zinc-500">Lifetime approval</span><span className="font-bold tabular-nums text-violet-200">{formatPercent(lifetime.value)}</span></div><div><span className="block text-[10px] uppercase text-zinc-500">Lifetime reviews</span><span className="tabular-nums text-zinc-300">{formatNumber(lifetime.total_reviews)}</span></div></div>}
-      <div className="xl:flex-1">{summary?.critics.length ? summary.critics.map((critic) => <CriticRecord key={`${critic.source}-${critic.source_id}`} critic={critic} />) : <p className="mt-4 text-sm text-zinc-500">No critic coverage yet.</p>}{summary?.critics.length ? <PlayersCriticsComparison critics={summary.critics} alignments={summary.alignment} /> : null}</div>
+      <div className="xl:flex-1">{summary?.critics.length ? summary.critics.map((critic) => <CriticRecord key={`${critic.source}-${critic.source_id}`} critic={critic} />) : <p className="mt-4 text-sm text-zinc-500">No critic coverage yet.</p>}{summary?.critics.length ? <PlayersCriticsComparison critics={summary.critics} alignments={summary.alignment} playerScore={score} /> : null}</div>
     </aside>
   );
 }

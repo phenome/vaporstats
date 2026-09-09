@@ -384,6 +384,11 @@ export function classifyCriticRecord(record: CriticRecord): ReceptionDirection |
   if (record.tier === "Weak") return "unfavorable";
   if (record.tier === "Fair") return "mixed";
   if (record.tier === "Strong" || record.tier === "Mighty") return "favorable";
+  if (typeof record.score === "number" && Number.isFinite(record.score) && record.score >= 0 && record.score <= 100) {
+    if (record.score < 50) return "unfavorable";
+    if (record.score < 75) return "mixed";
+    return "favorable";
+  }
   return null;
 }
 
