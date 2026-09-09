@@ -125,7 +125,7 @@ function DayColumn({ dayGroup }: DayColumnProps) {
 
   return (
     <div
-      className="border border-zinc-800/80 bg-zinc-900/40 p-3 flex flex-col space-y-3 min-h-[220px]"
+      className="border border-zinc-800/80 bg-zinc-900/40 p-3 pr-2 flex flex-col space-y-3 min-h-[220px]"
       data-testid="calendar-day-column"
       data-date={dayGroup.date}
       data-status={dayGroup.status}
@@ -159,7 +159,7 @@ function DayColumn({ dayGroup }: DayColumnProps) {
             No releases
           </div>
         ) : (
-          <div className="space-y-2 pr-2.5">
+          <div className="space-y-2 pr-1">
             {dayGroup.entities.map((entity) => (
               <ReleaseCard key={entity.appid} entity={entity} />
             ))}
