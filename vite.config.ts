@@ -17,11 +17,11 @@ function imageOptimizerPlugin() {
   };
 }
 
-export default defineConfig({
+export default defineConfig(({ mode }) => ({
   plugins: [
     tanstackStart({
       server: {
-        entry: "./server",
+        entry: mode === "prototype" ? "./server.prototype" : "./server",
       },
       prerender: {
         enabled: false,
@@ -43,8 +43,10 @@ export default defineConfig({
   environments: {
     ssr: {
       optimizeDeps: {
-        include: ["react-dom/server"],
+        include: mode === "prototype"
+          ? ["react", "react/jsx-runtime", "react/jsx-dev-runtime", "react-dom", "react-dom/server"]
+          : ["react-dom/server"],
       },
     },
   },
-});
+}));

@@ -13,6 +13,12 @@ import { CACHE_POLICIES, getEntityCacheHeaders } from "../lib/cache";
 import { gameScoreHistoryQueryOptions, gameScoreSummaryQueryOptions } from "../lib/score-query";
 import { createQueryClient } from "../lib/query-client";
 import { GamePageView } from "../components/game-page";
+import {
+  parseMediaScenario,
+  parseMediaVariant,
+  type MediaScenario,
+  type MediaVariant,
+} from "../components/media-discovery-prototype";
 import { GamePageSkeleton } from "../components/route-skeletons";
 import { AppLink } from "../components/app-link";
 import type { GameDetailResponseData } from "./api.games.$appid.detail";
@@ -48,7 +54,13 @@ export function gameDetailQueryOptions(appid: number) {
 export const Route = createFileRoute("/games/$game")({
   headers: () => getEntityCacheHeaders(),
   validateSearch: (search: Record<string, unknown>) => {
-    const result: { range?: number; pricerange?: number; event?: string } = {};
+    const result: {
+      range?: number;
+      pricerange?: number;
+      event?: string;
+      variant?: MediaVariant;
+      scenario?: MediaScenario;
+    } = {};
     if (search.range !== undefined) {
       const parsed = parseNumericRange(search.range);
       if (parsed !== DEFAULT_NUMERIC_RANGE) result.range = parsed;
@@ -63,6 +75,10 @@ export const Route = createFileRoute("/games/$game")({
         result.event = raw;
       }
     }
+    const variant = parseMediaVariant(search.variant);
+    if (variant) result.variant = variant;
+    const scenario = parseMediaScenario(search.scenario);
+    if (scenario) result.scenario = scenario;
     return result;
   },
   loaderDeps: ({ search }) => ({
@@ -91,6 +107,13 @@ function GameRouteComponent() {
   const numericRange = parseNumericRange(search.range);
   const numericPriceRange = parseNumericPriceRange(search.pricerange);
   const activeEvent = search.event ?? null;
+  const mediaVariant = import.meta.env.MODE === "prototype" ? parseMediaVariant(search.variant) : undefined;
+  const mediaScenario = mediaVariant
+    ? parseMediaScenario(search.scenario) ?? "richer"
+    : undefined;
+  const prototypeSearch = mediaVariant && mediaScenario
+    ? { variant: mediaVariant, scenario: mediaScenario }
+    : {};
   const { data, isLoading, isError } = useQuery(gameDetailQueryOptions(appid));
 
   if (isError) {
@@ -121,7 +144,7 @@ function GameRouteComponent() {
       event: activeEvent,
     });
     void navigate({
-      search: cleaned,
+      search: { ...cleaned, ...prototypeSearch },
       replace: true,
       resetScroll: false,
     });
@@ -134,7 +157,7 @@ function GameRouteComponent() {
       event: activeEvent,
     });
     void navigate({
-      search: cleaned,
+      search: { ...cleaned, ...prototypeSearch },
       replace: true,
       resetScroll: false,
     });
@@ -147,11 +170,28 @@ function GameRouteComponent() {
       event: nextEventId,
     });
     void navigate({
-      search: cleaned,
+      search: { ...cleaned, ...prototypeSearch },
       replace: true,
       resetScroll: false,
     });
   };
+  const handleMediaVariantChange = (nextVariant: MediaVariant) => {
+    void navigate({
+      search: { ...search, variant: nextVariant, scenario: mediaScenario ?? "richer" },
+      replace: true,
+      resetScroll: false,
+    });
+  };
+
+  const handleMediaScenarioChange = (nextScenario: MediaScenario) => {
+    if (!mediaVariant) return;
+    void navigate({
+      search: { ...search, variant: mediaVariant, scenario: nextScenario },
+      replace: true,
+      resetScroll: false,
+    });
+  };
+
 
   return (
     <GamePageView
@@ -166,6 +206,10 @@ function GameRouteComponent() {
       onRangeChange={handleRangeChange}
       onPriceRangeChange={handlePriceRangeChange}
       onEventChange={handleEventChange}
+      mediaVariant={mediaVariant}
+      mediaScenario={mediaScenario}
+      onMediaVariantChange={mediaVariant ? handleMediaVariantChange : undefined}
+      onMediaScenarioChange={mediaVariant ? handleMediaScenarioChange : undefined}
     />
   );
 }
@@ -200,6 +244,14 @@ export async function handleGameHttpRequest(
   db: AppDatabase
 ): Promise<Response> {
   const url = new URL(request.url);
+  const ssrMediaVariant = import.meta.env.MODE === "prototype"
+    ? parseMediaVariant(url.searchParams.get("variant"))
+    : undefined;
+  const ssrMediaScenario = ssrMediaVariant
+    ? parseMediaScenario(url.searchParams.get("scenario")) ?? "richer"
+    : undefined;
+  const ssrMediaVariantChange = ssrMediaVariant ? (_next: MediaVariant) => undefined : undefined;
+  const ssrMediaScenarioChange = ssrMediaVariant ? (_next: MediaScenario) => undefined : undefined;
   const match = url.pathname.match(/^\/games\/([^/]+)$/);
 
   if (!match) {
@@ -254,6 +306,10 @@ export async function handleGameHttpRequest(
         playerHistory={playerHistory}
         price={currentPrice}
         priceHistory={priceHistory}
+        mediaVariant={ssrMediaVariant}
+        mediaScenario={ssrMediaScenario}
+        onMediaVariantChange={ssrMediaVariantChange}
+        onMediaScenarioChange={ssrMediaScenarioChange}
       />
     </QueryClientProvider>
   );

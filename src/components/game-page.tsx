@@ -16,6 +16,11 @@ import { AppLink } from "./app-link";
 import { LifecycleHistorySection } from "./lifecycle-history";
 import { GameReception, GameScoreHero } from "./game-reception";
 import {
+  MediaDiscoveryPrototype,
+  type MediaScenario,
+  type MediaVariant,
+} from "./media-discovery-prototype";
+import {
   NUMERIC_TO_HISTORY_RANGE,
   NUMERIC_TO_PRICE_RANGE,
   HISTORY_TO_NUMERIC_RANGE,
@@ -266,6 +271,10 @@ export interface GamePageProps {
   onRangeChange?: (range: NumericRange) => void;
   onPriceRangeChange?: (pricerange: NumericPriceRange) => void;
   onEventChange?: (eventId: string | null) => void;
+  mediaVariant?: MediaVariant;
+  mediaScenario?: MediaScenario;
+  onMediaVariantChange?: (variant: MediaVariant) => void;
+  onMediaScenarioChange?: (scenario: MediaScenario) => void;
 }
 
 export function GamePageView({
@@ -280,6 +289,10 @@ export function GamePageView({
   onRangeChange,
   onPriceRangeChange,
   onEventChange,
+  mediaVariant,
+  mediaScenario,
+  onMediaVariantChange,
+  onMediaScenarioChange,
 }: GamePageProps) {
   const historyRange = NUMERIC_TO_HISTORY_RANGE[range ?? DEFAULT_NUMERIC_RANGE];
   const priceRange = NUMERIC_TO_PRICE_RANGE[pricerange ?? DEFAULT_NUMERIC_PRICE_RANGE];
@@ -529,6 +542,15 @@ export function GamePageView({
       </div>
 
       <LifecycleHistorySection appid={game.appid} />
+      {mediaVariant && mediaScenario && onMediaVariantChange && onMediaScenarioChange && (
+        <MediaDiscoveryPrototype
+          game={game}
+          variant={mediaVariant}
+          scenario={mediaScenario}
+          onVariantChange={onMediaVariantChange}
+          onScenarioChange={onMediaScenarioChange}
+        />
+      )}
       <nav
         aria-label="Game page sections"
         className="flex min-h-[44px] items-center overflow-x-auto border border-zinc-800 bg-zinc-950 px-1 font-mono"
