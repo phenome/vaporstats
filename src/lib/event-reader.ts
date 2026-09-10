@@ -240,6 +240,16 @@ export function bbcodeToHtml(bbcode: string): string {
   // Remove empty paragraphs
   text = text.replace(/<p>\s*<\/p>/gi, "");
 
+  // Convert bracketed uppercase section headers like [ MAPS ], [ GAMEPLAY ], [ MISC ] into sticky section headers
+  text = text.replace(/<p>\s*\[\s*([A-Z0-9 &/_.:'-]{2,})\s*\]\s*<\/p>/gi, (_, title: string) => `<h3 class="score-event-section-header">[ ${title.trim()} ]</h3>`);
+  text = text.replace(/(?:^|\n)\s*\[\s*([A-Z0-9 &/_.:'-]{2,})\s*\]\s*(?:\n|$)/gi, (_, title: string) => `\n<h3 class="score-event-section-header">[ ${title.trim()} ]</h3>\n`);
+
+  // Tag h2 and h3 headings with score-event-section-header
+  text = text.replace(/<(h[23])(?:\s+class="([^"]*)")?>([\s\S]*?)<\/\1>/gi, (_, tag: string, cls: string | undefined, content: string) => {
+    if (cls?.includes("score-event-section-header")) return `<${tag} class="${cls}">${content}</${tag}>`;
+    const combined = cls ? `${cls} score-event-section-header` : "score-event-section-header";
+    return `<${tag} class="${combined}">${content}</${tag}>`;
+  });
   // Wrap remaining bare text blocks in <p>
   text = text
     .split(/\n{2,}/)

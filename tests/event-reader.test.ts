@@ -137,7 +137,7 @@ describe("Steam Store BBCode and Event Extraction", () => {
       [previewyoutube=dQw4w9WgXcQ;full][/previewyoutube]
     `;
     const html = bbcodeToHtml(bbcode);
-    expect(html).toContain("<h2>Patch Highlights</h2>");
+    expect(html).toContain('<h2 class="score-event-section-header">Patch Highlights</h2>');
     expect(html).toContain("<strong>Bold note</strong>");
     expect(html).toContain("<em>italic note</em>");
     expect(html).toContain("<u>underlined</u>");
@@ -158,7 +158,7 @@ describe("Steam Store BBCode and Event Extraction", () => {
     const csBbcode = `[p]\\[ MAPS ][/p][p]Boulder[/p][list][*][p]Updated to the latest version from the Community Workshop ([url="https://steamcommunity.com/sharedfiles/filedetails/changelog/3663186989"]Update Notes[/url])[/p][/*][/list][p]Poseidon[/p][list][*][p]Updated to the latest version from the Community Workshop ([url="https://steamcommunity.com/sharedfiles/filedetails/changelog/3522144043"]Update Notes[/url])[/p][/*][/list][p]\\[ GAMEPLAY ][/p][list][*][p]Fixed a case where player speed was too high when moving against walls.[/p][/*][/list]`;
 
     const html = bbcodeToHtml(csBbcode);
-    expect(html).toContain("[ MAPS ]");
+    expect(html).toContain('<h3 class="score-event-section-header">[ MAPS ]</h3>');
     expect(html).not.toContain("\\[");
     expect(html).not.toContain("\\]");
     expect(html).not.toContain("[p]");
@@ -192,7 +192,7 @@ describe("Steam Store BBCode and Event Extraction", () => {
     expect(result).not.toBeNull();
     expect(result?.title).toBe("Beta Patch Notes - v0.111.0");
     expect(result?.contentHtml).toContain("Time for another beta patch!");
-    expect(result?.contentHtml).toContain("<h2>CONTENT &amp; BALANCE:</h2>");
+    expect(result?.contentHtml).toContain('<h2 class="score-event-section-header">CONTENT &amp; BALANCE:</h2>');
     expect(result?.contentHtml).toContain("<li>Buffed Axebot</li>");
     expect(result?.contentHtml).not.toContain("Valve Corporation. All rights reserved");
   });
