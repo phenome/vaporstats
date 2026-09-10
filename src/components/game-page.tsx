@@ -412,10 +412,16 @@ export function GamePageView({
   // itself fades during the final stretch, once the rising hero edge has
   // eaten all but a small remnant of the cards.
   const publisherChromeOpacity = Math.min(1, Math.max(0, (1 - progress) / 0.15));
+  const isFullyCompact = progress >= 0.999;
   const heroStyle = {
     transformOrigin: "top left",
-    transform: geometry ? "scaleY(" + visualScaleY.toFixed(5) + ")" : undefined,
-    willChange: "transform",
+    transform: isFullyCompact
+      ? undefined
+      : geometry
+        ? "scaleY(" + visualScaleY.toFixed(5) + ")"
+        : undefined,
+    height: isFullyCompact && geometry ? `${geometry.compactHeight}px` : undefined,
+    willChange: isFullyCompact ? undefined : "transform",
     ["--hero-morph-progress"]: progress,
   } as React.CSSProperties & Record<string, string | number | undefined>;
 
@@ -435,6 +441,7 @@ export function GamePageView({
       >
       <header
         ref={heroRef}
+        data-morph-layout={isFullyCompact ? "compact" : undefined}
         className="morphing-game-hero relative border border-zinc-800 bg-zinc-950/95 backdrop-blur-md"
         style={heroStyle}
       >
@@ -630,12 +637,6 @@ export function GamePageView({
           </a>
         )}
         <a
-          href="#activity"
-          className="inline-flex h-8 min-h-[32px] shrink-0 items-center border-b-2 border-transparent px-2.5 text-[11px] uppercase tracking-wider text-zinc-300 hover:bg-zinc-900 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-orange-500 transition-colors"
-        >
-          Activity
-        </a>
-        <a
           href="#game-reception"
           className="inline-flex h-8 min-h-[32px] shrink-0 items-center border-b-2 border-transparent px-2.5 text-[11px] uppercase tracking-wider text-zinc-300 hover:bg-zinc-900 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-orange-500 transition-colors"
         >
@@ -662,18 +663,15 @@ export function GamePageView({
           </a>
         )}
       </nav>
-      {mediaVariant && mediaScenario && onMediaVariantChange && onMediaScenarioChange && (
-        <MediaDiscoveryPrototype
-          game={game}
-          variant={mediaVariant}
-          scenario={mediaScenario}
-          onVariantChange={onMediaVariantChange}
-          onScenarioChange={onMediaScenarioChange}
-        />
-      )}
 
-      <div id="activity" className="game-activity-grid scroll-mt-28">
-        <GameScoreHero appid={game.appid} />
+      <div className="game-activity-grid">
+        <a
+          href="#game-reception"
+          className="group block transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-orange-500"
+          aria-label="Current Player Score - click to view Reception details"
+        >
+          <GameScoreHero appid={game.appid} className="transition-colors group-hover:border-zinc-700" />
+        </a>
         <PlayerPanel
           key={game.appid}
           appid={game.appid}
@@ -685,6 +683,16 @@ export function GamePageView({
           }}
         />
       </div>
+
+      {mediaVariant && mediaScenario && onMediaVariantChange && onMediaScenarioChange && (
+        <MediaDiscoveryPrototype
+          game={game}
+          variant={mediaVariant}
+          scenario={mediaScenario}
+          onVariantChange={onMediaVariantChange}
+          onScenarioChange={onMediaScenarioChange}
+        />
+      )}
 
       <GameReception
         key={game.appid}

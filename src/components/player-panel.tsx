@@ -156,7 +156,12 @@ export function PlayerPanel({
 
   return (
     <>
-      <div key={`players-${appid}`} className="border border-zinc-800 bg-zinc-950 p-5 space-y-3">
+      <a
+        href="#player-history"
+        key={`players-${appid}`}
+        className="group block border border-zinc-800 bg-zinc-950 p-5 space-y-3 transition-colors hover:border-zinc-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-orange-500"
+        aria-label="Current Players - click to view Player History"
+      >
         <div className="flex items-center justify-between">
           <span className="text-[11px] font-mono text-zinc-400 uppercase tracking-wider">
             Current Players
@@ -204,14 +209,21 @@ export function PlayerPanel({
               </div>
             )}
         </div>
-      </div>
+      </a>
 
-      <PriceSummary
+      <a
+        href="#price-history"
         key={`price-${appid}`}
-        price={price}
-        variant="card"
-        status={status === "pending" ? "loading" : status}
-      />
+        className="group block transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-orange-500"
+        aria-label="Current Price - click to view Price History"
+      >
+        <PriceSummary
+          price={price}
+          variant="card"
+          status={status === "pending" ? "loading" : status}
+          className="transition-colors group-hover:border-zinc-700"
+        />
+      </a>
     </>
   );
 }
