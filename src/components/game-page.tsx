@@ -109,8 +109,6 @@ function useHeroGeometry(
     if (!hero) return;
 
     const nodes = Object.values(identityRefs);
-    const previousHeight = hero.style.height;
-    const previousOverflow = hero.style.overflow;
     let lastObservedWidth = 0;
     let frameId = 0;
 
@@ -137,6 +135,11 @@ function useHeroGeometry(
     };
 
     const measure = () => {
+      const previousHeight = hero.style.height;
+      const previousOverflow = hero.style.overflow;
+      const previousProgress = hero.style.getPropertyValue("--hero-morph-progress");
+      // Capture the same expanded typography regardless of the current scroll position.
+      hero.style.setProperty("--hero-morph-progress", "0");
       const previousHeroTransform = hero.style.transform;
       const previousTransforms = nodes.map((nodeRef) => nodeRef.current?.style.transform ?? "");
       nodes.forEach((nodeRef) => {
@@ -150,6 +153,7 @@ function useHeroGeometry(
       hero.style.height = previousHeight;
       hero.style.overflow = previousOverflow;
       hero.style.transform = previousHeroTransform;
+      hero.style.setProperty("--hero-morph-progress", previousProgress);
       nodes.forEach((nodeRef, index) => {
         if (nodeRef.current) nodeRef.current.style.transform = previousTransforms[index];
       });
@@ -412,16 +416,12 @@ export function GamePageView({
   // itself fades during the final stretch, once the rising hero edge has
   // eaten all but a small remnant of the cards.
   const publisherChromeOpacity = Math.min(1, Math.max(0, (1 - progress) / 0.15));
-  const isFullyCompact = progress >= 0.999;
   const heroStyle = {
     transformOrigin: "top left",
-    transform: isFullyCompact
-      ? undefined
-      : geometry
-        ? "scaleY(" + visualScaleY.toFixed(5) + ")"
-        : undefined,
-    height: isFullyCompact && geometry ? `${geometry.compactHeight}px` : undefined,
-    willChange: isFullyCompact ? undefined : "transform",
+    transform: geometry ? "scaleY(" + visualScaleY.toFixed(5) + ")" : undefined,
+    // Keep the FLIP source box stable while its title changes font size.
+    height: geometry ? `${geometry.expandedHeight}px` : undefined,
+    willChange: "transform",
     ["--hero-morph-progress"]: progress,
   } as React.CSSProperties & Record<string, string | number | undefined>;
 
@@ -441,7 +441,6 @@ export function GamePageView({
       >
       <header
         ref={heroRef}
-        data-morph-layout={isFullyCompact ? "compact" : undefined}
         className="morphing-game-hero relative border border-zinc-800 bg-zinc-950/95 backdrop-blur-md"
         style={heroStyle}
       >
