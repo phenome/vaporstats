@@ -120,6 +120,7 @@ function GameRouteComponent() {
     void navigate({
       search: cleaned,
       replace: true,
+      resetScroll: false,
     });
   };
 
@@ -132,6 +133,7 @@ function GameRouteComponent() {
     void navigate({
       search: cleaned,
       replace: true,
+      resetScroll: false,
     });
   };
 
@@ -144,6 +146,7 @@ function GameRouteComponent() {
     void navigate({
       search: cleaned,
       replace: true,
+      resetScroll: false,
     });
   };
 
