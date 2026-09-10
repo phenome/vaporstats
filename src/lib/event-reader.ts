@@ -92,6 +92,12 @@ export function sanitizeReaderHtml(dirtyHtml: string, baseUrl?: string): string 
   for (const tag of Object.keys(DISALLOWED_TAGS)) {
     const elements = Array.from(root.querySelectorAll(tag));
     for (const el of elements) {
+      if (tag === "iframe") {
+        const src = el.getAttribute("src")?.trim() || "";
+        if (/^https:\/\/(www\.)?(youtube\.com\/embed\/|youtube-nocookie\.com\/embed\/)[\w-]+/i.test(src)) {
+          continue;
+        }
+      }
       el.remove();
     }
   }
@@ -145,6 +151,11 @@ export function sanitizeReaderHtml(dirtyHtml: string, baseUrl?: string): string 
           element.setAttribute("src", resolved);
           element.setAttribute("loading", "lazy");
         }
+      }
+    } else if (tagName === "iframe") {
+      const src = element.getAttribute("src")?.trim() || "";
+      if (!/^https:\/\/(www\.)?(youtube\.com\/embed\/|youtube-nocookie\.com\/embed\/)[\w-]+/i.test(src)) {
+        element.remove();
       }
     }
   }
@@ -212,11 +223,40 @@ export function bbcodeToHtml(bbcode: string): string {
   text = text.replace(/\[quote\]([\s\S]*?)\[\/quote\]/gi, "<blockquote>$1</blockquote>");
   text = text.replace(/\[code\]([\s\S]*?)\[\/code\]/gi, "<pre><code>$1</code></pre>");
 
-  // YouTube previews
-  text = text.replace(/\[previewyoutube=([^;\]]+)(?:;full)?\]\[\/previewyoutube\]/gi, '<a href="https://www.youtube.com/watch?v=$1">Watch on YouTube</a>');
+  // YouTube previews: supports [previewyoutube=ID], [previewyoutube="ID"], [previewyoutube=ID;full], [previewyoutube="ID;full"]
+  text = text.replace(
+    /\[previewyoutube=["']?([^;"'\]]+)(?:;[^"'\]]*)?["']?\](?:\[\/previewyoutube\])?/gi,
+    (_, videoId: string) => {
+      const id = videoId.trim();
+      return `
+<div class="score-event-youtube-embed my-3 overflow-hidden rounded border border-zinc-800 bg-zinc-900">
+  <div class="relative aspect-video w-full">
+    <iframe
+      src="https://www.youtube-nocookie.com/embed/${id}"
+      title="YouTube video player"
+      allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+      allowfullscreen
+      loading="lazy"
+      class="absolute inset-0 h-full w-full border-0"
+    ></iframe>
+  </div>
+  <div class="border-t border-zinc-800/80 bg-zinc-950/60 px-3 py-1.5 font-mono text-[11px] text-zinc-400">
+    <a href="https://www.youtube.com/watch?v=${id}" target="_blank" rel="noopener noreferrer" class="text-violet-300 hover:text-violet-200 underline">Watch on YouTube ↗</a>
+  </div>
+</div>`;
+    },
+  );
 
-  // Paragraphs
-  text = text.replace(/\[p\]([\s\S]*?)\[\/p\]/gi, "<p>$1</p>");
+  // Paragraphs: supports [p], [p align="start"], etc.
+  text = text.replace(/\[p(?:\s+[^\]]*)?\]([\s\S]*?)\[\/p\]/gi, "<p>$1</p>");
+
+  // Other layout helpers
+  text = text.replace(/\[align=[^\]]+\]([\s\S]*?)\[\/align\]/gi, "<p>$1</p>");
+  text = text.replace(/\[center\]([\s\S]*?)\[\/center\]/gi, "<p>$1</p>");
+  text = text.replace(/\[hr\](?:\[\/hr\])?/gi, "<hr />");
+
+  // Auto-link standalone URLs not already inside tags
+  text = text.replace(/(?<!["'=])\b(https?:\/\/[^\s<>"']+)/gi, '<a href="$1">$1</a>');
 
   // Lists: Steam BBCode uses [*] to open item, [/*] to close item
   text = text.replace(/\[\/\*\]/gi, "</li>");
@@ -244,8 +284,8 @@ export function bbcodeToHtml(bbcode: string): string {
   text = text.replace(/<p>\s*\[\s*([A-Z0-9 &/_.:'-]{2,})\s*\]\s*<\/p>/gi, (_, title: string) => `<h3 class="score-event-section-header">[ ${title.trim()} ]</h3>`);
   text = text.replace(/(?:^|\n)\s*\[\s*([A-Z0-9 &/_.:'-]{2,})\s*\]\s*(?:\n|$)/gi, (_, title: string) => `\n<h3 class="score-event-section-header">[ ${title.trim()} ]</h3>\n`);
 
-  // Tag h2 and h3 headings with score-event-section-header
-  text = text.replace(/<(h[23])(?:\s+class="([^"]*)")?>([\s\S]*?)<\/\1>/gi, (_, tag: string, cls: string | undefined, content: string) => {
+  // Tag h1, h2, and h3 headings with score-event-section-header
+  text = text.replace(/<(h[1-3])(?:\s+class="([^"]*)")?>([\s\S]*?)<\/\1>/gi, (_, tag: string, cls: string | undefined, content: string) => {
     if (cls?.includes("score-event-section-header")) return `<${tag} class="${cls}">${content}</${tag}>`;
     const combined = cls ? `${cls} score-event-section-header` : "score-event-section-header";
     return `<${tag} class="${combined}">${content}</${tag}>`;
@@ -275,12 +315,12 @@ export function bbcodeToPlainText(bbcode: string): string {
     .replace(/\\\]/g, "]")
     .replace(/\[img\].*?\[\/img\]/gi, "")
     .replace(/\[url=["']?([^"'\]]+)["']?\]([\s\S]*?)\[\/url\]/gi, "$2")
-    .replace(/\[previewyoutube=[^\]]+\]\[\/previewyoutube\]/gi, "")
-    .replace(/\[p\]/gi, "")
+    .replace(/\[previewyoutube=[^\]]+\](?:\[\/previewyoutube\])?/gi, "")
+    .replace(/\[p(?:\s+[^\]]*)?\]/gi, "")
     .replace(/\[\/p\]/gi, "\n")
     .replace(/\[\/\*\]/gi, "\n")
     .replace(/\[\*\]/gi, "\n- ")
-    .replace(/\[\/?(?:img|url|b|i|u|strike|h[1-6]|list|\*|quote|code|previewyoutube|p)(?:=[^\]]*)?\]/gi, "")
+    .replace(/\[\/?(?:img|url|b|i|u|strike|h[1-6]|list|\*|quote|code|previewyoutube|p|align|center|hr)(?:=[^\]]*)?\]/gi, "")
     .replace(/\s+/g, " ")
     .trim();
 }

@@ -197,6 +197,47 @@ describe("Steam Store BBCode and Event Extraction", () => {
     expect(result?.contentHtml).not.toContain("Valve Corporation. All rights reserved");
   });
 
+
+  test("tags h1 headings as sticky section headers", () => {
+    const bbcode = `
+      [p]Intro text[/p]
+      [h1][b]Vehicles[/b][/h1]
+      [list][*]New vehicle added[/list]
+      [h1]Photo Mode[/h1]
+      [list][*]New camera setting[/list]
+    `;
+    const html = bbcodeToHtml(bbcode);
+    expect(html).toContain('<h1 class="score-event-section-header"><strong>Vehicles</strong></h1>');
+    expect(html).toContain('<h1 class="score-event-section-header">Photo Mode</h1>');
+  });
+
+  test("handles BBCode attributes and YouTube preview embeds", () => {
+    const bbcode = `[p align="start"]To survive in Night City, you need someone to watch your back.[/p][previewyoutube="KO0a5vujTB0;full"][/previewyoutube][p align="start"]Check out: http://cdpred.ly/AAY[/p]`;
+
+    const html = bbcodeToHtml(bbcode);
+    expect(html).not.toContain('[p align="start"]');
+    expect(html).toContain("<p>To survive in Night City");
+    expect(html).toContain("https://www.youtube-nocookie.com/embed/KO0a5vujTB0");
+    expect(html).toContain("<iframe");
+    expect(html).toContain('src="https://www.youtube-nocookie.com/embed/KO0a5vujTB0"');
+    expect(html).toContain('href="http://cdpred.ly/AAY"');
+
+    const sanitized = sanitizeReaderHtml(html, "https://store.steampowered.com");
+    expect(sanitized).toContain('src="https://www.youtube-nocookie.com/embed/KO0a5vujTB0"');
+    expect(sanitized).toContain("Watch on YouTube");
+  });
+
+  test("milestone label precedence and safe iframe filtering", () => {
+    const maliciousIframe = '<iframe src="https://evil.com/malicious"></iframe>';
+    const sanitizedMalicious = sanitizeReaderHtml(maliciousIframe);
+    expect(sanitizedMalicious).not.toContain("iframe");
+    expect(sanitizedMalicious).not.toContain("evil.com");
+
+    const youtubeIframe = '<iframe src="https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ" title="Video"></iframe>';
+    const sanitizedYoutube = sanitizeReaderHtml(youtubeIframe);
+    expect(sanitizedYoutube).toContain("iframe");
+    expect(sanitizedYoutube).toContain("youtube-nocookie.com/embed/dQw4w9WgXcQ");
+  });
   test("rejects pages where Readability only extracted Valve legal footer", () => {
     const footerOnlyHtml = `
       <!DOCTYPE html>
