@@ -44,6 +44,7 @@ type Evidence = {
   tone: "positive" | "negative" | "mixed" | "observation";
   opposing?: { text: string; articles: string[] };
   context?: string;
+  disputed?: boolean;
 };
 
 type MediaCategory = {
@@ -107,7 +108,7 @@ function createFixture(gameName: string, scenario: MediaScenario): MediaFixture 
     "Hands-on",
     "PC",
     "Pre-release sample build",
-    ["gameplay", "story", "visuals"],
+    ["Action Platformer", "Sci-Fi", "Stylized Animation"],
   );
 
   if (scenario === "one-source") {
@@ -125,7 +126,7 @@ function createFixture(gameName: string, scenario: MediaScenario): MediaFixture 
               id: "one-loop",
               text: "The first hands-on brief describes short expeditions that return to a persistent hub. This establishes the shape of the central loop, but the account is too early to judge how its progression holds up across the whole game.",
               articles: [one.id],
-              tags: ["gameplay", "systems"],
+              tags: ["Action Platformer", "Expedition Loop", "Roguelite"],
               tone: "observation",
             },
           ],
@@ -139,7 +140,7 @@ function createFixture(gameName: string, scenario: MediaScenario): MediaFixture 
               id: "one-world",
               text: "Environmental clues suggest a layered setting that rewards attention to the places being explored. The preview finds that sense of place promising, while leaving the full narrative and its eventual payoff unassessed.",
               articles: [one.id],
-              tags: ["story", "world"],
+              tags: ["Sci-Fi", "Surreal Mystery", "Environmental Storytelling"],
               tone: "positive",
             },
           ],
@@ -153,7 +154,7 @@ function createFixture(gameName: string, scenario: MediaScenario): MediaFixture 
               id: "one-visuals",
               text: "High-contrast silhouettes stand out as a practical visual cue in the hands-on session. That is an observation about readability during play, not yet a verdict on the complete art direction, audio, or range of access options.",
               articles: [one.id],
-              tags: ["visuals", "accessibility"],
+              tags: ["Stylized Animation", "High-Contrast Visuals"],
               tone: "observation",
             },
           ],
@@ -173,7 +174,7 @@ function createFixture(gameName: string, scenario: MediaScenario): MediaFixture 
     "Not hands-on",
     "Not specified",
     "Announced",
-    ["story", "world", "announcement"],
+    ["Sci-Fi", "Surreal Mystery", "Psychological Thriller"],
   );
 
   if (scenario === "announced") {
@@ -191,7 +192,7 @@ function createFixture(gameName: string, scenario: MediaScenario): MediaFixture 
               id: "announced-world",
               text: "The announcement introduces a layered setting intended to unfold through exploration and environmental clues. Those are announced characteristics, not observations from play. The available coverage gives a sense of the premise without establishing how convincingly the world or narrative will deliver on it.",
               articles: [announcement.id],
-              tags: ["story", "world", "announcement"],
+              tags: ["Sci-Fi", "Surreal Mystery", "Psychological Thriller"],
               tone: "observation",
             },
           ],
@@ -211,7 +212,7 @@ function createFixture(gameName: string, scenario: MediaScenario): MediaFixture 
     "Hands-on",
     "PC",
     "Prepatch sample build",
-    ["gameplay", "systems", "technical"],
+    ["Action Platformer", "Expedition Loop", "Roguelite"],
   );
   const secondPreview = article(
     current,
@@ -222,7 +223,7 @@ function createFixture(gameName: string, scenario: MediaScenario): MediaFixture 
     "Hands-on",
     "PC",
     "Prepatch sample build",
-    ["story", "world", "visuals"],
+    ["Sci-Fi", "Environmental Storytelling", "Revisited Spaces"],
   );
   const review = article(
     current,
@@ -233,7 +234,7 @@ function createFixture(gameName: string, scenario: MediaScenario): MediaFixture 
     "Hands-on",
     "PC",
     "Launch sample build",
-    ["gameplay", "technical", "accessibility"],
+    ["Roguelite", "Satirical Narrative", "Frame-rate Sensitive"],
   );
   const platformNote = article(
     current,
@@ -244,7 +245,7 @@ function createFixture(gameName: string, scenario: MediaScenario): MediaFixture 
     "Hands-on",
     "Console",
     "Launch sample build",
-    ["gameplay", "social", "platform"],
+    ["3D Platforming", "Asymmetric Co-op", "Class-based Roles"],
   );
   const audioNote = article(
     current,
@@ -255,7 +256,7 @@ function createFixture(gameName: string, scenario: MediaScenario): MediaFixture 
     "Hands-on",
     "PC",
     "Launch sample build",
-    ["visuals", "audio", "accessibility"],
+    ["Stylized Animation", "Directional Audio", "Remappable Controls"],
   );
 
   const richerArticles = [preview, secondPreview, review, platformNote, audioNote];
@@ -269,15 +270,16 @@ function createFixture(gameName: string, scenario: MediaScenario): MediaFixture 
           id: "rich-loop",
           text: "Expeditions revolve around the tension between pushing for another reward and returning safely to a persistent hub. The preview and review both find that rhythm approachable: the immediate objective is clear, while the decision to stay out gives each run a sense of risk.",
           articles: [preview.id, review.id],
-          tags: ["gameplay", "systems"],
+          tags: ["Action Platformer", "Expedition Loop", "Roguelite"],
           tone: "positive",
         },
         {
           id: "rich-traversal",
           text: "Traversal is a point of disagreement rather than a shared strength. The preview finds its deliberate pace gives exploration room to breathe.",
           articles: [preview.id],
-          tags: ["gameplay", "traversal", "disputed"],
+          tags: ["3D Platforming", "Traversal"],
           tone: "mixed",
+          disputed: true,
           opposing: {
             text: "The console account instead describes stop-start movement during combat transitions, where that same pace can interrupt the flow.",
             articles: [platformNote.id],
@@ -294,14 +296,14 @@ function createFixture(gameName: string, scenario: MediaScenario): MediaFixture 
           id: "rich-world",
           text: "The world reveals itself through environmental clues rather than relying entirely on exposition. Both accounts describe familiar spaces taking on new significance when revisited, making discovery part of the appeal rather than simply a route to the next objective.",
           articles: [secondPreview.id, review.id],
-          tags: ["story", "world"],
+          tags: ["Sci-Fi", "Environmental Storytelling", "Revisited Spaces"],
           tone: "positive",
         },
         {
           id: "rich-characters",
           text: "The review also finds the central cast’s motives easy to follow. That clarity gives the main arc a useful anchor even as the setting asks the player to piece together its wider history.",
           articles: [review.id],
-          tags: ["story", "characters"],
+          tags: ["Satirical Narrative", "Character-driven"],
           tone: "observation",
         },
       ],
@@ -315,7 +317,7 @@ function createFixture(gameName: string, scenario: MediaScenario): MediaFixture 
           id: "rich-visuals",
           text: "In the prepatch build, strong silhouettes help characters remain distinct in crowded scenes. The coverage treats this as more than an attractive style: readable shapes make busy encounters easier to follow.",
           articles: [secondPreview.id, audioNote.id],
-          tags: ["visuals", "readability"],
+          tags: ["Stylized Animation", "High-Contrast Visuals"],
           tone: "positive",
           context: "Prepatch / early-access context",
         },
@@ -323,7 +325,7 @@ function createFixture(gameName: string, scenario: MediaScenario): MediaFixture 
           id: "rich-audio",
           text: "The audio account describes directional cues that remain distinguishable in a stereo mix, complementing the visual clarity without overwhelming it.",
           articles: [audioNote.id],
-          tags: ["audio", "accessibility"],
+          tags: ["Directional Audio", "Stereo Soundscape"],
           tone: "observation",
         },
       ],
@@ -337,7 +339,7 @@ function createFixture(gameName: string, scenario: MediaScenario): MediaFixture 
           id: "rich-social",
           text: "The console preview describes cooperation through distinct roles and shared resource decisions. What one player spends or saves is visible to the group, giving teammates a concrete reason to coordinate rather than simply occupy the same space. This is one account of co-op play, not evidence that every platform or mode offers the same experience.",
           articles: [platformNote.id],
-          tags: ["social", "co-op", "platform"],
+          tags: ["Asymmetric Co-op", "Class-based Roles"],
           tone: "observation",
         },
       ],
@@ -351,14 +353,14 @@ function createFixture(gameName: string, scenario: MediaScenario): MediaFixture 
           id: "rich-performance",
           text: "Launch coverage raises a consistent reservation about frame-time spikes when several effects overlap. These reports qualify the otherwise favorable impression of busy encounters, but they describe the builds tested rather than establishing the state of every later update.",
           articles: [review.id, audioNote.id],
-          tags: ["technical", "performance"],
+          tags: ["Frame-rate Sensitive", "Particle Effects"],
           tone: "negative",
         },
         {
           id: "rich-access",
           text: "The access notes are more encouraging, highlighting remappable controls and readable subtitles. Those specific options are useful evidence, not a comprehensive accessibility assessment.",
           articles: [audioNote.id],
-          tags: ["accessibility", "controls"],
+          tags: ["Remappable Controls", "Subtitles & Captions"],
           tone: "positive",
         },
       ],
@@ -376,7 +378,7 @@ function createFixture(gameName: string, scenario: MediaScenario): MediaFixture 
       "Hands-on",
       "PC",
       "Launch sample build",
-      ["gameplay", "systems"],
+      ["Roguelite", "Expedition Loop"],
     ),
     article(
       comparison,
@@ -387,7 +389,7 @@ function createFixture(gameName: string, scenario: MediaScenario): MediaFixture 
       "Hands-on",
       "PC",
       "Launch sample build",
-      ["story", "world"],
+      ["Sci-Fi", "Environmental Storytelling"],
     ),
   ];
 
@@ -402,25 +404,25 @@ function createFixture(gameName: string, scenario: MediaScenario): MediaFixture 
     pros: [
       {
         id: "rapid-loop",
-        text: "The sample coverage repeatedly finds the expedition loop easy to parse.",
+        text: "The expedition loop balances immediate reward with safe returns to the hub.",
         articles: [preview.id, review.id],
-        tags: ["gameplay", "systems"],
+        tags: ["Expedition Loop", "Action Platformer"],
         tone: "positive",
       },
       {
         id: "rapid-readability",
-        text: "Multiple sample notes mention readable silhouettes during busy encounters.",
+        text: "Strong silhouettes keep characters readable during crowded encounters.",
         articles: [secondPreview.id, audioNote.id],
-        tags: ["visuals", "readability"],
+        tags: ["High-Contrast Visuals", "Stylized Animation"],
         tone: "positive",
       },
     ],
     cons: [
       {
         id: "rapid-performance",
-        text: "Two sample launch notes mention frame-time spikes in effect-heavy scenes.",
+        text: "Frame-time spikes appear when several visual effects overlap.",
         articles: [review.id, audioNote.id],
-        tags: ["technical", "performance"],
+        tags: ["Frame-rate Sensitive"],
         tone: "negative",
       },
     ],
@@ -499,44 +501,149 @@ function ArticleLinks({ articles, ids }: { articles: MediaArticle[]; ids: string
   );
 }
 
+function getGameSummary(scenario: MediaScenario) {
+  if (scenario === "announced") {
+    return {
+      tagline: "Early expectations & premise",
+      title: "Surreal world exploration and psychological themes",
+      text: "An imaginative narrative adventure set in an eccentric world explored through environmental discovery and puzzle-solving. Early announcements outline a distinctive stylized art direction and psychological themes, though playable combat balance and performance remain to be verified in upcoming hands-on builds.",
+    };
+  }
+  if (scenario === "one-source") {
+    return {
+      tagline: "Hands-on preview overview",
+      title: "Risk-reward expedition loop with distinct visual style",
+      text: "A fast-paced platformer blending short expeditions with a persistent home base, emphasizing readable silhouettes and layered environmental storytelling. Initial impressions highlight the approachable risk-reward loop of each run, while noting that wider mission variety and progression depth will need verification in final builds.",
+    };
+  }
+  return {
+    tagline: "Critical overview & consensus",
+    title: "Inventive mental worlds, sharp writing, and an engaging hub loop",
+    text: "A story-driven action platformer built around imaginative expeditions, sharp environmental storytelling, and expressive visual direction. Outlets praise its approachable risk-reward hub loop and creative spaces, while noting debate over traversal momentum and occasional frame drops during busy effect-heavy encounters.",
+  };
+}
 
+function TopSummary({
+  scenario,
+  articles,
+}: {
+  scenario: MediaScenario;
+  articles: MediaArticle[];
+}) {
+  const summary = getGameSummary(scenario);
+  const sourceIds = articles
+    .filter((source) => source.gameLabel === articles[0]?.gameLabel)
+    .map((source) => source.id);
+
+  return (
+    <header className="border border-zinc-800 bg-zinc-950/70 p-5 sm:p-6">
+      <p className="mb-2 font-mono text-xs uppercase tracking-wider text-violet-300">
+        {summary.tagline}
+      </p>
+      <h2 className="mb-3 text-xl font-semibold text-zinc-100">{summary.title}</h2>
+      <p className="max-w-4xl text-sm leading-7 text-zinc-200">
+        {summary.text} <ArticleLinks articles={articles} ids={sourceIds} />
+      </p>
+    </header>
+  );
+}
+
+function renderEvidenceParagraph(findings: Evidence[], articles: MediaArticle[]) {
+  return findings.map((evidence) => {
+    if (evidence.disputed && evidence.opposing) {
+      return (
+        <React.Fragment key={evidence.id}>
+          <mark className="rounded-sm border-b-2 border-amber-400/80 bg-amber-400/15 px-1.5 py-0.5 font-normal text-zinc-100">
+            {evidence.text}
+          </mark>{" "}
+          <ArticleLinks articles={articles} ids={evidence.articles} />{" "}
+          <mark className="rounded-sm border-b-2 border-amber-400/80 bg-amber-400/15 px-1.5 py-0.5 font-normal text-zinc-200">
+            {evidence.opposing.text}
+          </mark>{" "}
+          <ArticleLinks articles={articles} ids={evidence.opposing.articles} />{" "}
+        </React.Fragment>
+      );
+    }
+    return (
+      <React.Fragment key={evidence.id}>
+        {evidence.text}{" "}
+        {evidence.opposing ? `${evidence.opposing.text} ` : ""}
+        <ArticleLinks articles={articles} ids={evidenceSourceIds(evidence)} />{" "}
+      </React.Fragment>
+    );
+  });
+}
+
+function CategoryTags({
+  findings,
+  activeTag,
+  onTag,
+}: {
+  findings: Evidence[];
+  activeTag: string | null;
+  onTag: (tag: string | null) => void;
+}) {
+  const hasDisputed = findings.some((evidence) => evidence.disputed);
+  const tags = [...new Set(findings.flatMap((evidence) => evidence.tags))];
+
+  return (
+    <div className="mt-4 flex flex-wrap items-center gap-2">
+      {hasDisputed && (
+        <button
+          type="button"
+          aria-pressed={activeTag === "disputed"}
+          onClick={() => onTag(activeTag === "disputed" ? null : "disputed")}
+          className={`inline-flex items-center gap-1.5 border px-2.5 py-1 font-mono text-xs font-semibold tracking-wide transition-colors ${
+            activeTag === "disputed"
+              ? "border-amber-300 bg-amber-300 text-zinc-950 shadow-sm"
+              : "border-amber-500/60 bg-amber-500/15 text-amber-300 hover:border-amber-400 hover:bg-amber-500/25 hover:text-amber-100"
+          }`}
+        >
+          <span className="h-1.5 w-1.5 rounded-full bg-amber-400" />
+          Contested in coverage
+        </button>
+      )}
+      {tags.map((tag) => (
+        <button
+          key={tag}
+          type="button"
+          aria-pressed={activeTag === tag}
+          onClick={() => onTag(activeTag === tag ? null : tag)}
+          className={`border px-2.5 py-1 font-mono text-xs transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-violet-300 ${
+            activeTag === tag
+              ? "border-violet-300 bg-violet-300 text-zinc-950 font-semibold shadow-sm"
+              : "border-violet-400/50 bg-violet-400/10 text-violet-200 hover:border-violet-300 hover:bg-violet-400/25 hover:text-white"
+          }`}
+        >
+          {tag}
+        </button>
+      ))}
+    </div>
+  );
+}
 
 function EvidenceBullet({
   evidence,
   fixture,
-  compact = false,
   onTag,
 }: {
   evidence: Evidence;
   fixture: MediaFixture;
-  compact?: boolean;
   onTag: (tag: string) => void;
 }) {
-  const allArticleIds = evidence.opposing ? [...evidence.articles, ...evidence.opposing.articles] : evidence.articles;
   return (
-    <li className={`border-l-2 pl-3 ${evidence.tone === "negative" ? "border-red-400/70" : evidence.tone === "positive" ? "border-emerald-400/70" : "border-zinc-700"}`}>
-      <div className={`${compact ? "text-xs" : "text-sm"} leading-relaxed text-zinc-200`}>
-        {evidence.text}
-        {evidence.opposing && (
-          <span className="mt-1 block text-zinc-400">
-            Opposing note: {evidence.opposing.text}
-          </span>
-        )}
-      </div>
-      {evidence.context && (
-        <span className="mt-2 inline-flex border border-zinc-700 bg-zinc-900 px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-wide text-zinc-400">
-          {evidence.context}
-        </span>
-      )}
-      <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1">
+    <li
+      className={`border-l-2 pl-3 ${
+        evidence.tone === "negative"
+          ? "border-red-400/70"
+          : evidence.tone === "positive"
+            ? "border-emerald-400/70"
+            : "border-zinc-700"
+      }`}
+    >
+      <div className="text-xs leading-relaxed text-zinc-200">
+        {evidence.text}{" "}
         <ArticleLinks articles={fixture.articles} ids={evidence.articles} />
-        {evidence.opposing && (
-          <span className="text-[10px] text-zinc-600">opposing</span>
-        )}
-        {evidence.opposing && <ArticleLinks articles={fixture.articles} ids={evidence.opposing.articles} />}
-        <span className="font-mono text-[10px] text-zinc-600">
-          {distinctOutlets(fixture.articles, allArticleIds)} {distinctOutlets(fixture.articles, allArticleIds) === 1 ? "outlet" : "outlets"}
-        </span>
       </div>
       <div className="mt-2 flex flex-wrap gap-1">
         {evidence.tags.map((tag) => (
@@ -544,9 +651,9 @@ function EvidenceBullet({
             key={tag}
             type="button"
             onClick={() => onTag(tag)}
-            className="border border-violet-400/50 bg-violet-400/10 px-2 py-1 font-mono text-xs text-violet-200 hover:bg-violet-400/25 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-300"
+            className="border border-violet-400/40 bg-violet-400/10 px-2 py-0.5 font-mono text-[11px] text-violet-200 hover:border-violet-300 hover:bg-violet-400/20 hover:text-white focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-violet-300"
           >
-            {tag === "disputed" ? "Disputed" : `#${tag}`}
+            {tag}
           </button>
         ))}
       </div>
@@ -554,43 +661,29 @@ function EvidenceBullet({
   );
 }
 
-function CategoryReadingSection({ category, fixture, onTag }: { category: MediaCategory; fixture: MediaFixture; onTag: (tag: string) => void }) {
-  const evidence = sortEvidenceByOutlets(fixture, category.evidence);
-  return (
-    <section className="border border-zinc-800 bg-zinc-950/70 p-4 sm:p-5">
-      <div className="mb-4 flex flex-wrap items-baseline justify-between gap-2 border-b border-zinc-800 pb-3">
-        <h3 className="font-mono text-sm font-bold uppercase tracking-wide text-zinc-100">{category.label}</h3>
-        <span className="font-mono text-[10px] uppercase tracking-wider text-zinc-600">{evidence.length} supported finding{evidence.length === 1 ? "" : "s"}</span>
-      </div>
-      <p className="mb-4 text-xs leading-relaxed text-zinc-500">{category.summary}</p>
-      <ul className="space-y-4">
-        {evidence.map((item) => <EvidenceBullet key={item.id} evidence={item} fixture={fixture} onTag={onTag} />)}
-      </ul>
-    </section>
-  );
-}
-
-
 function RapidFire({ fixture, onTag }: { fixture: MediaFixture; onTag: (tag: string) => void }) {
   const pros = sortEvidenceByOutlets(fixture, fixture.pros);
   const cons = sortEvidenceByOutlets(fixture, fixture.cons);
   if (pros.length === 0 && cons.length === 0) {
-    return <p className="border border-dashed border-zinc-800 p-4 text-xs leading-relaxed text-zinc-500">No rapid-fire pros or cons yet: this scenario has no hands-on evidence to support them.</p>;
+    return (
+      <p className="border border-dashed border-zinc-800 p-4 text-xs leading-relaxed text-zinc-400">
+        Highlights and reservations will appear as hands-on reviews are cataloged.
+      </p>
+    );
   }
   return (
-    <section className="border border-zinc-800 bg-zinc-950/70 p-4 sm:p-5">
-      <div className="mb-4 flex items-baseline justify-between gap-2 border-b border-zinc-800 pb-3">
-        <h3 className="font-mono text-sm font-bold uppercase tracking-wide text-zinc-100">Rapid-fire signal</h3>
-        <span className="font-mono text-[10px] uppercase tracking-wider text-zinc-600">one overall list</span>
+    <section className="border border-zinc-800 bg-zinc-950/70 p-5 sm:p-6">
+      <div className="mb-4 border-b border-zinc-800 pb-3">
+        <h3 className="font-mono text-xs uppercase tracking-wider text-zinc-200">Key takeaways</h3>
       </div>
       <div className="grid gap-5 md:grid-cols-2">
         <div>
-          <h4 className="mb-2 font-mono text-[10px] uppercase tracking-wider text-emerald-300">Pros</h4>
-          <ul className="space-y-3">{pros.map((item) => <EvidenceBullet key={item.id} evidence={item} fixture={fixture} compact onTag={onTag} />)}</ul>
+          <h4 className="mb-3 font-mono text-xs font-semibold uppercase tracking-wider text-emerald-300">Pros</h4>
+          <ul className="space-y-3">{pros.map((item) => <EvidenceBullet key={item.id} evidence={item} fixture={fixture} onTag={onTag} />)}</ul>
         </div>
         <div>
-          <h4 className="mb-2 font-mono text-[10px] uppercase tracking-wider text-red-300">Cons</h4>
-          <ul className="space-y-3">{cons.map((item) => <EvidenceBullet key={item.id} evidence={item} fixture={fixture} compact onTag={onTag} />)}</ul>
+          <h4 className="mb-3 font-mono text-xs font-semibold uppercase tracking-wider text-red-300">Cons</h4>
+          <ul className="space-y-3">{cons.map((item) => <EvidenceBullet key={item.id} evidence={item} fixture={fixture} onTag={onTag} />)}</ul>
         </div>
       </div>
     </section>
@@ -599,7 +692,8 @@ function RapidFire({ fixture, onTag }: { fixture: MediaFixture; onTag: (tag: str
 
 function filteredFixture(fixture: MediaFixture, activeTag: string | null): MediaFixture {
   if (!activeTag) return fixture;
-  const keep = (evidence: Evidence) => evidence.tags.includes(activeTag);
+  const keep = (evidence: Evidence) =>
+    activeTag === "disputed" ? !!evidence.disputed : evidence.tags.includes(activeTag);
   return {
     ...fixture,
     categories: fixture.categories
@@ -727,69 +821,66 @@ function SimilarityPanel({ fixture }: { fixture: MediaFixture }) {
 function VariantA({ fixture, activeTag, onTag }: { fixture: MediaFixture; activeTag: string | null; onTag: (tag: string | null) => void }) {
   return (
     <div className="space-y-5">
-      <header className="border-l-4 border-violet-400 bg-zinc-950/60 px-4 py-1">
-        <h2 className="mt-1 text-xl font-semibold text-zinc-100">Media coverage</h2>
-        <p className="mt-2 max-w-3xl text-sm leading-relaxed text-zinc-400">{fixture.description}</p>
-      </header>
-      <div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_18rem]">
-        <main className="space-y-5">
-          {fixture.categories.map((category) => <CategoryReadingSection key={category.key} category={category} fixture={fixture} onTag={(tag) => onTag(activeTag === tag ? null : tag)} />)}
-          <RapidFire fixture={fixture} onTag={(tag) => onTag(activeTag === tag ? null : tag)} />
-          <SimilarityPanel fixture={fixture} />
-        </main>
-        <SourceRail fixture={fixture} activeTag={activeTag} onTag={onTag} />
-      </div>
+      <TopSummary scenario={fixture.label === "Announced / non-hands-on" ? "announced" : fixture.label === "One source" ? "one-source" : "richer"} articles={fixture.articles} />
+      <section className="divide-y divide-zinc-800 border border-zinc-800 bg-zinc-950/70" aria-label="Editorial coverage stream">
+        {fixture.categories.map((category) => {
+          const findings = sortEvidenceByOutlets(fixture, category.evidence);
+          return (
+            <article key={category.key} className="p-5 sm:p-6">
+              <h3 className="mb-2 text-base font-semibold text-violet-200">{category.label}</h3>
+              <p className="max-w-4xl text-sm leading-7 text-zinc-200">
+                {renderEvidenceParagraph(findings, fixture.articles)}
+              </p>
+              <CategoryTags findings={findings} activeTag={activeTag} onTag={onTag} />
+            </article>
+          );
+        })}
+      </section>
+      {activeTag && (
+        <button type="button" onClick={() => onTag(null)} className="border border-violet-400/50 bg-violet-400/10 px-3 py-2 text-sm text-violet-200">
+          Showing {activeTag} · clear filter
+        </button>
+      )}
+      <RapidFire fixture={fixture} onTag={(tag) => onTag(activeTag === tag ? null : tag)} />
+      <SimilarityPanel fixture={fixture} />
       <CoverageList fixture={fixture} />
     </div>
   );
 }
 
 function VariantB({ fixture, activeTag, onTag }: { fixture: MediaFixture; activeTag: string | null; onTag: (tag: string | null) => void }) {
-  const sourceIds = fixture.articles.filter((source) => source.gameLabel === fixture.articles[0]?.gameLabel).map((source) => source.id);
-  const isAnnouncement = fixture.label === "Announced / non-hands-on";
-  const isSingleSource = fixture.label === "One source";
-  const overview = isAnnouncement
-    ? "Coverage so far introduces the setting and its premise rather than assessing the experience of playing. The announced world offers an initial sense of direction, but there is no hands-on verdict on its execution. An overall reception judgment would be premature."
-    : isSingleSource
-      ? "The first hands-on account sketches a game built around short expeditions and a persistent hub, with a layered world revealed through environmental clues. Its observations emphasize visual readability and a promising sense of place. This is one outlet’s early impression, not a broader critical consensus or a release verdict."
-      : "Across the collected coverage, the clearest strengths are an approachable expedition loop, readable visual design, and a world that rewards revisiting familiar spaces. The overall impression is positive but qualified: outlets differ on whether deliberate traversal adds texture or interrupts the pace, while launch notes flag frame-time spikes. These impressions span preview and launch builds, so their context matters more than a single blended verdict.";
   return (
     <div className="space-y-5">
-      <header className="border border-zinc-800 bg-zinc-950/70 p-5 sm:p-6">
-        <p className="mb-2 font-mono text-xs uppercase tracking-wider text-violet-300">Across the coverage · {distinctOutlets(fixture.articles, sourceIds)} {isSingleSource || isAnnouncement ? "outlet" : "outlets"}</p>
-        <h2 className="mb-3 text-xl font-semibold text-zinc-100">The overall impression</h2>
-        <p className="max-w-4xl text-sm leading-7 text-zinc-200">{overview} <ArticleLinks articles={fixture.articles} ids={sourceIds} /></p>
-      </header>
+      <TopSummary scenario={fixture.label === "Announced / non-hands-on" ? "announced" : fixture.label === "One source" ? "one-source" : "richer"} articles={fixture.articles} />
       <section className="divide-y divide-zinc-800 border border-zinc-800 bg-zinc-950/70" aria-label="Coverage by category">
         {fixture.categories.map((category) => {
           const findings = sortEvidenceByOutlets(fixture, category.evidence);
-          const tags = [...new Set(findings.flatMap((evidence) => evidence.tags))];
+          const hasDisputed = findings.some((e) => e.disputed);
           return (
-            <section key={category.key} className="grid gap-3 p-5 md:grid-cols-[11rem_minmax(0,1fr)] md:gap-6 sm:p-6">
-              <h3 className="text-sm font-semibold text-violet-200">{category.label}</h3>
+            <section key={category.key} className="grid gap-3 p-5 md:grid-cols-[13rem_minmax(0,1fr)] md:gap-6 sm:p-6">
+              <div>
+                <h3 className="text-sm font-semibold text-violet-200">{category.label}</h3>
+                {hasDisputed && (
+                  <span className="mt-2 inline-flex items-center gap-1 border border-amber-500/60 bg-amber-500/15 px-2 py-0.5 font-mono text-[10px] font-semibold uppercase tracking-wider text-amber-300">
+                    Contested
+                  </span>
+                )}
+              </div>
               <div>
                 <p className="max-w-4xl text-sm leading-7 text-zinc-200">
-                  {findings.map((evidence) => (
-                    <React.Fragment key={evidence.id}>
-                      {evidence.text} {evidence.opposing ? `${evidence.opposing.text} ` : ""}
-                      <ArticleLinks articles={fixture.articles} ids={evidenceSourceIds(evidence)} />{" "}
-                    </React.Fragment>
-                  ))}
+                  {renderEvidenceParagraph(findings, fixture.articles)}
                 </p>
-                <div className="mt-4 flex flex-wrap gap-2">
-                  {tags.map((tag) => (
-                    <button key={tag} type="button" aria-pressed={activeTag === tag} onClick={() => onTag(activeTag === tag ? null : tag)}
-                      className={`border px-2.5 py-1 font-mono text-xs transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-violet-300 ${activeTag === tag ? "border-violet-300 bg-violet-300 text-zinc-950" : "border-violet-400/50 bg-violet-400/10 text-violet-200 hover:border-violet-300 hover:bg-violet-400/25 hover:text-white"}`}>
-                      {tag === "disputed" ? "Disputed" : tag}
-                    </button>
-                  ))}
-                </div>
+                <CategoryTags findings={findings} activeTag={activeTag} onTag={onTag} />
               </div>
             </section>
           );
         })}
       </section>
-      {activeTag && <button type="button" onClick={() => onTag(null)} className="border border-violet-400/50 bg-violet-400/10 px-3 py-2 text-sm text-violet-200">Showing {activeTag} · clear filter</button>}
+      {activeTag && (
+        <button type="button" onClick={() => onTag(null)} className="border border-violet-400/50 bg-violet-400/10 px-3 py-2 text-sm text-violet-200">
+          Showing {activeTag} · clear filter
+        </button>
+      )}
       <RapidFire fixture={fixture} onTag={(tag) => onTag(activeTag === tag ? null : tag)} />
       <SimilarityPanel fixture={fixture} />
       <CoverageList fixture={fixture} />
@@ -798,48 +889,71 @@ function VariantB({ fixture, activeTag, onTag }: { fixture: MediaFixture; active
 }
 
 function VariantC({ fixture, activeTag, onTag }: { fixture: MediaFixture; activeTag: string | null; onTag: (tag: string | null) => void }) {
-  const tags = [...new Set(fixture.articles.flatMap((item) => item.tags))].sort();
+  const [selectedCategory, setSelectedCategory] = useState<string | null>(null);
+  const displayedCategories = selectedCategory
+    ? fixture.categories.filter((cat) => cat.key === selectedCategory)
+    : fixture.categories;
+
   return (
     <div className="space-y-5">
-      <header className="border border-zinc-800 bg-zinc-950/70 p-4">
-        <h2 className="mt-1 text-xl font-semibold text-zinc-100">Media coverage</h2>
-        <p className="mt-2 max-w-3xl text-sm leading-relaxed text-zinc-400">{fixture.description}</p>
-      </header>
-      <div className="grid gap-4 lg:grid-cols-[15rem_minmax(0,1fr)]">
-        <aside className="border border-zinc-800 bg-zinc-950/70 p-4 lg:sticky lg:top-24 lg:self-start">
-          <p className="font-mono text-[10px] uppercase tracking-wider text-violet-300">Discovery filters</p>
-          <p className="mt-2 text-xs leading-relaxed text-zinc-500">Tags reveal matching sample evidence without changing the underlying game page.</p>
-          <div className="mt-4 space-y-1">
-            <button type="button" onClick={() => onTag(null)} className={`w-full border px-2 py-2 text-left font-mono text-[10px] uppercase ${activeTag === null ? "border-violet-400/60 bg-violet-400/10 text-violet-100" : "border-zinc-800 text-zinc-500 hover:text-zinc-200"}`}>All supported evidence</button>
-            {tags.map((tag) => <button key={tag} type="button" onClick={() => onTag(activeTag === tag ? null : tag)} className={`w-full border px-2 py-2 text-left font-mono text-[10px] uppercase ${activeTag === tag ? "border-violet-400/60 bg-violet-400/10 text-violet-100" : "border-zinc-800 text-zinc-500 hover:text-zinc-200"}`}>#{tag}</button>)}
-          </div>
-          <div className="mt-5 border-t border-zinc-800 pt-4">
-            <p className="font-mono text-[10px] uppercase tracking-wider text-zinc-600">Current result</p>
-            <p className="mt-1 text-sm text-zinc-200">{fixture.categories.reduce((total, category) => total + category.evidence.length, 0)} supported findings</p>
-            {activeTag && <p className="mt-1 font-mono text-[10px] text-violet-300">filtered to #{activeTag}</p>}
-          </div>
-        </aside>
-        <main className="space-y-3">
-          {fixture.categories.map((category, index) => (
-            <details key={category.key} className="group border border-zinc-800 bg-zinc-950/70" open={index === 0}>
-              <summary className="flex cursor-pointer list-none items-center justify-between gap-3 p-4 marker:hidden">
-                <div>
-                  <p className="font-mono text-[10px] uppercase tracking-wider text-violet-300">0{index + 1}</p>
-                  <h3 className="mt-1 text-sm font-semibold text-zinc-100">{category.label}</h3>
-                  <p className="mt-1 text-xs text-zinc-500">{category.summary}</p>
-                </div>
-                <span className="font-mono text-lg text-zinc-600 group-open:rotate-180">⌄</span>
-              </summary>
-              <div className="border-t border-zinc-800 p-4">
-                <ul className="space-y-4">{sortEvidenceByOutlets(fixture, category.evidence).map((evidence) => <EvidenceBullet key={evidence.id} evidence={evidence} fixture={fixture} onTag={(tag) => onTag(activeTag === tag ? null : tag)} />)}</ul>
-              </div>
-            </details>
-          ))}
-          <RapidFire fixture={fixture} onTag={(tag) => onTag(activeTag === tag ? null : tag)} />
-          <CoverageList fixture={fixture} />
-          <SimilarityPanel fixture={fixture} />
-        </main>
+      <TopSummary scenario={fixture.label === "Announced / non-hands-on" ? "announced" : fixture.label === "One source" ? "one-source" : "richer"} articles={fixture.articles} />
+      <div className="flex flex-wrap items-center gap-2 border border-zinc-800 bg-zinc-950/70 p-3">
+        <button
+          type="button"
+          onClick={() => setSelectedCategory(null)}
+          className={`px-3 py-1.5 font-mono text-xs transition-colors ${
+            selectedCategory === null
+              ? "border border-violet-300 bg-violet-300 font-semibold text-zinc-950 shadow-sm"
+              : "border border-zinc-800 text-zinc-300 hover:border-zinc-700 hover:text-white"
+          }`}
+        >
+          All Categories ({fixture.categories.length})
+        </button>
+        {fixture.categories.map((cat) => (
+          <button
+            key={cat.key}
+            type="button"
+            onClick={() => setSelectedCategory(selectedCategory === cat.key ? null : cat.key)}
+            className={`px-3 py-1.5 font-mono text-xs transition-colors ${
+              selectedCategory === cat.key
+                ? "border border-violet-300 bg-violet-300 font-semibold text-zinc-950 shadow-sm"
+                : "border border-zinc-800 text-zinc-400 hover:border-zinc-700 hover:text-zinc-200"
+            }`}
+          >
+            {cat.label}
+          </button>
+        ))}
       </div>
+      <div className="space-y-4">
+        {displayedCategories.map((category) => {
+          const findings = sortEvidenceByOutlets(fixture, category.evidence);
+          const hasDisputed = findings.some((e) => e.disputed);
+          return (
+            <section key={category.key} className="border border-zinc-800 bg-zinc-950/70 p-5 sm:p-6">
+              <div className="mb-3 flex flex-wrap items-center justify-between gap-2 border-b border-zinc-800 pb-3">
+                <h3 className="text-base font-semibold text-violet-200">{category.label}</h3>
+                {hasDisputed && (
+                  <span className="inline-flex items-center gap-1 border border-amber-500/60 bg-amber-500/15 px-2 py-0.5 font-mono text-[10px] font-semibold uppercase tracking-wider text-amber-300">
+                    Contested in coverage
+                  </span>
+                )}
+              </div>
+              <p className="max-w-4xl text-sm leading-7 text-zinc-200">
+                {renderEvidenceParagraph(findings, fixture.articles)}
+              </p>
+              <CategoryTags findings={findings} activeTag={activeTag} onTag={onTag} />
+            </section>
+          );
+        })}
+      </div>
+      {activeTag && (
+        <button type="button" onClick={() => onTag(null)} className="border border-violet-400/50 bg-violet-400/10 px-3 py-2 text-sm text-violet-200">
+          Showing {activeTag} · clear filter
+        </button>
+      )}
+      <RapidFire fixture={fixture} onTag={(tag) => onTag(activeTag === tag ? null : tag)} />
+      <SimilarityPanel fixture={fixture} />
+      <CoverageList fixture={fixture} />
     </div>
   );
 }
@@ -871,7 +985,7 @@ function PrototypeSwitcher({
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [onVariantChange, variant]);
 
-  const currentName = variant === "A" ? "Reading-first" : variant === "B" ? "Paragraphs & footnotes" : "Discovery split";
+  const currentName = variant === "A" ? "Editorial Stream" : variant === "B" ? "Category Dossier" : "Interactive Navigator";
   return (
     <div className="fixed inset-x-3 bottom-3 z-[70] mx-auto max-w-4xl border border-violet-300/40 bg-zinc-950/95 p-2 shadow-2xl shadow-black/50 backdrop-blur-md">
       <div className="flex flex-wrap items-center justify-center gap-2 sm:gap-3">
