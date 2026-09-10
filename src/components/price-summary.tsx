@@ -10,12 +10,14 @@ export interface PriceSummaryProps {
   price: PriceState | null;
   variant: PriceSummaryVariant;
   status?: PriceSummaryStatus;
+  className?: string;
 }
 
 export function PriceSummary({
   price,
   variant,
   status = "success",
+  className,
 }: PriceSummaryProps) {
   const offer = status === "success" && isPriceDiscounted(price);
   const value =
@@ -48,7 +50,7 @@ export function PriceSummary({
 
   if (variant === "hero") {
     return (
-      <section className={`border p-5 ${tone}`} aria-label="Current price">
+      <section className={`border p-5 ${tone} ${className ?? ""}`} aria-label="Current price">
         <div className="flex flex-wrap items-end justify-between gap-4">
           <div>
             <div className="flex flex-wrap items-center gap-2">
@@ -86,7 +88,7 @@ export function PriceSummary({
   }
 
   return (
-    <article className={`border p-5 space-y-3 ${tone}`} aria-label="Current price">
+    <article className={`border p-5 space-y-3 ${tone} ${className ?? ""}`} aria-label="Current price">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <p className="text-[11px] font-mono uppercase tracking-wider text-zinc-400 whitespace-nowrap">
           {label}

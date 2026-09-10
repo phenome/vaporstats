@@ -47,13 +47,13 @@ function formatDateOnly(value: string | null): string {
 }
 
 
-export function GameScoreHero({ appid }: { appid: number }) {
+export function GameScoreHero({ appid, className }: { appid: number; className?: string }) {
   const summaryQuery = useQuery(gameScoreSummaryQueryOptions(appid));
   const summary = summaryQuery.data;
   const score = summary?.score?.value ?? null;
   const reviews = summary?.score?.current_reviews ?? null;
   return (
-    <section id="player-score" className="score-hero border border-violet-500/30 bg-zinc-950 p-4 sm:p-5" aria-labelledby="player-score-title">
+    <section id="player-score" className={`score-hero border border-violet-500/30 bg-zinc-950 p-4 sm:p-5 ${className ?? ""}`} aria-labelledby="player-score-title">
       <div className="flex items-center justify-between gap-3">
         <h2 id="player-score-title" className="font-mono text-[11px] uppercase tracking-wider text-zinc-300">Current Player Score</h2>
         <span className="h-2 w-2 bg-violet-400" aria-hidden="true" />

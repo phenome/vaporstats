@@ -104,8 +104,6 @@ function useHeroGeometry(
     if (!hero) return;
 
     const nodes = Object.values(identityRefs);
-    const previousHeight = hero.style.height;
-    const previousOverflow = hero.style.overflow;
     let lastObservedWidth = 0;
     let frameId = 0;
 
@@ -132,6 +130,11 @@ function useHeroGeometry(
     };
 
     const measure = () => {
+      const previousHeight = hero.style.height;
+      const previousOverflow = hero.style.overflow;
+      const previousProgress = hero.style.getPropertyValue("--hero-morph-progress");
+      // Capture the same expanded typography regardless of the current scroll position.
+      hero.style.setProperty("--hero-morph-progress", "0");
       const previousHeroTransform = hero.style.transform;
       const previousTransforms = nodes.map((nodeRef) => nodeRef.current?.style.transform ?? "");
       nodes.forEach((nodeRef) => {
@@ -145,6 +148,7 @@ function useHeroGeometry(
       hero.style.height = previousHeight;
       hero.style.overflow = previousOverflow;
       hero.style.transform = previousHeroTransform;
+      hero.style.setProperty("--hero-morph-progress", previousProgress);
       nodes.forEach((nodeRef, index) => {
         if (nodeRef.current) nodeRef.current.style.transform = previousTransforms[index];
       });
@@ -303,6 +307,73 @@ export function GamePageView({
     () => ({ title: titleRef, status: statusRef, date: dateRef, store: storeRef, artwork: artworkRef }),
     [],
   );
+  const sectionNavRef = useRef<HTMLElement>(null);
+
+  useEffect(() => {
+    const nav = sectionNavRef.current;
+    if (!nav) return;
+
+    const links = Array.from(nav.querySelectorAll<HTMLAnchorElement>("a[href^='#']"));
+    if (links.length === 0) return;
+    const targets = links
+      .map((link) => {
+        const id = link.getAttribute("href")?.slice(1);
+        return id ? document.getElementById(id) : null;
+      })
+      .filter((el): el is HTMLElement => el !== null);
+
+    const updateActiveLink = (activeId: string | null) => {
+      links.forEach((link) => {
+        const isActive = activeId ? link.getAttribute("href") === `#${activeId}` : false;
+        link.setAttribute("aria-current", isActive ? "true" : "false");
+      });
+    };
+
+    const updateFromScroll = () => {
+      const navRect = nav.getBoundingClientRect();
+      const readingLine = navRect.bottom + 20;
+      let activeId: string | null = null;
+
+      for (const target of targets) {
+        const rect = target.getBoundingClientRect();
+        if (rect.top <= readingLine && rect.bottom > readingLine) {
+          activeId = target.id;
+          break;
+        }
+      }
+
+      if (!activeId && targets.length > 0) {
+        if (targets[0].getBoundingClientRect().top > readingLine) {
+          activeId = targets[0].id;
+        } else {
+          for (let i = targets.length - 1; i >= 0; i--) {
+            if (targets[i].getBoundingClientRect().top <= readingLine) {
+              activeId = targets[i].id;
+              break;
+            }
+          }
+        }
+      }
+
+      if (activeId) {
+        updateActiveLink(activeId);
+      }
+    };
+
+    let frameId = 0;
+    const onScroll = () => {
+      cancelAnimationFrame(frameId);
+      frameId = requestAnimationFrame(updateFromScroll);
+    };
+
+    updateFromScroll();
+    window.addEventListener("scroll", onScroll, { passive: true });
+
+    return () => {
+      cancelAnimationFrame(frameId);
+      window.removeEventListener("scroll", onScroll);
+    };
+  }, [related]);
   const geometry = useHeroGeometry(heroRef, identityRefs, game.appid);
   // The scroll range is measured from the captured layouts: shrinking from the
   // expanded height to the compact height takes exactly as much scroll as the
@@ -335,12 +406,21 @@ export function GamePageView({
   const heroStyle = {
     transformOrigin: "top left",
     transform: geometry ? "scaleY(" + visualScaleY.toFixed(5) + ")" : undefined,
+    // Keep the FLIP source box stable while its title changes font size.
+    height: geometry ? `${geometry.expandedHeight}px` : undefined,
     willChange: "transform",
     ["--hero-morph-progress"]: progress,
   } as React.CSSProperties & Record<string, string | number | undefined>;
 
   return (
-    <div className="game-page-container max-w-7xl mx-auto px-4 py-8 space-y-6">
+    <div
+      className="game-page-container max-w-7xl mx-auto px-4 py-8 space-y-6"
+      style={{
+        ["--hero-compact-height" as string]: geometry?.compactHeight
+          ? `${geometry.compactHeight}px`
+          : "50px",
+      }}
+    >
       <div ref={sentinelRef} className="h-0 w-full pointer-events-none" aria-hidden="true" />
       <div
         className="morphing-game-hero-flow"
@@ -530,30 +610,46 @@ export function GamePageView({
 
       <LifecycleHistorySection appid={game.appid} />
       <nav
+        ref={sectionNavRef}
         aria-label="Game page sections"
-        className="flex min-h-[44px] items-center overflow-x-auto border border-zinc-800 bg-zinc-950 px-1 font-mono"
+        className="game-section-nav flex h-8 min-h-[32px] items-center overflow-x-auto border border-zinc-800 bg-zinc-950/95 backdrop-blur-md px-1 font-mono"
       >
-        <a href="#activity" className="inline-flex min-h-[44px] shrink-0 items-center px-3 text-xs uppercase tracking-wider text-zinc-300 hover:bg-zinc-900 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-orange-500">
-          Activity
-        </a>
-        <a href="#game-reception" className="inline-flex min-h-[44px] shrink-0 items-center px-3 text-xs uppercase tracking-wider text-zinc-300 hover:bg-zinc-900 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-orange-500">
+        <a
+          href="#game-reception"
+          className="inline-flex h-8 min-h-[32px] shrink-0 items-center border-b-2 border-transparent px-2.5 text-[11px] uppercase tracking-wider text-zinc-300 hover:bg-zinc-900 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-orange-500 transition-colors"
+        >
           Reception
         </a>
-        <a href="#player-history" className="inline-flex min-h-[44px] shrink-0 items-center px-3 text-xs uppercase tracking-wider text-zinc-300 hover:bg-zinc-900 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-orange-500">
+        <a
+          href="#player-history"
+          className="inline-flex h-8 min-h-[32px] shrink-0 items-center border-b-2 border-transparent px-2.5 text-[11px] uppercase tracking-wider text-zinc-300 hover:bg-zinc-900 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-orange-500 transition-colors"
+        >
           Player History
         </a>
-        <a href="#price-history" className="inline-flex min-h-[44px] shrink-0 items-center px-3 text-xs uppercase tracking-wider text-zinc-300 hover:bg-zinc-900 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-orange-500">
+        <a
+          href="#price-history"
+          className="inline-flex h-8 min-h-[32px] shrink-0 items-center border-b-2 border-transparent px-2.5 text-[11px] uppercase tracking-wider text-zinc-300 hover:bg-zinc-900 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-orange-500 transition-colors"
+        >
           Price History
         </a>
         {related && (
-          <a href="#related-content" className="inline-flex min-h-[44px] shrink-0 items-center px-3 text-xs uppercase tracking-wider text-zinc-300 hover:bg-zinc-900 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-orange-500">
+          <a
+            href="#related-content"
+            className="inline-flex h-8 min-h-[32px] shrink-0 items-center border-b-2 border-transparent px-2.5 text-[11px] uppercase tracking-wider text-zinc-300 hover:bg-zinc-900 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-orange-500 transition-colors"
+          >
             Related Content
           </a>
         )}
       </nav>
 
-      <div id="activity" className="game-activity-grid scroll-mt-28">
-        <GameScoreHero appid={game.appid} />
+      <div className="game-activity-grid">
+        <a
+          href="#game-reception"
+          className="group block transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-orange-500"
+          aria-label="Current Player Score - click to view Reception details"
+        >
+          <GameScoreHero appid={game.appid} className="transition-colors group-hover:border-zinc-700" />
+        </a>
         <PlayerPanel
           key={game.appid}
           appid={game.appid}

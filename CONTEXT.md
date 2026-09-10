@@ -134,6 +134,12 @@ Standings of full-release games ordered by filtered lifetime Steam approval. It 
 **Catalog Facet**:
 A source-identified genre, Steam feature, or community tag. The three classifications remain distinct even when their labels are identical.
 
+**Discovery Trait**:
+A characteristic of a game supported by attributed media coverage, organized within a descriptive category. It describes what the game offers rather than assigning a quality score.
+
+**Media Discovery Tag**:
+A shared, normalized label for a coverage-supported game characteristic, used to find games with that characteristic. Its wording is independent of the game summary, and it is distinct from a Steam Catalog Facet.
+
 **Monthly Score Comparison**:
 An earlier score comparison for the games eligible in a selected catalog group now. It may use a Reconstructed Player Score when no Recorded Player Score exists; missing historical evidence remains missing, and the comparison does not assert that the same games were eligible then.
 
