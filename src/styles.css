@@ -297,3 +297,44 @@
 .game-page-container {
   overflow-anchor: none;
 }
+
+/* Game Section Navigation - Sticky Stack below Hero & Scrollspy (Google Chrome Modern Web Guidance) */
+.game-section-nav {
+  position: sticky;
+  top: calc(56px + var(--hero-compact-height, 50px));
+  z-index: 35;
+}
+
+@media (max-width: 767px) {
+  .game-section-nav {
+    top: calc(102px + var(--hero-compact-height, 50px));
+  }
+}
+
+/* Exclusively highlight single active section */
+.game-section-nav a[aria-current="true"] {
+  color: #ffffff;
+  background-color: hsl(240 3.7% 14%);
+  border-bottom-color: #f97316;
+  font-weight: 600;
+}
+/* Ensure sections have appropriate scroll-margin to clear both sticky headers */
+#activity,
+#game-reception,
+#player-history,
+#price-history,
+#related-content,
+#media-discovery {
+  scroll-margin-top: calc(56px + var(--hero-compact-height, 50px) + 38px);
+}
+
+@media (max-width: 767px) {
+  #activity,
+  #game-reception,
+  #player-history,
+  #price-history,
+  #related-content,
+  #media-discovery {
+    scroll-margin-top: calc(102px + var(--hero-compact-height, 50px) + 38px);
+  }
+}
