@@ -585,14 +585,20 @@ function renderEvidenceParagraphs(findings: Evidence[], articles: MediaArticle[]
       {findings.map((evidence) => {
         if (evidence.disputed && evidence.opposing) {
           return (
-            <p key={evidence.id} className="text-sm leading-relaxed text-zinc-200">
-              <mark className="border-b border-amber-500/40 bg-amber-500/[0.05] px-1 py-0.5 font-normal text-zinc-200">
-                {evidence.text}{" "}
-                <ArticleLinks articles={articles} ids={evidence.articles} />{" "}
-                {evidence.opposing.text}{" "}
+            <div key={evidence.id} className="space-y-1 text-sm leading-relaxed text-zinc-200">
+              <p>
+                <mark className="border-b border-amber-500/40 bg-amber-500/[0.05] px-1 py-0.5 font-normal text-zinc-200">
+                  {evidence.text}
+                </mark>{" "}
+                <ArticleLinks articles={articles} ids={evidence.articles} />
+              </p>
+              <p>
+                <mark className="border-b border-amber-500/40 bg-amber-500/[0.05] px-1 py-0.5 font-normal text-zinc-200">
+                  {evidence.opposing.text}
+                </mark>{" "}
                 <ArticleLinks articles={articles} ids={evidence.opposing.articles} />
-              </mark>
-            </p>
+              </p>
+            </div>
           );
         }
         return (
