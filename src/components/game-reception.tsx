@@ -191,7 +191,13 @@ function MilestoneLabel({
         } ${alignLeft ? "ml-auto" : ""}`}
         aria-label={`${milestone.display_label} · ${formatDateOnly(milestone.event_time)}`}
         aria-describedby={active ? `score-milestone-${milestone.event_id}` : undefined}
-        onMouseEnter={onPointerActivate}
+        onMouseEnter={(event) => {
+          event.stopPropagation();
+          onPointerActivate(event);
+        }}
+        onMouseMove={(event) => {
+          event.stopPropagation();
+        }}
         onFocus={onFocusActivate}
         onPointerDown={(event) => {
           event.stopPropagation();
@@ -291,6 +297,8 @@ function ScoreChart({
   const activateMilestonePointer = (eventMilestoneId: string, event: MilestonePointerEvent | undefined) => {
     const touch = event?.nativeEvent instanceof PointerEvent && event.nativeEvent.pointerType === "touch";
     if (touch) focusedTooltipRef.current = null;
+    setHoveredValue(null);
+    setActiveTimestamp(null);
     setMilestoneTooltip((current) => {
       if (current?.id === eventMilestoneId && current.modality === (touch ? "touch" : "pointer")) {
         return current;
@@ -372,6 +380,7 @@ function ScoreChart({
           accessibilityLayer
           margin={{ top: 12, right: SCORE_CHART_MARGIN_RIGHT, left: 0, bottom: 0 }}
           onMouseMove={(state) => {
+            if (milestoneTooltip !== null) return;
             const activeLabel = Number(state.activeLabel);
             const activeRow = Number.isFinite(activeLabel) ? chartData.find((row) => row.timestamp === activeLabel) : undefined;
             setActiveTimestamp(Number.isFinite(activeLabel) ? activeLabel : null);
