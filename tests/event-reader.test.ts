@@ -154,6 +154,25 @@ describe("Steam Store BBCode and Event Extraction", () => {
     expect(plain).toContain("Bold note");
   });
 
+  test("converts Steam [img src] attributes and clan image placeholders", () => {
+    const bbcode = '[p][img src="{STEAM_CLAN_LOC_IMAGE}/3703047/test.png"][/img]Congratulations[/p]';
+    const html = bbcodeToHtml(bbcode);
+
+    expect(html).toContain('src="https://clan.fastly.steamstatic.com/images/3703047/test.png"');
+    expect(html).toContain("Congratulations");
+    expect(html).not.toContain("[img src=");
+
+    const plain = bbcodeToPlainText(bbcode);
+    expect(plain).toBe("Congratulations");
+  });
+
+  test("keeps a section heading after a YouTube preview", () => {
+    const html = bbcodeToHtml('[previewyoutube="gsSWz6sfu-U;full"][/previewyoutube][h1]Patch Notes – Valheim 1.0[/h1]');
+
+    expect(html).toContain("score-event-youtube-embed");
+    expect(html).toContain('<h1 class="score-event-section-header">Patch Notes – Valheim 1.0</h1>');
+  });
+
   test("converts Steam BBCode with paragraphs, escaped brackets, and [/*] list items", () => {
     const csBbcode = `[p]\\[ MAPS ][/p][p]Boulder[/p][list][*][p]Updated to the latest version from the Community Workshop ([url="https://steamcommunity.com/sharedfiles/filedetails/changelog/3663186989"]Update Notes[/url])[/p][/*][/list][p]Poseidon[/p][list][*][p]Updated to the latest version from the Community Workshop ([url="https://steamcommunity.com/sharedfiles/filedetails/changelog/3522144043"]Update Notes[/url])[/p][/*][/list][p]\\[ GAMEPLAY ][/p][list][*][p]Fixed a case where player speed was too high when moving against walls.[/p][/*][/list]`;
 

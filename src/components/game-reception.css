@@ -42,6 +42,15 @@ html:has(.morphing-game-hero-flow) {
   text-transform: uppercase;
   color: rgb(196, 181, 253);
 }
+
+.score-event-youtube-embed {
+  margin-bottom: 0 !important;
+}
+
+.score-event-youtube-embed + .score-event-section-header {
+  margin-top: 0 !important;
+  padding-top: 0.125rem;
+}
 @media (max-width: 767px) {
   html:has(.morphing-game-hero-flow) {
     scroll-padding-top: 152px;

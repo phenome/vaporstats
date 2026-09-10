@@ -139,7 +139,7 @@ export function ScoreEventReader({ appid, eventId, onClose }: ScoreEventReaderPr
                 )}
               </div>
             ) : successPayload ? (
-              <ScrollArea className="h-[440px] w-full pr-3">
+              <ScrollArea className="h-[440px] min-w-0 w-full pr-3">
                 {successPayload.sourceUrl && (
                   <div className="mb-3 border-b border-zinc-900 pb-2.5">
                     <a
@@ -154,7 +154,7 @@ export function ScoreEventReader({ appid, eventId, onClose }: ScoreEventReaderPr
                   </div>
                 )}
                 <div
-                  className="space-y-3 text-xs leading-relaxed text-zinc-300 break-words font-sans selection:bg-violet-500/30 selection:text-violet-100
+                  className="min-w-0 max-w-full space-y-3 text-xs leading-relaxed text-zinc-300 wrap-anywhere font-sans selection:bg-violet-500/30 selection:text-violet-100
                     [&_h1]:text-sm [&_h1]:font-bold [&_h1]:text-zinc-100 [&_h1]:mt-3
                     [&_h2]:text-xs [&_h2]:font-bold [&_h2]:text-zinc-100 [&_h2]:mt-2.5
                     [&_h3]:text-xs [&_h3]:font-semibold [&_h3]:text-zinc-200 [&_h3]:mt-2

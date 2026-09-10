@@ -200,7 +200,17 @@ export function bbcodeToHtml(bbcode: string): string {
   // Unescape escaped brackets like \[ MAPS ]
   text = text.replace(/\\\[/g, "[").replace(/\\\]/g, "]");
 
-  // Images
+  // Images: support both Steam's body form and attribute form.
+  text = text.replace(
+    /\[img\s+src\s*=\s*(?:"([^"]+)"|'([^']+)'|([^\]\s]+))\s*\]([\s\S]*?)\[\/img\]/gi,
+    (_, doubleQuoted: string | undefined, singleQuoted: string | undefined, unquoted: string | undefined) => {
+      const src = (doubleQuoted ?? singleQuoted ?? unquoted ?? "").replace(
+        /^\{STEAM_CLAN_(?:LOC_)?IMAGE\}/i,
+        "https://clan.fastly.steamstatic.com/images",
+      );
+      return `<img src="${src}" alt="" />`;
+    },
+  );
   text = text.replace(/\[img\]\{STEAM_CLAN_IMAGE\}(.*?)\[\/img\]/gi, '<img src="https://clan.fastly.steamstatic.com/images$1" />');
   text = text.replace(/\[img\](.*?)\[\/img\]/gi, '<img src="$1" />');
 
@@ -313,7 +323,7 @@ export function bbcodeToPlainText(bbcode: string): string {
   return bbcode
     .replace(/\\\[/g, "[")
     .replace(/\\\]/g, "]")
-    .replace(/\[img\].*?\[\/img\]/gi, "")
+    .replace(/\[img(?:\s+src\s*=\s*(?:"[^"]+"|'[^']+'|[^\]\s]+))?\s*\][\s\S]*?\[\/img\]/gi, "")
     .replace(/\[url=["']?([^"'\]]+)["']?\]([\s\S]*?)\[\/url\]/gi, "$2")
     .replace(/\[previewyoutube=[^\]]+\](?:\[\/previewyoutube\])?/gi, "")
     .replace(/\[p(?:\s+[^\]]*)?\]/gi, "")
