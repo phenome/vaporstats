@@ -197,6 +197,7 @@ function MilestoneLabel({
         }}
         onMouseMove={(event) => {
           event.stopPropagation();
+          onPointerActivate(event);
         }}
         onFocus={onFocusActivate}
         onPointerDown={(event) => {
@@ -299,13 +300,19 @@ function ScoreChart({
     if (touch) focusedTooltipRef.current = null;
     setHoveredValue(null);
     setActiveTimestamp(null);
+    const modality = touch ? "touch" : "pointer";
+    const anchor = tooltipPositionFor(event);
+    if (!anchor) return;
     setMilestoneTooltip((current) => {
-      if (current?.id === eventMilestoneId && current.modality === (touch ? "touch" : "pointer")) {
+      if (
+        current?.id === eventMilestoneId &&
+        current.modality === modality &&
+        current.anchor.x === anchor.x &&
+        current.anchor.y === anchor.y
+      ) {
         return current;
       }
-      const anchor = tooltipPositionFor(event);
-      if (!anchor) return current;
-      return { id: eventMilestoneId, modality: touch ? "touch" : "pointer", anchor };
+      return { id: eventMilestoneId, modality, anchor };
     });
   };
   const activateMilestoneFocus = (eventMilestoneId: string, event: React.FocusEvent<HTMLButtonElement>) => {
@@ -405,6 +412,7 @@ function ScoreChart({
           <CartesianGrid strokeDasharray="3 3" stroke="#27272a" vertical={false} />
           <XAxis dataKey="timestamp" type="number" domain={domain} allowDataOverflow tickLine={false} axisLine={false} stroke="#71717a" fontSize={10} minTickGap={40} tickFormatter={(value) => formatDateOnly(new Date(Number(value)).toISOString())} />
           <YAxis domain={[0, 100]} ticks={[0, 50, 100]} width={SCORE_CHART_Y_AXIS_WIDTH} tickLine={false} axisLine={false} stroke="#71717a" fontSize={10} />
+          <Area data={chartData} dataKey="score" name="Player score" type="monotone" stroke="var(--color-score)" strokeWidth={1.8} fill={"url(#score-area-" + appid + ")"} dot={chartData.length === 1 ? { r: 3 } : false} activeDot={false} isAnimationActive={false} connectNulls={false} />
           {selectedMilestones.map((milestone) => {
             const timestamp = Date.parse(milestone.event_time);
             const isSelected = activeEventId === milestone.event_id;
@@ -412,7 +420,6 @@ function ScoreChart({
               <ReferenceLine
                 key={milestone.event_id}
                 x={timestamp}
-                isFront={true}
                 stroke={isSelected ? "#c4b5fd" : SCORE_COLOR}
                 strokeWidth={isSelected ? 2 : 1}
                 strokeDasharray={isSelected ? undefined : "3 3"}
@@ -463,7 +470,6 @@ function ScoreChart({
               />
             }
           />
-          <Area data={chartData} dataKey="score" name="Player score" type="monotone" stroke="var(--color-score)" strokeWidth={1.8} fill={"url(#score-area-" + appid + ")"} dot={chartData.length === 1 ? { r: 3 } : false} activeDot={false} isAnimationActive={false} connectNulls={false} />
         </ComposedChart>
       </ChartContainer>
       {active && (
@@ -802,19 +808,16 @@ export function GameReception({
     }
   };
 
-  // Mobile scroll-into-view when an event reader is opened
+  // Native nearest scrolling preserves the reader when it is already visible.
   useEffect(() => {
-    if (activeEventId && typeof window !== "undefined") {
-      const card = document.getElementById("critic-reception") || document.getElementById("score-event-reader");
-      if (card) {
-        const targetY = window.scrollY + card.getBoundingClientRect().top - 80;
-        try {
-          window.scrollTo({ top: targetY, behavior: "smooth" });
-        } catch {
-          window.scrollTo(0, targetY);
-        }
-      }
-    }
+    if (!activeEventId || typeof window === "undefined") return;
+    const card = document.getElementById("critic-reception") || document.getElementById("score-event-reader");
+    if (!card) return;
+    card.scrollIntoView({
+      behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth",
+      block: "nearest",
+      inline: "nearest",
+    });
   }, [activeEventId]);
 
   return (
