@@ -27,6 +27,7 @@ type MediaArticle = {
   id: string;
   outlet: string;
   title: string;
+  publishedAt: string;
   type: "Preview" | "Review" | "Announcement" | "Comparison";
   handsOn: "Hands-on" | "Not hands-on";
   platform: string;
@@ -91,7 +92,7 @@ function article(
   build: string,
   tags: string[],
 ): MediaArticle {
-  return { id, outlet, title, type, handsOn, platform, build, gameLabel, tags };
+  return { id, outlet, title, type, handsOn, platform, build, gameLabel, tags, publishedAt: type === "Preview" ? "2026-08-12" : type === "Announcement" ? "2026-08-05" : "2026-08-20" };
 }
 
 function createFixture(gameName: string, scenario: MediaScenario): MediaFixture {
@@ -122,7 +123,7 @@ function createFixture(gameName: string, scenario: MediaScenario): MediaFixture 
           evidence: [
             {
               id: "one-loop",
-              text: "The sample brief describes a short expedition loop that returns to a persistent hub.",
+              text: "The first hands-on brief describes short expeditions that return to a persistent hub. This establishes the shape of the central loop, but the account is too early to judge how its progression holds up across the whole game.",
               articles: [one.id],
               tags: ["gameplay", "systems"],
               tone: "observation",
@@ -136,7 +137,7 @@ function createFixture(gameName: string, scenario: MediaScenario): MediaFixture 
           evidence: [
             {
               id: "one-world",
-              text: "The sample brief points to a layered setting revealed through environmental clues.",
+              text: "Environmental clues suggest a layered setting that rewards attention to the places being explored. The preview finds that sense of place promising, while leaving the full narrative and its eventual payoff unassessed.",
               articles: [one.id],
               tags: ["story", "world"],
               tone: "positive",
@@ -150,7 +151,7 @@ function createFixture(gameName: string, scenario: MediaScenario): MediaFixture 
           evidence: [
             {
               id: "one-visuals",
-              text: "The sample brief calls out high-contrast silhouettes as a useful visual cue during play.",
+              text: "High-contrast silhouettes stand out as a practical visual cue in the hands-on session. That is an observation about readability during play, not yet a verdict on the complete art direction, audio, or range of access options.",
               articles: [one.id],
               tags: ["visuals", "accessibility"],
               tone: "observation",
@@ -188,7 +189,7 @@ function createFixture(gameName: string, scenario: MediaScenario): MediaFixture 
           evidence: [
             {
               id: "announced-world",
-              text: "The sample announcement introduces a setting premise without making a hands-on claim.",
+              text: "The announcement introduces a layered setting intended to unfold through exploration and environmental clues. Those are announced characteristics, not observations from play. The available coverage gives a sense of the premise without establishing how convincingly the world or narrative will deliver on it.",
               articles: [announcement.id],
               tags: ["story", "world", "announcement"],
               tone: "observation",
@@ -266,19 +267,19 @@ function createFixture(gameName: string, scenario: MediaScenario): MediaFixture 
       evidence: [
         {
           id: "rich-loop",
-          text: "Sample hands-on notes describe expeditions that trade immediate rewards against a safer return to the hub.",
+          text: "Expeditions revolve around the tension between pushing for another reward and returning safely to a persistent hub. The preview and review both find that rhythm approachable: the immediate objective is clear, while the decision to stay out gives each run a sense of risk.",
           articles: [preview.id, review.id],
           tags: ["gameplay", "systems"],
           tone: "positive",
         },
         {
           id: "rich-traversal",
-          text: "The sample coverage agrees that traversal is deliberate, but the stated reason differs by source.",
+          text: "Traversal is a point of disagreement rather than a shared strength. The preview finds its deliberate pace gives exploration room to breathe.",
           articles: [preview.id],
           tags: ["gameplay", "traversal", "disputed"],
           tone: "mixed",
           opposing: {
-            text: "A separate sample note describes the same traversal as stop-start during combat transitions.",
+            text: "The console account instead describes stop-start movement during combat transitions, where that same pace can interrupt the flow.",
             articles: [platformNote.id],
           },
         },
@@ -291,14 +292,14 @@ function createFixture(gameName: string, scenario: MediaScenario): MediaFixture 
       evidence: [
         {
           id: "rich-world",
-          text: "Sample world notes emphasize environmental clues that reward returning to earlier spaces.",
+          text: "The world reveals itself through environmental clues rather than relying entirely on exposition. Both accounts describe familiar spaces taking on new significance when revisited, making discovery part of the appeal rather than simply a route to the next objective.",
           articles: [secondPreview.id, review.id],
           tags: ["story", "world"],
           tone: "positive",
         },
         {
           id: "rich-characters",
-          text: "A sample review observes that character motives remain legible during the central arc.",
+          text: "The review also finds the central cast’s motives easy to follow. That clarity gives the main arc a useful anchor even as the setting asks the player to piece together its wider history.",
           articles: [review.id],
           tags: ["story", "characters"],
           tone: "observation",
@@ -312,7 +313,7 @@ function createFixture(gameName: string, scenario: MediaScenario): MediaFixture 
       evidence: [
         {
           id: "rich-visuals",
-          text: "In the prepatch sample build, the notes call out strong silhouette contrast in crowded scenes.",
+          text: "In the prepatch build, strong silhouettes help characters remain distinct in crowded scenes. The coverage treats this as more than an attractive style: readable shapes make busy encounters easier to follow.",
           articles: [secondPreview.id, audioNote.id],
           tags: ["visuals", "readability"],
           tone: "positive",
@@ -320,7 +321,7 @@ function createFixture(gameName: string, scenario: MediaScenario): MediaFixture 
         },
         {
           id: "rich-audio",
-          text: "A sample audio note describes directional cues as easy to distinguish in a stereo mix.",
+          text: "The audio account describes directional cues that remain distinguishable in a stereo mix, complementing the visual clarity without overwhelming it.",
           articles: [audioNote.id],
           tags: ["audio", "accessibility"],
           tone: "observation",
@@ -334,7 +335,7 @@ function createFixture(gameName: string, scenario: MediaScenario): MediaFixture 
       evidence: [
         {
           id: "rich-social",
-          text: "The sample platform note describes co-op roles that make resource decisions visible to the group.",
+          text: "The console preview describes cooperation through distinct roles and shared resource decisions. What one player spends or saves is visible to the group, giving teammates a concrete reason to coordinate rather than simply occupy the same space. This is one account of co-op play, not evidence that every platform or mode offers the same experience.",
           articles: [platformNote.id],
           tags: ["social", "co-op", "platform"],
           tone: "observation",
@@ -348,14 +349,14 @@ function createFixture(gameName: string, scenario: MediaScenario): MediaFixture 
       evidence: [
         {
           id: "rich-performance",
-          text: "Sample launch notes mention occasional frame-time spikes when several effects overlap.",
+          text: "Launch coverage raises a consistent reservation about frame-time spikes when several effects overlap. These reports qualify the otherwise favorable impression of busy encounters, but they describe the builds tested rather than establishing the state of every later update.",
           articles: [review.id, audioNote.id],
           tags: ["technical", "performance"],
           tone: "negative",
         },
         {
           id: "rich-access",
-          text: "A sample access note highlights remappable controls and readable subtitle treatment.",
+          text: "The access notes are more encouraging, highlighting remappable controls and readable subtitles. Those specific options are useful evidence, not a comprehensive accessibility assessment.",
           articles: [audioNote.id],
           tags: ["accessibility", "controls"],
           tone: "positive",
@@ -396,7 +397,7 @@ function createFixture(gameName: string, scenario: MediaScenario): MediaFixture 
       scenario === "cited-similarity"
         ? "Shared traits are separated into generated suggestions and outlet-explicit comparisons, with citations for both example games."
         : "Repeated findings, independent observations, and disagreement remain visible without a quality ranking.",
-    articles: similarityArticles,
+    articles: scenario === "cited-similarity" ? similarityArticles : richerArticles,
     categories: richerCategories,
     pros: [
       {
@@ -480,18 +481,17 @@ function distinctOutlets(articles: MediaArticle[], ids: string[]) {
 
 function ArticleLinks({ articles, ids }: { articles: MediaArticle[]; ids: string[] }) {
   return (
-    <span className="inline-flex flex-wrap items-center gap-x-2 gap-y-1 font-mono text-[10px]">
-      {ids.map((id) => {
-        const source = articleById(articles, id);
+    <span className="inline-flex gap-0.5 align-baseline font-mono text-xs">
+      {[...new Set(ids)].map((id) => {
+        const index = articles.findIndex((item) => item.id === id);
+        const source = articles[index];
         if (!source) return null;
+        const description = `${source.outlet} · ${source.title} · ${source.publishedAt}`;
         return (
-          <a
-            key={id}
-            href={`#media-sample-article-${source.id}`}
-            aria-label={`${source.outlet}: ${source.title}`}
-            className="text-violet-300 underline decoration-violet-500/40 underline-offset-2 hover:text-violet-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400"
-          >
-            {source.outlet}: {source.title} [{source.gameLabel}] ↗
+          <a key={id} href={`#media-sample-article-${source.id}`}
+            title={description} aria-label={`Source ${index + 1}: ${description}`}
+            className="rounded-sm px-0.5 text-violet-300 hover:bg-violet-400/20 hover:text-violet-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-violet-300">
+            [{index + 1}]
           </a>
         );
       })}
@@ -544,7 +544,7 @@ function EvidenceBullet({
             key={tag}
             type="button"
             onClick={() => onTag(tag)}
-            className="border border-zinc-800 px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-wide text-zinc-500 hover:border-violet-400/60 hover:text-violet-200 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-violet-400"
+            className="border border-violet-400/50 bg-violet-400/10 px-2 py-1 font-mono text-xs text-violet-200 hover:bg-violet-400/25 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-300"
           >
             {tag === "disputed" ? "Disputed" : `#${tag}`}
           </button>
@@ -662,38 +662,28 @@ function SourceRail({ fixture, activeTag, onTag }: { fixture: MediaFixture; acti
   );
 }
 
-function CoverageList({ fixture, onTag }: { fixture: MediaFixture; onTag: (tag: string) => void }) {
+function CoverageList({ fixture }: { fixture: MediaFixture }) {
   return (
-    <details className="group border border-zinc-800 bg-zinc-950/70" open>
-      <summary className="flex cursor-pointer list-none items-center justify-between gap-3 p-4 font-mono text-xs uppercase tracking-wider text-zinc-200 marker:hidden">
-        <span>Coverage list · {fixture.articles.length} sample articles</span>
-        <span className="text-zinc-600 group-open:rotate-180">⌄</span>
-      </summary>
-      <div className="grid gap-2 border-t border-zinc-800 p-4 md:grid-cols-2">
-        {fixture.articles.map((source) => (
-          <article key={source.id} className="border border-zinc-900 bg-zinc-900/40 p-3" id={`media-sample-article-${source.id}`}>
-            <div className="flex flex-wrap items-start justify-between gap-2">
-              <div>
-                <p className="font-mono text-[10px] uppercase tracking-wide text-violet-300">{source.outlet}</p>
-                <h4 className="mt-1 text-xs font-semibold leading-relaxed text-zinc-100">{source.title}</h4>
-                <p className="mt-1 text-[10px] text-zinc-500">{source.gameLabel}</p>
-              </div>
-              <a href={`#media-sample-article-${source.id}`} className="font-mono text-[10px] text-zinc-500 underline underline-offset-2 hover:text-zinc-200">sample ↗</a>
-            </div>
-            <div className="mt-3 flex flex-wrap gap-1.5 font-mono text-[9px] uppercase tracking-wide text-zinc-500">
-              <span className="border border-zinc-800 px-1.5 py-0.5">{source.type}</span>
-              <span className="border border-zinc-800 px-1.5 py-0.5">{source.handsOn}</span>
-              <span className="border border-zinc-800 px-1.5 py-0.5">{source.platform}</span>
-              <span className="border border-zinc-800 px-1.5 py-0.5">{source.build}</span>
-            </div>
-            <div className="mt-3 flex flex-wrap gap-1">
-              {source.tags.map((tag) => <button key={tag} type="button" onClick={() => onTag(tag)} className="text-[9px] text-zinc-600 hover:text-violet-200">#{tag}</button>)}
-            </div>
-            <p className="mt-3 border-t border-zinc-900 pt-2 text-[10px] leading-relaxed text-zinc-600">Sample article detail for this design exercise; not a published outlet assessment.</p>
-          </article>
-        ))}
-      </div>
-    </details>
+    <section aria-label="Articles" className="border border-zinc-800 bg-zinc-950/70">
+      <h3 className="border-b border-zinc-800 px-4 py-3 font-mono text-xs uppercase tracking-wider text-zinc-200">Articles · {fixture.articles.length}</h3>
+      <ol className="divide-y divide-zinc-800">
+        {fixture.articles.map((source, index) => {
+          const destination = `/media-discovery-sample.html?${new URLSearchParams({ outlet: source.outlet, title: source.title, date: source.publishedAt })}`;
+          return (
+            <li key={source.id} id={`media-sample-article-${source.id}`} style={{ scrollMarginTop: 160 }}
+              className="grid grid-cols-[1.5rem_minmax(0,1fr)_auto] items-baseline gap-x-3 gap-y-1 px-4 py-3 text-sm target:bg-violet-400/10 md:grid-cols-[1.5rem_10rem_minmax(0,1fr)_7rem_auto]">
+              <span className="font-mono text-xs text-violet-300">[{index + 1}]</span>
+              <span className="font-medium text-zinc-200">{source.outlet}</span>
+              <span className="col-start-2 row-start-2 text-zinc-300 md:col-auto md:row-auto">{source.title}</span>
+              <time dateTime={source.publishedAt} className="col-start-2 row-start-3 font-mono text-xs text-zinc-400 md:col-auto md:row-auto">{source.publishedAt}</time>
+              <a href={destination} target="_blank" rel="noopener noreferrer"
+                aria-label={`Open ${source.title} in a new tab or window`}
+                className="col-start-3 row-start-1 text-violet-300 underline-offset-4 hover:text-white hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-violet-300 md:col-auto md:row-auto">Read ↗</a>
+            </li>
+          );
+        })}
+      </ol>
+    </section>
   );
 }
 
@@ -749,57 +739,60 @@ function VariantA({ fixture, activeTag, onTag }: { fixture: MediaFixture; active
         </main>
         <SourceRail fixture={fixture} activeTag={activeTag} onTag={onTag} />
       </div>
-      <CoverageList fixture={fixture} onTag={(tag) => onTag(activeTag === tag ? null : tag)} />
+      <CoverageList fixture={fixture} />
     </div>
   );
 }
 
 function VariantB({ fixture, activeTag, onTag }: { fixture: MediaFixture; activeTag: string | null; onTag: (tag: string | null) => void }) {
-  const rows = fixture.categories
-    .flatMap((category) => category.evidence.map((evidence) => ({ category, evidence })))
-    .sort(
-      (left, right) =>
-        distinctOutlets(fixture.articles, evidenceSourceIds(right.evidence)) -
-        distinctOutlets(fixture.articles, evidenceSourceIds(left.evidence)),
-    );
+  const sourceIds = fixture.articles.filter((source) => source.gameLabel === fixture.articles[0]?.gameLabel).map((source) => source.id);
+  const isAnnouncement = fixture.label === "Announced / non-hands-on";
+  const isSingleSource = fixture.label === "One source";
+  const overview = isAnnouncement
+    ? "Coverage so far introduces the setting and its premise rather than assessing the experience of playing. The announced world offers an initial sense of direction, but there is no hands-on verdict on its execution. An overall reception judgment would be premature."
+    : isSingleSource
+      ? "The first hands-on account sketches a game built around short expeditions and a persistent hub, with a layered world revealed through environmental clues. Its observations emphasize visual readability and a promising sense of place. This is one outlet’s early impression, not a broader critical consensus or a release verdict."
+      : "Across the collected coverage, the clearest strengths are an approachable expedition loop, readable visual design, and a world that rewards revisiting familiar spaces. The overall impression is positive but qualified: outlets differ on whether deliberate traversal adds texture or interrupts the pace, while launch notes flag frame-time spikes. These impressions span preview and launch builds, so their context matters more than a single blended verdict.";
   return (
     <div className="space-y-5">
-      <header className="flex flex-col gap-3 border border-zinc-800 bg-zinc-950/70 p-4 md:flex-row md:items-end md:justify-between">
-        <div>
-          <h2 className="mt-1 text-xl font-semibold text-zinc-100">Media coverage</h2>
-        </div>
-        <p className="max-w-xl text-xs leading-relaxed text-zinc-500">{fixture.description}</p>
+      <header className="border border-zinc-800 bg-zinc-950/70 p-5 sm:p-6">
+        <p className="mb-2 font-mono text-xs uppercase tracking-wider text-violet-300">Across the coverage · {distinctOutlets(fixture.articles, sourceIds)} {isSingleSource || isAnnouncement ? "outlet" : "outlets"}</p>
+        <h2 className="mb-3 text-xl font-semibold text-zinc-100">The overall impression</h2>
+        <p className="max-w-4xl text-sm leading-7 text-zinc-200">{overview} <ArticleLinks articles={fixture.articles} ids={sourceIds} /></p>
       </header>
-      <section className="border border-zinc-800 bg-zinc-950/70">
-        <div className="hidden border-b border-zinc-800 px-4 py-2 font-mono text-[10px] uppercase tracking-wider text-zinc-600 md:grid md:grid-cols-[11rem_minmax(0,1fr)_8rem] md:gap-4">
-          <span>Facet</span><span>Evidence / opposing read</span><span>Source signal</span>
-        </div>
-        <div className="divide-y divide-zinc-900">
-          {rows.map(({ category, evidence }) => {
-            const count = distinctOutlets(fixture.articles, [...evidence.articles, ...(evidence.opposing?.articles ?? [])]);
-            return (
-              <div key={evidence.id} className="grid gap-3 px-4 py-4 md:grid-cols-[11rem_minmax(0,1fr)_8rem] md:gap-4">
-                <div>
-                  <p className="font-mono text-[10px] uppercase tracking-wide text-violet-300">{category.label}</p>
-                  <p className="mt-1 text-xs text-zinc-500">{evidence.tone === "mixed" ? "Disputed" : evidence.tone === "observation" ? "Observation" : evidence.tone === "positive" ? "Favorable read" : "Unfavorable read"}</p>
+      <section className="divide-y divide-zinc-800 border border-zinc-800 bg-zinc-950/70" aria-label="Coverage by category">
+        {fixture.categories.map((category) => {
+          const findings = sortEvidenceByOutlets(fixture, category.evidence);
+          const tags = [...new Set(findings.flatMap((evidence) => evidence.tags))];
+          return (
+            <section key={category.key} className="grid gap-3 p-5 md:grid-cols-[11rem_minmax(0,1fr)] md:gap-6 sm:p-6">
+              <h3 className="text-sm font-semibold text-violet-200">{category.label}</h3>
+              <div>
+                <p className="max-w-4xl text-sm leading-7 text-zinc-200">
+                  {findings.map((evidence) => (
+                    <React.Fragment key={evidence.id}>
+                      {evidence.text} {evidence.opposing ? `${evidence.opposing.text} ` : ""}
+                      <ArticleLinks articles={fixture.articles} ids={evidenceSourceIds(evidence)} />{" "}
+                    </React.Fragment>
+                  ))}
+                </p>
+                <div className="mt-4 flex flex-wrap gap-2">
+                  {tags.map((tag) => (
+                    <button key={tag} type="button" aria-pressed={activeTag === tag} onClick={() => onTag(activeTag === tag ? null : tag)}
+                      className={`border px-2.5 py-1 font-mono text-xs transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-violet-300 ${activeTag === tag ? "border-violet-300 bg-violet-300 text-zinc-950" : "border-violet-400/50 bg-violet-400/10 text-violet-200 hover:border-violet-300 hover:bg-violet-400/25 hover:text-white"}`}>
+                      {tag === "disputed" ? "Disputed" : tag}
+                    </button>
+                  ))}
                 </div>
-                <div>
-                  <p className="text-sm leading-relaxed text-zinc-200">{evidence.text}</p>
-                  {evidence.opposing && <p className="mt-2 border-l border-zinc-700 pl-3 text-xs leading-relaxed text-zinc-400"><span className="font-mono text-[10px] uppercase text-zinc-600">Opposite judgment · </span>{evidence.opposing.text}</p>}
-                  {evidence.context && <span className="mt-2 inline-flex border border-zinc-700 px-1.5 py-0.5 font-mono text-[9px] uppercase text-zinc-500">{evidence.context}</span>}
-                  <div className="mt-2 flex flex-wrap gap-2"><ArticleLinks articles={fixture.articles} ids={evidence.articles} />{evidence.opposing && <ArticleLinks articles={fixture.articles} ids={evidence.opposing.articles} />}</div>
-                  <div className="mt-2 flex flex-wrap gap-1">{evidence.tags.map((tag) => <button key={tag} type="button" onClick={() => onTag(activeTag === tag ? null : tag)} className="border border-zinc-800 px-1.5 py-0.5 font-mono text-[9px] uppercase text-zinc-600 hover:border-violet-400/60 hover:text-violet-200">{tag === "disputed" ? "Disputed" : `#${tag}`}</button>)}</div>
-                </div>
-                <div className="font-mono text-[10px] uppercase text-zinc-600 md:text-right">{count} distinct {count === 1 ? "outlet" : "outlets"}</div>
               </div>
-            );
-          })}
-        </div>
+            </section>
+          );
+        })}
       </section>
-      {activeTag && <button type="button" onClick={() => onTag(null)} className="border border-violet-400/50 bg-violet-400/10 px-2 py-1 font-mono text-[10px] uppercase text-violet-200">Showing #{activeTag} · clear filter</button>}
+      {activeTag && <button type="button" onClick={() => onTag(null)} className="border border-violet-400/50 bg-violet-400/10 px-3 py-2 text-sm text-violet-200">Showing {activeTag} · clear filter</button>}
       <RapidFire fixture={fixture} onTag={(tag) => onTag(activeTag === tag ? null : tag)} />
-      <CoverageList fixture={fixture} onTag={(tag) => onTag(activeTag === tag ? null : tag)} />
       <SimilarityPanel fixture={fixture} />
+      <CoverageList fixture={fixture} />
     </div>
   );
 }
@@ -843,7 +836,7 @@ function VariantC({ fixture, activeTag, onTag }: { fixture: MediaFixture; active
             </details>
           ))}
           <RapidFire fixture={fixture} onTag={(tag) => onTag(activeTag === tag ? null : tag)} />
-          <CoverageList fixture={fixture} onTag={(tag) => onTag(activeTag === tag ? null : tag)} />
+          <CoverageList fixture={fixture} />
           <SimilarityPanel fixture={fixture} />
         </main>
       </div>
@@ -878,7 +871,7 @@ function PrototypeSwitcher({
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [onVariantChange, variant]);
 
-  const currentName = variant === "A" ? "Reading-first" : variant === "B" ? "Comparative rows" : "Discovery split";
+  const currentName = variant === "A" ? "Reading-first" : variant === "B" ? "Paragraphs & footnotes" : "Discovery split";
   return (
     <div className="fixed inset-x-3 bottom-3 z-[70] mx-auto max-w-4xl border border-violet-300/40 bg-zinc-950/95 p-2 shadow-2xl shadow-black/50 backdrop-blur-md">
       <div className="flex flex-wrap items-center justify-center gap-2 sm:gap-3">

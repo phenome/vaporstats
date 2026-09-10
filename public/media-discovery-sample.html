@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Sample article · Media coverage prototype</title>
+  <style>
+    :root { color-scheme: dark; font-family: system-ui, sans-serif; background: #09090b; color: #e4e4e7; }
+    body { max-width: 44rem; margin: 12vh auto; padding: 1.5rem; line-height: 1.7; }
+    .outlet { color: #c4b5fd; } h1 { line-height: 1.3; } time { color: #a1a1aa; }
+    aside { margin-top: 2rem; border-top: 1px solid #3f3f46; padding-top: 1rem; color: #a1a1aa; }
+  </style>
+</head>
+<body>
+  <p class="outlet" id="outlet"></p>
+  <h1 id="title">Sample article</h1>
+  <time id="date"></time>
+  <aside>This is a synthetic article record for the media-coverage presentation experiment, not a published outlet assessment. The original game page remains open in its own browsing context. Production article links would point directly to the original publisher.</aside>
+  <script>
+    const params = new URLSearchParams(location.search);
+    for (const key of ['outlet', 'title', 'date']) {
+      document.getElementById(key).textContent = params.get(key) || '';
+    }
+    const date = params.get('date');
+    if (date && /^\d{4}-\d{2}-\d{2}$/.test(date)) document.getElementById('date').dateTime = date;
+  </script>
+</body>
+</html>
