@@ -192,9 +192,13 @@ function MilestoneLabel({
         aria-label={`${milestone.display_label} · ${formatDateOnly(milestone.event_time)}`}
         aria-describedby={active ? `score-milestone-${milestone.event_id}` : undefined}
         onMouseEnter={onPointerActivate}
-        onMouseMove={onPointerActivate}
         onFocus={onFocusActivate}
+        onPointerDown={(event) => {
+          event.stopPropagation();
+          onSelect?.();
+        }}
         onClick={(event) => {
+          event.stopPropagation();
           onPointerActivate(event);
           onSelect?.();
         }}
@@ -285,11 +289,16 @@ function ScoreChart({
     };
   };
   const activateMilestonePointer = (eventMilestoneId: string, event: MilestonePointerEvent | undefined) => {
-    const anchor = tooltipPositionFor(event);
-    if (!anchor) return;
     const touch = event?.nativeEvent instanceof PointerEvent && event.nativeEvent.pointerType === "touch";
     if (touch) focusedTooltipRef.current = null;
-    setMilestoneTooltip({ id: eventMilestoneId, modality: touch ? "touch" : "pointer", anchor });
+    setMilestoneTooltip((current) => {
+      if (current?.id === eventMilestoneId && current.modality === (touch ? "touch" : "pointer")) {
+        return current;
+      }
+      const anchor = tooltipPositionFor(event);
+      if (!anchor) return current;
+      return { id: eventMilestoneId, modality: touch ? "touch" : "pointer", anchor };
+    });
   };
   const activateMilestoneFocus = (eventMilestoneId: string, event: React.FocusEvent<HTMLButtonElement>) => {
     if (!event.currentTarget.matches(":focus-visible")) return;
@@ -787,16 +796,13 @@ export function GameReception({
   // Mobile scroll-into-view when an event reader is opened
   useEffect(() => {
     if (activeEventId && typeof window !== "undefined") {
-      const isMobileStacked = window.innerWidth < 1280;
-      if (isMobileStacked) {
-        const card = document.getElementById("critic-reception");
-        if (card) {
-          const targetY = window.scrollY + card.getBoundingClientRect().top - 80;
-          try {
-            window.scrollTo({ top: targetY, behavior: "smooth" });
-          } catch {
-            window.scrollTo(0, targetY);
-          }
+      const card = document.getElementById("critic-reception") || document.getElementById("score-event-reader");
+      if (card) {
+        const targetY = window.scrollY + card.getBoundingClientRect().top - 80;
+        try {
+          window.scrollTo({ top: targetY, behavior: "smooth" });
+        } catch {
+          window.scrollTo(0, targetY);
         }
       }
     }

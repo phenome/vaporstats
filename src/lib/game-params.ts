@@ -134,7 +134,10 @@ export function cleanGameSearchParams(
   }
 
   if (input.event && typeof input.event === "string" && input.event.trim().length > 0) {
-    output.event = input.event.trim();
+    const raw = input.event.trim().replace(/^["']|["']$/g, "");
+    if (raw.length > 0) {
+      output.event = raw;
+    }
   }
 
   return output;
