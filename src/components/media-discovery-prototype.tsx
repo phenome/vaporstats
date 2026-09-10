@@ -526,9 +526,15 @@ function getGameSummary(scenario: MediaScenario) {
 function TopSummary({
   scenario,
   articles,
+  allTags,
+  activeTag,
+  onTag,
 }: {
   scenario: MediaScenario;
   articles: MediaArticle[];
+  allTags: string[];
+  activeTag: string | null;
+  onTag: (tag: string | null) => void;
 }) {
   const summary = getGameSummary(scenario);
   const sourceIds = articles
@@ -544,6 +550,27 @@ function TopSummary({
       <p className="max-w-4xl text-sm leading-7 text-zinc-200">
         {summary.text} <ArticleLinks articles={articles} ids={sourceIds} />
       </p>
+      {allTags.length > 0 && (
+        <div className="mt-5 border-t border-zinc-800/80 pt-4">
+          <div className="flex flex-wrap items-center gap-2">
+            {allTags.map((tag) => (
+              <button
+                key={tag}
+                type="button"
+                aria-pressed={activeTag === tag}
+                onClick={() => onTag(activeTag === tag ? null : tag)}
+                className={`border px-2.5 py-1 font-mono text-xs transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-violet-300 ${
+                  activeTag === tag
+                    ? "border-violet-300 bg-violet-300 text-zinc-950 font-semibold shadow-sm"
+                    : "border-violet-400/40 bg-violet-400/10 text-violet-200 hover:border-violet-300 hover:bg-violet-400/20 hover:text-white"
+                }`}
+              >
+                {tag}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
     </header>
   );
 }
@@ -553,11 +580,11 @@ function renderEvidenceParagraph(findings: Evidence[], articles: MediaArticle[])
     if (evidence.disputed && evidence.opposing) {
       return (
         <React.Fragment key={evidence.id}>
-          <mark className="rounded-sm border-b-2 border-amber-400/80 bg-amber-400/15 px-1.5 py-0.5 font-normal text-zinc-100">
+          <mark className="border-b border-amber-500/40 bg-amber-500/[0.06] px-1 py-0.5 font-normal text-zinc-200">
             {evidence.text}
           </mark>{" "}
           <ArticleLinks articles={articles} ids={evidence.articles} />{" "}
-          <mark className="rounded-sm border-b-2 border-amber-400/80 bg-amber-400/15 px-1.5 py-0.5 font-normal text-zinc-200">
+          <mark className="border-b border-amber-500/40 bg-amber-500/[0.06] px-1 py-0.5 font-normal text-zinc-200">
             {evidence.opposing.text}
           </mark>{" "}
           <ArticleLinks articles={articles} ids={evidence.opposing.articles} />{" "}
@@ -574,62 +601,36 @@ function renderEvidenceParagraph(findings: Evidence[], articles: MediaArticle[])
   });
 }
 
-function CategoryTags({
-  findings,
-  activeTag,
-  onTag,
+function ContestedBadge({
+  active,
+  onClick,
 }: {
-  findings: Evidence[];
-  activeTag: string | null;
-  onTag: (tag: string | null) => void;
+  active: boolean;
+  onClick: () => void;
 }) {
-  const hasDisputed = findings.some((evidence) => evidence.disputed);
-  const tags = [...new Set(findings.flatMap((evidence) => evidence.tags))];
-
   return (
-    <div className="mt-4 flex flex-wrap items-center gap-2">
-      {hasDisputed && (
-        <button
-          type="button"
-          aria-pressed={activeTag === "disputed"}
-          onClick={() => onTag(activeTag === "disputed" ? null : "disputed")}
-          className={`inline-flex items-center gap-1.5 border px-2.5 py-1 font-mono text-xs font-semibold tracking-wide transition-colors ${
-            activeTag === "disputed"
-              ? "border-amber-300 bg-amber-300 text-zinc-950 shadow-sm"
-              : "border-amber-500/60 bg-amber-500/15 text-amber-300 hover:border-amber-400 hover:bg-amber-500/25 hover:text-amber-100"
-          }`}
-        >
-          <span className="h-1.5 w-1.5 rounded-full bg-amber-400" />
-          Contested in coverage
-        </button>
-      )}
-      {tags.map((tag) => (
-        <button
-          key={tag}
-          type="button"
-          aria-pressed={activeTag === tag}
-          onClick={() => onTag(activeTag === tag ? null : tag)}
-          className={`border px-2.5 py-1 font-mono text-xs transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-violet-300 ${
-            activeTag === tag
-              ? "border-violet-300 bg-violet-300 text-zinc-950 font-semibold shadow-sm"
-              : "border-violet-400/50 bg-violet-400/10 text-violet-200 hover:border-violet-300 hover:bg-violet-400/25 hover:text-white"
-          }`}
-        >
-          {tag}
-        </button>
-      ))}
-    </div>
+    <button
+      type="button"
+      aria-pressed={active}
+      onClick={onClick}
+      className={`inline-flex items-center gap-1.5 border px-2 py-0.5 font-mono text-[10px] tracking-wide transition-colors ${
+        active
+          ? "border-amber-400/70 bg-amber-400/20 text-amber-200 font-semibold"
+          : "border-amber-500/25 bg-amber-500/[0.04] text-amber-300/70 hover:border-amber-500/40 hover:text-amber-200"
+      }`}
+    >
+      <span className="h-1.5 w-1.5 rounded-full bg-amber-400/60" />
+      Contested in coverage
+    </button>
   );
 }
 
 function EvidenceBullet({
   evidence,
   fixture,
-  onTag,
 }: {
   evidence: Evidence;
   fixture: MediaFixture;
-  onTag: (tag: string) => void;
 }) {
   return (
     <li
@@ -645,23 +646,11 @@ function EvidenceBullet({
         {evidence.text}{" "}
         <ArticleLinks articles={fixture.articles} ids={evidence.articles} />
       </div>
-      <div className="mt-2 flex flex-wrap gap-1">
-        {evidence.tags.map((tag) => (
-          <button
-            key={tag}
-            type="button"
-            onClick={() => onTag(tag)}
-            className="border border-violet-400/40 bg-violet-400/10 px-2 py-0.5 font-mono text-[11px] text-violet-200 hover:border-violet-300 hover:bg-violet-400/20 hover:text-white focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-violet-300"
-          >
-            {tag}
-          </button>
-        ))}
-      </div>
     </li>
   );
 }
 
-function RapidFire({ fixture, onTag }: { fixture: MediaFixture; onTag: (tag: string) => void }) {
+function RapidFire({ fixture }: { fixture: MediaFixture }) {
   const pros = sortEvidenceByOutlets(fixture, fixture.pros);
   const cons = sortEvidenceByOutlets(fixture, fixture.cons);
   if (pros.length === 0 && cons.length === 0) {
@@ -679,11 +668,11 @@ function RapidFire({ fixture, onTag }: { fixture: MediaFixture; onTag: (tag: str
       <div className="grid gap-5 md:grid-cols-2">
         <div>
           <h4 className="mb-3 font-mono text-xs font-semibold uppercase tracking-wider text-emerald-300">Pros</h4>
-          <ul className="space-y-3">{pros.map((item) => <EvidenceBullet key={item.id} evidence={item} fixture={fixture} onTag={onTag} />)}</ul>
+          <ul className="space-y-3">{pros.map((item) => <EvidenceBullet key={item.id} evidence={item} fixture={fixture} />)}</ul>
         </div>
         <div>
           <h4 className="mb-3 font-mono text-xs font-semibold uppercase tracking-wider text-red-300">Cons</h4>
-          <ul className="space-y-3">{cons.map((item) => <EvidenceBullet key={item.id} evidence={item} fixture={fixture} onTag={onTag} />)}</ul>
+          <ul className="space-y-3">{cons.map((item) => <EvidenceBullet key={item.id} evidence={item} fixture={fixture} />)}</ul>
         </div>
       </div>
     </section>
@@ -819,19 +808,35 @@ function SimilarityPanel({ fixture }: { fixture: MediaFixture }) {
 }
 
 function VariantA({ fixture, activeTag, onTag }: { fixture: MediaFixture; activeTag: string | null; onTag: (tag: string | null) => void }) {
+  const allTags = [...new Set(fixture.categories.flatMap((cat) => cat.evidence.flatMap((e) => e.tags)))];
+
   return (
     <div className="space-y-5">
-      <TopSummary scenario={fixture.label === "Announced / non-hands-on" ? "announced" : fixture.label === "One source" ? "one-source" : "richer"} articles={fixture.articles} />
+      <TopSummary
+        scenario={fixture.label === "Announced / non-hands-on" ? "announced" : fixture.label === "One source" ? "one-source" : "richer"}
+        articles={fixture.articles}
+        allTags={allTags}
+        activeTag={activeTag}
+        onTag={onTag}
+      />
       <section className="divide-y divide-zinc-800 border border-zinc-800 bg-zinc-950/70" aria-label="Editorial coverage stream">
         {fixture.categories.map((category) => {
           const findings = sortEvidenceByOutlets(fixture, category.evidence);
+          const hasDisputed = findings.some((e) => e.disputed);
           return (
             <article key={category.key} className="p-5 sm:p-6">
-              <h3 className="mb-2 text-base font-semibold text-violet-200">{category.label}</h3>
+              <div className="mb-2 flex flex-wrap items-baseline justify-between gap-2">
+                <h3 className="text-base font-semibold text-violet-200">{category.label}</h3>
+                {hasDisputed && (
+                  <ContestedBadge
+                    active={activeTag === "disputed"}
+                    onClick={() => onTag(activeTag === "disputed" ? null : "disputed")}
+                  />
+                )}
+              </div>
               <p className="max-w-4xl text-sm leading-7 text-zinc-200">
                 {renderEvidenceParagraph(findings, fixture.articles)}
               </p>
-              <CategoryTags findings={findings} activeTag={activeTag} onTag={onTag} />
             </article>
           );
         })}
@@ -841,7 +846,7 @@ function VariantA({ fixture, activeTag, onTag }: { fixture: MediaFixture; active
           Showing {activeTag} · clear filter
         </button>
       )}
-      <RapidFire fixture={fixture} onTag={(tag) => onTag(activeTag === tag ? null : tag)} />
+      <RapidFire fixture={fixture} />
       <SimilarityPanel fixture={fixture} />
       <CoverageList fixture={fixture} />
     </div>
@@ -849,9 +854,17 @@ function VariantA({ fixture, activeTag, onTag }: { fixture: MediaFixture; active
 }
 
 function VariantB({ fixture, activeTag, onTag }: { fixture: MediaFixture; activeTag: string | null; onTag: (tag: string | null) => void }) {
+  const allTags = [...new Set(fixture.categories.flatMap((cat) => cat.evidence.flatMap((e) => e.tags)))];
+
   return (
     <div className="space-y-5">
-      <TopSummary scenario={fixture.label === "Announced / non-hands-on" ? "announced" : fixture.label === "One source" ? "one-source" : "richer"} articles={fixture.articles} />
+      <TopSummary
+        scenario={fixture.label === "Announced / non-hands-on" ? "announced" : fixture.label === "One source" ? "one-source" : "richer"}
+        articles={fixture.articles}
+        allTags={allTags}
+        activeTag={activeTag}
+        onTag={onTag}
+      />
       <section className="divide-y divide-zinc-800 border border-zinc-800 bg-zinc-950/70" aria-label="Coverage by category">
         {fixture.categories.map((category) => {
           const findings = sortEvidenceByOutlets(fixture, category.evidence);
@@ -861,16 +874,18 @@ function VariantB({ fixture, activeTag, onTag }: { fixture: MediaFixture; active
               <div>
                 <h3 className="text-sm font-semibold text-violet-200">{category.label}</h3>
                 {hasDisputed && (
-                  <span className="mt-2 inline-flex items-center gap-1 border border-amber-500/60 bg-amber-500/15 px-2 py-0.5 font-mono text-[10px] font-semibold uppercase tracking-wider text-amber-300">
-                    Contested
-                  </span>
+                  <div className="mt-2">
+                    <ContestedBadge
+                      active={activeTag === "disputed"}
+                      onClick={() => onTag(activeTag === "disputed" ? null : "disputed")}
+                    />
+                  </div>
                 )}
               </div>
               <div>
                 <p className="max-w-4xl text-sm leading-7 text-zinc-200">
                   {renderEvidenceParagraph(findings, fixture.articles)}
                 </p>
-                <CategoryTags findings={findings} activeTag={activeTag} onTag={onTag} />
               </div>
             </section>
           );
@@ -881,7 +896,7 @@ function VariantB({ fixture, activeTag, onTag }: { fixture: MediaFixture; active
           Showing {activeTag} · clear filter
         </button>
       )}
-      <RapidFire fixture={fixture} onTag={(tag) => onTag(activeTag === tag ? null : tag)} />
+      <RapidFire fixture={fixture} />
       <SimilarityPanel fixture={fixture} />
       <CoverageList fixture={fixture} />
     </div>
@@ -890,13 +905,20 @@ function VariantB({ fixture, activeTag, onTag }: { fixture: MediaFixture; active
 
 function VariantC({ fixture, activeTag, onTag }: { fixture: MediaFixture; activeTag: string | null; onTag: (tag: string | null) => void }) {
   const [selectedCategory, setSelectedCategory] = useState<string | null>(null);
+  const allTags = [...new Set(fixture.categories.flatMap((cat) => cat.evidence.flatMap((e) => e.tags)))];
   const displayedCategories = selectedCategory
     ? fixture.categories.filter((cat) => cat.key === selectedCategory)
     : fixture.categories;
 
   return (
     <div className="space-y-5">
-      <TopSummary scenario={fixture.label === "Announced / non-hands-on" ? "announced" : fixture.label === "One source" ? "one-source" : "richer"} articles={fixture.articles} />
+      <TopSummary
+        scenario={fixture.label === "Announced / non-hands-on" ? "announced" : fixture.label === "One source" ? "one-source" : "richer"}
+        articles={fixture.articles}
+        allTags={allTags}
+        activeTag={activeTag}
+        onTag={onTag}
+      />
       <div className="flex flex-wrap items-center gap-2 border border-zinc-800 bg-zinc-950/70 p-3">
         <button
           type="button"
@@ -933,15 +955,15 @@ function VariantC({ fixture, activeTag, onTag }: { fixture: MediaFixture; active
               <div className="mb-3 flex flex-wrap items-center justify-between gap-2 border-b border-zinc-800 pb-3">
                 <h3 className="text-base font-semibold text-violet-200">{category.label}</h3>
                 {hasDisputed && (
-                  <span className="inline-flex items-center gap-1 border border-amber-500/60 bg-amber-500/15 px-2 py-0.5 font-mono text-[10px] font-semibold uppercase tracking-wider text-amber-300">
-                    Contested in coverage
-                  </span>
+                  <ContestedBadge
+                    active={activeTag === "disputed"}
+                    onClick={() => onTag(activeTag === "disputed" ? null : "disputed")}
+                  />
                 )}
               </div>
               <p className="max-w-4xl text-sm leading-7 text-zinc-200">
                 {renderEvidenceParagraph(findings, fixture.articles)}
               </p>
-              <CategoryTags findings={findings} activeTag={activeTag} onTag={onTag} />
             </section>
           );
         })}
@@ -951,7 +973,7 @@ function VariantC({ fixture, activeTag, onTag }: { fixture: MediaFixture; active
           Showing {activeTag} · clear filter
         </button>
       )}
-      <RapidFire fixture={fixture} onTag={(tag) => onTag(activeTag === tag ? null : tag)} />
+      <RapidFire fixture={fixture} />
       <SimilarityPanel fixture={fixture} />
       <CoverageList fixture={fixture} />
     </div>
