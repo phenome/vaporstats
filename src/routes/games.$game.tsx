@@ -57,8 +57,11 @@ export const Route = createFileRoute("/games/$game")({
       const parsed = parseNumericPriceRange(search.pricerange);
       if (parsed !== DEFAULT_NUMERIC_PRICE_RANGE) result.pricerange = parsed;
     }
-    if (typeof search.event === "string" && search.event.trim().length > 0) {
-      result.event = search.event.trim();
+    if (search.event !== undefined && search.event !== null) {
+      const raw = String(search.event).trim().replace(/^["']|["']$/g, "");
+      if (raw.length > 0) {
+        result.event = raw;
+      }
     }
     return result;
   },

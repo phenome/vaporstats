@@ -285,16 +285,18 @@ export function extractSteamStoreEvent(
     const targetId = sourceUrl
       ? sourceUrl.match(/\/view\/(\d+)/)?.[1] || sourceUrl.match(/\/detail\/(\d+)/)?.[1]
       : null;
-    const event =
-      (targetId &&
-        events.find(
-          (e) =>
-            e.gid === targetId ||
-            e.announcement_body?.gid === targetId ||
-            e.announcement_body?.event_gid === targetId,
-        )) ||
-      events[0];
-
+    let event: SteamStoreRawEvent | undefined;
+    if (targetId) {
+      event = events.find(
+        (e) =>
+          e.gid === targetId ||
+          e.announcement_body?.gid === targetId ||
+          e.announcement_body?.event_gid === targetId,
+      );
+      if (!event) return null;
+    } else {
+      event = events[0];
+    }
     const body = event.announcement_body?.body || event.body;
     if (!body || typeof body !== "string") return null;
 
@@ -422,7 +424,13 @@ export async function getEventReader(
 
   const publishedAt = event.publication_at ?? event.start_at;
   const eventTitle = event.title || "Game Update";
-  if (!event.url) {
+  const sourceUrl =
+    event.url ||
+    (event.appid && /^\d+$/.test(event.event_id)
+      ? `https://store.steampowered.com/news/app/${event.appid}/view/${event.event_id}`
+      : null);
+
+  if (!sourceUrl) {
     return {
       status: "fallback",
       eventId: event.event_id,
@@ -438,8 +446,6 @@ export async function getEventReader(
       fallbackReason: "no_url",
     };
   }
-
-  const sourceUrl = event.url;
   const fetchFn = options.customFetch ?? fetch;
   let html = "";
   try {

@@ -174,10 +174,17 @@ function MilestoneLabel({
   const x = (viewBox?.x ?? 0) + (alignLeft ? -(SCORE_MILESTONE_LABEL_WIDTH + SCORE_MILESTONE_LABEL_GAP) : SCORE_MILESTONE_LABEL_GAP);
   const y = (viewBox?.y ?? 0) + 3;
   return (
-    <foreignObject x={x} y={y} width={SCORE_MILESTONE_LABEL_WIDTH} height={25}>
+    <foreignObject
+      x={x}
+      y={y}
+      width={SCORE_MILESTONE_LABEL_WIDTH}
+      height={28}
+      className="overflow-visible pointer-events-auto"
+      style={{ overflow: "visible", pointerEvents: "auto" }}
+    >
       <button
         type="button"
-        className={`score-event-label block h-6 max-w-[62px] truncate border px-1 text-left font-mono text-[10px] font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400 ${
+        className={`score-event-label block h-6 max-w-[62px] truncate border px-1 text-left font-mono text-[10px] font-semibold transition-colors cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400 ${
           selected
             ? "border-violet-300 bg-violet-500/40 text-white ring-1 ring-violet-300"
             : "border-violet-400/50 bg-zinc-950 text-violet-200 hover:bg-violet-500/20"
@@ -387,6 +394,7 @@ function ScoreChart({
               <ReferenceLine
                 key={milestone.event_id}
                 x={timestamp}
+                isFront={true}
                 stroke={isSelected ? "#c4b5fd" : SCORE_COLOR}
                 strokeWidth={isSelected ? 2 : 1}
                 strokeDasharray={isSelected ? undefined : "3 3"}

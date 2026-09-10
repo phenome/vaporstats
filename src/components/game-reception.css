@@ -19,10 +19,16 @@
   grid-column: 1 / -1;
 }
 
-.score-event-label {
+.recharts-reference-line {
   pointer-events: auto;
 }
 
+.score-event-label {
+  pointer-events: auto;
+  position: relative;
+  z-index: 30;
+  cursor: pointer;
+}
 @media (max-width: 767px) {
   .score-reception-card {
     align-self: auto;

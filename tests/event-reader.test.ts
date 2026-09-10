@@ -9,8 +9,11 @@ import {
   getEventReader,
   sanitizeReaderHtml,
 } from "../src/lib/event-reader";
-import { handleEventReaderRequest } from "../src/routes/api.games.$appid.events.$eventid.reader";
-
+import {
+  handleEventReaderRequest,
+  parseEventReaderPath,
+} from "../src/routes/api.games.$appid.events.$eventid.reader";
+import { parseSearch, stringifySearch } from "../src/router";
 function appDatabase(native: Database): AppDatabase {
   return {
     prepare(query: string): AppPreparedStatement {
@@ -282,6 +285,57 @@ describe("Event Reader Data Access and API", () => {
     };
     expect(body.status).toBe("data");
     expect(body.data.contentHtml).toContain("Comprehensive article text");
+    native.close(true);
+  });
+
+  test("parseEventReaderPath strips surrounding quotes from eventId", () => {
+    const parsed = parseEventReaderPath("/api/games/1091500/events/%223873721309648486251%22/reader");
+    expect(parsed).not.toBeNull();
+    expect(parsed?.appid).toBe(1091500);
+    expect(parsed?.eventId).toBe("3873721309648486251");
+  });
+
+  test("router search serialization avoids quotes and preserves 64-bit integer precision", () => {
+    const stringified = stringifySearch({ range: 5, event: "3873721309648486251" });
+    expect(stringified).toBe("?range=5&event=3873721309648486251");
+    expect(stringified).not.toContain("%22");
+    expect(stringified).not.toContain('"');
+
+    const parsed = parseSearch("?range=5&event=3873721309648486251");
+    expect(parsed.range).toBe(5);
+    expect(parsed.event).toBe("3873721309648486251");
+    expect(typeof parsed.event).toBe("string");
+
+    const parsedFromQuoted = parseSearch('?range=5&event=%223873721309648486251%22');
+    expect(parsedFromQuoted.event).toBe("3873721309648486251");
+  });
+
+  test("derives canonical store URL for numeric eventId when DB url is null", async () => {
+    const { db, native } = freshDb();
+    native.query(`
+      INSERT INTO steam_events (event_id, appid, category, title, url, start_at, publication_at, observed_at, source, provenance)
+      VALUES ('3873721309648486251', 1091500, 'major_update', 'Update 2.1', NULL, '2023-12-05T11:10:40Z', NULL, '2023-12-05T11:10:40Z', 'steam', '{}');
+    `).run();
+
+    let requestedUrl = "";
+    const customFetch = (async (url: string | URL | Request) => {
+      requestedUrl = typeof url === "string" ? url : url.toString();
+      return new Response(`
+        <html>
+          <body>
+            <div id="application_config" data-partnereventstore="[{&quot;gid&quot;:&quot;3873721309648486251&quot;,&quot;event_name&quot;:&quot;Update 2.1&quot;,&quot;announcement_body&quot;:{&quot;headline&quot;:&quot;Update 2.1&quot;,&quot;body&quot;:&quot;Update 2.1 is now available!&quot;}}]"></div>
+          </body>
+        </html>
+      `, { status: 200 });
+    }) as unknown as typeof fetch;
+
+    const result = await getEventReader(db, 1091500, "3873721309648486251", { customFetch });
+    expect(requestedUrl).toBe("https://store.steampowered.com/news/app/1091500/view/3873721309648486251");
+    expect(result.status).toBe("success");
+    if (result.status === "success") {
+      expect(result.title).toBe("Update 2.1");
+      expect(result.contentHtml).toContain("Update 2.1 is now available!");
+    }
     native.close(true);
   });
 });

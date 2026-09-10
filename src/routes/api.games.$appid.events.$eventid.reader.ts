@@ -15,7 +15,7 @@ export function parseEventReaderPath(pathname: string): { appid: number; eventId
   const match = pathname.match(/\/api\/games\/([^/]+)\/events\/([^/]+)\/reader\/?$/);
   if (!match) return null;
   const rawAppid = match[1];
-  const eventId = decodeURIComponent(match[2].trim());
+  const eventId = decodeURIComponent(match[2].trim()).replace(/^["']|["']$/g, "");
   if (!/^\d+$/.test(rawAppid) || !eventId) return null;
   const appid = Number(rawAppid);
   if (!Number.isSafeInteger(appid) || appid <= 0) return null;
