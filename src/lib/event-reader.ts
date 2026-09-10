@@ -186,7 +186,10 @@ export function bbcodeToHtml(bbcode: string): string {
 
   let text = bbcode.replace(/\r\n|\r/g, "\n");
 
-  // Steam Clan Images and regular images
+  // Unescape escaped brackets like \[ MAPS ]
+  text = text.replace(/\\\[/g, "[").replace(/\\\]/g, "]");
+
+  // Images
   text = text.replace(/\[img\]\{STEAM_CLAN_IMAGE\}(.*?)\[\/img\]/gi, '<img src="https://clan.fastly.steamstatic.com/images$1" />');
   text = text.replace(/\[img\](.*?)\[\/img\]/gi, '<img src="$1" />');
 
@@ -201,8 +204,8 @@ export function bbcodeToHtml(bbcode: string): string {
   text = text.replace(/\[u\]([\s\S]*?)\[\/u\]/gi, "<u>$1</u>");
   text = text.replace(/\[strike\]([\s\S]*?)\[\/strike\]/gi, "<del>$1</del>");
 
-  // Links
-  text = text.replace(/\[url=([^\]]+)\]([\s\S]*?)\[\/url\]/gi, '<a href="$1">$2</a>');
+  // Links: strip quotes from url target like [url="https://..."]
+  text = text.replace(/\[url=["']?([^"'\]]+)["']?\]([\s\S]*?)\[\/url\]/gi, '<a href="$1">$2</a>');
   text = text.replace(/\[url\]([\s\S]*?)\[\/url\]/gi, '<a href="$1">$1</a>');
 
   // Quotes and Code
@@ -212,19 +215,38 @@ export function bbcodeToHtml(bbcode: string): string {
   // YouTube previews
   text = text.replace(/\[previewyoutube=([^;\]]+)(?:;full)?\]\[\/previewyoutube\]/gi, '<a href="https://www.youtube.com/watch?v=$1">Watch on YouTube</a>');
 
-  // Lists
-  text = text.replace(/\[list\]([\s\S]*?)\[\/list\]/gi, (_, content: string) => {
-    const items = content.split(/\[\*\]/).filter((item) => item.trim().length > 0);
-    return `<ul>${items.map((item) => `<li>${item.trim()}</li>`).join("")}</ul>`;
+  // Paragraphs
+  text = text.replace(/\[p\]([\s\S]*?)\[\/p\]/gi, "<p>$1</p>");
+
+  // Lists: Steam BBCode uses [*] to open item, [/*] to close item
+  text = text.replace(/\[\/\*\]/gi, "</li>");
+  text = text.replace(/\[\*\]/gi, "<li>");
+  text = text.replace(/\[list\]/gi, "<ul>");
+  text = text.replace(/\[\/list\]/gi, "</ul>");
+
+  // Close any unclosed <li> before next <li>, </ul>, or end
+  text = text.replace(/<li>([\s\S]*?)(?=(?:<li>|<\/ul>|$))/gi, (match, inner) => {
+    if (inner.includes("</li>")) return match;
+    return `<li>${inner.trim()}</li>`;
   });
 
-  // Paragraphs and breaks
+  // Unwrap redundant <p> inside <li>
+  text = text.replace(/<li>\s*<p>([\s\S]*?)<\/p>\s*<\/li>/gi, "<li>$1</li>");
+
+  // Trim list items and list containers
+  text = text.replace(/<li>([\s\S]*?)<\/li>/gi, (_, item: string) => `<li>${item.trim()}</li>`);
+  text = text.replace(/<ul>\s*/gi, "<ul>").replace(/\s*<\/ul>/gi, "</ul>");
+
+  // Remove empty paragraphs
+  text = text.replace(/<p>\s*<\/p>/gi, "");
+
+  // Wrap remaining bare text blocks in <p>
   text = text
     .split(/\n{2,}/)
     .map((chunk) => {
       const trimmed = chunk.trim();
       if (!trimmed) return "";
-      if (/^<(h[1-3]|ul|ol|blockquote|pre)/i.test(trimmed)) return trimmed;
+      if (/^<(h[1-3]|ul|ol|blockquote|pre|p|div)/i.test(trimmed)) return trimmed;
       return `<p>${trimmed.replace(/\n/g, "<br />")}</p>`;
     })
     .filter(Boolean)
@@ -239,13 +261,20 @@ export function bbcodeToHtml(bbcode: string): string {
 export function bbcodeToPlainText(bbcode: string): string {
   if (!bbcode || typeof bbcode !== "string") return "";
   return bbcode
+    .replace(/\\\[/g, "[")
+    .replace(/\\\]/g, "]")
     .replace(/\[img\].*?\[\/img\]/gi, "")
-    .replace(/\[url=([^\]]+)\]([\s\S]*?)\[\/url\]/gi, "$2")
+    .replace(/\[url=["']?([^"'\]]+)["']?\]([\s\S]*?)\[\/url\]/gi, "$2")
     .replace(/\[previewyoutube=[^\]]+\]\[\/previewyoutube\]/gi, "")
-    .replace(/\[[^\]]+\]/g, "")
+    .replace(/\[p\]/gi, "")
+    .replace(/\[\/p\]/gi, "\n")
+    .replace(/\[\/\*\]/gi, "\n")
+    .replace(/\[\*\]/gi, "\n- ")
+    .replace(/\[\/?(?:img|url|b|i|u|strike|h[1-6]|list|\*|quote|code|previewyoutube|p)(?:=[^\]]*)?\]/gi, "")
     .replace(/\s+/g, " ")
     .trim();
 }
+
 
 interface SteamStoreRawEvent {
   gid?: string;

@@ -140,6 +140,19 @@ export function ScoreEventReader({ appid, eventId, onClose }: ScoreEventReaderPr
               </div>
             ) : successPayload ? (
               <ScrollArea className="h-[440px] w-full pr-3">
+                {successPayload.sourceUrl && (
+                  <div className="mb-3 border-b border-zinc-900 pb-2.5">
+                    <a
+                      href={successPayload.sourceUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="inline-flex items-center gap-1 font-mono text-[11px] text-violet-300 underline underline-offset-2 hover:text-violet-200"
+                    >
+                      <span>Original announcement on Steam</span>
+                      <ExternalLink className="h-3 w-3" aria-hidden="true" />
+                    </a>
+                  </div>
+                )}
                 <div
                   className="space-y-3 text-xs leading-relaxed text-zinc-300 break-words font-sans selection:bg-violet-500/30 selection:text-violet-100
                     [&_h1]:text-sm [&_h1]:font-bold [&_h1]:text-zinc-100 [&_h1]:mt-3
@@ -157,19 +170,6 @@ export function ScoreEventReader({ appid, eventId, onClose }: ScoreEventReaderPr
                     [&_hr]:border-zinc-800 [&_hr]:my-3"
                   dangerouslySetInnerHTML={{ __html: successPayload.contentHtml }}
                 />
-                {successPayload.sourceUrl && (
-                  <footer className="mt-4 border-t border-zinc-900 pt-3">
-                    <a
-                      href={successPayload.sourceUrl}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="inline-flex items-center gap-1 font-mono text-[11px] text-violet-300 underline underline-offset-2 hover:text-violet-200"
-                    >
-                      <span>Original announcement on Steam</span>
-                      <ExternalLink className="h-3 w-3" aria-hidden="true" />
-                    </a>
-                  </footer>
-                )}
               </ScrollArea>
             ) : null}
           </>

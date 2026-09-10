@@ -154,6 +154,29 @@ describe("Steam Store BBCode and Event Extraction", () => {
     expect(plain).toContain("Bold note");
   });
 
+  test("converts Steam BBCode with paragraphs, escaped brackets, and [/*] list items", () => {
+    const csBbcode = `[p]\\[ MAPS ][/p][p]Boulder[/p][list][*][p]Updated to the latest version from the Community Workshop ([url="https://steamcommunity.com/sharedfiles/filedetails/changelog/3663186989"]Update Notes[/url])[/p][/*][/list][p]Poseidon[/p][list][*][p]Updated to the latest version from the Community Workshop ([url="https://steamcommunity.com/sharedfiles/filedetails/changelog/3522144043"]Update Notes[/url])[/p][/*][/list][p]\\[ GAMEPLAY ][/p][list][*][p]Fixed a case where player speed was too high when moving against walls.[/p][/*][/list]`;
+
+    const html = bbcodeToHtml(csBbcode);
+    expect(html).toContain("[ MAPS ]");
+    expect(html).not.toContain("\\[");
+    expect(html).not.toContain("\\]");
+    expect(html).not.toContain("[p]");
+    expect(html).not.toContain("[/p]");
+    expect(html).not.toContain("[/*]");
+    expect(html).not.toContain("[*]");
+    expect(html).toContain('<a href="https://steamcommunity.com/sharedfiles/filedetails/changelog/3663186989">Update Notes</a>');
+    expect(html).toContain("<li>Updated to the latest version");
+    expect(html).toContain("[ GAMEPLAY ]");
+
+    const plain = bbcodeToPlainText(csBbcode);
+    expect(plain).toContain("[ MAPS ]");
+    expect(plain).not.toContain("\\[");
+    expect(plain).not.toContain("[p]");
+    expect(plain).not.toContain("[/*]");
+    expect(plain).toContain("Update Notes");
+  });
+
   test("extracts Steam store event content from data-partnereventstore", () => {
     const storeHtml = `
       <!DOCTYPE html>
