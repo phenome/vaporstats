@@ -483,41 +483,45 @@ function distinctOutlets(articles: MediaArticle[], ids: string[]) {
 
 function ArticleLinks({ articles, ids }: { articles: MediaArticle[]; ids: string[] }) {
   return (
-    <span className="inline-flex gap-0.5 align-baseline font-mono text-xs">
+    <sup className="inline-flex gap-0.5 align-super font-mono text-[10px] select-none">
       {[...new Set(ids)].map((id) => {
         const index = articles.findIndex((item) => item.id === id);
         const source = articles[index];
         if (!source) return null;
         const description = `${source.outlet} · ${source.title} · ${source.publishedAt}`;
         return (
-          <a key={id} href={`#media-sample-article-${source.id}`}
-            title={description} aria-label={`Source ${index + 1}: ${description}`}
-            className="rounded-sm px-0.5 text-violet-300 hover:bg-violet-400/20 hover:text-violet-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-violet-300">
+          <a
+            key={id}
+            href={`#media-sample-article-${source.id}`}
+            title={description}
+            aria-label={`Source ${index + 1}: ${description}`}
+            className="rounded-sm px-0.5 text-violet-300/80 hover:bg-violet-400/20 hover:text-violet-100 focus-visible:outline focus-visible:outline-1 focus-visible:outline-violet-300"
+          >
             [{index + 1}]
           </a>
         );
       })}
-    </span>
+    </sup>
   );
 }
 
 function getGameSummary(scenario: MediaScenario) {
   if (scenario === "announced") {
     return {
-      tagline: "Early expectations & premise",
+      tagline: "Overview",
       title: "Surreal world exploration and psychological themes",
       text: "An imaginative narrative adventure set in an eccentric world explored through environmental discovery and puzzle-solving. Early announcements outline a distinctive stylized art direction and psychological themes, though playable combat balance and performance remain to be verified in upcoming hands-on builds.",
     };
   }
   if (scenario === "one-source") {
     return {
-      tagline: "Hands-on preview overview",
+      tagline: "Overview",
       title: "Risk-reward expedition loop with distinct visual style",
       text: "A fast-paced platformer blending short expeditions with a persistent home base, emphasizing readable silhouettes and layered environmental storytelling. Initial impressions highlight the approachable risk-reward loop of each run, while noting that wider mission variety and progression depth will need verification in final builds.",
     };
   }
   return {
-    tagline: "Critical overview & consensus",
+    tagline: "Overview",
     title: "Inventive mental worlds, sharp writing, and an engaging hub loop",
     text: "A story-driven action platformer built around imaginative expeditions, sharp environmental storytelling, and expressive visual direction. Outlets praise its approachable risk-reward hub loop and creative spaces, while noting debate over traversal momentum and occasional frame drops during busy effect-heavy encounters.",
   };
@@ -547,7 +551,7 @@ function TopSummary({
         {summary.tagline}
       </p>
       <h2 className="mb-3 text-xl font-semibold text-zinc-100">{summary.title}</h2>
-      <p className="max-w-4xl text-sm leading-7 text-zinc-200">
+      <p className="w-full text-sm leading-7 text-zinc-200">
         {summary.text} <ArticleLinks articles={articles} ids={sourceIds} />
       </p>
       {allTags.length > 0 && (
@@ -559,7 +563,7 @@ function TopSummary({
                 type="button"
                 aria-pressed={activeTag === tag}
                 onClick={() => onTag(activeTag === tag ? null : tag)}
-                className={`border px-2.5 py-1 font-mono text-xs transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-violet-300 ${
+                className={`border px-2 py-0.5 font-mono text-[11px] transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-violet-300 ${
                   activeTag === tag
                     ? "border-violet-300 bg-violet-300 text-zinc-950 font-semibold shadow-sm"
                     : "border-violet-400/40 bg-violet-400/10 text-violet-200 hover:border-violet-300 hover:bg-violet-400/20 hover:text-white"
@@ -575,30 +579,34 @@ function TopSummary({
   );
 }
 
-function renderEvidenceParagraph(findings: Evidence[], articles: MediaArticle[]) {
-  return findings.map((evidence) => {
-    if (evidence.disputed && evidence.opposing) {
-      return (
-        <React.Fragment key={evidence.id}>
-          <mark className="border-b border-amber-500/40 bg-amber-500/[0.06] px-1 py-0.5 font-normal text-zinc-200">
-            {evidence.text}
-          </mark>{" "}
-          <ArticleLinks articles={articles} ids={evidence.articles} />{" "}
-          <mark className="border-b border-amber-500/40 bg-amber-500/[0.06] px-1 py-0.5 font-normal text-zinc-200">
-            {evidence.opposing.text}
-          </mark>{" "}
-          <ArticleLinks articles={articles} ids={evidence.opposing.articles} />{" "}
-        </React.Fragment>
-      );
-    }
-    return (
-      <React.Fragment key={evidence.id}>
-        {evidence.text}{" "}
-        {evidence.opposing ? `${evidence.opposing.text} ` : ""}
-        <ArticleLinks articles={articles} ids={evidenceSourceIds(evidence)} />{" "}
-      </React.Fragment>
-    );
-  });
+function renderEvidenceParagraphs(findings: Evidence[], articles: MediaArticle[]) {
+  return (
+    <div className="space-y-3">
+      {findings.map((evidence) => {
+        if (evidence.disputed && evidence.opposing) {
+          return (
+            <p key={evidence.id} className="text-sm leading-relaxed text-zinc-200">
+              <mark className="border-b border-amber-500/40 bg-amber-500/[0.06] px-1 py-0.5 font-normal text-zinc-200">
+                {evidence.text}
+              </mark>{" "}
+              <ArticleLinks articles={articles} ids={evidence.articles} />{" "}
+              <mark className="border-b border-amber-500/40 bg-amber-500/[0.06] px-1 py-0.5 font-normal text-zinc-200">
+                {evidence.opposing.text}
+              </mark>{" "}
+              <ArticleLinks articles={articles} ids={evidence.opposing.articles} />
+            </p>
+          );
+        }
+        return (
+          <p key={evidence.id} className="text-sm leading-relaxed text-zinc-200">
+            {evidence.text}{" "}
+            {evidence.opposing ? `${evidence.opposing.text} ` : ""}
+            <ArticleLinks articles={articles} ids={evidenceSourceIds(evidence)} />
+          </p>
+        );
+      })}
+    </div>
+  );
 }
 
 function ContestedBadge({
@@ -620,7 +628,7 @@ function ContestedBadge({
       }`}
     >
       <span className="h-1.5 w-1.5 rounded-full bg-amber-400/60" />
-      Contested in coverage
+      Contested
     </button>
   );
 }
@@ -834,9 +842,7 @@ function VariantA({ fixture, activeTag, onTag }: { fixture: MediaFixture; active
                   />
                 )}
               </div>
-              <p className="max-w-4xl text-sm leading-7 text-zinc-200">
-                {renderEvidenceParagraph(findings, fixture.articles)}
-              </p>
+              {renderEvidenceParagraphs(findings, fixture.articles)}
             </article>
           );
         })}
@@ -883,9 +889,7 @@ function VariantB({ fixture, activeTag, onTag }: { fixture: MediaFixture; active
                 )}
               </div>
               <div>
-                <p className="max-w-4xl text-sm leading-7 text-zinc-200">
-                  {renderEvidenceParagraph(findings, fixture.articles)}
-                </p>
+                {renderEvidenceParagraphs(findings, fixture.articles)}
               </div>
             </section>
           );
@@ -961,9 +965,7 @@ function VariantC({ fixture, activeTag, onTag }: { fixture: MediaFixture; active
                   />
                 )}
               </div>
-              <p className="max-w-4xl text-sm leading-7 text-zinc-200">
-                {renderEvidenceParagraph(findings, fixture.articles)}
-              </p>
+              {renderEvidenceParagraphs(findings, fixture.articles)}
             </section>
           );
         })}
