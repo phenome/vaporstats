@@ -181,6 +181,31 @@ describe("Steam News Hub event source", () => {
     expect(result.value.events[0]?.eventId).toBeNull();
     expect(result.value.events[0]?.announcementId).toBe("body-only");
   });
+
+  it("assigns canonical store url when Steam event omits raw url", async () => {
+    const customFetch = (async () => htmlResponse({ events: [
+      event("event-100", "body-100", 14, 730),
+      { ...event("", "body-only-200", 12, 730), gid: undefined },
+    ] })) as unknown as typeof fetch;
+    const result = await fetchSteamNewsHubEvents(730, { customFetch, observedAt });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.events[0]?.url).toBe("https://store.steampowered.com/news/app/730/view/event-100");
+    expect(result.value.events[1]?.url).toBe("https://steamcommunity.com/ogg/730/announcements/detail/body-only-200");
+  });
+
+  it("ingests Cyberpunk 2077 events with canonical store URLs", async () => {
+    const result = await fetchSteamNewsHubEvents(1091500, { observedAt, maxEvents: 10 });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.events.length).toBeGreaterThan(0);
+    for (const ev of result.value.events) {
+      expect(ev.appid).toBe(1091500);
+      expect(ev.url).not.toBeNull();
+      expect(ev.url).toMatch(/^https:\/\/(store\.steampowered\.com|steamcommunity\.com)/);
+    }
+  });
 });
 
 function response(body: unknown): Response {

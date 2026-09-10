@@ -152,8 +152,166 @@ export function sanitizeReaderHtml(dirtyHtml: string, baseUrl?: string): string 
   return root.innerHTML;
 }
 
+function decodeHtmlEntities(str: string): string {
+  return str
+    .replace(/&quot;/g, '"')
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&#39;/g, "'");
+}
+
+function safeParseJson(str: string): unknown {
+  try {
+    return JSON.parse(str);
+  } catch {
+    try {
+      const sanitized = str.replace(/[\u0000-\u001F\u007F-\u009F]/g, (char) => {
+        if (char === "\n") return "\\n";
+        if (char === "\r") return "\\r";
+        if (char === "\t") return "\\t";
+        return "";
+      });
+      return JSON.parse(sanitized);
+    } catch {
+      return null;
+    }
+  }
+}
 /**
- * Parses raw HTML using linkedom and extracts article content via @mozilla/readability.
+ * Converts Steam announcement BBCode into semantic HTML elements.
+ */
+export function bbcodeToHtml(bbcode: string): string {
+  if (!bbcode || typeof bbcode !== "string") return "";
+
+  let text = bbcode.replace(/\r\n|\r/g, "\n");
+
+  // Steam Clan Images and regular images
+  text = text.replace(/\[img\]\{STEAM_CLAN_IMAGE\}(.*?)\[\/img\]/gi, '<img src="https://clan.fastly.steamstatic.com/images$1" />');
+  text = text.replace(/\[img\](.*?)\[\/img\]/gi, '<img src="$1" />');
+
+  // Headings
+  text = text.replace(/\[h1\]([\s\S]*?)\[\/h1\]/gi, "<h1>$1</h1>");
+  text = text.replace(/\[h2\]([\s\S]*?)\[\/h2\]/gi, "<h2>$1</h2>");
+  text = text.replace(/\[h3\]([\s\S]*?)\[\/h3\]/gi, "<h3>$1</h3>");
+
+  // Inline formatting
+  text = text.replace(/\[b\]([\s\S]*?)\[\/b\]/gi, "<strong>$1</strong>");
+  text = text.replace(/\[i\]([\s\S]*?)\[\/i\]/gi, "<em>$1</em>");
+  text = text.replace(/\[u\]([\s\S]*?)\[\/u\]/gi, "<u>$1</u>");
+  text = text.replace(/\[strike\]([\s\S]*?)\[\/strike\]/gi, "<del>$1</del>");
+
+  // Links
+  text = text.replace(/\[url=([^\]]+)\]([\s\S]*?)\[\/url\]/gi, '<a href="$1">$2</a>');
+  text = text.replace(/\[url\]([\s\S]*?)\[\/url\]/gi, '<a href="$1">$1</a>');
+
+  // Quotes and Code
+  text = text.replace(/\[quote\]([\s\S]*?)\[\/quote\]/gi, "<blockquote>$1</blockquote>");
+  text = text.replace(/\[code\]([\s\S]*?)\[\/code\]/gi, "<pre><code>$1</code></pre>");
+
+  // YouTube previews
+  text = text.replace(/\[previewyoutube=([^;\]]+)(?:;full)?\]\[\/previewyoutube\]/gi, '<a href="https://www.youtube.com/watch?v=$1">Watch on YouTube</a>');
+
+  // Lists
+  text = text.replace(/\[list\]([\s\S]*?)\[\/list\]/gi, (_, content: string) => {
+    const items = content.split(/\[\*\]/).filter((item) => item.trim().length > 0);
+    return `<ul>${items.map((item) => `<li>${item.trim()}</li>`).join("")}</ul>`;
+  });
+
+  // Paragraphs and breaks
+  text = text
+    .split(/\n{2,}/)
+    .map((chunk) => {
+      const trimmed = chunk.trim();
+      if (!trimmed) return "";
+      if (/^<(h[1-3]|ul|ol|blockquote|pre)/i.test(trimmed)) return trimmed;
+      return `<p>${trimmed.replace(/\n/g, "<br />")}</p>`;
+    })
+    .filter(Boolean)
+    .join("\n");
+
+  return text;
+}
+
+/**
+ * Strips BBCode tags to produce clean plain text for excerpts.
+ */
+export function bbcodeToPlainText(bbcode: string): string {
+  if (!bbcode || typeof bbcode !== "string") return "";
+  return bbcode
+    .replace(/\[img\].*?\[\/img\]/gi, "")
+    .replace(/\[url=([^\]]+)\]([\s\S]*?)\[\/url\]/gi, "$2")
+    .replace(/\[previewyoutube=[^\]]+\]\[\/previewyoutube\]/gi, "")
+    .replace(/\[[^\]]+\]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+interface SteamStoreRawEvent {
+  gid?: string;
+  event_name?: string;
+  name?: string;
+  announcement_body?: {
+    gid?: string;
+    event_gid?: string;
+    headline?: string;
+    body?: string;
+  };
+  body?: string;
+}
+
+/**
+ * Extracts structured Steam announcement event content embedded in Steam store page HTML.
+ */
+export function extractSteamStoreEvent(
+  html: string,
+  sourceUrl?: string,
+): { title?: string; body?: string; byline?: string | null } | null {
+  const marker =
+    html.match(/data-partnereventstore\s*=\s*(['"])(.*?)\1/s) ||
+    html.match(/data-initialevents\s*=\s*(['"])(.*?)\1/s);
+  if (!marker) return null;
+
+  try {
+    const decodedJson = decodeHtmlEntities(marker[2]);
+    const parsed = safeParseJson(decodedJson);
+    const events: SteamStoreRawEvent[] = Array.isArray(parsed)
+      ? (parsed as SteamStoreRawEvent[])
+      : parsed && typeof parsed === "object" && "events" in parsed && Array.isArray(parsed.events)
+        ? (parsed.events as SteamStoreRawEvent[])
+        : [];
+    if (events.length === 0) return null;
+
+    const targetId = sourceUrl
+      ? sourceUrl.match(/\/view\/(\d+)/)?.[1] || sourceUrl.match(/\/detail\/(\d+)/)?.[1]
+      : null;
+    const event =
+      (targetId &&
+        events.find(
+          (e) =>
+            e.gid === targetId ||
+            e.announcement_body?.gid === targetId ||
+            e.announcement_body?.event_gid === targetId,
+        )) ||
+      events[0];
+
+    const body = event.announcement_body?.body || event.body;
+    if (!body || typeof body !== "string") return null;
+
+    const title = event.announcement_body?.headline || event.event_name || event.name;
+    return {
+      title: typeof title === "string" ? title : undefined,
+      body,
+      byline: null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Parses raw HTML, checking first for Steam store structured event data,
+ * and falling back to @mozilla/readability for standard HTML articles.
  */
 export function extractReaderContent(
   html: string,
@@ -167,6 +325,25 @@ export function extractReaderContent(
 } | null {
   if (!html || typeof html !== "string") return null;
 
+  // 1. Structured Steam store announcement data embedded in page attributes
+  const steamEvent = extractSteamStoreEvent(html, sourceUrl);
+  if (steamEvent && steamEvent.body) {
+    const rawHtml = bbcodeToHtml(steamEvent.body);
+    const cleanContent = sanitizeReaderHtml(rawHtml, sourceUrl);
+    if (cleanContent.trim()) {
+      const plainText = bbcodeToPlainText(steamEvent.body);
+      const excerpt = plainText.length > 280 ? `${plainText.slice(0, 277)}...` : plainText || null;
+      return {
+        title: steamEvent.title || undefined,
+        byline: steamEvent.byline || null,
+        contentHtml: cleanContent,
+        textContent: plainText || undefined,
+        excerpt,
+      };
+    }
+  }
+
+  // 2. Mozilla Readability for generic article pages
   let document: Document;
   try {
     const parsed = parseHTML(html);
@@ -194,6 +371,15 @@ export function extractReaderContent(
 
   const cleanContent = sanitizeReaderHtml(article.content, sourceUrl);
   if (!cleanContent.trim()) {
+    return null;
+  }
+
+  // Ignore if Readability only captured Valve's legal footer boilerplate
+  if (
+    cleanContent.includes("Valve Corporation") &&
+    cleanContent.includes("All rights reserved") &&
+    cleanContent.length < 500
+  ) {
     return null;
   }
 
@@ -236,7 +422,6 @@ export async function getEventReader(
 
   const publishedAt = event.publication_at ?? event.start_at;
   const eventTitle = event.title || "Game Update";
-
   if (!event.url) {
     return {
       status: "fallback",
@@ -254,10 +439,11 @@ export async function getEventReader(
     };
   }
 
+  const sourceUrl = event.url;
   const fetchFn = options.customFetch ?? fetch;
   let html = "";
   try {
-    const response = await fetchFn(event.url, {
+    const response = await fetchFn(sourceUrl, {
       signal: options.signal,
       headers: {
         "User-Agent": "VaporStats-Reader/1.0 (+https://vaporstats.com)",
@@ -276,7 +462,7 @@ export async function getEventReader(
         contentHtml: null,
         textContent: null,
         excerpt: null,
-        sourceUrl: event.url,
+        sourceUrl,
         category: event.category,
         fallbackReason: "fetch_failed",
       };
@@ -294,13 +480,13 @@ export async function getEventReader(
       contentHtml: null,
       textContent: null,
       excerpt: null,
-      sourceUrl: event.url,
+      sourceUrl,
       category: event.category,
       fallbackReason: "fetch_failed",
     };
   }
 
-  const extracted = extractReaderContent(html, event.url);
+  const extracted = extractReaderContent(html, sourceUrl);
   if (!extracted || !extracted.contentHtml) {
     return {
       status: "fallback",
@@ -312,7 +498,7 @@ export async function getEventReader(
       contentHtml: null,
       textContent: null,
       excerpt: null,
-      sourceUrl: event.url,
+      sourceUrl,
       category: event.category,
       fallbackReason: "extraction_failed",
     };
@@ -328,7 +514,8 @@ export async function getEventReader(
     contentHtml: extracted.contentHtml,
     textContent: extracted.textContent || null,
     excerpt: extracted.excerpt || null,
-    sourceUrl: event.url,
+    sourceUrl,
     category: event.category,
   };
 }
+

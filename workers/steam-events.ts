@@ -244,7 +244,13 @@ function eventRecord(raw: unknown, requestedAppId: number | null, observedAt: st
   const rawTitle = raw.event_name ?? raw.name ?? body?.headline ?? body?.title;
   const title = typeof rawTitle === "string" ? rawTitle : null;
   const rawUrl = raw.url ?? body?.url;
-  const url = typeof rawUrl === "string" ? rawUrl : null;
+  const url = typeof rawUrl === "string" && rawUrl.trim().length > 0
+    ? rawUrl.trim()
+    : eventId && eventAppId
+      ? `https://store.steampowered.com/news/app/${eventAppId}/view/${eventId}`
+      : announcementId && eventAppId
+        ? `https://steamcommunity.com/ogg/${eventAppId}/announcements/detail/${announcementId}`
+        : null;
   const buildId = typeof raw.build_id === "number" && Number.isSafeInteger(raw.build_id)
     ? raw.build_id
     : typeof raw.build_id === "string" && raw.build_id !== "" ? raw.build_id : null;

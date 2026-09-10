@@ -3,6 +3,8 @@ import { describe, expect, test } from "bun:test";
 import type { AppDatabase, AppPreparedStatement } from "../src/lib/db";
 import { applyMigrations } from "../src/lib/migrations";
 import {
+  bbcodeToHtml,
+  bbcodeToPlainText,
   extractReaderContent,
   getEventReader,
   sanitizeReaderHtml,
@@ -115,6 +117,73 @@ describe("Event Reader Extraction", () => {
   test("returns null for empty or unparseable HTML", () => {
     expect(extractReaderContent("")).toBeNull();
     expect(extractReaderContent("<div>No readable article here</div>")).toBeNull();
+  });
+});
+
+describe("Steam Store BBCode and Event Extraction", () => {
+  test("converts BBCode elements to semantic HTML", () => {
+    const bbcode = `
+      [h2]Patch Highlights[/h2]
+      [b]Bold note[/b] and [i]italic note[/i] and [u]underlined[/u] and [strike]deleted[/strike].
+      [img]{STEAM_CLAN_IMAGE}/44971832/test.png[/img]
+      [url=https://store.steampowered.com]Steam Store[/url]
+      [list]
+      [*]First bullet
+      [*]Second bullet
+      [/list]
+      [previewyoutube=dQw4w9WgXcQ;full][/previewyoutube]
+    `;
+    const html = bbcodeToHtml(bbcode);
+    expect(html).toContain("<h2>Patch Highlights</h2>");
+    expect(html).toContain("<strong>Bold note</strong>");
+    expect(html).toContain("<em>italic note</em>");
+    expect(html).toContain("<u>underlined</u>");
+    expect(html).toContain("<del>deleted</del>");
+    expect(html).toContain('src="https://clan.fastly.steamstatic.com/images/44971832/test.png"');
+    expect(html).toContain('href="https://store.steampowered.com"');
+    expect(html).toContain("<ul><li>First bullet</li><li>Second bullet</li></ul>");
+    expect(html).toContain("https://www.youtube.com/watch?v=dQw4w9WgXcQ");
+
+    const plain = bbcodeToPlainText(bbcode);
+    expect(plain).not.toContain("[h2]");
+    expect(plain).not.toContain("[img]");
+    expect(plain).toContain("Patch Highlights");
+    expect(plain).toContain("Bold note");
+  });
+
+  test("extracts Steam store event content from data-partnereventstore", () => {
+    const storeHtml = `
+      <!DOCTYPE html>
+      <html>
+        <head><title>Slay the Spire 2 - News</title></head>
+        <body>
+          <div id="application_config" data-partnereventstore="[{&quot;gid&quot;:&quot;671751488532383386&quot;,&quot;event_name&quot;:&quot;Beta Patch Notes - v0.111.0&quot;,&quot;announcement_body&quot;:{&quot;gid&quot;:&quot;671751488532383387&quot;,&quot;headline&quot;:&quot;Beta Patch Notes - v0.111.0&quot;,&quot;body&quot;:&quot;Time for another beta patch!\n\n[h2]CONTENT &amp; BALANCE:[/h2]\n[list]\n[*]Buffed Axebot\n[/list]&quot;}}]"></div>
+          <footer>© Valve Corporation. All rights reserved.</footer>
+        </body>
+      </html>
+    `;
+    const result = extractReaderContent(storeHtml, "https://store.steampowered.com/news/app/2868840/view/671751488532383386");
+    expect(result).not.toBeNull();
+    expect(result?.title).toBe("Beta Patch Notes - v0.111.0");
+    expect(result?.contentHtml).toContain("Time for another beta patch!");
+    expect(result?.contentHtml).toContain("<h2>CONTENT &amp; BALANCE:</h2>");
+    expect(result?.contentHtml).toContain("<li>Buffed Axebot</li>");
+    expect(result?.contentHtml).not.toContain("Valve Corporation. All rights reserved");
+  });
+
+  test("rejects pages where Readability only extracted Valve legal footer", () => {
+    const footerOnlyHtml = `
+      <!DOCTYPE html>
+      <html>
+        <head><title>Steam Community</title></head>
+        <body>
+          <div id="root"></div>
+          <p>© Valve Corporation. All rights reserved. All trademarks are property of their respective owners.</p>
+        </body>
+      </html>
+    `;
+    const result = extractReaderContent(footerOnlyHtml, "https://store.steampowered.com/news/app/730/view/999");
+    expect(result).toBeNull();
   });
 });
 
