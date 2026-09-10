@@ -189,6 +189,85 @@ describe("Bun ingestion scheduling and player rollups", () => {
       .first<{ current_players: number }>();
     expect(observation?.current_players).toBe(1234);
   });
+  test("rejects an explicit zero after a positive player observation", async () => {
+    const db = createAppDatabase();
+    const appid = 730;
+    const anchorTime = new Date("2026-09-05T03:10:00.000Z");
+    const priorObservedAt = "2026-09-05T03:00:00.000Z";
+    await seedDueGame(db, appid, anchorTime.toISOString());
+    await db
+      .prepare("INSERT INTO observations (appid, current_players, observed_at) VALUES (?, ?, ?)")
+      .bind(appid, 42, priorObservedAt)
+      .run();
+    await db
+      .prepare("UPDATE tracked_games SET latest_players = ?, last_successful_at = ? WHERE appid = ?")
+      .bind(42, priorObservedAt, appid)
+      .run();
+
+    const customFetch = (async () => Response.json({ response: { result: 1, player_count: 0 } })) as unknown as typeof fetch;
+    const result = await runPlayerCollectionTick(db, { anchorTime, customFetch });
+
+    expect(result).toMatchObject({ attempted: 1, succeeded: 0, failed: 1 });
+    expect(await db.prepare("SELECT COUNT(*) AS count FROM observations WHERE appid = ?").bind(appid).first<number>("count")).toBe(1);
+    expect(
+      await db
+        .prepare(
+          "SELECT latest_players, consecutive_failures, last_attempted_at, last_successful_at, next_due_at FROM tracked_games WHERE appid = ?"
+        )
+        .bind(appid)
+        .first<{
+          latest_players: number | null;
+          consecutive_failures: number;
+          last_attempted_at: string | null;
+          last_successful_at: string | null;
+          next_due_at: string;
+        }>(),
+    ).toEqual({
+      latest_players: 42,
+      consecutive_failures: 1,
+      last_attempted_at: anchorTime.toISOString(),
+      last_successful_at: priorObservedAt,
+      next_due_at: calculateNextDueAt(anchorTime, "fast", appid).toISOString(),
+    });
+  });
+
+  test("accepts an initial explicit zero player observation", async () => {
+    const db = createAppDatabase();
+    const appid = 731;
+    const anchorTime = new Date("2026-09-05T03:10:00.000Z");
+    await seedDueGame(db, appid, anchorTime.toISOString());
+
+    const customFetch = (async () => Response.json({ response: { result: 1, player_count: 0 } })) as unknown as typeof fetch;
+    const result = await runPlayerCollectionTick(db, { anchorTime, customFetch });
+
+    expect(result).toMatchObject({ attempted: 1, succeeded: 1, failed: 0 });
+    expect(
+      await db.prepare("SELECT current_players, observed_at FROM observations WHERE appid = ?").bind(appid).first<{
+        current_players: number;
+        observed_at: string;
+      }>(),
+    ).toEqual({ current_players: 0, observed_at: anchorTime.toISOString() });
+    expect(
+      await db
+        .prepare(
+          "SELECT latest_players, consecutive_failures, last_attempted_at, last_successful_at, next_due_at FROM tracked_games WHERE appid = ?"
+        )
+        .bind(appid)
+        .first<{
+          latest_players: number | null;
+          consecutive_failures: number;
+          last_attempted_at: string | null;
+          last_successful_at: string | null;
+          next_due_at: string;
+        }>(),
+    ).toEqual({
+      latest_players: 0,
+      consecutive_failures: 0,
+      last_attempted_at: anchorTime.toISOString(),
+      last_successful_at: anchorTime.toISOString(),
+      next_due_at: calculateNextDueAt(anchorTime, "fast", appid).toISOString(),
+    });
+  });
   test("collects reception without rescheduling the player cadence", async () => {
     const db = createAppDatabase();
     const anchorTime = new Date("2026-09-05T03:10:00.000Z");

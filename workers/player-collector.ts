@@ -203,10 +203,12 @@ export async function runPlayerCollectionTick(
     concurrency,
     async (game: TrackedGame) => {
       const count = await fetchSteamCurrentPlayers(game.appid, customFetch);
+      const suspiciousZero =
+        count === 0 && game.latest_players !== null && game.latest_players > 0;
       return {
         game,
-        count,
-        success: count !== null,
+        count: suspiciousZero ? null : count,
+        success: count !== null && !suspiciousZero,
       };
     }
   );
