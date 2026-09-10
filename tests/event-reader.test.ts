@@ -153,6 +153,20 @@ describe("Steam Store BBCode and Event Extraction", () => {
     expect(plain).toContain("Patch Highlights");
     expect(plain).toContain("Bold note");
   });
+  test("converts Steam star bullets into dense unordered lists", () => {
+    const bbcode = `
+      [h3]New Content:[/h3]
+      * New Biome – Deep North
+      * 40+ New weapons
+      [p]<strong>Crafting:</strong><br>* Material: Bloodgold<br>* Material: Ice[/p]
+    `;
+    const html = bbcodeToHtml(bbcode);
+
+    expect(html).toContain("<ul><li>New Biome – Deep North</li><li>40+ New weapons</li></ul>");
+    expect(html).toContain("<p><strong>Crafting:</strong></p><ul><li>Material: Bloodgold</li><li>Material: Ice</li></ul>");
+    expect(html).not.toContain("* New Biome");
+  });
+
 
   test("converts Steam [img src] attributes and clan image placeholders", () => {
     const bbcode = '[p][img src="{STEAM_CLAN_LOC_IMAGE}/3703047/test.png"][/img]Congratulations[/p]';

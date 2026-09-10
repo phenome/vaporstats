@@ -260,10 +260,28 @@ export function bbcodeToHtml(bbcode: string): string {
   // Paragraphs: supports [p], [p align="start"], etc.
   text = text.replace(/\[p(?:\s+[^\]]*)?\]([\s\S]*?)\[\/p\]/gi, "<p>$1</p>");
 
+  // Steam also emits literal asterisk bullets instead of [list] BBCode.
+  text = text.replace(/<p>([\s\S]*?)<\/p>/gi, (match, inner: string) => {
+    const parts = inner.split(/<br\s*\/?>\s*(?=\*\s+)/i);
+    const first = parts[0]?.trim() ?? "";
+    const hasPrefix = first.length > 0 && !/^\*\s+/.test(first);
+    const items = hasPrefix ? parts.slice(1) : parts;
+    if (items.length === 0 || items.some((item) => !/^\*\s+/.test(item.trim()))) return match;
+    const prefix = hasPrefix ? `<p>${first}</p>` : "";
+    const list = items.map((item) => `<li>${item.trim().replace(/^\*\s+/, "")}</li>`).join("");
+    return `${prefix}<ul>${list}</ul>`;
+  });
+  text = text.replace(/(^|\n)((?:[ \t]*\*\s+.+(?:\n|$))+)/g, (_, prefix: string, block: string) => {
+    const items = block
+      .split(/\r?\n/)
+      .map((item) => item.trim().replace(/^\*\s+/, ""))
+      .filter(Boolean)
+      .map((item) => `<li>${item}</li>`)
+      .join("");
+    return `${prefix}<ul>${items}</ul>`;
+  });
+
   // Other layout helpers
-  text = text.replace(/\[align=[^\]]+\]([\s\S]*?)\[\/align\]/gi, "<p>$1</p>");
-  text = text.replace(/\[center\]([\s\S]*?)\[\/center\]/gi, "<p>$1</p>");
-  text = text.replace(/\[hr\](?:\[\/hr\])?/gi, "<hr />");
 
   // Auto-link standalone URLs not already inside tags
   text = text.replace(/(?<!["'=])\b(https?:\/\/[^\s<>"']+)/gi, '<a href="$1">$1</a>');

@@ -160,8 +160,8 @@ export function ScoreEventReader({ appid, eventId, onClose }: ScoreEventReaderPr
                     [&_h3]:text-xs [&_h3]:font-semibold [&_h3]:text-zinc-200 [&_h3]:mt-2
                     [&_p]:mt-1.5 [&_p]:leading-relaxed
                     [&_a]:text-violet-300 [&_a]:underline [&_a]:underline-offset-2 hover:[&_a]:text-violet-200
-                    [&_ul]:list-disc [&_ul]:pl-4 [&_ul]:space-y-1 [&_ul]:my-2
-                    [&_ol]:list-decimal [&_ol]:pl-4 [&_ol]:space-y-1 [&_ol]:my-2
+                    [&_ul]:list-disc [&_ul]:pl-4 [&_ul]:space-y-0.5 [&_ul]:my-1
+                    [&_ol]:list-decimal [&_ol]:pl-4 [&_ol]:space-y-0.5 [&_ol]:my-1
                     [&_li]:text-zinc-300
                     [&_blockquote]:border-l-2 [&_blockquote]:border-violet-400/50 [&_blockquote]:pl-3 [&_blockquote]:italic [&_blockquote]:my-2
                     [&_code]:rounded [&_code]:bg-zinc-900 [&_code]:px-1 [&_code]:py-0.5 [&_code]:font-mono [&_code]:text-[11px] [&_code]:text-violet-200
