@@ -483,7 +483,7 @@ function distinctOutlets(articles: MediaArticle[], ids: string[]) {
 
 function ArticleLinks({ articles, ids }: { articles: MediaArticle[]; ids: string[] }) {
   return (
-    <sup className="inline-flex gap-0.5 align-super font-mono text-[10px] select-none">
+    <span className="inline-flex gap-1 align-baseline font-mono text-[11px] select-none">
       {[...new Set(ids)].map((id) => {
         const index = articles.findIndex((item) => item.id === id);
         const source = articles[index];
@@ -495,13 +495,13 @@ function ArticleLinks({ articles, ids }: { articles: MediaArticle[]; ids: string
             href={`#media-sample-article-${source.id}`}
             title={description}
             aria-label={`Source ${index + 1}: ${description}`}
-            className="rounded-sm px-0.5 text-violet-300/80 hover:bg-violet-400/20 hover:text-violet-100 focus-visible:outline focus-visible:outline-1 focus-visible:outline-violet-300"
+            className="text-violet-300/80 hover:text-violet-100 hover:underline underline-offset-2 focus-visible:outline focus-visible:outline-1 focus-visible:outline-violet-300"
           >
             [{index + 1}]
           </a>
         );
       })}
-    </sup>
+    </span>
   );
 }
 
@@ -586,14 +586,12 @@ function renderEvidenceParagraphs(findings: Evidence[], articles: MediaArticle[]
         if (evidence.disputed && evidence.opposing) {
           return (
             <p key={evidence.id} className="text-sm leading-relaxed text-zinc-200">
-              <mark className="border-b border-amber-500/40 bg-amber-500/[0.06] px-1 py-0.5 font-normal text-zinc-200">
-                {evidence.text}
-              </mark>{" "}
-              <ArticleLinks articles={articles} ids={evidence.articles} />{" "}
-              <mark className="border-b border-amber-500/40 bg-amber-500/[0.06] px-1 py-0.5 font-normal text-zinc-200">
-                {evidence.opposing.text}
-              </mark>{" "}
-              <ArticleLinks articles={articles} ids={evidence.opposing.articles} />
+              <mark className="border-b border-amber-500/40 bg-amber-500/[0.05] px-1 py-0.5 font-normal text-zinc-200">
+                {evidence.text}{" "}
+                <ArticleLinks articles={articles} ids={evidence.articles} />{" "}
+                {evidence.opposing.text}{" "}
+                <ArticleLinks articles={articles} ids={evidence.opposing.articles} />
+              </mark>
             </p>
           );
         }
