@@ -1,0 +1,88 @@
+name: Media discovery
+
+on:
+  workflow_dispatch:
+    inputs:
+      pass:
+        description: Discovery pass
+        required: true
+        type: choice
+        default: initial
+        options: [initial]
+      game:
+        description: Game selection
+        required: true
+        type: choice
+        default: all
+        options:
+          - all
+          - cyberpunk-2077
+          - baldurs-gate-3
+          - hades-ii
+
+permissions:
+  contents: read
+
+concurrency:
+  group: vaporstats-media-discovery
+  cancel-in-progress: false
+
+jobs:
+  trigger:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Configure deployment SSH
+        env:
+          DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}
+          TARGET_HOST: ${{ secrets.TARGET_HOST }}
+        run: |
+          set -eu
+          test -n "$DEPLOY_KEY"
+          test -n "$TARGET_HOST"
+          umask 077
+          install -d -m 700 "$HOME/.ssh"
+          printf '%s\n' "$DEPLOY_KEY" > "$HOME/.ssh/vaporstats_deploy"
+          printf '%s ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIA51h5nwC1jWsVxRCe9xuhpxh4/dCGtpvsT42YtCaq7m\n' "$TARGET_HOST" > "$HOME/.ssh/known_hosts"
+          chmod 600 "$HOME/.ssh/vaporstats_deploy" "$HOME/.ssh/known_hosts"
+
+      - name: Trigger media discovery
+        env:
+          INPUT_PASS: ${{ inputs.pass }}
+          INPUT_GAME: ${{ inputs.game }}
+          TARGET_HOST: ${{ secrets.TARGET_HOST }}
+        run: |
+          set -euo pipefail
+          case "$INPUT_PASS" in
+            initial) remote_pass=initial ;;
+            *) printf '%s\n' 'unsupported discovery pass' >&2; exit 1 ;;
+          esac
+          case "$INPUT_GAME" in
+            all) remote_game=all ;;
+            cyberpunk-2077) remote_game=cyberpunk-2077 ;;
+            baldurs-gate-3) remote_game=baldurs-gate-3 ;;
+            hades-ii) remote_game=hades-ii ;;
+            *) printf '%s\n' 'unsupported game selection' >&2; exit 1 ;;
+          esac
+          remote_command="media $remote_pass $remote_game"
+          set +e
+          response=$(ssh -i "$HOME/.ssh/vaporstats_deploy" \
+            -o BatchMode=yes \
+            -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile="$HOME/.ssh/known_hosts" \
+            -o GlobalKnownHostsFile=/dev/null \
+            "vaporstats-deploy@$TARGET_HOST" \
+            "$remote_command" 2>/dev/null)
+          status=$?
+          set -e
+          if (( ${#response} > 8192 )); then
+            printf '%s' "${response:0:8192}" >> "$GITHUB_STEP_SUMMARY"
+          else
+            printf '%s' "$response" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          printf '\n' >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"
+
+      - name: Remove deployment SSH key
+        if: always()
+        run: rm -f "$HOME/.ssh/vaporstats_deploy" "$HOME/.ssh/known_hosts"

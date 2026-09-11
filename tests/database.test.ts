@@ -64,6 +64,10 @@ describe("Bun SQLite persistence", () => {
       "apps",
       "checkpoints",
       "critic_records",
+      "media_discovery_attempts",
+      "media_discovery_progress",
+      "media_discovery_runs",
+      "media_sources",
       "observations",
       "player_daily_requests",
       "player_rollups",
@@ -105,6 +109,23 @@ describe("Bun SQLite persistence", () => {
       .prepare("INSERT INTO app_release_plans (appid, expected_date, observed_at) VALUES (?, ?, ?)")
       .bind(10, "2026-10-01", "2026-09-05T00:00:00.000Z")
       .run();
+    await db
+      .prepare("INSERT INTO media_discovery_runs (pass, identity_key, selected_games, status) VALUES ('initial', ?, ?, 'running')")
+      .bind("initial:reopen", "[10]")
+      .run();
+    const mediaRun = await db
+      .prepare("SELECT id FROM media_discovery_runs WHERE identity_key = ?")
+      .bind("initial:reopen")
+      .first<{ id: number }>();
+    if (!mediaRun) throw new Error("media run was not persisted");
+    await db
+      .prepare("INSERT INTO media_discovery_progress (run_id, appid, pass, outlet, status) VALUES (?, ?, 'initial', 'IGN', 'completed')")
+      .bind(mediaRun.id, 10)
+      .run();
+    await db
+      .prepare("INSERT INTO media_sources (appid, pass, original_url, title, outlet, retrieved_at, type) VALUES (?, 'initial', ?, ?, 'IGN', ?, 'review')")
+      .bind(10, "https://ign.com/articles/persistence", "Persistence Review", "2026-09-05T00:00:00.000Z")
+      .run();
     await closeDb();
 
     const reopened = await getDb();
@@ -116,6 +137,10 @@ describe("Bun SQLite persistence", () => {
       .prepare("SELECT appid, expected_date, observed_at FROM app_release_plans WHERE appid = ?")
       .bind(10)
       .first<{ appid: number; expected_date: string; observed_at: string }>();
+    const mediaSource = await reopened
+      .prepare("SELECT appid, original_url, title, outlet, type FROM media_sources WHERE appid = ?")
+      .bind(10)
+      .first<{ appid: number; original_url: string; title: string; outlet: string; type: string }>();
     const migrations = await reopened
       .prepare("SELECT hash FROM __drizzle_migrations ORDER BY created_at")
       .all<{ hash: string }>();
@@ -124,6 +149,13 @@ describe("Bun SQLite persistence", () => {
       appid: 10,
       expected_date: "2026-10-01",
       observed_at: "2026-09-05T00:00:00.000Z",
+    });
+    expect(mediaSource).toEqual({
+      appid: 10,
+      original_url: "https://ign.com/articles/persistence",
+      title: "Persistence Review",
+      outlet: "IGN",
+      type: "review",
     });
     expect(migrations.results).toHaveLength(migrationNames.length);
   });

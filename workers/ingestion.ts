@@ -26,11 +26,15 @@ import {
   refreshSteamTagDictionary,
   type SteamTagDictionaryRefreshResult,
 } from "./catalog-seed";
-import { syncReleaseFactsFromApps } from "./release-facts";
+import {
+  runSerializedMediaDiscovery,
+  type MediaRunSummary,
+} from "../src/lib/media-discovery";
 import {
   compactReviewEvidence,
   type CompactReviewEvidenceResult,
 } from "../src/lib/reception-store";
+import { syncReleaseFactsFromApps } from "./release-facts";
 
 const INGESTION_DAILY_CHECKPOINT_KEY = "ingestion:last-daily-cycle";
 const INGESTION_CRON = "*/15 * * * *";
@@ -41,6 +45,7 @@ export interface IngestionTickOptions {
   steamApiKey?: string;
   anchorTime?: Date;
   customFetch?: typeof fetch;
+  tavilyApiKey?: string;
 }
 
 export interface IngestionTickResult {
@@ -55,6 +60,7 @@ export interface IngestionTickResult {
   rollups?: RollupJobResult;
   prices?: HourlyPriceFeedTickResult;
   tagDictionary?: SteamTagDictionaryRefreshResult;
+  mediaDiscovery?: MediaRunSummary;
   reviewCompaction?: CompactReviewEvidenceResult;
   catalogRefresh?: {
     active: boolean;
@@ -149,6 +155,15 @@ function logCompletion(result: IngestionTickResult): void {
       entries: result.tagDictionary.entries,
       date: result.tagDictionary.date,
     },
+    mediaDiscovery: result.mediaDiscovery && {
+      runId: result.mediaDiscovery.runId,
+      status: result.mediaDiscovery.status,
+      resumed: result.mediaDiscovery.resumed,
+      queries: result.mediaDiscovery.queries,
+      attempts: result.mediaDiscovery.attempts,
+      articles: result.mediaDiscovery.articles,
+      stopReasons: result.mediaDiscovery.stopReasons,
+    },
     reviewCompaction: result.reviewCompaction && {
       monthsCompacted: result.reviewCompaction.monthsCompacted,
       dailyBucketsDeleted: result.reviewCompaction.dailyBucketsDeleted,
@@ -166,6 +181,18 @@ async function performIngestionTick(options: IngestionTickOptions): Promise<Inge
   const tick = await runPlayerCollectionTick(options.db, { anchorTime, customFetch });
   const reviewCollection = await runReviewCollection(options.db, { anchorTime, customFetch });
   const criticCollection = await runCriticCollection(options.db, { now: anchorTime, fetch: customFetch });
+  let mediaDiscovery: MediaRunSummary | undefined;
+  const pendingMediaRun = await options.db
+    .prepare("SELECT id FROM media_discovery_runs WHERE pass = 'initial' AND status IN ('queued', 'running') ORDER BY id LIMIT 1")
+    .first<{ id: number }>();
+  if (pendingMediaRun) {
+    mediaDiscovery = await runSerializedMediaDiscovery(options.db, {
+      runId: pendingMediaRun.id,
+      tavilyApiKey: options.tavilyApiKey ?? process.env.TAVILY_API_KEY,
+      fetch: customFetch,
+      now: anchorTime,
+    });
+  }
 
   let discovery: DiscoveryResult | undefined;
   let rollups: RollupJobResult | undefined;
@@ -222,6 +249,7 @@ async function performIngestionTick(options: IngestionTickOptions): Promise<Inge
     rollups,
     prices,
     tagDictionary,
+    mediaDiscovery,
     reviewCompaction,
     catalogRefresh,
   };

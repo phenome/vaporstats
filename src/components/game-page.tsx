@@ -15,6 +15,8 @@ import { RelatedApps } from "./related-apps";
 import { AppLink } from "./app-link";
 import { LifecycleHistorySection } from "./lifecycle-history";
 import { GameReception, GameScoreHero } from "./game-reception";
+import { MediaSources } from "./media-sources";
+import type { MediaSource } from "../lib/media-discovery";
 import {
   NUMERIC_TO_HISTORY_RANGE,
   NUMERIC_TO_PRICE_RANGE,
@@ -264,6 +266,7 @@ export interface GamePageProps {
   playerHistory?: PlayerHistoryResult;
   price?: PriceState | null;
   priceHistory?: PriceHistoryResult | null;
+  sources?: MediaSource[];
   range?: NumericRange;
   pricerange?: NumericPriceRange;
   eventId?: string | null;
@@ -278,6 +281,7 @@ export function GamePageView({
   playerHistory,
   price,
   priceHistory,
+  sources = [],
   range,
   pricerange,
   eventId,
@@ -373,7 +377,7 @@ export function GamePageView({
       cancelAnimationFrame(frameId);
       window.removeEventListener("scroll", onScroll);
     };
-  }, [related]);
+  }, [related, sources.length]);
   const geometry = useHeroGeometry(heroRef, identityRefs, game.appid);
   // The scroll range is measured from the captured layouts: shrinking from the
   // expanded height to the compact height takes exactly as much scroll as the
@@ -614,6 +618,14 @@ export function GamePageView({
         aria-label="Game page sections"
         className="game-section-nav flex h-8 min-h-[32px] items-center overflow-x-auto border border-zinc-800 bg-zinc-950/95 backdrop-blur-md px-1 font-mono"
       >
+        {sources.length > 0 && (
+          <a
+            href="#media-sources"
+            className="inline-flex h-8 min-h-[32px] shrink-0 items-center border-b-2 border-transparent px-2.5 text-[11px] uppercase tracking-wider text-zinc-300 hover:bg-zinc-900 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-orange-500 transition-colors"
+          >
+            Sources
+          </a>
+        )}
         <a
           href="#game-reception"
           className="inline-flex h-8 min-h-[32px] shrink-0 items-center border-b-2 border-transparent px-2.5 text-[11px] uppercase tracking-wider text-zinc-300 hover:bg-zinc-900 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-orange-500 transition-colors"
@@ -661,6 +673,7 @@ export function GamePageView({
           }}
         />
       </div>
+      {sources.length > 0 && <MediaSources sources={sources} />}
 
       <GameReception
         key={game.appid}

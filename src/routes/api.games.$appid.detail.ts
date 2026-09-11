@@ -7,6 +7,7 @@ import { getRelatedApps, type GroupedRelatedApps } from "../lib/related";
 import { getPlayerHistory, type PlayerHistoryResult } from "../lib/player-history";
 import { getCurrentPrice, getPriceHistory, type PriceState, type PriceHistoryResult } from "../lib/prices";
 import { CACHE_POLICIES, getEntityCacheHeaders } from "../lib/cache";
+import { getMediaSources, type MediaSource } from "../lib/media-discovery";
 
 export interface GameDetailResponseData {
   game: GameDetail;
@@ -14,6 +15,7 @@ export interface GameDetailResponseData {
   playerHistory: PlayerHistoryResult;
   price: PriceState | null;
   priceHistory: PriceHistoryResult | null;
+  sources: MediaSource[];
 }
 
 export async function handleGameDetailRequest(
@@ -57,11 +59,12 @@ export async function handleGameDetailRequest(
     );
   }
 
-  const [related, playerHistory, currentPrice, lqips] = await Promise.all([
+  const [related, playerHistory, currentPrice, lqips, sources] = await Promise.all([
     getRelatedApps(db, game.appid),
     getPlayerHistory(db, game.appid, "30d"),
     getCurrentPrice(db, game.appid),
     ensureAppLqips(db, game),
+    getMediaSources(db, game.appid),
   ]);
   game.header_lqip = lqips.header_lqip;
   game.icon_lqip = lqips.icon_lqip;
@@ -73,6 +76,7 @@ export async function handleGameDetailRequest(
     playerHistory,
     price: currentPrice,
     priceHistory,
+    sources,
   };
 
   return Response.json(

@@ -710,3 +710,155 @@ export const criticRecords = sqliteTable(
     ),
   ],
 );
+export const mediaDiscoveryRuns = sqliteTable(
+  "media_discovery_runs",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    pass: text("pass").notNull(),
+    identityKey: text("identity_key").notNull(),
+    selectedGames: text("selected_games").notNull(),
+    status: text("status").notNull().default("queued"),
+    resumed: integer("resumed").notNull().default(0),
+    queryCount: integer("query_count").notNull().default(0),
+    articleCount: integer("article_count").notNull().default(0),
+    attemptCount: integer("attempt_count").notNull().default(0),
+    providerRequestIds: text("provider_request_ids").notNull().default("[]"),
+    usage: text("usage").notNull().default("{}"),
+    stopReason: text("stop_reason"),
+    summary: text("summary").notNull().default("{}"),
+    startedAt: text("started_at"),
+    finishedAt: text("finished_at"),
+    createdAt: text("created_at").notNull().default(currentTimestamp),
+  },
+  (table) => [
+    check("media_discovery_runs_pass_check", sql`${table.pass} = 'initial'`),
+    check(
+      "media_discovery_runs_status_check",
+      sql`${table.status} IN ('queued', 'running', 'completed', 'stopped', 'failed')`,
+    ),
+    check("media_discovery_runs_resumed_check", sql`${table.resumed} IN (0, 1)`),
+    check("media_discovery_runs_counts_check", sql`${table.queryCount} >= 0 AND ${table.articleCount} >= 0 AND ${table.attemptCount} >= 0`),
+    uniqueIndex("uq_media_discovery_runs_identity").on(table.identityKey),
+  ],
+);
+
+export const mediaDiscoveryProgress = sqliteTable(
+  "media_discovery_progress",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    runId: integer("run_id")
+      .notNull()
+      .references(() => mediaDiscoveryRuns.id, { onDelete: "cascade" }),
+    appid: integer("appid")
+      .notNull()
+      .references(() => apps.appid, { onDelete: "cascade" }),
+    pass: text("pass").notNull(),
+    outlet: text("outlet").notNull(),
+    status: text("status").notNull().default("queued"),
+    queryAttemptedAt: text("query_attempted_at"),
+    candidateUrls: text("candidate_urls").notNull().default("[]"),
+    candidateIndex: integer("candidate_index").notNull().default(0),
+    providerRequestId: text("provider_request_id"),
+    creditsUsed: integer("credits_used"),
+    usage: text("usage").notNull().default("{}"),
+    stopReason: text("stop_reason"),
+    updatedAt: text("updated_at").notNull().default(currentTimestamp),
+  },
+  (table) => [
+    uniqueIndex("uq_media_discovery_progress_game_outlet_pass").on(
+      table.appid,
+      table.outlet,
+      table.pass,
+    ),
+    index("idx_media_discovery_progress_run").on(table.runId),
+    check("media_discovery_progress_pass_check", sql`${table.pass} = 'initial'`),
+    check(
+      "media_discovery_progress_outlet_check",
+      sql`${table.outlet} IN ('IGN', 'Eurogamer', 'GameSpot', 'PC Gamer', 'Kotaku', 'GamesRadar+')`,
+    ),
+    check(
+      "media_discovery_progress_status_check",
+      sql`${table.status} IN ('queued', 'searching', 'fetching', 'completed', 'stopped')`,
+    ),
+    check(
+      "media_discovery_progress_candidate_index_check",
+      sql`${table.candidateIndex} >= 0`,
+    ),
+    check(
+      "media_discovery_progress_credits_check",
+      sql`${table.creditsUsed} IS NULL OR ${table.creditsUsed} >= 0`,
+    ),
+  ],
+);
+
+export const mediaDiscoveryAttempts = sqliteTable(
+  "media_discovery_attempts",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    appid: integer("appid")
+      .notNull()
+      .references(() => apps.appid, { onDelete: "cascade" }),
+    outlet: text("outlet").notNull(),
+    pass: text("pass").notNull(),
+    day: text("day").notNull(),
+    kind: text("kind").notNull(),
+    url: text("url"),
+    statusCode: integer("status_code"),
+    succeeded: integer("succeeded").notNull().default(0),
+    error: text("error"),
+    attemptedAt: text("attempted_at").notNull(),
+  },
+  (table) => [
+    index("idx_media_discovery_attempts_outlet_day").on(table.outlet, table.day),
+    index("idx_media_discovery_attempts_game").on(table.appid, table.pass),
+    check("media_discovery_attempts_pass_check", sql`${table.pass} = 'initial'`),
+    check(
+      "media_discovery_attempts_outlet_check",
+      sql`${table.outlet} IN ('IGN', 'Eurogamer', 'GameSpot', 'PC Gamer', 'Kotaku', 'GamesRadar+')`,
+    ),
+    check(
+      "media_discovery_attempts_kind_check",
+      sql`${table.kind} IN ('search', 'fetch', 'redirect', 'failure')`,
+    ),
+    check("media_discovery_attempts_succeeded_check", sql`${table.succeeded} IN (0, 1)`),
+    check(
+      "media_discovery_attempts_status_code_check",
+      sql`${table.statusCode} IS NULL OR (${table.statusCode} >= 100 AND ${table.statusCode} <= 599)`,
+    ),
+  ],
+);
+
+export const mediaSources = sqliteTable(
+  "media_sources",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    appid: integer("appid")
+      .notNull()
+      .references(() => apps.appid, { onDelete: "cascade" }),
+    pass: text("pass").notNull(),
+    originalUrl: text("original_url").notNull(),
+    discoveryUrl: text("discovery_url"),
+    title: text("title").notNull(),
+    outlet: text("outlet").notNull(),
+    author: text("author"),
+    publishedAt: text("published_at"),
+    updatedAt: text("updated_at"),
+    retrievedAt: text("retrieved_at").notNull(),
+    type: text("type").notNull(),
+    handsOn: integer("hands_on"),
+    affiliation: text("affiliation"),
+    platform: text("platform"),
+    buildContext: text("build_context"),
+  },
+  (table) => [
+    uniqueIndex("uq_media_sources_game_url").on(table.appid, table.originalUrl),
+    index("idx_media_sources_game").on(table.appid, table.publishedAt),
+    check("media_sources_pass_check", sql`${table.pass} = 'initial'`),
+    check(
+      "media_sources_outlet_check",
+      sql`${table.outlet} IN ('IGN', 'Eurogamer', 'GameSpot', 'PC Gamer', 'Kotaku', 'GamesRadar+')`,
+    ),
+    check("media_sources_type_check", sql`${table.type} IN ('review', 'preview')`),
+    check("media_sources_hands_on_check", sql`${table.handsOn} IN (0, 1)`),
+  ],
+);

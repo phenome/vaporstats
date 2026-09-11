@@ -27,8 +27,11 @@ const expectedTables = [
   "player_score_history",
   "player_score_state",
   "critic_records",
+  "media_discovery_attempts",
+  "media_discovery_progress",
+  "media_discovery_runs",
+  "media_sources",
 ];
-
 const temporaryDirectory = mkdtempSync(join(tmpdir(), "vaporstats-sqlite-check-"));
 const databasePath = join(temporaryDirectory, "check.sqlite");
 const legacyDatabasePath = join(temporaryDirectory, "legacy.sqlite");

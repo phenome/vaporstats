@@ -1,10 +1,14 @@
 import { realpath, stat } from "node:fs/promises";
+import { createHash, timingSafeEqual } from "node:crypto";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import serverEntry from "@tanstack/react-start/server-entry";
 import { startIngestionScheduler } from "../workers/ingestion";
+import {
+  MEDIA_GAME_CHOICES,
+  runSerializedMediaDiscovery,
+} from "./lib/media-discovery";
 import { CACHE_POLICIES } from "./lib/cache";
 import { getDb } from "./lib/db";
-
 export const API_RATE_LIMIT_MAX_REQUESTS = 30;
 export const API_RATE_LIMIT_WINDOW_MS = 10_000;
 export const API_RATE_LIMIT_MAX_ENTRIES = 10_000;
@@ -190,9 +194,88 @@ async function serveStaticAsset(url: URL): Promise<Response | null> {
     return null;
   }
 }
+const INTERNAL_MEDIA_PATH = "/internal/media-discovery";
+
+function loopbackHost(request: Request, url: URL): boolean {
+  const raw = (request.headers.get("host") ?? url.hostname).trim().toLowerCase();
+  const value = raw.startsWith("[")
+    ? raw.slice(1).replace(/\](?::\d+)?$/, "")
+    : raw === "::1"
+      ? raw
+      : raw.replace(/:\d+$/, "");
+  return value === "localhost" || value === "127.0.0.1" || value === "::1";
+}
+
+function sameSecret(expected: string, provided: string): boolean {
+  const expectedHash = createHash("sha256").update(expected).digest();
+  const providedHash = createHash("sha256").update(provided).digest();
+  return timingSafeEqual(expectedHash, providedHash);
+}
+
+function internalMediaResponse(status: number, body: Record<string, unknown>): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: {
+      "Content-Type": "application/json; charset=utf-8",
+      "Cache-Control": CACHE_POLICIES.noStore,
+    },
+  });
+}
+
+async function handleInternalMediaRequest(request: Request, url: URL): Promise<Response> {
+  if (!loopbackHost(request, url)) return internalMediaResponse(404, { error: "Not Found" });
+  if (request.method !== "POST") return internalMediaResponse(405, { error: "Method Not Allowed" });
+  const configuredToken = process.env.MEDIA_TRIGGER_TOKEN;
+  const authorization = request.headers.get("authorization") ?? "";
+  if (!configuredToken || !authorization.startsWith("Bearer ") || !sameSecret(configuredToken, authorization.slice(7))) {
+    return internalMediaResponse(401, { error: "Unauthorized" });
+  }
+  const contentType = request.headers.get("content-type")?.split(";", 1)[0].trim().toLowerCase();
+  if (contentType !== "application/json") return internalMediaResponse(415, { error: "Content-Type must be application/json" });
+  const declaredLength = Number(request.headers.get("content-length") ?? 0);
+  if (declaredLength > 4096) return internalMediaResponse(413, { error: "Request body too large" });
+  let body: unknown;
+  try {
+    const text = await request.text();
+    if (text.length > 4096) return internalMediaResponse(413, { error: "Request body too large" });
+    body = JSON.parse(text);
+  } catch {
+    return internalMediaResponse(400, { error: "Invalid JSON" });
+  }
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    return internalMediaResponse(400, { error: "Invalid request" });
+  }
+  const keys = Object.keys(body);
+  if (keys.length !== 2 || !keys.includes("pass") || !keys.includes("game")) {
+    return internalMediaResponse(400, { error: "Invalid request" });
+  }
+  const input = body as { pass?: unknown; game?: unknown };
+  const isAll = input.game === "all";
+  if (input.pass !== "initial" || typeof input.game !== "string" || (!isAll && !Object.prototype.hasOwnProperty.call(MEDIA_GAME_CHOICES, input.game))) {
+    return internalMediaResponse(400, { error: "Invalid request" });
+  }
+  const games = isAll
+    ? Object.values(MEDIA_GAME_CHOICES)
+    : [MEDIA_GAME_CHOICES[input.game as keyof typeof MEDIA_GAME_CHOICES]];
+  try {
+    const db = await getDb();
+    const result = await runSerializedMediaDiscovery(db, {
+      games,
+      tavilyApiKey: process.env.TAVILY_API_KEY,
+    });
+    return internalMediaResponse(200, result as unknown as Record<string, unknown>);
+  } catch (error) {
+    return internalMediaResponse(500, { error: boundedInternalError(error) });
+  }
+}
+
+function boundedInternalError(error: unknown): string {
+  return (error instanceof Error ? error.message : String(error)).replace(/[\r\n]+/g, " ").slice(0, 256);
+}
 
 export async function handleRequest(request: Request): Promise<Response> {
   const url = new URL(request.url);
+  if (url.pathname === INTERNAL_MEDIA_PATH) return handleInternalMediaRequest(request, url);
 
   if (url.hostname === "www.vaporstats.com") {
     url.protocol = "https:";
@@ -237,6 +320,7 @@ export function startServer(options: StartServerOptions = {}) {
     startIngestionScheduler({
       db,
       steamApiKey: process.env.STEAM_API_KEY,
+      tavilyApiKey: process.env.TAVILY_API_KEY,
       runImmediately: true,
     });
 

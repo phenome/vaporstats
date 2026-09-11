@@ -71,6 +71,13 @@
       "when": 1788830637273,
       "tag": "0009_melodic_famine",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "6",
+      "when": 1789088397379,
+      "tag": "0010_ancient_centennial",
+      "breakpoints": true
     }
   ]
 }
