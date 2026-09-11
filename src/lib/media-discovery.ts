@@ -86,6 +86,7 @@ export interface MediaRunSummary {
 }
 
 type MediaFetch = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
+type MediaClock = () => Date;
 
 export interface MediaDiscoveryOptions {
   runId?: number;
@@ -207,6 +208,55 @@ async function transaction(db: AppDatabase, work: () => Promise<void>): Promise<
   }
 }
 
+async function prepareProgressForAuthorization(
+  db: AppDatabase,
+  runId: number,
+  games: readonly number[],
+  includeCompleted: boolean,
+): Promise<void> {
+  const statusFilter = includeCompleted ? "" : " AND status <> 'completed'";
+  const gamesJson = JSON.stringify(games);
+  await db.prepare(
+    `UPDATE media_discovery_progress
+     SET run_id = ?,
+         status = CASE
+           WHEN status IN ('queued', 'searching', 'fetching')
+             THEN CASE WHEN query_attempted_at IS NULL THEN 'queued' ELSE 'fetching' END
+           ELSE status
+         END,
+         updated_at = CURRENT_TIMESTAMP
+     WHERE pass = 'initial'
+       AND appid IN (SELECT value FROM json_each(?))
+       ${statusFilter}`,
+  ).bind(runId, gamesJson).run();
+}
+
+async function reopenDayScopedProgress(
+  db: AppDatabase,
+  runId: number,
+  games: readonly number[],
+  day: string,
+): Promise<void> {
+  const gamesJson = JSON.stringify(games);
+  await db.prepare(
+    `UPDATE media_discovery_progress
+     SET run_id = ?,
+         status = CASE WHEN query_attempted_at IS NULL THEN 'queued' ELSE 'fetching' END,
+         stop_reason = NULL,
+         updated_at = CURRENT_TIMESTAMP
+     WHERE pass = 'initial'
+       AND appid IN (SELECT value FROM json_each(?))
+       AND status = 'stopped'
+       AND stop_reason IN ('daily_attempt_cap', 'search_http_429', 'fetch_http_429')
+       AND (
+         SELECT MAX(attempt.day)
+         FROM media_discovery_attempts AS attempt
+         WHERE attempt.pass = 'initial'
+           AND attempt.outlet = media_discovery_progress.outlet
+       ) < ?`,
+  ).bind(runId, gamesJson, day).run();
+}
+
 async function authorizeMediaRunNow(
   db: AppDatabase,
   input: { pass: MediaPass; games: readonly number[] },
@@ -225,7 +275,7 @@ async function authorizeMediaRunNow(
       await db.prepare(
         "UPDATE media_discovery_runs SET status = 'running', resumed = 1, started_at = COALESCE(started_at, CURRENT_TIMESTAMP) WHERE id = ?",
       ).bind(existing.id).run();
-      await db.prepare("UPDATE media_discovery_progress SET run_id = ? WHERE pass = 'initial' AND appid IN (SELECT value FROM json_each(?))").bind(existing.id, JSON.stringify(games)).run();
+      await prepareProgressForAuthorization(db, existing.id, games, true);
       result = { authorized: true, runId: existing.id, pass: "initial", games, identity: existing.identity_key, resumed: true };
       return;
     }
@@ -241,13 +291,12 @@ async function authorizeMediaRunNow(
     if (!inserted.success) throw new Error("Unable to create media discovery run");
     const id = Number((await first<{ id: number }>(db, "SELECT id FROM media_discovery_runs WHERE identity_key = ?", identityWithNonce))?.id ?? 0);
     if (!id) throw new Error("Unable to create media discovery run");
-    await db.prepare(
-      "UPDATE media_discovery_progress SET run_id = ?, status = CASE WHEN query_attempted_at IS NULL THEN 'queued' ELSE 'fetching' END, stop_reason = NULL, updated_at = CURRENT_TIMESTAMP WHERE pass = 'initial' AND appid IN (SELECT value FROM json_each(?)) AND status <> 'completed'",
-    ).bind(id, JSON.stringify(games)).run();
+    await prepareProgressForAuthorization(db, id, games, false);
     result = { authorized: true, runId: id, pass: "initial", games, identity: identityWithNonce, resumed: reusableProgress > 0 };
   });
   return result;
 }
+
 
 let mediaAuthorizationQueue: Promise<unknown> = Promise.resolve();
 
@@ -331,7 +380,8 @@ function parseSource(html: string, finalUrl: string, appid: number, outlet: Medi
   if (appid === 1091500 && (/\bphantom\s+liberty\b/.test(titleLower) || /\bphantom\s+liberty\b/.test(bodyLower.slice(0, 240)))) return null;
   const reviewScoreNews = /\b(?:review\s+scores?|(?:gets?|earns?|receives?|scores?|rated)\s+(?:a\s+)?\d+(?:\.\d+)?\s*(?:\/\s*\d+|out of \d+))\b/.test(titleLower);
   const coTitledReview = /\b(?:and|&)\s+.+?\s+reviews?\b/.test(titleLower);
-  if (reviewScoreNews || coTitledReview || /\b(round[- ]?up|best games?|games like|versus|\bvs\.?\b|comparison|ranking|ranked|top\s+\d+|lists?(?:icle)?|highest|metacritic|surpasses?|outperforms?|outscores?|beats?|review\s+drama|drama)\b/.test(titleLower)) return null;
+  const reviewRelatedNews = /\breviews?\s*(?:[:\-–—]\s*|\s+)(?:embargo(?:es)?|details?|reactions?|coverage|codes?|copies|policies?|discourse)\b|\b(?:embargo(?:es)?|details?|reactions?|coverage|codes?|copies|policies?|discourse)\s*(?:[:\-–—]\s*|\s+)(?:about|around|for|on|of|to)?\s*reviews?\b/.test(titleLower);
+  if (reviewScoreNews || coTitledReview || reviewRelatedNews || /\b(round[- ]?up|best games?|games like|versus|\bvs\.?\b|comparison|ranking|ranked|top\s+\d+|lists?(?:icle)?|highest|metacritic|surpasses?|outperforms?|outscores?|beats?|review\s+drama|drama)\b/.test(titleLower)) return null;
   const bodyList = /\b(round[- ]?up|games like|top\s+\d+|listicle|ranking|ranked among|(?:a|the)\s+list\s+of|multi[- ]game|multiple games?|several games?|lists?)\b/.test(bodyLower);
   const substantiveBodyComparison = /\b(side[- ]by[- ]side|head[- ]to[- ]head|direct comparison|comparison\s+(?:of|between)|versus|vs\.?)\b/.test(bodyLower);
   if (bodyList || substantiveBodyComparison) return null;
@@ -418,13 +468,15 @@ async function stopProgress(db: AppDatabase, progressId: number, reason: string)
   await db.prepare("UPDATE media_discovery_progress SET status = 'stopped', stop_reason = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(reason.slice(0, 128), progressId).run();
 }
 
-async function fetchManual(fetchFn: MediaFetch, url: string, outlet: (typeof MEDIA_OUTLETS)[number], db: AppDatabase, runId: number, appid: number, now: Date): Promise<{ html: string; finalUrl: string } | null> {
+async function fetchManual(fetchFn: MediaFetch, url: string, outlet: (typeof MEDIA_OUTLETS)[number], db: AppDatabase, runId: number, appid: number, clock: MediaClock): Promise<{ html: string; finalUrl: string } | null> {
   let current = url;
   for (let redirect = 0; redirect <= MAX_REDIRECTS; redirect += 1) {
     if (!hostInOutlet(current, outlet)) return null;
-    const allowed = (await attemptsToday(db, appid, outlet.name, now)) < MAX_ATTEMPTS_PER_OUTLET_DAY;
+    const capNow = clock();
+    const allowed = (await attemptsToday(db, appid, outlet.name, capNow)) < MAX_ATTEMPTS_PER_OUTLET_DAY;
     if (!allowed) return null;
-    const attemptId = await reserveAttempt(db, runId, appid, outlet.name, "fetch", now, current);
+    const attemptNow = clock();
+    const attemptId = await reserveAttempt(db, runId, appid, outlet.name, "fetch", attemptNow, current);
     let response: Response;
     try {
       response = await fetchFn(current, { redirect: "manual", headers: { Accept: "text/html,application/xhtml+xml" } });
@@ -544,7 +596,8 @@ export async function runAuthorizedMediaDiscovery(db: AppDatabase, options: Medi
   const apiKey = options.tavilyApiKey ?? process.env.TAVILY_API_KEY;
   let usageSummary: MediaRunSummary["usage"] = { ...EMPTY_USAGE_SUMMARY };
   try {
-    const now = isoNow(options.now);
+    const clock: MediaClock = () => isoNow(options.now);
+    await reopenDayScopedProgress(db, run.id, selectedGames, dayKey(clock()));
     const stopReasons = new Set<string>();
     const stoppedOutlets = new Set<MediaOutlet>();
     let searchCreditBudget: number | null = null;
@@ -586,7 +639,8 @@ export async function runAuthorizedMediaDiscovery(db: AppDatabase, options: Medi
         let candidates = json<Candidate[]>(current.candidate_urls, []).filter((candidate) => typeof candidate?.url === "string");
         let index = current.candidate_index;
         if (!current.query_attempted_at) {
-          if ((await attemptsToday(db, appid, outlet.name, now)) >= MAX_ATTEMPTS_PER_OUTLET_DAY) {
+          const searchCapNow = clock();
+          if ((await attemptsToday(db, appid, outlet.name, searchCapNow)) >= MAX_ATTEMPTS_PER_OUTLET_DAY) {
             await stopProgress(db, progressId, "daily_attempt_cap");
             stopReasons.add(`${outlet.name}:daily_attempt_cap`);
             continue;
@@ -604,10 +658,11 @@ export async function runAuthorizedMediaDiscovery(db: AppDatabase, options: Medi
           }
           const query = `${MEDIA_GAME_METADATA.find((game) => game.appid === appid)?.name ?? "Game"} review preview`;
           searchesIssued += 1;
+          const attemptNow = clock();
           await db.prepare(
             "UPDATE media_discovery_progress SET query_attempted_at = ?, status = 'searching', updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-          ).bind(now.toISOString(), progressId).run();
-          const attemptId = await reserveAttempt(db, run.id, appid, outlet.name, "search", now, null);
+          ).bind(attemptNow.toISOString(), progressId).run();
+          const attemptId = await reserveAttempt(db, run.id, appid, outlet.name, "search", attemptNow, null);
           let response: Response;
           try {
             response = await fetchFn("https://api.tavily.com/search", {
@@ -617,7 +672,7 @@ export async function runAuthorizedMediaDiscovery(db: AppDatabase, options: Medi
             });
           } catch (error) {
             await finishAttempt(db, attemptId, "failure", null, false, boundedError(error));
-            await db.prepare("UPDATE media_discovery_progress SET query_attempted_at = ?, status = 'completed', stop_reason = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(now.toISOString(), `search_error:${boundedError(error)}`, progressId).run();
+            await db.prepare("UPDATE media_discovery_progress SET query_attempted_at = ?, status = 'completed', stop_reason = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(attemptNow.toISOString(), `search_error:${boundedError(error)}`, progressId).run();
             stopReasons.add(`${outlet.name}:search_error`);
             continue;
           }
@@ -632,7 +687,7 @@ export async function runAuthorizedMediaDiscovery(db: AppDatabase, options: Medi
           candidates = response.ok && Array.isArray(jsonObject(body).results)
             ? (jsonObject(body).results as TavilyResult[]).slice(0, 10).map((item) => ({ url: typeof item.url === "string" ? item.url : "", publishedDate: dateValue(item.published_date) })).filter((item) => item.url && hostInOutlet(item.url, outlet))
             : [];
-          await db.prepare("UPDATE media_discovery_progress SET query_attempted_at = ?, status = 'fetching', candidate_urls = ?, candidate_index = 0, provider_request_id = ?, credits_used = ?, usage = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(now.toISOString(), JSON.stringify(candidates), providerRequestId, typeof (usage.credits ?? usage.credits_used) === "number" ? (usage.credits ?? usage.credits_used) : null, JSON.stringify(usage), progressId).run();
+          await db.prepare("UPDATE media_discovery_progress SET query_attempted_at = ?, status = 'fetching', candidate_urls = ?, candidate_index = 0, provider_request_id = ?, credits_used = ?, usage = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(attemptNow.toISOString(), JSON.stringify(candidates), providerRequestId, typeof (usage.credits ?? usage.credits_used) === "number" ? (usage.credits ?? usage.credits_used) : null, JSON.stringify(usage), progressId).run();
           await db.prepare("UPDATE media_discovery_runs SET query_count = query_count + 1, provider_request_ids = json_insert(provider_request_ids, '$[#]', ?), usage = json_patch(usage, ?) WHERE id = ?").bind(providerRequestId, JSON.stringify(usage), run.id).run();
           if (response.status === 401 || response.status === 403 || response.status === 429) {
             await db.prepare("UPDATE media_discovery_progress SET status = 'stopped', stop_reason = ?, updated_at = CURRENT_TIMESTAMP WHERE outlet = ? AND pass = 'initial'").bind(`search_http_${response.status}`, outlet.name).run();
@@ -644,12 +699,13 @@ export async function runAuthorizedMediaDiscovery(db: AppDatabase, options: Medi
         let review: MediaSource | null = null;
         let preview: MediaSource | null = null;
         for (; index < candidates.length; index += 1) {
-          if ((await attemptsToday(db, appid, outlet.name, now)) >= MAX_ATTEMPTS_PER_OUTLET_DAY) {
+          const fetchCapNow = clock();
+          if ((await attemptsToday(db, appid, outlet.name, fetchCapNow)) >= MAX_ATTEMPTS_PER_OUTLET_DAY) {
             await stopProgress(db, progressId, "daily_attempt_cap");
             stopReasons.add(`${outlet.name}:daily_attempt_cap`);
             break;
           }
-          const fetched = await fetchManual(fetchFn, candidates[index]!.url, outlet, db, run.id, appid, now);
+          const fetched = await fetchManual(fetchFn, candidates[index]!.url, outlet, db, run.id, appid, clock);
           await db.prepare("UPDATE media_discovery_progress SET candidate_index = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(index + 1, progressId).run();
           if (!fetched) {
             const stopped = await first<{ status: string; stop_reason: string | null }>(
@@ -664,7 +720,7 @@ export async function runAuthorizedMediaDiscovery(db: AppDatabase, options: Medi
             }
             continue;
           }
-          const source = parseSource(fetched.html, fetched.finalUrl, appid, outlet.name, now.toISOString());
+          const source = parseSource(fetched.html, fetched.finalUrl, appid, outlet.name, clock().toISOString());
           if (!source) continue;
           source.discoveryUrl = candidates[index]!.url;
           if (source.type === "review") review = !review || candidateDate(source) < candidateDate(review) ? source : review;

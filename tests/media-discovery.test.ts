@@ -425,4 +425,187 @@ describe("bounded media discovery", () => {
       else process.env.MEDIA_TRIGGER_TOKEN = previousToken;
     }
   });
+  test("does not retry terminal 401/403 outlets after a newly authorized rerun", async () => {
+    for (const denialStatus of [401, 403] as const) {
+      const { db, cleanup } = fixture();
+      try {
+        const calls: { url: string; init?: RequestInit }[] = [];
+        const fetchFn = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+          const url = String(input);
+          calls.push({ url, init });
+          if (url.endsWith("/usage")) return Response.json({ account: { current_plan: "free" }, plan_usage: 0, plan_limit: 100, paygo_usage: 0, paygo_limit: 0 });
+          if (url.endsWith("/search")) {
+            if (String(init?.body).includes("\"ign.com\"")) return new Response("", { status: denialStatus });
+            return Response.json({ results: [] });
+          }
+          return new Response("", { status: 500 });
+        };
+        const authorization = await authorizeMediaRun(db, { pass: "initial", games: [1091500] });
+        const first = await runAuthorizedMediaDiscovery(db, { runId: authorization.runId, tavilyApiKey: "test-key", fetch: fetchFn, now: new Date("2026-09-10T00:00:00.000Z") });
+        expect(first.stopReasons).toContain(`IGN:search_http_${denialStatus}`);
+        expect(first.summary.stopReason).toBe(`IGN:search_http_${denialStatus}`);
+        const stopped = await db.prepare("SELECT status, stop_reason FROM media_discovery_progress WHERE appid = ? AND outlet = 'IGN'").bind(1091500).first<{ status: string; stop_reason: string | null }>();
+        expect(stopped).toEqual({ status: "stopped", stop_reason: `search_http_${denialStatus}` });
+
+        const resumedAuthorization = await authorizeMediaRun(db, { pass: "initial", games: [1091500] });
+        const resumed = await runAuthorizedMediaDiscovery(db, { runId: resumedAuthorization.runId, tavilyApiKey: "test-key", fetch: fetchFn, now: new Date("2026-09-11T00:00:00.000Z") });
+        expect(resumedAuthorization.resumed).toBe(true);
+        expect(resumed.status).toBe("completed");
+        expect(calls.filter((call) => call.url.endsWith("/search"))).toHaveLength(6);
+        const stillStopped = await db.prepare("SELECT status, stop_reason FROM media_discovery_progress WHERE appid = ? AND outlet = 'IGN'").bind(1091500).first<{ status: string; stop_reason: string | null }>();
+        expect(stillStopped).toEqual({ status: "stopped", stop_reason: `search_http_${denialStatus}` });
+      } finally {
+        cleanup();
+      }
+    }
+  });
+
+  test("keeps a daily-cap stop closed the same day, then resumes it on a later authorized day", async () => {
+    const { db, cleanup } = fixture();
+    try {
+      for (let id = 0; id < 30; id += 1) {
+        await db.prepare("INSERT INTO media_discovery_attempts (appid, outlet, pass, day, kind, succeeded, attempted_at) VALUES (?, 'IGN', 'initial', ?, 'failure', 0, ?)").bind(1091500, "2026-09-10", `2026-09-10T00:00:${String(id).padStart(2, "0")}.000Z`).run();
+      }
+      const { calls, fetchFn } = discoveryFetch();
+      const authorization = await authorizeMediaRun(db, { pass: "initial", games: [1091500] });
+      const first = await runAuthorizedMediaDiscovery(db, { runId: authorization.runId, tavilyApiKey: "test-key", fetch: fetchFn, now: new Date("2026-09-10T12:00:00.000Z") });
+      expect(first.stopReasons).toContain("IGN:daily_attempt_cap");
+      expect(first.summary.stopReason).toBe("IGN:daily_attempt_cap");
+
+      const sameDayAuthorization = await authorizeMediaRun(db, { pass: "initial", games: [1091500] });
+      await runAuthorizedMediaDiscovery(db, { runId: sameDayAuthorization.runId, tavilyApiKey: "test-key", fetch: fetchFn, now: new Date("2026-09-10T18:00:00.000Z") });
+      expect(calls.filter((call) => call.url.endsWith("/search"))).toHaveLength(5);
+      const sameDayProgress = await db.prepare("SELECT status, stop_reason FROM media_discovery_progress WHERE appid = ? AND outlet = 'IGN'").bind(1091500).first<{ status: string; stop_reason: string | null }>();
+      expect(sameDayProgress).toEqual({ status: "stopped", stop_reason: "daily_attempt_cap" });
+
+      const laterAuthorization = await authorizeMediaRun(db, { pass: "initial", games: [1091500] });
+      await runAuthorizedMediaDiscovery(db, { runId: laterAuthorization.runId, tavilyApiKey: "test-key", fetch: fetchFn, now: new Date("2026-09-11T12:00:00.000Z") });
+      expect(calls.filter((call) => call.url.endsWith("/search"))).toHaveLength(6);
+      expect((await getMediaSources(db, 1091500)).some((source) => source.outlet === "IGN")).toBe(true);
+      const reopened = await db.prepare("SELECT status FROM media_discovery_progress WHERE appid = ? AND outlet = 'IGN'").bind(1091500).first<{ status: string }>();
+      expect(reopened?.status).toBe("completed");
+    } finally {
+      cleanup();
+    }
+  });
+
+  test("keeps a fetch 429 stopped the same day, then continues candidates without repeating its search", async () => {
+    const { db, cleanup } = fixture();
+    try {
+      const firstUrl = "https://ign.com/articles/first-candidate";
+      const secondUrl = "https://ign.com/articles/second-candidate";
+      const searchBodies: string[] = [];
+      const articleCalls: string[] = [];
+      const fetchFn = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+        const url = String(input);
+        if (url.endsWith("/usage")) return Response.json({ account: { current_plan: "free" }, plan_usage: 0, plan_limit: 100, paygo_usage: 0, paygo_limit: 0 });
+        if (url.endsWith("/search")) {
+          searchBodies.push(String(init?.body));
+          const payload = JSON.parse(String(init?.body)) as { include_domains: string[] };
+          return Response.json({ results: payload.include_domains[0] === "ign.com" ? [{ url: firstUrl }, { url: secondUrl }] : [] });
+        }
+        if (url === firstUrl) {
+          articleCalls.push(url);
+          return new Response("", { status: 429 });
+        }
+        if (url === secondUrl) {
+          articleCalls.push(url);
+          return new Response(html(1091500, "Cyberpunk 2077 Review"));
+        }
+        return new Response("", { status: 500 });
+      };
+      const authorization = await authorizeMediaRun(db, { pass: "initial", games: [1091500] });
+      const first = await runAuthorizedMediaDiscovery(db, { runId: authorization.runId, tavilyApiKey: "test-key", fetch: fetchFn, now: new Date("2026-09-10T00:00:00.000Z") });
+      expect(first.stopReasons).toContain("IGN:fetch_http_429");
+      expect(first.summary.stopReason).toBe("IGN:fetch_http_429");
+      const stopped = await db.prepare("SELECT status, stop_reason FROM media_discovery_progress WHERE appid = ? AND outlet = 'IGN'").bind(1091500).first<{ status: string; stop_reason: string | null }>();
+      expect(stopped).toEqual({ status: "stopped", stop_reason: "fetch_http_429" });
+
+      const sameDayAuthorization = await authorizeMediaRun(db, { pass: "initial", games: [1091500] });
+      await runAuthorizedMediaDiscovery(db, { runId: sameDayAuthorization.runId, tavilyApiKey: "test-key", fetch: fetchFn, now: new Date("2026-09-10T18:00:00.000Z") });
+      expect(searchBodies).toHaveLength(6);
+      expect(articleCalls).toEqual([firstUrl]);
+      const sameDayStopped = await db.prepare("SELECT status, stop_reason FROM media_discovery_progress WHERE appid = ? AND outlet = 'IGN'").bind(1091500).first<{ status: string; stop_reason: string | null }>();
+      expect(sameDayStopped).toEqual({ status: "stopped", stop_reason: "fetch_http_429" });
+
+      const laterAuthorization = await authorizeMediaRun(db, { pass: "initial", games: [1091500] });
+      await runAuthorizedMediaDiscovery(db, { runId: laterAuthorization.runId, tavilyApiKey: "test-key", fetch: fetchFn, now: new Date("2026-09-11T00:00:00.000Z") });
+      expect(searchBodies).toHaveLength(6);
+      expect(articleCalls).toEqual([firstUrl, secondUrl]);
+      expect((await getMediaSources(db, 1091500)).some((source) => source.outlet === "IGN")).toBe(true);
+      const reopened = await db.prepare("SELECT status FROM media_discovery_progress WHERE appid = ? AND outlet = 'IGN'").bind(1091500).first<{ status: string }>();
+      expect(reopened?.status).toBe("completed");
+    } finally {
+      cleanup();
+    }
+  });
+
+  test("uses a clock function across UTC midnight and enforces the daily cap for each day", async () => {
+    const { db, cleanup } = fixture();
+    try {
+      for (const day of ["2026-09-10", "2026-09-11"]) {
+        for (let id = 0; id < 29; id += 1) {
+          await db.prepare("INSERT INTO media_discovery_attempts (appid, outlet, pass, day, kind, succeeded, attempted_at) VALUES (?, 'IGN', 'initial', ?, 'failure', 0, ?)").bind(1091500, day, `${day}T00:00:${String(id).padStart(2, "0")}.000Z`).run();
+        }
+      }
+      const firstUrl = "https://ign.com/articles/midnight-first";
+      const secondUrl = "https://ign.com/articles/midnight-second";
+      let currentClock = new Date("2026-09-10T23:59:59.900Z");
+      const searched: string[] = [];
+      const articleCalls: string[] = [];
+      const fetchFn = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+        const url = String(input);
+        if (url.endsWith("/usage")) return Response.json({ account: { current_plan: "free" }, plan_usage: 0, plan_limit: 100, paygo_usage: 0, paygo_limit: 0 });
+        if (url.endsWith("/search")) {
+          const payload = JSON.parse(String(init?.body)) as { include_domains: string[] };
+          searched.push(payload.include_domains[0]!);
+          if (payload.include_domains[0] === "ign.com") {
+            currentClock = new Date("2026-09-11T00:00:00.100Z");
+            return Response.json({ results: [{ url: firstUrl }, { url: secondUrl }] });
+          }
+          return Response.json({ results: [] });
+        }
+        if (url === firstUrl) {
+          articleCalls.push(url);
+          return new Response(html(1091500, "Cyberpunk 2077 Review"));
+        }
+        if (url === secondUrl) {
+          articleCalls.push(url);
+          return new Response(html(1091500, "Cyberpunk 2077 Review 2"));
+        }
+        return new Response("", { status: 500 });
+      };
+      const authorization = await authorizeMediaRun(db, { pass: "initial", games: [1091500] });
+      const result = await runAuthorizedMediaDiscovery(db, { runId: authorization.runId, tavilyApiKey: "test-key", fetch: fetchFn, now: () => new Date(currentClock) });
+      expect(result.stopReasons).toContain("IGN:daily_attempt_cap");
+      expect(result.summary.stopReason).toBe("IGN:daily_attempt_cap");
+      expect(searched).toHaveLength(6);
+      expect(articleCalls).toEqual([firstUrl]);
+      const dayRows = await db.prepare("SELECT day, COUNT(*) AS count FROM media_discovery_attempts WHERE appid = ? AND outlet = 'IGN' GROUP BY day ORDER BY day").bind(1091500).all<{ day: string; count: number }>();
+      expect(dayRows.results).toEqual([{ day: "2026-09-10", count: 30 }, { day: "2026-09-11", count: 30 }]);
+    } finally {
+      cleanup();
+    }
+  });
+
+  test("rejects review embargo and reaction news while accepting an ordinary full review", async () => {
+    const { db, cleanup } = fixture();
+    try {
+      const { fetchFn } = discoveryFetch({
+        variants: {
+          "https://ign.com/articles/1091500-ign-com": { body: html(1091500, "Cyberpunk 2077 Review Embargo Has Been Lifted") },
+          "https://eurogamer.net/articles/1091500-eurogamer-net": { body: html(1091500, "Cyberpunk 2077 Review Reaction: What Critics Think") },
+          "https://gamespot.com/articles/1091500-gamespot-com": { body: html(1091500, "Cyberpunk 2077 Review") },
+        },
+      });
+      const authorization = await authorizeMediaRun(db, { pass: "initial", games: [1091500] });
+      await runAuthorizedMediaDiscovery(db, { runId: authorization.runId, tavilyApiKey: "test-key", fetch: fetchFn, now: new Date("2026-09-10T00:00:00.000Z") });
+      const sources = await getMediaSources(db, 1091500);
+      expect(sources.some((source) => source.outlet === "IGN")).toBe(false);
+      expect(sources.some((source) => source.outlet === "Eurogamer")).toBe(false);
+      expect(sources).toEqual(expect.arrayContaining([expect.objectContaining({ outlet: "GameSpot", type: "review", title: "Cyberpunk 2077 Review" })]));
+    } finally {
+      cleanup();
+    }
+  });
 });
