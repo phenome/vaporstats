@@ -27,9 +27,13 @@ const expectedTables = [
   "player_score_history",
   "player_score_state",
   "critic_records",
+  "media_article_extractions",
   "media_discovery_attempts",
   "media_discovery_progress",
   "media_discovery_runs",
+  "media_game_overviews",
+  "media_processing_authorizations",
+  "media_processing_jobs",
   "media_sources",
 ];
 const temporaryDirectory = mkdtempSync(join(tmpdir(), "vaporstats-sqlite-check-"));
@@ -95,6 +99,14 @@ function verifyExistingRowsSurviveUpgrade(): void {
     legacy
       .query("INSERT INTO app_release_plans (appid, expected_date, observed_at) VALUES (?, ?, ?)")
       .run(900001, "2026-10-01", "2026-09-01T00:00:00.000Z");
+    legacy
+      .query("INSERT INTO media_sources (appid, pass, original_url, title, outlet, retrieved_at, type) VALUES (?, 'initial', ?, ?, 'IGN', ?, 'review')")
+      .run(900001, "https://ign.com/articles/migration-preservation", "Preserved review", "2026-09-01T00:00:00.000Z");
+    legacy
+      .query(
+        "INSERT INTO media_discovery_runs (pass, identity_key, selected_games, status) VALUES ('initial', ?, ?, 'completed')"
+      )
+      .run("migration-preservation-media", "[900001]");
   } finally {
     legacy.close(true);
   }
@@ -175,6 +187,47 @@ function verifyExistingRowsSurviveUpgrade(): void {
     ) {
       throw new Error("Existing lifecycle data was not preserved during migration");
     }
+    const mediaSource = upgraded
+      .query<
+        {
+          title: string;
+          normalized_content_hash: string | null;
+          cleanup_version: string | null;
+          processing_content: string | null;
+          processing_input_identity: string | null;
+        },
+        []
+      >(
+        "SELECT title, normalized_content_hash, cleanup_version, processing_content, processing_input_identity FROM media_sources WHERE appid = 900001"
+      )
+      .get();
+    if (
+      !mediaSource ||
+      mediaSource.title !== "Preserved review" ||
+      mediaSource.normalized_content_hash !== null ||
+      mediaSource.cleanup_version !== null ||
+      mediaSource.processing_content !== null ||
+      mediaSource.processing_input_identity !== null
+    ) {
+      throw new Error("Existing media source data was not preserved during migration");
+    }
+    const mediaRun = upgraded
+      .query<{ id: number }, []>(
+        "SELECT id FROM media_discovery_runs WHERE identity_key = 'migration-preservation-media'"
+      )
+      .get();
+    if (!mediaRun) throw new Error("Preserved media discovery run was not found");
+    upgraded
+      .query("INSERT INTO media_processing_authorizations (run_id, status) VALUES (?, 'queued')")
+      .run(mediaRun.id);
+    const authorization = upgraded
+      .query<{ billing_confirmation: string | null }, []>(
+        "SELECT billing_confirmation FROM media_processing_authorizations WHERE run_id = ?"
+      )
+      .get(mediaRun.id);
+    if (!authorization || authorization.billing_confirmation !== null) {
+      throw new Error("New billing confirmation was not NULL after migration");
+    }
 
   } finally {
     upgraded.close(true);
@@ -223,6 +276,37 @@ try {
     if (!releasePlanColumns.has(column)) {
       throw new Error("Missing app_release_plans." + column + " column");
     }
+  }
+  const mediaSourceColumns = new Set(
+    database
+      .query<{ name: string }, []>("PRAGMA table_info(media_sources)")
+      .all()
+      .map((column) => column.name)
+  );
+  for (const column of [
+    "normalized_content_hash",
+    "cleanup_version",
+    "processing_content",
+    "processing_input_identity",
+  ]) {
+    if (!mediaSourceColumns.has(column)) {
+      throw new Error("Missing media_sources." + column + " column");
+    }
+  }
+  const mediaAuthorizationColumns = database
+    .query<{ name: string; type: string; notnull: number }, []>(
+      "PRAGMA table_info(media_processing_authorizations)"
+    )
+    .all();
+  const billingConfirmationColumn = mediaAuthorizationColumns.find(
+    (column) => column.name === "billing_confirmation"
+  );
+  if (
+    !billingConfirmationColumn ||
+    billingConfirmationColumn.type.toLowerCase() !== "text" ||
+    billingConfirmationColumn.notnull !== 0
+  ) {
+    throw new Error("Missing nullable media_processing_authorizations.billing_confirmation column");
   }
 
   const appliedMigrations = database

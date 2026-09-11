@@ -9,6 +9,7 @@ import { getDb } from "../lib/db-access";
 import type { AppDatabase } from "../lib/db";
 import { getCurrentPrice, getPriceHistory } from "../lib/prices";
 import { getMediaSources } from "../lib/media-discovery";
+import { getMediaOverview } from "../lib/media-overview";
 import { parseGameSlug, toSlug, getCanonicalGamePath } from "../lib/slug";
 import { gameScoreHistoryQueryOptions, gameScoreSummaryQueryOptions } from "../lib/score-query";
 import { createQueryClient } from "../lib/query-client";
@@ -103,7 +104,7 @@ function GameRouteComponent() {
     return <GamePageSkeleton />;
   }
 
-  const { game, related, playerHistory, price, priceHistory, sources } = data;
+  const { game, related, playerHistory, price, priceHistory, sources, mediaOverview } = data;
   const canonicalSlug = toSlug(game.name);
   if (slug !== canonicalSlug) {
     return (
@@ -163,6 +164,7 @@ function GameRouteComponent() {
       price={price}
       priceHistory={priceHistory}
       sources={sources}
+      mediaOverview={mediaOverview}
       range={numericRange}
       pricerange={numericPriceRange}
       eventId={activeEvent}
@@ -243,11 +245,12 @@ export async function handleGameHttpRequest(
       },
     });
   }
-  const [related, playerHistory, currentPrice, sources] = await Promise.all([
+  const [related, playerHistory, currentPrice, sources, mediaOverview] = await Promise.all([
     getRelatedApps(db, game.appid),
     getPlayerHistory(db, game.appid, "30d"),
     getCurrentPrice(db, game.appid),
     getMediaSources(db, game.appid),
+    getMediaOverview(db, game.appid),
   ]);
   const priceHistory = await getPriceHistory(db, game.appid, "all", { currentPrice });
   const appHtml = renderToString(
@@ -259,6 +262,7 @@ export async function handleGameHttpRequest(
         price={currentPrice}
         priceHistory={priceHistory}
         sources={sources}
+        mediaOverview={mediaOverview}
       />
     </QueryClientProvider>
   );

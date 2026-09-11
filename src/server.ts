@@ -8,6 +8,11 @@ import {
   MEDIA_GAME_CHOICES,
   runSerializedMediaDiscovery,
 } from "./lib/media-discovery";
+import {
+  advanceMediaProcessing,
+  authorizeMediaProcessing,
+  type MediaProcessingSummary,
+} from "./lib/media-processing";
 import { CACHE_POLICIES } from "./lib/cache";
 import { getDb } from "./lib/db";
 export const API_RATE_LIMIT_MAX_REQUESTS = 30;
@@ -224,6 +229,36 @@ function internalMediaResponse(status: number, body: Record<string, unknown>): R
     },
   });
 }
+const SAFE_MEDIA_PROCESSING_STOP_REASONS: Record<string, true> = {
+  missing_gemini_batch_transport: true,
+  pricing_unconfirmed: true,
+  capability_unconfirmed: true,
+  input_token_cap: true,
+  lifetime_budget: true,
+};
+
+function safeNonNegativeInteger(value: number): number {
+  return Number.isSafeInteger(value) && value >= 0 ? value : 0;
+}
+
+function sanitizeMediaProcessingSummary(summary: MediaProcessingSummary): Pick<
+  MediaProcessingSummary,
+  "runId" | "status" | "submitted" | "completed" | "reused" |
+  "chargedMicrousd" | "outstandingReservedMicrousd" | "stopReasons"
+> {
+  return {
+    runId: summary.runId,
+    status: summary.status,
+    submitted: safeNonNegativeInteger(summary.submitted),
+    completed: safeNonNegativeInteger(summary.completed),
+    reused: safeNonNegativeInteger(summary.reused),
+    chargedMicrousd: safeNonNegativeInteger(summary.chargedMicrousd),
+    outstandingReservedMicrousd: safeNonNegativeInteger(summary.outstandingReservedMicrousd),
+    stopReasons: [...new Set(summary.stopReasons.map((reason) =>
+      Object.prototype.hasOwnProperty.call(SAFE_MEDIA_PROCESSING_STOP_REASONS, reason) ? reason : "provider_failure"
+    ))],
+  };
+}
 
 async function handleInternalMediaRequest(request: Request, peerAddress?: string): Promise<Response> {
   if (!loopbackPeer(peerAddress)) return internalMediaResponse(404, { error: "Not Found" });
@@ -266,7 +301,14 @@ async function handleInternalMediaRequest(request: Request, peerAddress?: string
       games,
       tavilyApiKey: process.env.TAVILY_API_KEY,
     });
-    return internalMediaResponse(200, result as unknown as Record<string, unknown>);
+    await authorizeMediaProcessing(db, result.runId);
+    const processing = await advanceMediaProcessing(db, {
+      runId: result.runId,
+      geminiApiKey: process.env.GEMINI_API_KEY,
+      pricingVersion: process.env.GEMINI_BATCH_PRICING_VERSION,
+      capabilityVersion: process.env.GEMINI_BATCH_CAPABILITY_VERSION,
+    });
+    return internalMediaResponse(200, { ...result, processing: sanitizeMediaProcessingSummary(processing) });
   } catch {
     return internalMediaResponse(500, { error: "Media discovery failed" });
   }
@@ -320,6 +362,9 @@ export function startServer(options: StartServerOptions = {}) {
       db,
       steamApiKey: process.env.STEAM_API_KEY,
       tavilyApiKey: process.env.TAVILY_API_KEY,
+      geminiApiKey: process.env.GEMINI_API_KEY,
+      geminiPricingVersion: process.env.GEMINI_BATCH_PRICING_VERSION,
+      geminiCapabilityVersion: process.env.GEMINI_BATCH_CAPABILITY_VERSION,
       runImmediately: true,
     });
 

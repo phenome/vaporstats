@@ -64,9 +64,13 @@ describe("Bun SQLite persistence", () => {
       "apps",
       "checkpoints",
       "critic_records",
+      "media_article_extractions",
       "media_discovery_attempts",
       "media_discovery_progress",
       "media_discovery_runs",
+      "media_game_overviews",
+      "media_processing_authorizations",
+      "media_processing_jobs",
       "media_sources",
       "observations",
       "player_daily_requests",
@@ -96,6 +100,15 @@ describe("Bun SQLite persistence", () => {
     expect(releasePlanColumns.results.map((column) => column.name)).toEqual(
       expect.arrayContaining(["id", "appid", "expected_date", "observed_at"]),
     );
+    const authorizationColumns = await db
+      .prepare("PRAGMA table_info(media_processing_authorizations)")
+      .all<{ name: string; type: string; notnull: number }>();
+    const billingConfirmationColumn = authorizationColumns.results.find(
+      (column) => column.name === "billing_confirmation"
+    );
+    expect(billingConfirmationColumn).toBeDefined();
+    expect(billingConfirmationColumn?.type.toLowerCase()).toBe("text");
+    expect(billingConfirmationColumn?.notnull).toBe(0);
     expect(migrations.results).toHaveLength(migrationNames.length);
   });
 
@@ -165,6 +178,16 @@ describe("Bun SQLite persistence", () => {
     legacy
       .query("INSERT INTO apps (appid, name, slug) VALUES (?, ?, ?)")
       .run(11, "Adopted Row", "adopted-row");
+    legacy
+      .query(
+        "INSERT INTO media_sources (appid, pass, original_url, title, outlet, retrieved_at, type) VALUES (?, 'initial', ?, ?, 'IGN', ?, 'review')"
+      )
+      .run(11, "https://ign.com/articles/adopted", "Adopted Review", "2026-09-05T00:00:00.000Z");
+    legacy
+      .query(
+        "INSERT INTO media_discovery_runs (pass, identity_key, selected_games, status) VALUES ('initial', ?, ?, 'completed')"
+      )
+      .run("adopted-media-run", "[11]");
     legacy.close(true);
 
     const db = await getDb();
@@ -180,6 +203,39 @@ describe("Bun SQLite persistence", () => {
       .prepare("SELECT hash, created_at FROM __drizzle_migrations ORDER BY created_at")
       .all<{ hash: string; created_at: number }>();
     expect(row).toEqual({ name: "Adopted Row", has_left_early_access: null });
+    const mediaSource = await db
+      .prepare(
+        "SELECT title, normalized_content_hash, cleanup_version, processing_content, processing_input_identity FROM media_sources WHERE appid = ?"
+      )
+      .bind(11)
+      .first<{
+        title: string;
+        normalized_content_hash: string | null;
+        cleanup_version: string | null;
+        processing_content: string | null;
+        processing_input_identity: string | null;
+      }>();
+    expect(mediaSource).toEqual({
+      title: "Adopted Review",
+      normalized_content_hash: null,
+      cleanup_version: null,
+      processing_content: null,
+      processing_input_identity: null,
+    });
+    const mediaRun = await db
+      .prepare("SELECT id FROM media_discovery_runs WHERE identity_key = ?")
+      .bind("adopted-media-run")
+      .first<{ id: number }>();
+    if (!mediaRun) throw new Error("adopted media discovery run was not preserved");
+    await db
+      .prepare("INSERT INTO media_processing_authorizations (run_id, status) VALUES (?, 'queued')")
+      .bind(mediaRun.id)
+      .run();
+    const authorization = await db
+      .prepare("SELECT billing_confirmation FROM media_processing_authorizations WHERE run_id = ?")
+      .bind(mediaRun.id)
+      .first<{ billing_confirmation: string | null }>();
+    expect(authorization).toEqual({ billing_confirmation: null });
     expect(ledger).toBeNull();
     expect(journal.results).toHaveLength(migrationNames.length);
     expect(await db.prepare("SELECT 1 FROM app_release_events LIMIT 1").first()).toBeNull();

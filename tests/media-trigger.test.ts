@@ -1,6 +1,10 @@
 import { describe, expect, it } from "bun:test";
 import { handleRequest } from "../src/server";
-import { getDb } from "../src/lib/db";
+import { closeDb, getDb } from "../src/lib/db";
+import {
+  GEMINI_BATCH_CAPABILITY_VERSION,
+  GEMINI_BATCH_PRICING_VERSION,
+} from "../src/lib/media-processing";
 import { chmod, copyFile, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -9,6 +13,40 @@ const root = dirname(import.meta.dir);
 const wrapperPath = join(root, "scripts", "remote-command.sh");
 const workflowPath = join(root, ".github", "workflows", "media-discovery.yml");
 const shell = process.platform === "win32" ? process.env.GIT_BASH_PATH ?? "C:\\Program Files\\Git\\bin\\bash.exe" : "bash";
+async function withIsolatedTriggerDb<T>(work: (discoveryCalls: string[]) => Promise<T>): Promise<T> {
+  const previousDatabasePath = process.env.DATABASE_PATH;
+  const previousFetch = globalThis.fetch;
+  await closeDb();
+  const directory = await mkdtemp(join(tmpdir(), "vaporstats-media-trigger-db-"));
+  process.env.DATABASE_PATH = join(directory, "trigger.sqlite");
+  const discoveryCalls: string[] = [];
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    const url = String(input);
+    discoveryCalls.push(url);
+    if (url.endsWith("/usage")) {
+      return Response.json({
+        account: { current_plan: "free" },
+        plan_usage: 0,
+        plan_limit: 100,
+        paygo_usage: 0,
+        paygo_limit: 0,
+      });
+    }
+    if (url.endsWith("/search")) {
+      return Response.json({ results: [], usage: { credits_used: 0 } });
+    }
+    throw new Error(`unexpected provider request: ${url}`);
+  }) as typeof fetch;
+  try {
+    return await work(discoveryCalls);
+  } finally {
+    await closeDb();
+    globalThis.fetch = previousFetch;
+    if (previousDatabasePath === undefined) delete process.env.DATABASE_PATH;
+    else process.env.DATABASE_PATH = previousDatabasePath;
+    await rm(directory, { recursive: true, force: true });
+  }
+}
 
 async function makeHarness() {
   const directory = await mkdtemp(join(tmpdir(), "vaporstats-media-trigger-"));
@@ -313,6 +351,147 @@ describe("media trigger network origin", () => {
       if (previousToken === undefined) delete process.env.MEDIA_TRIGGER_TOKEN;
       else process.env.MEDIA_TRIGGER_TOKEN = previousToken;
     }
+  });
+
+  it("rejects invalid requests before any database processing", async () => {
+    const previousToken = process.env.MEDIA_TRIGGER_TOKEN;
+    process.env.MEDIA_TRIGGER_TOKEN = "test-trigger-token";
+    const db = await getDb();
+    const originalPrepare = db.prepare;
+    let prepareCalls = 0;
+    db.prepare = ((query: string) => {
+      prepareCalls += 1;
+      throw new Error(`unexpected database work: ${query}`);
+    }) as typeof db.prepare;
+    try {
+      const response = await handleRequest(
+        request({
+          Authorization: "Bearer test-trigger-token",
+          "Content-Type": "application/json",
+        }, "{\"pass\":\"initial\",\"game\":\"not-a-game\"}"),
+        "127.0.0.1",
+      );
+      expect(response.status).toBe(400);
+      expect(prepareCalls).toBe(0);
+    } finally {
+      db.prepare = originalPrepare;
+      if (previousToken === undefined) delete process.env.MEDIA_TRIGGER_TOKEN;
+      else process.env.MEDIA_TRIGGER_TOKEN = previousToken;
+    }
+  });
+
+  it("returns only sanitized processing budget state when provider configuration is missing", async () => {
+    await withIsolatedTriggerDb(async (discoveryCalls) => {
+      const previousToken = process.env.MEDIA_TRIGGER_TOKEN;
+      const previousTavilyKey = process.env.TAVILY_API_KEY;
+      const previousGeminiKey = process.env.GEMINI_API_KEY;
+      const previousPricingVersion = process.env.GEMINI_BATCH_PRICING_VERSION;
+      const previousCapabilityVersion = process.env.GEMINI_BATCH_CAPABILITY_VERSION;
+      process.env.MEDIA_TRIGGER_TOKEN = "test-trigger-token";
+      process.env.TAVILY_API_KEY = "tavily-provider-secret";
+      delete process.env.GEMINI_API_KEY;
+      process.env.GEMINI_BATCH_PRICING_VERSION = GEMINI_BATCH_PRICING_VERSION;
+      process.env.GEMINI_BATCH_CAPABILITY_VERSION = GEMINI_BATCH_CAPABILITY_VERSION;
+      try {
+        const response = await handleRequest(
+          request({
+            Authorization: "Bearer test-trigger-token",
+            "Content-Type": "application/json",
+          }, "{\"pass\":\"initial\",\"game\":\"cyberpunk-2077\"}"),
+          "127.0.0.1",
+        );
+        const body = await response.json() as {
+          runId: number;
+          processing?: Record<string, unknown>;
+        };
+        expect(response.status).toBe(200);
+        expect(body.processing).toEqual({
+          runId: body.runId,
+          status: "waiting",
+          submitted: 0,
+          completed: 0,
+          reused: 0,
+          chargedMicrousd: 0,
+          outstandingReservedMicrousd: 0,
+          stopReasons: ["missing_gemini_batch_transport"],
+        });
+        expect(discoveryCalls.length).toBeGreaterThan(0);
+        expect(discoveryCalls.every((url) => url.startsWith("https://api.tavily.com/"))).toBe(true);
+        expect(discoveryCalls.some((url) => url.includes("generativelanguage.googleapis.com"))).toBe(false);
+        const serialized = JSON.stringify(body);
+        expect(serialized).not.toContain("test-trigger-token");
+        expect(serialized).not.toContain("tavily-provider-secret");
+      } finally {
+        if (previousToken === undefined) delete process.env.MEDIA_TRIGGER_TOKEN;
+        else process.env.MEDIA_TRIGGER_TOKEN = previousToken;
+        if (previousTavilyKey === undefined) delete process.env.TAVILY_API_KEY;
+        else process.env.TAVILY_API_KEY = previousTavilyKey;
+        if (previousGeminiKey === undefined) delete process.env.GEMINI_API_KEY;
+        else process.env.GEMINI_API_KEY = previousGeminiKey;
+        if (previousPricingVersion === undefined) delete process.env.GEMINI_BATCH_PRICING_VERSION;
+        else process.env.GEMINI_BATCH_PRICING_VERSION = previousPricingVersion;
+        if (previousCapabilityVersion === undefined) delete process.env.GEMINI_BATCH_CAPABILITY_VERSION;
+        else process.env.GEMINI_BATCH_CAPABILITY_VERSION = previousCapabilityVersion;
+      }
+    });
+  });
+
+  it("refuses paid processing without a confirmed capability and sanitizes provider state", async () => {
+    await withIsolatedTriggerDb(async (discoveryCalls) => {
+      const previousToken = process.env.MEDIA_TRIGGER_TOKEN;
+      const previousTavilyKey = process.env.TAVILY_API_KEY;
+      const previousGeminiKey = process.env.GEMINI_API_KEY;
+      const previousPricingVersion = process.env.GEMINI_BATCH_PRICING_VERSION;
+      const previousCapabilityVersion = process.env.GEMINI_BATCH_CAPABILITY_VERSION;
+      process.env.MEDIA_TRIGGER_TOKEN = "test-trigger-token";
+      process.env.TAVILY_API_KEY = "tavily-provider-secret";
+      process.env.GEMINI_API_KEY = "gemini-provider-secret";
+      process.env.GEMINI_BATCH_PRICING_VERSION = GEMINI_BATCH_PRICING_VERSION;
+      delete process.env.GEMINI_BATCH_CAPABILITY_VERSION;
+      try {
+        const response = await handleRequest(
+          request({
+            Authorization: "Bearer test-trigger-token",
+            "Content-Type": "application/json",
+          }, "{\"pass\":\"initial\",\"game\":\"cyberpunk-2077\"}"),
+          "127.0.0.1",
+        );
+        const body = await response.json() as {
+          runId: number;
+          processing?: Record<string, unknown>;
+        };
+        expect(response.status).toBe(200);
+        expect(body.processing).toMatchObject({
+          status: "waiting",
+          submitted: 0,
+          stopReasons: ["capability_unconfirmed"],
+        });
+        const db = await getDb();
+        const jobs = await db
+          .prepare("SELECT COUNT(*) AS count FROM media_processing_jobs WHERE run_id = ?")
+          .bind(body.runId)
+          .first<{ count: number }>();
+        expect(jobs?.count).toBe(0);
+        expect(discoveryCalls.length).toBeGreaterThan(0);
+        expect(discoveryCalls.every((url) => url.startsWith("https://api.tavily.com/"))).toBe(true);
+        expect(discoveryCalls.some((url) => url.includes("generativelanguage.googleapis.com"))).toBe(false);
+        const serialized = JSON.stringify(body);
+        expect(serialized).not.toContain("gemini-provider-secret");
+        expect(serialized).not.toContain("tavily-provider-secret");
+        expect(serialized).not.toContain("test-trigger-token");
+      } finally {
+        if (previousToken === undefined) delete process.env.MEDIA_TRIGGER_TOKEN;
+        else process.env.MEDIA_TRIGGER_TOKEN = previousToken;
+        if (previousTavilyKey === undefined) delete process.env.TAVILY_API_KEY;
+        else process.env.TAVILY_API_KEY = previousTavilyKey;
+        if (previousGeminiKey === undefined) delete process.env.GEMINI_API_KEY;
+        else process.env.GEMINI_API_KEY = previousGeminiKey;
+        if (previousPricingVersion === undefined) delete process.env.GEMINI_BATCH_PRICING_VERSION;
+        else process.env.GEMINI_BATCH_PRICING_VERSION = previousPricingVersion;
+        if (previousCapabilityVersion === undefined) delete process.env.GEMINI_BATCH_CAPABILITY_VERSION;
+        else process.env.GEMINI_BATCH_CAPABILITY_VERSION = previousCapabilityVersion;
+      }
+    });
   });
 
   it("does not expose endpoint exceptions in the response body", async () => {

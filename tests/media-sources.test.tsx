@@ -9,6 +9,7 @@ import { getMediaSources, type MediaSource } from "../src/lib/media-discovery";
 import { handleGameDetailRequest } from "../src/routes/api.games.$appid.detail";
 import { handleGameHttpRequest } from "../src/routes/games.$game";
 import { MediaSources } from "../src/components/media-sources";
+import { MediaOverviewSection } from "../src/components/media-overview";
 
 function createSqliteAppAdapter(native: Database): AppDatabase {
   return {
@@ -138,6 +139,65 @@ describe("game media sources", () => {
       expect(await ssrResponse.text()).toContain("Cyberpunk 2077 Review");
     } finally {
       native.close(true);
+    }
+  });
+
+  test("serves and renders a persisted cited Overview when publication is enabled", async () => {
+    const previous = process.env.MEDIA_OVERVIEW_PUBLIC;
+    process.env.MEDIA_OVERVIEW_PUBLIC = "true";
+    const { db, native } = createFixture();
+    try {
+      await seedGame(db, native);
+      native.prepare(
+        "INSERT INTO media_game_overviews (appid, input_identity, model, config_version, output_json) VALUES (?, ?, ?, ?, ?)",
+      ).run(
+        source.appid,
+        "overview-input",
+        "gemini-3.1-flash-lite",
+        "media-synthesis-v1",
+        JSON.stringify({
+          appid: source.appid,
+          statements: [{
+            text: "Night City supports several approaches to its missions.",
+            sourceUrls: [source.originalUrl],
+          }],
+        }),
+      );
+
+      const response = await handleGameDetailRequest(
+        new Request("https://vaporstats.test/api/games/1091500/detail"),
+        db,
+        1091500,
+      );
+      const body = await response.json() as {
+        data: { mediaOverview: { statements: Array<{ text: string; sourceUrls: string[] }> } };
+      };
+      expect(body.data.mediaOverview.statements[0]).toEqual({
+        text: "Night City supports several approaches to its missions.",
+        sourceUrls: [source.originalUrl],
+      });
+
+      const overviewHtml = renderToString(React.createElement(MediaOverviewSection, {
+        overview: { appid: source.appid, statements: body.data.mediaOverview.statements },
+        sources: [source],
+      }));
+      expect(overviewHtml).toContain("Overview");
+      expect(overviewHtml).toContain("Night City supports several approaches");
+      expect(overviewHtml).toContain('href="#media-source-1"');
+      expect(overviewHtml).toContain('title="IGN: Cyberpunk 2077 Review"');
+      expect(overviewHtml).toContain('aria-label="Source 1: Cyberpunk 2077 Review on IGN"');
+
+      const ssrResponse = await handleGameHttpRequest(
+        new Request("https://vaporstats.test/games/1091500-cyberpunk-2077"),
+        db,
+      );
+      const ssrHtml = await ssrResponse.text();
+      expect(ssrHtml).toContain("Night City supports several approaches");
+      expect(ssrHtml).toContain('id=\"media-source-1\"');
+    } finally {
+      native.close(true);
+      if (previous === undefined) delete process.env.MEDIA_OVERVIEW_PUBLIC;
+      else process.env.MEDIA_OVERVIEW_PUBLIC = previous;
     }
   });
 

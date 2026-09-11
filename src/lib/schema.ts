@@ -849,6 +849,10 @@ export const mediaSources = sqliteTable(
     affiliation: text("affiliation"),
     platform: text("platform"),
     buildContext: text("build_context"),
+    normalizedContentHash: text("normalized_content_hash"),
+    cleanupVersion: text("cleanup_version"),
+    processingContent: text("processing_content"),
+    processingInputIdentity: text("processing_input_identity"),
   },
   (table) => [
     uniqueIndex("uq_media_sources_game_url").on(table.appid, table.originalUrl),
@@ -860,5 +864,120 @@ export const mediaSources = sqliteTable(
     ),
     check("media_sources_type_check", sql`${table.type} IN ('review', 'preview')`),
     check("media_sources_hands_on_check", sql`${table.handsOn} IN (0, 1)`),
+  ],
+);
+
+export const mediaProcessingAuthorizations = sqliteTable(
+  "media_processing_authorizations",
+  {
+    runId: integer("run_id")
+      .primaryKey()
+      .references(() => mediaDiscoveryRuns.id, { onDelete: "cascade" }),
+    status: text("status").notNull().default("queued"),
+    billingConfirmation: text("billing_confirmation"),
+    stopReason: text("stop_reason"),
+    authorizedAt: text("authorized_at").notNull().default(currentTimestamp),
+    updatedAt: text("updated_at").notNull().default(currentTimestamp),
+  },
+  (table) => [
+    check(
+      "media_processing_authorizations_status_check",
+      sql`${table.status} IN ('queued', 'waiting', 'completed', 'stopped')`,
+    ),
+  ],
+);
+
+export const mediaProcessingJobs = sqliteTable(
+  "media_processing_jobs",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    runId: integer("run_id")
+      .notNull()
+      .references(() => mediaDiscoveryRuns.id, { onDelete: "no action" }),
+    stage: text("stage").notNull(),
+    appid: integer("appid")
+      .notNull()
+      .references(() => apps.appid, { onDelete: "no action" }),
+    sourceId: integer("source_id").references(() => mediaSources.id, { onDelete: "no action" }),
+    requestKey: text("request_key").notNull(),
+    inputIdentity: text("input_identity").notNull(),
+    model: text("model").notNull(),
+    configVersion: text("config_version").notNull(),
+    maxInputTokens: integer("max_input_tokens").notNull(),
+    maxOutputTokens: integer("max_output_tokens").notNull(),
+    reservedMicrousd: integer("reserved_microusd").notNull(),
+    chargedMicrousd: integer("charged_microusd"),
+    reservationActive: integer("reservation_active").notNull().default(1),
+    status: text("status").notNull().default("reserved"),
+    providerBatchId: text("provider_batch_id"),
+    outputJson: text("output_json"),
+    usageJson: text("usage_json").notNull().default("{}"),
+    error: text("error"),
+    submittedAt: text("submitted_at"),
+    completedAt: text("completed_at"),
+    createdAt: text("created_at").notNull().default(currentTimestamp),
+  },
+  (table) => [
+    uniqueIndex("uq_media_processing_jobs_request").on(table.requestKey),
+    uniqueIndex("uq_media_processing_jobs_provider_batch").on(table.providerBatchId),
+    index("idx_media_processing_jobs_authorization").on(table.runId, table.status),
+    check("media_processing_jobs_stage_check", sql`${table.stage} IN ('extraction', 'synthesis')`),
+    check(
+      "media_processing_jobs_status_check",
+      sql`${table.status} IN ('reserved', 'submitted', 'succeeded', 'failed', 'uncertain', 'stale')`,
+    ),
+    check("media_processing_jobs_reservation_check", sql`${table.reservationActive} IN (0, 1)`),
+    check(
+      "media_processing_jobs_token_check",
+      sql`${table.maxInputTokens} >= 0 AND ${table.maxOutputTokens} > 0`,
+    ),
+    check(
+      "media_processing_jobs_charge_check",
+      sql`${table.reservedMicrousd} >= 0 AND (${table.chargedMicrousd} IS NULL OR ${table.chargedMicrousd} >= 0)`,
+    ),
+  ],
+);
+
+export const mediaArticleExtractions = sqliteTable(
+  "media_article_extractions",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    sourceId: integer("source_id")
+      .notNull()
+      .references(() => mediaSources.id, { onDelete: "cascade" }),
+    inputIdentity: text("input_identity").notNull(),
+    contentHash: text("content_hash").notNull(),
+    cleanupVersion: text("cleanup_version").notNull(),
+    model: text("model").notNull(),
+    configVersion: text("config_version").notNull(),
+    outputJson: text("output_json").notNull(),
+    active: integer("active").notNull().default(1),
+    createdAt: text("created_at").notNull().default(currentTimestamp),
+  },
+  (table) => [
+    uniqueIndex("uq_media_article_extractions_input").on(table.sourceId, table.inputIdentity),
+    index("idx_media_article_extractions_active").on(table.sourceId, table.active),
+    check("media_article_extractions_active_check", sql`${table.active} IN (0, 1)`),
+  ],
+);
+
+export const mediaGameOverviews = sqliteTable(
+  "media_game_overviews",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    appid: integer("appid")
+      .notNull()
+      .references(() => apps.appid, { onDelete: "cascade" }),
+    inputIdentity: text("input_identity").notNull(),
+    model: text("model").notNull(),
+    configVersion: text("config_version").notNull(),
+    outputJson: text("output_json").notNull(),
+    active: integer("active").notNull().default(1),
+    createdAt: text("created_at").notNull().default(currentTimestamp),
+  },
+  (table) => [
+    uniqueIndex("uq_media_game_overviews_input").on(table.inputIdentity),
+    index("idx_media_game_overviews_active").on(table.appid, table.active),
+    check("media_game_overviews_active_check", sql`${table.active} IN (0, 1)`),
   ],
 );

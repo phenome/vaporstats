@@ -31,6 +31,10 @@ import {
   type MediaRunSummary,
 } from "../src/lib/media-discovery";
 import {
+  advanceMediaProcessing,
+  type MediaProcessingSummary,
+} from "../src/lib/media-processing";
+import {
   compactReviewEvidence,
   type CompactReviewEvidenceResult,
 } from "../src/lib/reception-store";
@@ -46,6 +50,9 @@ export interface IngestionTickOptions {
   anchorTime?: Date;
   customFetch?: typeof fetch;
   tavilyApiKey?: string;
+  geminiApiKey?: string;
+  geminiPricingVersion?: string;
+  geminiCapabilityVersion?: string;
 }
 
 export interface IngestionTickResult {
@@ -61,6 +68,7 @@ export interface IngestionTickResult {
   prices?: HourlyPriceFeedTickResult;
   tagDictionary?: SteamTagDictionaryRefreshResult;
   mediaDiscovery?: MediaRunSummary;
+  mediaProcessing?: MediaProcessingSummary;
   reviewCompaction?: CompactReviewEvidenceResult;
   catalogRefresh?: {
     active: boolean;
@@ -164,6 +172,16 @@ function logCompletion(result: IngestionTickResult): void {
       articles: result.mediaDiscovery.articles,
       stopReasons: result.mediaDiscovery.stopReasons,
     },
+    mediaProcessing: result.mediaProcessing && {
+      runId: result.mediaProcessing.runId,
+      status: result.mediaProcessing.status,
+      submitted: result.mediaProcessing.submitted,
+      completed: result.mediaProcessing.completed,
+      reused: result.mediaProcessing.reused,
+      chargedMicrousd: result.mediaProcessing.chargedMicrousd,
+      outstandingReservedMicrousd: result.mediaProcessing.outstandingReservedMicrousd,
+      stopReasons: result.mediaProcessing.stopReasons,
+    },
     reviewCompaction: result.reviewCompaction && {
       monthsCompacted: result.reviewCompaction.monthsCompacted,
       dailyBucketsDeleted: result.reviewCompaction.dailyBucketsDeleted,
@@ -190,6 +208,21 @@ async function performIngestionTick(options: IngestionTickOptions): Promise<Inge
       runId: pendingMediaRun.id,
       tavilyApiKey: options.tavilyApiKey ?? process.env.TAVILY_API_KEY,
       fetch: customFetch,
+      now: anchorTime,
+    });
+  }
+  let mediaProcessing: MediaProcessingSummary | undefined;
+  const pendingMediaProcessing = await options.db
+    .prepare("SELECT run_id FROM media_processing_authorizations WHERE status IN ('queued', 'waiting') ORDER BY authorized_at LIMIT 1")
+    .first<{ run_id: number }>();
+  if (pendingMediaProcessing) {
+    mediaProcessing = await advanceMediaProcessing(options.db, {
+      runId: pendingMediaProcessing.run_id,
+      geminiApiKey: options.geminiApiKey ?? process.env.GEMINI_API_KEY,
+      pricingVersion: options.geminiPricingVersion ?? process.env.GEMINI_BATCH_PRICING_VERSION,
+      capabilityVersion: options.geminiCapabilityVersion ?? process.env.GEMINI_BATCH_CAPABILITY_VERSION,
+      articleFetch: customFetch,
+      providerFetch: customFetch,
       now: anchorTime,
     });
   }
@@ -250,6 +283,7 @@ async function performIngestionTick(options: IngestionTickOptions): Promise<Inge
     prices,
     tagDictionary,
     mediaDiscovery,
+    mediaProcessing,
     reviewCompaction,
     catalogRefresh,
   };
