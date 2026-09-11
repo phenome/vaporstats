@@ -65,6 +65,7 @@ jobs:
           esac
           remote_command="media $remote_pass $remote_game"
           set +e
+          stderr_file=$(mktemp)
           response=$(ssh -i "$HOME/.ssh/vaporstats_deploy" \
             -o BatchMode=yes \
             -o IdentitiesOnly=yes \
@@ -72,9 +73,19 @@ jobs:
             -o UserKnownHostsFile="$HOME/.ssh/known_hosts" \
             -o GlobalKnownHostsFile=/dev/null \
             "vaporstats-deploy@$TARGET_HOST" \
-            "$remote_command" 2>/dev/null)
+            "$remote_command" 2>"$stderr_file")
           status=$?
+          diagnostic=$(<"$stderr_file")
+          rm -f "$stderr_file"
           set -e
+          if [[ -n "$diagnostic" ]]; then
+            diagnostic=${diagnostic//$'\r'/ }
+            diagnostic=${diagnostic//$'\n'/ }
+            diagnostic=${diagnostic//"$TARGET_HOST"/'[redacted host]'}
+            printf 'remote media discovery diagnostic: %s\n' "${diagnostic:0:8192}" >&2
+          elif (( status != 0 )); then
+            printf 'remote media discovery failed with SSH status %d\n' "$status" >&2
+          fi
           if (( ${#response} > 8192 )); then
             printf '%s' "${response:0:8192}" >> "$GITHUB_STEP_SUMMARY"
           else

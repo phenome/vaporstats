@@ -19,8 +19,13 @@ try {
   const body = await response.text();
   process.stdout.write(body.slice(0, 8192));
   if (!response.ok) process.exitCode = 1;
-} catch {
-  console.error("media discovery request failed");
+} catch (error) {
+  const message = (error instanceof Error ? error.message : String(error))
+    .replace(/Bearer\s+\S+/gi, "Bearer [redacted]")
+    .replace(/https?:\/\/[^\s/]+/gi, "[redacted endpoint]")
+    .replace(/[\r\n]+/g, " ")
+    .slice(0, 256);
+  console.error(`media discovery request failed: ${message}`);
   process.exit(1);
 }'
 
@@ -48,4 +53,4 @@ case "$original_command" in
     ;;
 esac
 
-exec docker exec vaporstats bun -e "$MEDIA_DISCOVERY_SCRIPT" "$media_game" 2>/dev/null
+exec docker exec vaporstats bun -e "$MEDIA_DISCOVERY_SCRIPT" "$media_game"

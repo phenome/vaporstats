@@ -1,4 +1,5 @@
 import { realpath, stat } from "node:fs/promises";
+import { isIP } from "node:net";
 import { createHash, timingSafeEqual } from "node:crypto";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import serverEntry from "@tanstack/react-start/server-entry";
@@ -196,14 +197,16 @@ async function serveStaticAsset(url: URL): Promise<Response | null> {
 }
 const INTERNAL_MEDIA_PATH = "/internal/media-discovery";
 
-function loopbackHost(request: Request, url: URL): boolean {
-  const raw = (request.headers.get("host") ?? url.hostname).trim().toLowerCase();
-  const value = raw.startsWith("[")
-    ? raw.slice(1).replace(/\](?::\d+)?$/, "")
-    : raw === "::1"
-      ? raw
-      : raw.replace(/:\d+$/, "");
-  return value === "localhost" || value === "127.0.0.1" || value === "::1";
+function loopbackPeer(address: string | undefined): boolean {
+  if (!address) return false;
+  const normalized = address.trim().toLowerCase();
+  if (isIP(normalized) === 4) return normalized.startsWith("127.");
+  if (normalized === "::1") return true;
+  if (normalized.startsWith("::ffff:")) {
+    const mapped = normalized.slice("::ffff:".length);
+    return isIP(mapped) === 4 && mapped.startsWith("127.");
+  }
+  return false;
 }
 
 function sameSecret(expected: string, provided: string): boolean {
@@ -222,8 +225,8 @@ function internalMediaResponse(status: number, body: Record<string, unknown>): R
   });
 }
 
-async function handleInternalMediaRequest(request: Request, url: URL): Promise<Response> {
-  if (!loopbackHost(request, url)) return internalMediaResponse(404, { error: "Not Found" });
+async function handleInternalMediaRequest(request: Request, peerAddress?: string): Promise<Response> {
+  if (!loopbackPeer(peerAddress)) return internalMediaResponse(404, { error: "Not Found" });
   if (request.method !== "POST") return internalMediaResponse(405, { error: "Method Not Allowed" });
   const configuredToken = process.env.MEDIA_TRIGGER_TOKEN;
   const authorization = request.headers.get("authorization") ?? "";
@@ -264,18 +267,14 @@ async function handleInternalMediaRequest(request: Request, url: URL): Promise<R
       tavilyApiKey: process.env.TAVILY_API_KEY,
     });
     return internalMediaResponse(200, result as unknown as Record<string, unknown>);
-  } catch (error) {
-    return internalMediaResponse(500, { error: boundedInternalError(error) });
+  } catch {
+    return internalMediaResponse(500, { error: "Media discovery failed" });
   }
 }
 
-function boundedInternalError(error: unknown): string {
-  return (error instanceof Error ? error.message : String(error)).replace(/[\r\n]+/g, " ").slice(0, 256);
-}
-
-export async function handleRequest(request: Request): Promise<Response> {
+export async function handleRequest(request: Request, peerAddress?: string): Promise<Response> {
   const url = new URL(request.url);
-  if (url.pathname === INTERNAL_MEDIA_PATH) return handleInternalMediaRequest(request, url);
+  if (url.pathname === INTERNAL_MEDIA_PATH) return handleInternalMediaRequest(request, peerAddress);
 
   if (url.hostname === "www.vaporstats.com") {
     url.protocol = "https:";
@@ -327,7 +326,7 @@ export function startServer(options: StartServerOptions = {}) {
     return Bun.serve({
       hostname: options.hostname ?? process.env.HOST ?? "0.0.0.0",
       port: options.port ?? getPort(),
-      fetch: handleRequest,
+      fetch: (request, server) => handleRequest(request, server.requestIP(request)?.address),
     });
   })();
   return serverPromise;

@@ -100,6 +100,7 @@ function discoveryFetch(options: { variants?: Record<string, { status?: number; 
     }
     const variant = options.variants?.[url];
     if (variant?.redirect) return new Response(null, { status: variant.status ?? 302, headers: { location: variant.redirect } });
+    if (variant?.body) return new Response(variant.body, { status: variant.status ?? 200 });
     const appid = url.includes("1086940") ? 1086940 : url.includes("1145350") ? 1145350 : 1091500;
     const outlet = MEDIA_OUTLETS.find((item) => url.includes(item.domain));
     return new Response(html(appid, `${NAMES[appid]} Review${outlet ? ` - ${outlet.name}` : ""}`));
@@ -192,6 +193,49 @@ describe("bounded media discovery", () => {
     cleanup();
   });
 
+  test("rejects review-drama, score-news, co-titled, and substantive comparisons while keeping incidental comparisons", async () => {
+    const { db, cleanup } = fixture();
+    const longComparison = `${"Cyberpunk 2077 is a focused role-playing game with a substantial playable campaign. ".repeat(12)} This is a direct comparison with Zelda throughout.`;
+    const incidentalComparisons = `Compared to Zelda, Cyberpunk 2077 has a denser city and more flexible builds. Better than many alternatives, its combat, quests, and exploration remain a substantial review subject. Higher than expected enemy variety keeps the campaign engaging.`;
+    const { fetchFn } = discoveryFetch({
+      variants: {
+        "https://ign.com/articles/1091500-ign-com": { body: html(1091500, "The Cyberpunk 2077 Review Drama") },
+        "https://eurogamer.net/articles/1091500-eurogamer-net": { body: html(1091500, "Cyberpunk 2077 Review", { body: longComparison }) },
+        "https://gamespot.com/articles/1091500-gamespot-com": { body: html(1091500, "Cyberpunk 2077 Review", { body: incidentalComparisons }) },
+        "https://gamesradar.com/articles/1091500-gamesradar-com": { body: html(1091500, "Cyberpunk 2077 Gets a 10/10 Review Score") },
+        "https://kotaku.com/articles/1091500-kotaku-com": { body: html(1091500, "Cyberpunk 2077 and The Witcher 3 Reviews") },
+        "https://ign.com/articles/1086940-ign-com": { body: html(1086940, "Baldur’s Gate 3 Surpasses Zelda With the Highest Metacritic Review Score") },
+      },
+    });
+    const authorization = await authorizeMediaRun(db, { pass: "initial", games: [1091500, 1086940] });
+    await runAuthorizedMediaDiscovery(db, { runId: authorization.runId, tavilyApiKey: "test-key", fetch: fetchFn, now: new Date("2026-09-10T00:00:00.000Z") });
+    const cyberpunkSources = await getMediaSources(db, 1091500);
+    const baldursSources = await getMediaSources(db, 1086940);
+    expect(cyberpunkSources.some((source) => source.outlet === "IGN" || source.outlet === "Eurogamer")).toBe(false);
+    expect(cyberpunkSources.some((source) => source.outlet === "GameSpot")).toBe(true);
+    expect(cyberpunkSources.some((source) => source.outlet === "GamesRadar+")).toBe(false);
+    expect(cyberpunkSources.some((source) => source.outlet === "Kotaku")).toBe(false);
+    expect(baldursSources.some((source) => source.outlet === "IGN")).toBe(false);
+    cleanup();
+  });
+
+  test("persists Early Access context without retaining article text", async () => {
+    const { db, cleanup } = fixture();
+    const { fetchFn } = discoveryFetch({
+      variants: {
+        "https://ign.com/articles/1091500-ign-com": {
+          body: html(1091500, "Cyberpunk 2077 Review", { body: `This Early Access review covers the playable build and its systems. ${"Detailed hands-on observations follow. ".repeat(8)}` }),
+        },
+      },
+    });
+    const authorization = await authorizeMediaRun(db, { pass: "initial", games: [1091500] });
+    await runAuthorizedMediaDiscovery(db, { runId: authorization.runId, tavilyApiKey: "test-key", fetch: fetchFn, now: new Date("2026-09-10T00:00:00.000Z") });
+    const source = (await getMediaSources(db, 1091500)).find((item) => item.outlet === "IGN");
+    expect(source).toEqual(expect.objectContaining({ buildContext: "Early Access" }));
+    expect(source).not.toHaveProperty("body");
+    cleanup();
+  });
+
   test("enforces the daily cap and resumes persisted progress after restart", async () => {
     const { native, databasePath, directory, db } = fixture();
     let restartedNative: Database | undefined;
@@ -251,6 +295,73 @@ describe("bounded media discovery", () => {
     expect(summary?.summary).not.toContain("Cyberpunk 2077 Review");
     cleanup();
   });
+
+  test("atomically records unexpected failure and reopens progress without repeating a search", async () => {
+    const { native, databasePath, directory, db } = fixture();
+    let restartedNative: Database | undefined;
+    let throwArticleBody = true;
+    const searchCalls: string[] = [];
+    const fetchFn = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const url = String(input);
+      if (url.endsWith("/usage")) return Response.json({ account: { current_plan: "free" }, plan_usage: 1, plan_limit: 100, paygo_usage: 0, paygo_limit: 0 });
+      if (url.endsWith("/search")) {
+        searchCalls.push(String(init?.body));
+        const payload = JSON.parse(String(init?.body)) as { include_domains: string[] };
+        const domain = payload.include_domains[0]!;
+        return Response.json({ request_id: `search-${domain}`, usage: { credits_used: 1 }, results: [{ url: `https://${domain}/articles/1091500-${domain.replaceAll(".", "-")}` }] });
+      }
+      if (throwArticleBody) {
+        throwArticleBody = false;
+        const body = new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.error(new Error("unexpected article failure test-key"));
+          },
+        });
+        return new Response(body);
+      }
+      return new Response(html(1091500, "Cyberpunk 2077 Review"));
+    };
+    const authorization = await authorizeMediaRun(db, { pass: "initial", games: [1091500] });
+    const failed = await runAuthorizedMediaDiscovery(db, { runId: authorization.runId, tavilyApiKey: "test-key", fetch: fetchFn, now: new Date("2026-09-10T00:00:00.000Z") });
+    expect(failed.status).toBe("failed");
+    const failedRow = await db.prepare("SELECT status, finished_at, summary FROM media_discovery_runs WHERE id = ?").bind(authorization.runId).first<{ status: string; finished_at: string | null; summary: string }>();
+    const failedSummary = JSON.parse(failedRow?.summary ?? "{}") as Record<string, unknown>;
+    expect(failedRow).toEqual(expect.objectContaining({ status: "failed" }));
+    expect(failedRow?.finished_at).toBeTruthy();
+    expect(failedSummary).toEqual(expect.objectContaining({ runId: authorization.runId, status: "failed", stopReason: expect.stringContaining("execution_error") }));
+    expect(JSON.stringify(failedSummary)).not.toContain("test-key");
+
+    native.close(true);
+    restartedNative = new Database(databasePath);
+    restartedNative.exec("PRAGMA foreign_keys = ON");
+    const restartedDb = createAdapter(restartedNative);
+    const resumedAuthorization = await authorizeMediaRun(restartedDb, { pass: "initial", games: [1091500] });
+    expect(resumedAuthorization.resumed).toBe(true);
+    const recovered = await runAuthorizedMediaDiscovery(restartedDb, { runId: resumedAuthorization.runId, tavilyApiKey: "test-key", fetch: fetchFn, now: new Date("2026-09-11T00:00:00.000Z") });
+    expect(recovered.status).toBe("completed");
+    expect(searchCalls).toHaveLength(6);
+    expect(searchCalls.filter((body) => body.includes("\"ign.com\""))).toHaveLength(1);
+    try { native.close(true); } catch { /* already closed for the restart */ }
+    restartedNative.close(true);
+    rmSync(directory, { recursive: true, force: true });
+  });
+
+  test("reports a shortfall when fewer than three outlets produce accepted sources", async () => {
+    const { db, cleanup } = fixture();
+    const { fetchFn: baseFetch } = discoveryFetch();
+    const fetchFn = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      if (String(input).endsWith("/search") && !String(init?.body).includes("\"ign.com\"")) return Response.json({ results: [] });
+      return baseFetch(input, init);
+    };
+    const authorization = await authorizeMediaRun(db, { pass: "initial", games: [1091500] });
+    const result = await runAuthorizedMediaDiscovery(db, { runId: authorization.runId, tavilyApiKey: "test-key", fetch: fetchFn, now: new Date("2026-09-10T00:00:00.000Z") });
+    const expected: NonNullable<typeof result.summary.outletShortfall> = { required: 3, actual: 1, missing: ["Eurogamer", "GameSpot", "PC Gamer", "Kotaku", "GamesRadar+"] };
+    expect(result.summary.outletShortfall).toEqual(expected);
+    const durable = await db.prepare("SELECT summary FROM media_discovery_runs WHERE id = ?").bind(authorization.runId).first<{ summary: string }>();
+    const durableSummary = JSON.parse(durable?.summary ?? "{}") as Record<string, unknown>;
+    expect(durableSummary.outletShortfall).toEqual(expected);
+    cleanup();
+  });
   test("serializes independently authorized runs", async () => {
     const { db, cleanup } = fixture();
     let activeFetches = 0;
@@ -303,12 +414,12 @@ describe("bounded media discovery", () => {
     process.env.MEDIA_TRIGGER_TOKEN = "test-trigger-token";
     const request = (url: string, headers: Record<string, string>, body = "{\"pass\":\"initial\",\"game\":\"cyberpunk-2077\"}") => new Request(url, { method: "POST", headers, body });
     try {
-      expect((await handleRequest(request("https://public.example/internal/media-discovery", { Authorization: "Bearer test-trigger-token", "Content-Type": "application/json", Host: "public.example" }))).status).toBe(404);
-      expect((await handleRequest(request("http://127.0.0.1/internal/media-discovery", { "Content-Type": "application/json", Host: "127.0.0.1" }))).status).toBe(401);
-      expect((await handleRequest(request("http://127.0.0.1/internal/media-discovery", { Authorization: "Bearer wrong", "Content-Type": "application/json", Host: "127.0.0.1" }))).status).toBe(401);
-      expect((await handleRequest(request("http://127.0.0.1/internal/media-discovery", { Authorization: "Bearer test-trigger-token", "Content-Type": "text/plain", Host: "127.0.0.1" }))).status).toBe(415);
-      expect((await handleRequest(request("http://127.0.0.1/internal/media-discovery", { Authorization: "Bearer test-trigger-token", "Content-Type": "application/json", "Content-Length": "4097", Host: "127.0.0.1" }, "x".repeat(4097)))).status).toBe(413);
-      expect((await handleRequest(request("http://127.0.0.1/internal/media-discovery", { Authorization: "Bearer test-trigger-token", "Content-Type": "application/json", Host: "127.0.0.1" }, "{\"pass\":\"later\",\"game\":\"unknown\"}"))).status).toBe(400);
+      expect((await handleRequest(request("https://public.example/internal/media-discovery", { Authorization: "Bearer test-trigger-token", "Content-Type": "application/json", Host: "public.example" }), "203.0.113.7")).status).toBe(404);
+      expect((await handleRequest(request("http://127.0.0.1/internal/media-discovery", { "Content-Type": "application/json", Host: "127.0.0.1" }), "127.0.0.1")).status).toBe(401);
+      expect((await handleRequest(request("http://127.0.0.1/internal/media-discovery", { Authorization: "Bearer wrong", "Content-Type": "application/json", Host: "127.0.0.1" }), "127.0.0.1")).status).toBe(401);
+      expect((await handleRequest(request("http://127.0.0.1/internal/media-discovery", { Authorization: "Bearer test-trigger-token", "Content-Type": "text/plain", Host: "127.0.0.1" }), "127.0.0.1")).status).toBe(415);
+      expect((await handleRequest(request("http://127.0.0.1/internal/media-discovery", { Authorization: "Bearer test-trigger-token", "Content-Type": "application/json", "Content-Length": "4097", Host: "127.0.0.1" }, "x".repeat(4097)), "127.0.0.1")).status).toBe(413);
+      expect((await handleRequest(request("http://127.0.0.1/internal/media-discovery", { Authorization: "Bearer test-trigger-token", "Content-Type": "application/json", Host: "127.0.0.1" }, "{\"pass\":\"later\",\"game\":\"unknown\"}"), "127.0.0.1")).status).toBe(400);
     } finally {
       if (previousToken === undefined) delete process.env.MEDIA_TRIGGER_TOKEN;
       else process.env.MEDIA_TRIGGER_TOKEN = previousToken;
