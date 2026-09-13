@@ -90,6 +90,9 @@ jobs:
           elif (( status != 0 )); then
             printf 'remote media discovery failed with SSH status %d\n' "$status" >&2
           fi
+          if [[ "$remote_pass" == status ]]; then
+            printf 'media processing status: %s\n' "${response:0:8192}"
+          fi
           if (( ${#response} > 8192 )); then
             printf '%s' "${response:0:8192}" >> "$GITHUB_STEP_SUMMARY"
           else
