@@ -16,7 +16,7 @@ import {
   type GeminiBatchPoll,
   type GeminiBatchTransport,
 } from "../src/lib/media-processing";
-import { getMediaOverview, parseMediaOverview } from "../src/lib/media-overview";
+import { getMediaOverview, normalizeMediaTag, parseMediaOverview } from "../src/lib/media-overview";
 import { handleGameDetailRequest } from "../src/routes/api.games.$appid.detail";
 
 function adapter(native: Database): AppDatabase {
@@ -132,7 +132,22 @@ function extractionOutputWithUnsupportedCategories(): Record<string, unknown> {
 }
 
 function overviewOutput(url: string): Record<string, unknown> {
-  return { statements: [{ text: "The game presents a focused campaign with flexible combat, with the preview's Early Access and PC qualification retained.", sourceUrls: [url] }] };
+  return {
+    statements: [{ text: "The game presents a focused campaign with flexible combat, with the preview's Early Access and PC qualification retained.", sourceUrls: [url] }],
+    tags: [{ label: "Build.Experimentation", sourceUrls: [url] }],
+  };
+}
+function overviewOutputForUrls(urls: readonly string[]): Record<string, unknown> {
+  return {
+    statements: [{ text: "The game presents a focused campaign with flexible combat.", sourceUrls: [...urls] }],
+    tags: [{ label: "Build experimentation", sourceUrls: [...urls] }],
+  };
+}
+
+function overviewOutputWithoutTags(url: string): Record<string, unknown> {
+  return {
+    statements: [{ text: "The game presents a focused campaign with flexible combat.", sourceUrls: [url] }],
+  };
 }
 
 function richOverviewOutput(urls: {
@@ -186,6 +201,22 @@ async function finishSingle(fixtureValue: ReturnType<typeof fixture>, transport:
 
 const cleanups: Array<() => void> = [];
 afterEach(() => { while (cleanups.length > 0) cleanups.pop()!(); });
+  test("normalizes cited media tags independently of overview wording", () => {
+    const url = URLS[APPIDS[0]];
+    const parsed = parseMediaOverview({
+      statements: [{ text: "The game supports varied tactics.", sourceUrls: [url] }],
+      tags: [
+        { label: "  First-Person Shooter! ", sourceUrls: [url] },
+        { label: "first person shooter", sourceUrls: [url] },
+        { label: "unsupported", sourceUrls: ["https://example.test/not-current"] },
+      ],
+    }, APPIDS[0], new Map([[url, { outlet: "IGN", identities: ["current"] }]]));
+    expect(normalizeMediaTag("First.Person Shooter")).toEqual({
+      label: "First.Person Shooter",
+      slug: "first-person-shooter",
+    });
+    expect(parsed?.tags).toEqual([{ label: "First-Person Shooter", slug: "first-person-shooter" }]);
+  });
 
 
 describe("bounded Gemini media processing", () => {
@@ -225,6 +256,14 @@ describe("bounded Gemini media processing", () => {
     await authorizeMediaProcessing(value.db, value.runId);
     const summary = await finishSingle(value, transport);
     const overview = await getMediaOverview(value.db, APPIDS[0], { includeUnpublished: true });
+    expect(overview?.tags).toEqual([{ label: "Build.Experimentation", slug: "build-experimentation" }]);
+    const membership = await value.db.prepare(
+      "SELECT m.tag_label, m.tag_slug, m.source_id, m.extraction_input_identity FROM media_tag_memberships m JOIN media_article_extractions e ON e.source_id = m.source_id AND e.input_identity = m.extraction_input_identity AND e.active = 1 WHERE m.appid = ?",
+    ).bind(APPIDS[0]).first<{ tag_label: string; tag_slug: string; source_id: number; extraction_input_identity: string }>();
+    expect(membership).toMatchObject({ tag_label: "Build.Experimentation", tag_slug: "build-experimentation" });
+    expect(membership?.source_id).toBeGreaterThan(0);
+    const activeExtraction = await value.db.prepare("SELECT input_identity FROM media_article_extractions WHERE active = 1").first<{ input_identity: string }>();
+    expect(membership?.extraction_input_identity).toBe(activeExtraction?.input_identity);
     expect(overview?.appid).toBe(APPIDS[0]);
     expect(overview?.statements[0]?.sourceUrls).toContain(URLS[APPIDS[0]]);
     expect(summary.overviewAppids).toContain(APPIDS[0]);
@@ -232,10 +271,87 @@ describe("bounded Gemini media processing", () => {
     expect(charged?.charged).toBe(78);
     const source = await value.db.prepare("SELECT processing_content FROM media_sources WHERE appid = ?").bind(APPIDS[0]).first<{ processing_content: string | null }>();
     expect(source?.processing_content).toBeNull();
-    const extraction = await value.db.prepare("SELECT output_json FROM media_article_extractions LIMIT 1").first<{ output_json: string }>();
-    expect(extraction?.output_json).not.toContain("secret-not-content");
+    const persistedExtraction = await value.db.prepare("SELECT output_json FROM media_article_extractions LIMIT 1").first<{ output_json: string }>();
+    expect(persistedExtraction?.output_json).not.toContain("secret-not-content");
     const authorization = await value.db.prepare("SELECT billing_confirmation FROM media_processing_authorizations WHERE run_id = ?").bind(value.runId).first<{ billing_confirmation: string | null }>();
     expect(authorization?.billing_confirmation).toBe(GEMINI_BATCH_BILLING_CONFIRMATION);
+  });
+  test("keeps memberships scoped to each entity and preserves unaffected current support", async () => {
+    const value = fixture(APPIDS); cleanups.push(value.cleanup);
+    const secondUrl = "https://www.eurogamer.net/cyberpunk-2077-tag-review";
+    value.native.prepare("INSERT INTO media_sources (appid, pass, original_url, title, outlet, retrieved_at, type) VALUES (?, 'initial', ?, ?, 'Eurogamer', ?, 'review')").run(APPIDS[0], secondUrl, "Cyberpunk 2077 tag review", "2026-09-11T00:00:00.000Z");
+    await authorizeMediaProcessing(value.db, value.runId);
+    const transport = new ControlledTransport();
+    transport.nextPolls.push(
+      { state: "succeeded", output: extractionOutput(), usage: { inputTokens: 100, outputTokens: 20 } },
+      { state: "succeeded", output: extractionOutput(), usage: { inputTokens: 100, outputTokens: 20 } },
+      { state: "succeeded", output: extractionOutput(), usage: { inputTokens: 100, outputTokens: 20 } },
+      { state: "succeeded", output: overviewOutput(URLS[APPIDS[1]]), usage: { inputTokens: 100, outputTokens: 20 } },
+      { state: "succeeded", output: overviewOutputForUrls([URLS[APPIDS[0]], secondUrl]), usage: { inputTokens: 100, outputTokens: 20 } },
+    );
+    const first = await advanceMediaProcessing(value.db, {
+      runId: value.runId,
+      transport,
+      articleFetch: async (url) => articleHtml(url.includes("baldurs") ? APPIDS[1] : APPIDS[0]),
+      pricingVersion: GEMINI_BATCH_PRICING_VERSION,
+      capabilityVersion: GEMINI_BATCH_CAPABILITY_VERSION,
+    });
+    expect(first.submitted).toBe(5);
+    await advanceMediaProcessing(value.db, {
+      runId: value.runId,
+      transport,
+      articleFetch: async (url) => articleHtml(url.includes("baldurs") ? APPIDS[1] : APPIDS[0]),
+      pricingVersion: GEMINI_BATCH_PRICING_VERSION,
+      capabilityVersion: GEMINI_BATCH_CAPABILITY_VERSION,
+    });
+    const memberships = await value.db.prepare(
+      "SELECT appid, source_id, tag_slug FROM media_tag_memberships ORDER BY appid, source_id",
+    ).all<{ appid: number; source_id: number; tag_slug: string }>();
+    expect(memberships.results).toHaveLength(3);
+    expect(memberships.results?.map(({ appid, tag_slug }) => [appid, tag_slug])).toEqual([
+      [APPIDS[1], "build-experimentation"],
+      [APPIDS[0], "build-experimentation"],
+      [APPIDS[0], "build-experimentation"],
+    ]);
+    const firstSource = value.native.prepare("SELECT id FROM media_sources WHERE original_url = ?").get(URLS[APPIDS[0]]) as { id: number };
+    value.native.prepare("UPDATE media_article_extractions SET active = 0 WHERE source_id = ?").run(firstSource.id);
+    const current = await value.db.prepare(
+      "SELECT m.appid, m.source_id FROM media_tag_memberships m JOIN media_article_extractions e ON e.source_id = m.source_id AND e.input_identity = m.extraction_input_identity AND e.active = 1 ORDER BY m.appid, m.source_id",
+    ).all<{ appid: number; source_id: number }>();
+    expect(current.results).toHaveLength(2);
+    expect(current.results?.map(({ appid }) => appid)).toEqual([APPIDS[1], APPIDS[0]]);
+  });
+
+  test("replaces prior memberships when a current synthesis has no tags", async () => {
+    const value = fixture(); cleanups.push(value.cleanup);
+    await authorizeMediaProcessing(value.db, value.runId);
+    const transport = new ControlledTransport();
+    await finishSingle(value, transport);
+    const countBefore = await value.db.prepare("SELECT COUNT(*) AS count FROM media_tag_memberships WHERE appid = ?").bind(APPIDS[0]).first<{ count: number }>();
+    expect(countBefore?.count).toBe(1);
+    value.native.prepare("INSERT INTO media_discovery_runs (pass, identity_key, selected_games, status) VALUES ('initial', ?, ?, 'completed')").run("initial:empty-tags:test", JSON.stringify([APPIDS[0]]));
+    const nextRun = value.native.prepare("SELECT id FROM media_discovery_runs ORDER BY id DESC LIMIT 1").get() as { id: number };
+    await authorizeMediaProcessing(value.db, nextRun.id);
+    transport.nextPolls.push(
+      { state: "succeeded", output: extractionOutput(), usage: { inputTokens: 100, outputTokens: 20 } },
+      { state: "succeeded", output: overviewOutputWithoutTags(URLS[APPIDS[0]]), usage: { inputTokens: 100, outputTokens: 20 } },
+    );
+    await advanceMediaProcessing(value.db, {
+      runId: nextRun.id,
+      transport,
+      articleFetch: async () => articleHtml(APPIDS[0]).replace("flexible combat", "deliberate combat"),
+      pricingVersion: GEMINI_BATCH_PRICING_VERSION,
+      capabilityVersion: GEMINI_BATCH_CAPABILITY_VERSION,
+    });
+    await advanceMediaProcessing(value.db, {
+      runId: nextRun.id,
+      transport,
+      articleFetch: async () => articleHtml(APPIDS[0]).replace("flexible combat", "deliberate combat"),
+      pricingVersion: GEMINI_BATCH_PRICING_VERSION,
+      capabilityVersion: GEMINI_BATCH_CAPABILITY_VERSION,
+    });
+    const countAfter = await value.db.prepare("SELECT COUNT(*) AS count FROM media_tag_memberships WHERE appid = ?").bind(APPIDS[0]).first<{ count: number }>();
+    expect(countAfter?.count).toBe(0);
   });
 
   test("processes every bounded source before one multi-outlet synthesis", async () => {

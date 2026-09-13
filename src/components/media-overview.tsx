@@ -1,5 +1,6 @@
 import type { MediaFinding, MediaOverview } from "../lib/media-overview";
 import type { MediaSource } from "../lib/media-discovery";
+import { AppLink } from "./app-link";
 
 function CitationNotes({
   sourceUrls,
@@ -81,6 +82,20 @@ export function MediaOverviewSection({
       <div className="space-y-3 text-sm leading-6 text-zinc-300">
         <CitedFindings findings={overview.statements} sources={sources} sourceNumbers={sourceNumbers} />
       </div>
+      {overview.tags.length > 0 && (
+        <nav aria-label="Media tags" className="flex flex-wrap gap-2" data-media-tags>
+          {overview.tags.map((tag) => (
+            <AppLink
+              key={tag.slug}
+              href={`/games/?mediaTag=${encodeURIComponent(tag.label)}`}
+              aria-label={`Browse games tagged ${tag.label}`}
+              className="inline-flex max-w-full items-center border border-orange-700/70 bg-orange-950/30 px-2.5 py-1 font-mono text-[11px] font-semibold text-orange-300 transition-colors hover:border-orange-400 hover:bg-orange-900/50 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-orange-500"
+            >
+              {tag.label}
+            </AppLink>
+          ))}
+        </nav>
+      )}
       {overview.categories.map((category) => (
         <section key={category.name} aria-labelledby={`media-category-${category.name.replaceAll(/\W+/g, "-").toLowerCase()}`} className="space-y-2 pt-2">
           <h3

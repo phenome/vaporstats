@@ -1,5 +1,6 @@
 import type { AppDatabase } from "./db";
 import { toSlug } from "./slug";
+import { normalizeMediaTag } from "./media-overview";
 
 export type ReleaseDateSource =
   | "original_release_date"
@@ -142,21 +143,46 @@ function mapRowToEntity(row: RawAppRow): CatalogEntity {
  */
 export async function listPlayableGames(
   db: AppDatabase,
-  options: { limit?: number; offset?: number } = {}
+  options: { limit?: number; offset?: number; mediaTag?: string } = {}
 ): Promise<CatalogEntity[]> {
   const limit = options.limit ?? 50;
   const offset = options.offset ?? 0;
+  const normalizedTag = options.mediaTag ? normalizeMediaTag(options.mediaTag) : null;
+
+  const publicEnabled = typeof process !== "undefined" && process.env?.MEDIA_OVERVIEW_PUBLIC === "true";
+  if (options.mediaTag && !normalizedTag) return [];
+  if (normalizedTag && !publicEnabled) {
+    return [];
+  }
 
   const stmt = db
     .prepare(
-      `SELECT * FROM apps 
-       WHERE is_playable = 1 
-         AND is_eligible = 1 
-         AND parent_appid IS NULL 
-       ORDER BY appid ASC 
-       LIMIT ? OFFSET ?`
+      normalizedTag
+        ? `SELECT DISTINCT app.*
+           FROM apps AS app
+           JOIN media_tag_memberships AS membership
+             ON membership.appid = app.appid
+            AND membership.tag_slug = ?
+           JOIN media_sources AS source
+             ON source.id = membership.source_id
+            AND source.appid = app.appid
+           JOIN media_article_extractions AS extraction
+             ON extraction.source_id = membership.source_id
+            AND extraction.input_identity = membership.extraction_input_identity
+            AND extraction.active = 1
+           WHERE app.is_playable = 1
+             AND app.is_eligible = 1
+             AND app.parent_appid IS NULL
+           ORDER BY app.appid ASC
+           LIMIT ? OFFSET ?`
+        : `SELECT * FROM apps
+           WHERE is_playable = 1
+             AND is_eligible = 1
+             AND parent_appid IS NULL
+           ORDER BY appid ASC
+           LIMIT ? OFFSET ?`
     )
-    .bind(limit, offset);
+    .bind(...(normalizedTag ? [normalizedTag.slug, limit, offset] : [limit, offset]));
 
   const res = await stmt.all<RawAppRow>();
   return (res.results || []).map(mapRowToEntity);

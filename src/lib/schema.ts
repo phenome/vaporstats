@@ -961,6 +961,30 @@ export const mediaArticleExtractions = sqliteTable(
   ],
 );
 
+export const mediaTagMemberships = sqliteTable(
+  "media_tag_memberships",
+  {
+    appid: integer("appid")
+      .notNull()
+      .references(() => apps.appid, { onDelete: "cascade" }),
+    tagSlug: text("tag_slug").notNull(),
+    tagLabel: text("tag_label").notNull(),
+    sourceId: integer("source_id")
+      .notNull()
+      .references(() => mediaSources.id, { onDelete: "cascade" }),
+    extractionInputIdentity: text("extraction_input_identity").notNull(),
+    createdAt: text("created_at").notNull().default(currentTimestamp),
+  },
+  (table) => [
+    uniqueIndex("uq_media_tag_memberships_identity").on(
+      table.appid,
+      table.tagSlug,
+      table.sourceId,
+      table.extractionInputIdentity,
+    ),
+  ],
+);
+
 export const mediaGameOverviews = sqliteTable(
   "media_game_overviews",
   {

@@ -21,11 +21,30 @@ export interface MediaOverview {
   statements: MediaFinding[];
   categories: Array<{ name: MediaCategoryName; findings: MediaFinding[] }>;
   prosCons: { pros: MediaFinding[]; cons: MediaFinding[] } | null;
+  tags: Array<{ label: string; slug: string }>;
+}
+
+export function normalizeMediaTag(value: unknown): { label: string; slug: string } | null {
+  if (typeof value !== "string") return null;
+  const label = value
+    .normalize("NFKC")
+    .replace(/[\u0000-\u001f]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/^[\p{P}\p{S}]+|[\p{P}\p{S}]+$/gu, "")
+    .trim();
+  if (!label || label.length > 120) return null;
+  const slug = label
+    .toLocaleLowerCase("en-US")
+    .replace(/[^\p{L}\p{N}]+/gu, "-")
+    .replace(/^-+|-+$/g, "");
+  return slug && slug.length <= 120 ? { label, slug } : null;
 }
 
 export interface MediaEvidenceSource {
   outlet: string;
   identities: string[];
+  current?: boolean;
 }
 
 function jsonObject(value: unknown): Record<string, unknown> {
@@ -51,6 +70,7 @@ export function createMediaEvidenceSource(input: {
   author?: string | null;
   title?: string | null;
   originatingAssessment?: string | null;
+  current?: boolean;
 }): MediaEvidenceSource {
   const identities = new Set<string>([`url:${input.url.toLowerCase()}`]);
   if (input.contentHash) identities.add(`content:${input.contentHash}`);
@@ -65,7 +85,7 @@ export function createMediaEvidenceSource(input: {
       identities.add(`byline:${origin}`);
     }
   }
-  return { outlet: input.outlet, identities: [...identities] };
+  return { outlet: input.outlet, identities: [...identities], ...(input.current === undefined ? {} : { current: input.current }) };
 }
 
 function distinctOutletSupport(
@@ -139,6 +159,35 @@ function parseFindings(value: unknown, sources: ReadonlyMap<string, MediaEvidenc
     )
     .map(({ finding }) => finding);
 }
+export interface MediaTagEvidence {
+  tag: { label: string; slug: string };
+  sourceUrls: string[];
+}
+
+export function parseMediaTagEvidence(
+  value: unknown,
+  sources: ReadonlyMap<string, MediaEvidenceSource>,
+): MediaTagEvidence[] {
+  const parsed = jsonObject(parseJson(value));
+  if (!Array.isArray(parsed.tags)) return [];
+  const bySlug = new Map<string, MediaTagEvidence>();
+  for (const item of parsed.tags) {
+    const object = jsonObject(item);
+    const tag = normalizeMediaTag(object.label);
+    const sourceUrls = Array.isArray(object.sourceUrls)
+      ? [...new Set(object.sourceUrls.filter((url): url is string => typeof url === "string" && sources.has(url) && sources.get(url)?.current !== false))]
+      : [];
+    if (!tag || sourceUrls.length === 0) continue;
+    const existing = bySlug.get(tag.slug);
+    if (existing) {
+      existing.sourceUrls = [...new Set([...existing.sourceUrls, ...sourceUrls])];
+    } else {
+      bySlug.set(tag.slug, { tag, sourceUrls });
+    }
+  }
+  return [...bySlug.values()];
+}
+
 
 async function first<T>(db: AppDatabase, query: string, ...values: unknown[]): Promise<T | null> {
   return db.prepare(query).bind(...values).first<T>();
@@ -147,7 +196,6 @@ async function first<T>(db: AppDatabase, query: string, ...values: unknown[]): P
 async function rows<T>(db: AppDatabase, query: string, ...values: unknown[]): Promise<T[]> {
   return (await db.prepare(query).bind(...values).all<T>()).results ?? [];
 }
-
 export function parseMediaOverview(
   value: unknown,
   appid: number,
@@ -173,11 +221,13 @@ export function parseMediaOverview(
   const rawProsCons = jsonObject(parsed.prosCons);
   const pros = parseFindings(rawProsCons.pros, sources);
   const cons = parseFindings(rawProsCons.cons, sources);
+  const tags = parseMediaTagEvidence(parsed, sources).map(({ tag }) => tag);
   return {
     appid,
     statements,
     categories,
     prosCons: pros.length > 0 || cons.length > 0 ? { pros, cons } : null,
+    tags,
   };
 }
 
@@ -225,6 +275,7 @@ export async function getMediaOverview(
         originatingAssessment: typeof extraction.originatingAssessment === "string"
           ? extraction.originatingAssessment
           : null,
+        current: source.output_json !== null,
       }),
     ];
   }));

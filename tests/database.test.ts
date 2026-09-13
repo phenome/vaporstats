@@ -72,6 +72,7 @@ describe("Bun SQLite persistence", () => {
       "media_processing_authorizations",
       "media_processing_jobs",
       "media_sources",
+      "media_tag_memberships",
       "observations",
       "player_daily_requests",
       "player_rollups",

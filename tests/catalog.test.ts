@@ -27,6 +27,7 @@ import {
   type SeedAppInput,
 } from "../workers/catalog-seed";
 import { handleGameHttpRequest } from "../src/routes/games.$game";
+import { handleCatalogRequest } from "../src/routes/api.catalog";
 import { CACHE_POLICIES } from "../src/lib/cache";
 import { toSlug, parseGameSlug, getCanonicalGamePath } from "../src/lib/slug";
 
@@ -174,6 +175,48 @@ describe("Catalog Foundation", () => {
     expect(checkpoint).toBeNull();
 
     console.log("fresh catalog migration");
+  });
+
+  test("filters catalog games by supported active media-tag evidence", async () => {
+    const freshDb = createFreshDb();
+    const previous = process.env.MEDIA_OVERVIEW_PUBLIC;
+    process.env.MEDIA_OVERVIEW_PUBLIC = "true";
+    try {
+      await upsertApp(freshDb, { appid: 9101, name: "Tagged One", type: "game", is_playable: true, is_eligible: true });
+      await upsertApp(freshDb, { appid: 9102, name: "Tagged Two", type: "game", is_playable: true, is_eligible: true });
+      await upsertApp(freshDb, { appid: 9103, name: "Child", type: "game", is_playable: true, is_eligible: true, parent_appid: 9101 });
+
+      for (const [appid, url] of [[9101, "https://ign.com/tagged-one"], [9102, "https://ign.com/tagged-two"], [9103, "https://ign.com/child"]] as const) {
+        await freshDb
+          .prepare("INSERT INTO media_sources (appid, pass, original_url, title, outlet, retrieved_at, type, hands_on) VALUES (?, 'initial', ?, ?, 'IGN', '2026-09-13T00:00:00.000Z', 'review', 1)")
+          .bind(appid, url, `${appid} review`)
+          .run();
+        const source = await freshDb.prepare("SELECT id FROM media_sources WHERE original_url = ?").bind(url).first<{ id: number }>();
+        await freshDb
+          .prepare("INSERT INTO media_article_extractions (source_id, input_identity, content_hash, cleanup_version, model, config_version, output_json, active) VALUES (?, ?, 'hash', 'cleanup', 'model', 'config', '{}', ?)")
+          .bind(source!.id, `identity-${appid}`, appid === 9103 ? 0 : 1)
+          .run();
+        await freshDb
+          .prepare("INSERT INTO media_tag_memberships (appid, tag_slug, tag_label, source_id, extraction_input_identity) VALUES (?, 'first-person-shooter', 'First-person shooter', ?, ?)")
+          .bind(appid, source!.id, `identity-${appid}`)
+          .run();
+      }
+
+      expect((await listPlayableGames(freshDb, { limit: 100, mediaTag: "First-person shooter" })).map((game) => game.appid)).toEqual([9101, 9102]);
+
+      const response = await handleCatalogRequest(
+        new Request("https://vaporstats.test/api/catalog?limit=100&media_tag=First-person%20shooter"),
+        freshDb,
+      );
+      expect(response.status).toBe(200);
+      expect((await response.json() as { data: CatalogEntity[] }).data.map((game) => game.appid)).toEqual([9101, 9102]);
+
+      process.env.MEDIA_OVERVIEW_PUBLIC = "false";
+      expect(await listPlayableGames(freshDb, { mediaTag: "First-person shooter" })).toEqual([]);
+    } finally {
+      if (previous === undefined) delete process.env.MEDIA_OVERVIEW_PUBLIC;
+      else process.env.MEDIA_OVERVIEW_PUBLIC = previous;
+    }
   });
 
   test("bounded catalog seed", async () => {

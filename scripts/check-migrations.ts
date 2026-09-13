@@ -35,6 +35,7 @@ const expectedTables = [
   "media_processing_authorizations",
   "media_processing_jobs",
   "media_sources",
+  "media_tag_memberships",
 ];
 const temporaryDirectory = mkdtempSync(join(tmpdir(), "vaporstats-sqlite-check-"));
 const databasePath = join(temporaryDirectory, "check.sqlite");

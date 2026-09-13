@@ -2,14 +2,17 @@ import React from "react";
 import { createFileRoute } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
 import { type CatalogEntity } from "../lib/catalog";
+import { normalizeMediaTag } from "../lib/media-overview";
 import { getCanonicalGamePath, getCanonicalPublisherPath } from "../lib/slug";
 import { getPageCacheHeaders } from "../lib/cache";
 import { RouteDataError } from "../components/route-state";
 import { CatalogSkeleton } from "../components/route-skeletons";
 import { AppLink } from "../components/app-link";
 
-export async function fetchCatalogGames(): Promise<CatalogEntity[]> {
-  const response = await fetch("/api/catalog?limit=500");
+export async function fetchCatalogGames(mediaTag?: string | null): Promise<CatalogEntity[]> {
+  const params = new URLSearchParams({ limit: "500" });
+  if (mediaTag) params.set("media_tag", mediaTag);
+  const response = await fetch(`/api/catalog?${params.toString()}`);
   if (!response.ok) throw new Error("Catalog request failed");
   const result = (await response.json()) as {
     status?: string;
@@ -19,25 +22,36 @@ export async function fetchCatalogGames(): Promise<CatalogEntity[]> {
   return Array.isArray(result.data) ? result.data : [];
 }
 
-export const catalogQueryOptions = {
-  queryKey: ["catalog-games"],
-  queryFn: fetchCatalogGames,
-};
+export function catalogQueryOptions(mediaTag?: string | null) {
+  const normalizedTag = mediaTag ? normalizeMediaTag(mediaTag) : null;
+  return {
+    queryKey: ["catalog-games", normalizedTag?.slug ?? null],
+    queryFn: () => fetchCatalogGames(normalizedTag?.label ?? null),
+  };
+}
 
 export const Route = createFileRoute("/games/")({
   ssr: false,
   headers: () => getPageCacheHeaders(),
-  loader: ({ context }) => {
+  validateSearch: (search: Record<string, unknown>) => {
+    const normalized = typeof search.mediaTag === "string" ? normalizeMediaTag(search.mediaTag) : null;
+    return { mediaTag: normalized?.label ?? null };
+  },
+  loaderDeps: ({ search }) => ({ mediaTag: search.mediaTag }),
+  loader: ({ context, deps }) => {
     // Start unawaited prefetch so navigation/hover proceeds immediately
-    void context.queryClient.prefetchQuery(catalogQueryOptions);
+    void context.queryClient.prefetchQuery(catalogQueryOptions(deps.mediaTag));
   },
   errorComponent: RouteDataError,
   component: GamesRouteView,
 });
 
 function GamesIndexComponent({ games: propGames }: { games?: CatalogEntity[] }) {
+  const { mediaTag } = Route.useSearch();
+  const selectedTag = mediaTag ? normalizeMediaTag(mediaTag) : null;
+  const queryOptions = catalogQueryOptions(selectedTag?.label ?? null);
   const { data: queryGames, isLoading, isError } = useQuery({
-    ...catalogQueryOptions,
+    ...queryOptions,
     enabled: !propGames,
   });
 
@@ -72,12 +86,31 @@ function GamesIndexComponent({ games: propGames }: { games?: CatalogEntity[] }) 
           TRACKED PLAYABLE: <span className="text-orange-400 font-bold tabular-nums">{games.length}</span>
         </div>
       </div>
+      {selectedTag && (
+        <div className="flex flex-wrap items-center justify-between gap-3 border border-orange-900/60 bg-orange-950/20 px-4 py-3 text-xs">
+          <p className="text-zinc-300">
+            Showing games tagged <span className="font-semibold text-orange-300">{selectedTag.label}</span>
+          </p>
+          <AppLink
+            href="/games/"
+            aria-label="Clear media tag filter"
+            className="inline-flex min-h-[32px] items-center border border-zinc-700 px-3 text-[11px] font-semibold uppercase tracking-wider text-zinc-300 transition-colors hover:border-orange-500 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-orange-500"
+          >
+            Clear filter
+          </AppLink>
+        </div>
+      )}
+
 
       {games.length === 0 ? (
         <div className="border border-zinc-800 bg-zinc-950 p-12 text-center space-y-3">
-          <div className="text-sm font-mono text-zinc-400">No games imported yet.</div>
+          <div className="text-sm font-mono text-zinc-400">
+            {selectedTag ? `No playable games match the “${selectedTag.label}” media tag.` : "No games imported yet."}
+          </div>
           <p className="text-xs text-zinc-600">
-            Initial catalog seeding will populate eligible playable titles.
+            {selectedTag
+              ? "Try another media tag or clear the filter to browse the full catalog."
+              : "Initial catalog seeding will populate eligible playable titles."}
           </p>
         </div>
       ) : (

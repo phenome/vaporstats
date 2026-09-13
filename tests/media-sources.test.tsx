@@ -182,6 +182,7 @@ describe("game media sources", () => {
         overview: {
           appid: source.appid,
           statements: body.data.mediaOverview.statements,
+          tags: [{ label: "First-person shooter", slug: "first-person-shooter" }],
           categories: [],
           prosCons: null,
         },
@@ -192,6 +193,8 @@ describe("game media sources", () => {
       expect(overviewHtml).toContain('href="#media-source-1"');
       expect(overviewHtml).toContain('title="IGN: Cyberpunk 2077 Review"');
       expect(overviewHtml).toContain('aria-label="Source 1: Cyberpunk 2077 Review on IGN"');
+      expect(overviewHtml).toContain('href="/games/?mediaTag=First-person%20shooter"');
+      expect(overviewHtml).toContain('aria-label="Browse games tagged First-person shooter"');
 
       const ssrResponse = await handleGameHttpRequest(
         new Request("https://vaporstats.test/games/1091500-cyberpunk-2077"),

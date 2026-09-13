@@ -6,6 +6,7 @@ import {
   createMediaEvidenceSource,
   MEDIA_CATEGORY_NAMES,
   parseMediaOverview,
+  parseMediaTagEvidence,
   type MediaEvidenceSource,
 } from "./media-overview";
 import {
@@ -372,7 +373,7 @@ function synthesisIdentity(appid: number, extractions: ExtractionRow[]): string 
 
 function makeExtractionRequest(source: SourceRow, content: string, identity: string): GeminiRequest {
   return {
-    contents: [{ role: "user", parts: [{ text: `Analyze only this article about Steam app ${source.appid}. Return JSON only. Keep natural wording grounded in the article. Use exactly these optional category names inside categories and contribution.category: ${MEDIA_CATEGORY_NAMES.join("; ")}. Top-level keys must be categories, contributions, traits, qualifications, provenance, and optional originatingAssessment. Contributions are objects with text and category; traits and qualifications are arrays of strings. Set originatingAssessment only when the article explicitly identifies itself as a republication: use the original article URL when present, otherwise exactly "<author>|<original title>"; otherwise omit it. Preserve writer, preview, platform, Early Access, build, and other material qualifications. Do not infer consensus, other entities, editions, or missing context.\nsourceIdentity: ${identity}\nsourceUrl: ${source.original_url}\ntitle: ${source.title}\narticle:\n${content}` }] }],
+    contents: [{ role: "user", parts: [{ text: `Analyze only this article about Steam app ${source.appid}. Return JSON only. Keep natural wording grounded in the article. Use exactly these optional category names inside categories and contribution.category: ${MEDIA_CATEGORY_NAMES.join("; ")}. Top-level keys must be categories, contributions, traits, qualifications, provenance, and optional originatingAssessment. Contributions are objects with text and category; traits and qualifications are arrays of strings. Traits must be concise, factual game descriptors that can support discovery tags, sourced only from the article (for example first-person shooter, turn-based strategy, medieval, or science fiction). Do not put opinions about quality, ranking, scores, reception, performance, bugs, or other technical complaints in traits. Preserve a disputed descriptor when the article supports it, but do not infer traits from summary wording or missing context. Set originatingAssessment only when the article explicitly identifies itself as a republication: use the original article URL when present, otherwise exactly "<author>|<original title>"; otherwise omit it. Preserve writer, preview, platform, Early Access, build, and other material qualifications. Do not infer consensus, other entities, editions, or missing context.\nsourceIdentity: ${identity}\nsourceUrl: ${source.original_url}\ntitle: ${source.title}\narticle:\n${content}` }] }],
     generationConfig: { responseMimeType: "application/json", maxOutputTokens: EXTRACTION_MAX_OUTPUT_TOKENS },
   };
 }
@@ -391,7 +392,7 @@ function makeSynthesisRequest(appid: number, name: string, extractions: Extracti
     } : null;
   }).filter((item) => item !== null);
   return {
-    contents: [{ role: "user", parts: [{ text: `Synthesize the current initial assessments for ${name || `game ${appid}`}. Return JSON only as {"statements":[{"text":"...","sourceUrls":["..."]}],"categories":[{"name":"...","findings":[{"text":"...","sourceUrls":["..."],"contested":true}]}],"prosCons":{"pros":[{"text":"...","sourceUrls":["..."]}],"cons":[...]}}. Write flowing, concise, game-first Overview statements. Write every text field as a direct game observation; never mention coverage, critics, reviewers, reviews, outlets, publications, sources, assessments, agreement, consensus, or frequency. Multiple citation URLs communicate repeated support. Include only supported sections named ${MEDIA_CATEGORY_NAMES.join("; ")}; omit unsupported sections. Provide one global pros/cons overview, omit unsupported sides, and do not force neutral characteristics into pros or cons. Every entry must cite every supporting article URL. Order findings by distinct supporting outlets, counting an outlet once and treating identical content or matching explicit originatingAssessment values as one assessment. More than one article from one outlet is not repeated cross-outlet support. Group genuinely opposing judgments on the same facet into one qualified contested entry with both sides cited; leave compatible different observations separate. Preserve material writer, preview, announcement, platform, build, and unknown-context distinctions. Do not infer consensus, identity, edition, features, or quality from missing coverage. Evidence belongs only to app ${appid}; do not transfer incidental comparisons, DLC, expansion, bundle, or focused edition evidence.\n${JSON.stringify(evidence)}` }] }],
+    contents: [{ role: "user", parts: [{ text: `Synthesize the current initial assessments for ${name || `game ${appid}`}. Return JSON only as {"statements":[{"text":"...","sourceUrls":["..."]}],"categories":[{"name":"...","findings":[{"text":"...","sourceUrls":["..."],"contested":true}]}],"prosCons":{"pros":[{"text":"...","sourceUrls":["..."]}],"cons":[...]},"tags":[{"label":"...","sourceUrls":["..."]}]}. Write flowing, concise, game-first Overview statements. Write every text field as a direct game observation; never mention coverage, critics, reviewers, reviews, outlets, publications, sources, assessments, agreement, consensus, or frequency. Multiple citation URLs communicate repeated support. Include only supported sections named ${MEDIA_CATEGORY_NAMES.join("; ")}; omit unsupported sections. Provide one global pros/cons overview, omit unsupported sides, and do not force neutral characteristics into pros or cons. Every entry must cite every supporting article URL. Tags are concise factual game descriptors and must be derived only from the supplied extraction.traits arrays, never from statements, categories, pros/cons, or summary wording. Cite every current extraction that supports each tag. Normalize equivalent casing or punctuation to one label. Preserve disputed traits when a supplied extraction supports them; do not include quality judgments, rankings, scores, reception, performance, bugs, or other technical complaints as tags. Order findings by distinct supporting outlets, counting an outlet once and treating identical content or matching explicit originatingAssessment values as one assessment. More than one article from one outlet is not repeated cross-outlet support. Group genuinely opposing judgments on the same facet into one qualified contested entry with both sides cited; leave compatible different observations separate. Preserve material writer, preview, announcement, platform, build, and unknown-context distinctions. Do not infer consensus, identity, edition, features, or quality from missing coverage. Evidence belongs only to app ${appid}; do not transfer incidental comparisons, DLC, expansion, bundle, or focused edition evidence.\n${JSON.stringify(evidence)}` }] }],
     generationConfig: { responseMimeType: "application/json", maxOutputTokens: SYNTHESIS_MAX_OUTPUT_TOKENS },
   };
 }
@@ -622,6 +623,7 @@ async function persistOverview(db: AppDatabase, job: JobRow, output: unknown, no
       return;
     }
     const sourceById = new Map(sources.map((source) => [source.id, source]));
+    const sourceByUrl = new Map(sources.map((source) => [source.original_url, source]));
     const evidenceSources = new Map<string, MediaEvidenceSource>();
     for (const extraction of extractions) {
       const source = sourceById.get(extraction.source_id);
@@ -634,16 +636,32 @@ async function persistOverview(db: AppDatabase, job: JobRow, output: unknown, no
         author: source.author,
         title: source.title,
         originatingAssessment,
+        current: true,
       }));
     }
+    const tagEvidence = parseMediaTagEvidence(output, evidenceSources);
     const overview = parseMediaOverview(output, job.appid, evidenceSources);
     if (!overview) {
       await db.prepare("UPDATE media_processing_jobs SET status = 'failed', error = ?, completed_at = ? WHERE id = ?").bind("Gemini synthesis returned no cited statements", now.toISOString(), job.id).run();
       return;
     }
+    const storedOverview = {
+      ...overview,
+      tags: tagEvidence.map(({ tag, sourceUrls }) => ({ ...tag, sourceUrls })),
+    };
     await db.prepare("UPDATE media_game_overviews SET active = 0 WHERE appid = ? AND active = 1").bind(job.appid).run();
-    await db.prepare("INSERT OR IGNORE INTO media_game_overviews (appid, input_identity, model, config_version, output_json, active, created_at) VALUES (?, ?, ?, ?, ?, 1, ?)").bind(job.appid, job.input_identity, job.model, job.config_version, JSON.stringify(overview), now.toISOString()).run();
-    await db.prepare("UPDATE media_processing_jobs SET status = 'succeeded', output_json = ?, error = NULL, completed_at = ? WHERE id = ?").bind(JSON.stringify(overview), now.toISOString(), job.id).run();
+    await db.prepare("INSERT OR IGNORE INTO media_game_overviews (appid, input_identity, model, config_version, output_json, active, created_at) VALUES (?, ?, ?, ?, ?, 1, ?)").bind(job.appid, job.input_identity, job.model, job.config_version, JSON.stringify(storedOverview), now.toISOString()).run();
+    await db.prepare("DELETE FROM media_tag_memberships WHERE appid = ?").bind(job.appid).run();
+    const extractionBySourceId = new Map(extractions.map((extraction) => [extraction.source_id, extraction]));
+    for (const { tag, sourceUrls } of tagEvidence) {
+      for (const sourceUrl of sourceUrls) {
+        const source = sourceByUrl.get(sourceUrl);
+        const extraction = source ? extractionBySourceId.get(source.id) : undefined;
+        if (!source || !extraction) continue;
+        await db.prepare("INSERT OR IGNORE INTO media_tag_memberships (appid, tag_slug, tag_label, source_id, extraction_input_identity, created_at) VALUES (?, ?, ?, ?, ?, ?)").bind(job.appid, tag.slug, tag.label, source.id, extraction.input_identity, now.toISOString()).run();
+      }
+    }
+    await db.prepare("UPDATE media_processing_jobs SET status = 'succeeded', output_json = ?, error = NULL, completed_at = ? WHERE id = ?").bind(JSON.stringify(storedOverview), now.toISOString(), job.id).run();
     status = "succeeded";
   });
   return status;

@@ -2,20 +2,69 @@ import { createFileRoute } from "@tanstack/react-router";
 import { listPlayableGames } from "../lib/catalog";
 import { getDb } from "../lib/db-access";
 import type { AppDatabase } from "../lib/db";
+import { normalizeMediaTag } from "../lib/media-overview";
 import { CACHE_POLICIES, getLiveApiCacheHeaders } from "../lib/cache";
 
 export async function handleCatalogRequest(
   request: Request,
   explicitDb?: AppDatabase
 ): Promise<Response> {
-  const rawLimit = new URL(request.url).searchParams.get("limit");
-  const limit = rawLimit
-    ? Math.min(Math.max(Number.parseInt(rawLimit, 10) || 100, 1), 500)
-    : 100;
+  const params = new URL(request.url).searchParams;
+  const allowedParameters: Record<string, true> = { limit: true, media_tag: true };
+  for (const key of params.keys()) {
+    if (!allowedParameters[key]) {
+      return Response.json(
+        { status: "error", error: `Unknown catalog parameter: ${key}` },
+        { status: 400, headers: { "Cache-Control": CACHE_POLICIES.noStore } },
+      );
+    }
+  }
+
+  const limitValues = params.getAll("limit");
+  const mediaTagValues = params.getAll("media_tag");
+  if (limitValues.length > 1 || mediaTagValues.length > 1) {
+    return Response.json(
+      { status: "error", error: "Duplicate catalog parameter" },
+      { status: 400, headers: { "Cache-Control": CACHE_POLICIES.noStore } },
+    );
+  }
+
+  const rawLimit = limitValues[0];
+  let limit = 100;
+  if (rawLimit !== undefined) {
+    if (!/^[1-9]\d*$/.test(rawLimit)) {
+      return Response.json(
+        { status: "error", error: "Invalid catalog limit" },
+        { status: 400, headers: { "Cache-Control": CACHE_POLICIES.noStore } },
+      );
+    }
+    limit = Number(rawLimit);
+    if (!Number.isSafeInteger(limit) || limit > 500) {
+      return Response.json(
+        { status: "error", error: "Invalid catalog limit" },
+        { status: 400, headers: { "Cache-Control": CACHE_POLICIES.noStore } },
+      );
+    }
+  }
+
+  const rawMediaTag = mediaTagValues[0];
+  let mediaTag: string | undefined;
+  if (rawMediaTag !== undefined) {
+    const normalized = /[\u0000-\u001f\u007f]/.test(rawMediaTag)
+      ? null
+      : normalizeMediaTag(rawMediaTag);
+    if (!normalized) {
+      return Response.json(
+        { status: "error", error: "Invalid media_tag" },
+        { status: 400, headers: { "Cache-Control": CACHE_POLICIES.noStore } },
+      );
+    }
+    mediaTag = normalized.label;
+  }
 
   try {
     const db = await getDb(explicitDb);
-    const games = await listPlayableGames(db, { limit });
+    const games = await listPlayableGames(db, { limit, mediaTag });
     return Response.json(
       {
         status: games.length > 0 ? "data" : "empty",
