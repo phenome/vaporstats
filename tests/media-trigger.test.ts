@@ -203,6 +203,7 @@ describe("forced media/deploy remote command", () => {
     expect(workflow).toContain("GlobalKnownHostsFile=/dev/null");
     expect(workflow).toContain("DEPLOY_KEY");
     expect(workflow).toContain("GITHUB_STEP_SUMMARY");
+    expect(workflow).toContain("media discovery result:");
     expect(workflow).toContain("stderr_file");
     expect(workflow).toContain("[redacted host]");
     expect(workflow).not.toContain("2>/dev/null");
