@@ -27,10 +27,12 @@ const expectedTables = [
   "player_score_history",
   "player_score_state",
   "critic_records",
+  "media_article_embeddings",
   "media_article_extractions",
   "media_discovery_attempts",
   "media_discovery_progress",
   "media_discovery_runs",
+  "media_game_matches",
   "media_game_overviews",
   "media_processing_authorizations",
   "media_processing_jobs",
@@ -308,6 +310,16 @@ try {
     billingConfirmationColumn.notnull !== 0
   ) {
     throw new Error("Missing nullable media_processing_authorizations.billing_confirmation column");
+  }
+
+  for (const [table, columns] of [
+    ["media_article_embeddings", ["source_id", "dimension", "input_identity", "extraction_input_identity", "model", "dimensions", "config_version", "vector", "active"]],
+    ["media_game_matches", ["appid", "matched_appid", "dimension", "trait", "explanation", "similarity", "current_source_ids", "matched_source_ids", "input_identity", "active"]],
+  ] as const) {
+    const found = new Set(database.query<{ name: string }, []>(`PRAGMA table_info(${table})`).all().map((column) => column.name));
+    for (const column of columns) {
+      if (!found.has(column)) throw new Error(`Missing ${table}.${column} column`);
+    }
   }
 
   const appliedMigrations = database

@@ -9,6 +9,7 @@ import { getCurrentPrice, getPriceHistory, type PriceState, type PriceHistoryRes
 import { CACHE_POLICIES, getEntityCacheHeaders } from "../lib/cache";
 import { getMediaSources, type MediaSource } from "../lib/media-discovery";
 import { getMediaOverview, type MediaOverview } from "../lib/media-overview";
+import { getMediaGameMatches, type MediaGameMatch } from "../lib/media-similarity";
 
 export interface GameDetailResponseData {
   game: GameDetail;
@@ -18,6 +19,7 @@ export interface GameDetailResponseData {
   priceHistory: PriceHistoryResult | null;
   sources: MediaSource[];
   mediaOverview: MediaOverview | null;
+  mediaMatches: MediaGameMatch[];
 }
 
 export async function handleGameDetailRequest(
@@ -61,13 +63,14 @@ export async function handleGameDetailRequest(
     );
   }
 
-  const [related, playerHistory, currentPrice, lqips, sources, mediaOverview] = await Promise.all([
+  const [related, playerHistory, currentPrice, lqips, sources, mediaOverview, mediaMatches] = await Promise.all([
     getRelatedApps(db, game.appid),
     getPlayerHistory(db, game.appid, "30d"),
     getCurrentPrice(db, game.appid),
     ensureAppLqips(db, game),
     getMediaSources(db, game.appid),
     getMediaOverview(db, game.appid),
+    getMediaGameMatches(db, game.appid),
   ]);
   game.header_lqip = lqips.header_lqip;
   game.icon_lqip = lqips.icon_lqip;
@@ -81,6 +84,7 @@ export async function handleGameDetailRequest(
     priceHistory,
     sources,
     mediaOverview,
+    mediaMatches,
   };
 
   return Response.json(

@@ -17,8 +17,10 @@ import { LifecycleHistorySection } from "./lifecycle-history";
 import { GameReception, GameScoreHero } from "./game-reception";
 import { MediaSources } from "./media-sources";
 import { MediaOverviewSection } from "./media-overview";
+import { MediaMatchesSection } from "./media-matches";
 import type { MediaSource } from "../lib/media-discovery";
 import type { MediaOverview } from "../lib/media-overview";
+import type { MediaGameMatch } from "../lib/media-similarity";
 import {
   NUMERIC_TO_HISTORY_RANGE,
   NUMERIC_TO_PRICE_RANGE,
@@ -270,6 +272,7 @@ export interface GamePageProps {
   priceHistory?: PriceHistoryResult | null;
   sources?: MediaSource[];
   mediaOverview?: MediaOverview | null;
+  mediaMatches?: MediaGameMatch[];
   range?: NumericRange;
   pricerange?: NumericPriceRange;
   eventId?: string | null;
@@ -286,6 +289,7 @@ export function GamePageView({
   priceHistory,
   sources = [],
   mediaOverview = null,
+  mediaMatches = [],
   range,
   pricerange,
   eventId,
@@ -293,6 +297,7 @@ export function GamePageView({
   onPriceRangeChange,
   onEventChange,
 }: GamePageProps) {
+  const hasMediaMatches = mediaMatches.some((match) => match.dimension === "gameplay" || match.dimension === "story_world");
   const historyRange = NUMERIC_TO_HISTORY_RANGE[range ?? DEFAULT_NUMERIC_RANGE];
   const priceRange = NUMERIC_TO_PRICE_RANGE[pricerange ?? DEFAULT_NUMERIC_PRICE_RANGE];
   const overviewEvents = getLifecycleOverviewEvents(game);
@@ -381,7 +386,7 @@ export function GamePageView({
       cancelAnimationFrame(frameId);
       window.removeEventListener("scroll", onScroll);
     };
-  }, [mediaOverview, related, sources]);
+  }, [mediaOverview, mediaMatches, related, sources]);
   const geometry = useHeroGeometry(heroRef, identityRefs, game.appid);
   // The scroll range is measured from the captured layouts: shrinking from the
   // expanded height to the compact height takes exactly as much scroll as the
@@ -638,6 +643,14 @@ export function GamePageView({
             Sources
           </a>
         )}
+        {hasMediaMatches && (
+          <a
+            href="#media-matches"
+            className="inline-flex h-8 min-h-[32px] shrink-0 items-center border-b-2 border-transparent px-2.5 text-[11px] uppercase tracking-wider text-zinc-300 hover:bg-zinc-900 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-orange-500 transition-colors"
+          >
+            Matches
+          </a>
+        )}
         <a
           href="#game-reception"
           className="inline-flex h-8 min-h-[32px] shrink-0 items-center border-b-2 border-transparent px-2.5 text-[11px] uppercase tracking-wider text-zinc-300 hover:bg-zinc-900 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-orange-500 transition-colors"
@@ -687,6 +700,7 @@ export function GamePageView({
       </div>
       {mediaOverview && <MediaOverviewSection overview={mediaOverview} sources={sources} />}
       {sources.length > 0 && <MediaSources sources={sources} />}
+      {hasMediaMatches && <MediaMatchesSection matches={mediaMatches} />}
 
       <GameReception
         key={game.appid}

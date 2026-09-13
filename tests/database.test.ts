@@ -64,10 +64,12 @@ describe("Bun SQLite persistence", () => {
       "apps",
       "checkpoints",
       "critic_records",
+      "media_article_embeddings",
       "media_article_extractions",
       "media_discovery_attempts",
       "media_discovery_progress",
       "media_discovery_runs",
+      "media_game_matches",
       "media_game_overviews",
       "media_processing_authorizations",
       "media_processing_jobs",
@@ -109,6 +111,14 @@ describe("Bun SQLite persistence", () => {
     );
     expect(billingConfirmationColumn).toBeDefined();
     expect(billingConfirmationColumn?.type.toLowerCase()).toBe("text");
+    const embeddingColumns = await db.prepare("PRAGMA table_info(media_article_embeddings)").all<{ name: string }>();
+    expect(embeddingColumns.results.map((column) => column.name)).toEqual(expect.arrayContaining([
+      "source_id", "dimension", "input_identity", "extraction_input_identity", "model", "dimensions", "config_version", "vector",
+    ]));
+    const matchColumns = await db.prepare("PRAGMA table_info(media_game_matches)").all<{ name: string }>();
+    expect(matchColumns.results.map((column) => column.name)).toEqual(expect.arrayContaining([
+      "appid", "matched_appid", "dimension", "trait", "explanation", "similarity", "current_source_ids", "matched_source_ids",
+    ]));
     expect(billingConfirmationColumn?.notnull).toBe(0);
     expect(migrations.results).toHaveLength(migrationNames.length);
   });

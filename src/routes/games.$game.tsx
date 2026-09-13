@@ -10,6 +10,7 @@ import type { AppDatabase } from "../lib/db";
 import { getCurrentPrice, getPriceHistory } from "../lib/prices";
 import { getMediaSources } from "../lib/media-discovery";
 import { getMediaOverview } from "../lib/media-overview";
+import { getMediaGameMatches } from "../lib/media-similarity";
 import { parseGameSlug, toSlug, getCanonicalGamePath } from "../lib/slug";
 import { gameScoreHistoryQueryOptions, gameScoreSummaryQueryOptions } from "../lib/score-query";
 import { createQueryClient } from "../lib/query-client";
@@ -104,7 +105,7 @@ function GameRouteComponent() {
     return <GamePageSkeleton />;
   }
 
-  const { game, related, playerHistory, price, priceHistory, sources, mediaOverview } = data;
+  const { game, related, playerHistory, price, priceHistory, sources, mediaOverview, mediaMatches } = data;
   const canonicalSlug = toSlug(game.name);
   if (slug !== canonicalSlug) {
     return (
@@ -165,6 +166,7 @@ function GameRouteComponent() {
       priceHistory={priceHistory}
       sources={sources}
       mediaOverview={mediaOverview}
+      mediaMatches={mediaMatches}
       range={numericRange}
       pricerange={numericPriceRange}
       eventId={activeEvent}
@@ -245,12 +247,13 @@ export async function handleGameHttpRequest(
       },
     });
   }
-  const [related, playerHistory, currentPrice, sources, mediaOverview] = await Promise.all([
+  const [related, playerHistory, currentPrice, sources, mediaOverview, mediaMatches] = await Promise.all([
     getRelatedApps(db, game.appid),
     getPlayerHistory(db, game.appid, "30d"),
     getCurrentPrice(db, game.appid),
     getMediaSources(db, game.appid),
     getMediaOverview(db, game.appid),
+    getMediaGameMatches(db, game.appid),
   ]);
   const priceHistory = await getPriceHistory(db, game.appid, "all", { currentPrice });
   const appHtml = renderToString(
@@ -263,6 +266,7 @@ export async function handleGameHttpRequest(
         priceHistory={priceHistory}
         sources={sources}
         mediaOverview={mediaOverview}
+        mediaMatches={mediaMatches}
       />
     </QueryClientProvider>
   );
