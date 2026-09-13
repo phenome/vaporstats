@@ -682,7 +682,7 @@ async function advanceMediaProcessingNow(db: AppDatabase, options: MediaProcessi
     await db.prepare("UPDATE media_processing_authorizations SET billing_confirmation = ?, updated_at = ? WHERE run_id = ?").bind(GEMINI_BATCH_BILLING_CONFIRMATION, now.toISOString(), auth.run_id).run();
   });
   const articleFetch = options.articleFetch ?? fetch;
-  const sources = await rows<SourceRow>(db, `SELECT id, appid, original_url, title, outlet, author, published_at, updated_at, retrieved_at, type, hands_on, affiliation, platform, build_context, normalized_content_hash, cleanup_version, processing_content, processing_input_identity FROM media_sources WHERE pass = 'initial' AND appid IN (SELECT value FROM json_each(?)) ORDER BY appid, id`, JSON.stringify(selectedGames));
+  const sources = await rows<SourceRow>(db, `SELECT id, appid, original_url, title, outlet, author, published_at, updated_at, retrieved_at, type, hands_on, affiliation, platform, build_context, normalized_content_hash, cleanup_version, processing_content, processing_input_identity FROM media_sources AS source WHERE pass = 'initial' AND appid IN (SELECT value FROM json_each(?)) AND id = (SELECT MIN(candidate.id) FROM media_sources AS candidate WHERE candidate.pass = 'initial' AND candidate.appid = source.appid) ORDER BY appid, id`, JSON.stringify(selectedGames));
   const sourceById = new Map(sources.map((source) => [source.id, source]));
   let extractionSubmitted = 0;
   let synthesisSubmitted = 0;

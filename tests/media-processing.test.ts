@@ -176,6 +176,18 @@ describe("bounded Gemini media processing", () => {
     expect(authorization?.billing_confirmation).toBe(GEMINI_BATCH_BILLING_CONFIRMATION);
   });
 
+  test("keeps the #53 processing slice to one source per game", async () => {
+    const value = fixture(); cleanups.push(value.cleanup);
+    value.native.prepare("INSERT INTO media_sources (appid, pass, original_url, title, outlet, retrieved_at, type, hands_on, platform) VALUES (?, 'initial', ?, ?, 'Eurogamer', ?, 'review', 1, 'PC')").run(APPIDS[0], "https://www.eurogamer.net/cyberpunk-2077-review", "Cyberpunk 2077 review", "2026-09-11T00:00:00.000Z");
+    await authorizeMediaProcessing(value.db, value.runId);
+    const transport = new ControlledTransport();
+    transport.nextPolls.push({ state: "pending" });
+    await advanceMediaProcessing(value.db, { runId: value.runId, transport, articleFetch: async () => articleHtml(APPIDS[0]), pricingVersion: GEMINI_BATCH_PRICING_VERSION, capabilityVersion: GEMINI_BATCH_CAPABILITY_VERSION });
+    const extractionJobs = await value.db.prepare("SELECT COUNT(*) AS count FROM media_processing_jobs WHERE stage = 'extraction'").first<{ count: number }>();
+    expect(extractionJobs?.count).toBe(1);
+    expect(transport.submissions).toHaveLength(1);
+  });
+
   test("serves controlled authorized output through the detail API without provider work on reads", async () => {
     const value = fixture(); cleanups.push(value.cleanup);
     const transport = new ControlledTransport();
