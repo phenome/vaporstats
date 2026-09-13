@@ -4,11 +4,11 @@ on:
   workflow_dispatch:
     inputs:
       pass:
-        description: Discovery operation
+        description: Discovery pass
         required: true
         type: choice
         default: initial
-        options: [initial, status]
+        options: [initial]
       game:
         description: Game selection
         required: true
@@ -53,8 +53,8 @@ jobs:
         run: |
           set -euo pipefail
           case "$INPUT_PASS" in
-            initial|status) remote_pass=$INPUT_PASS ;;
-            *) printf '%s\n' 'unsupported discovery operation' >&2; exit 1 ;;
+            initial) remote_pass=initial ;;
+            *) printf '%s\n' 'unsupported discovery pass' >&2; exit 1 ;;
           esac
           case "$INPUT_GAME" in
             all) remote_game=all ;;
@@ -63,10 +63,6 @@ jobs:
             hades-ii) remote_game=hades-ii ;;
             *) printf '%s\n' 'unsupported game selection' >&2; exit 1 ;;
           esac
-          if [[ "$remote_pass" == status && "$remote_game" == all ]]; then
-            printf '%s\n' 'status requires one game' >&2
-            exit 1
-          fi
           remote_command="media $remote_pass $remote_game"
           set +e
           stderr_file=$(mktemp)

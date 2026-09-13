@@ -134,14 +134,6 @@ describe("forced media/deploy remote command", () => {
         expect(media.trace).toContain(`docker:exec|vaporstats|bun|-e|`);
         expect(media.trace.endsWith(`|${game}\n`)).toBe(true);
       }
-      const status = await runWrapper(
-        harness.directory,
-        harness.tracePath,
-        "media status cyberpunk-2077",
-      );
-      expect(status.exitCode).toBe(0);
-      expect(status.trace).toContain("docker:exec|vaporstats|bun|-e|");
-      expect(status.trace.endsWith("|1091500\n")).toBe(true);
     } finally {
       await rm(harness.directory, { recursive: true, force: true });
     }
@@ -167,8 +159,6 @@ describe("forced media/deploy remote command", () => {
         "media initial all; echo nope",
         "media initial all\n",
         " MEDIA initial all",
-        "media status all",
-        "media status cyberpunk",
       ];
 
       for (const command of invalidCommands) {
@@ -201,12 +191,9 @@ describe("forced media/deploy remote command", () => {
     for (const game of ["all", "cyberpunk-2077", "baldurs-gate-3", "hades-ii"]) {
       expect(wrapper).toContain(`"media initial ${game}"`);
     }
-    for (const game of ["cyberpunk-2077", "baldurs-gate-3", "hades-ii"]) {
-      expect(wrapper).toContain(`"media status ${game}"`);
-    }
 
     expect(workflow).toContain("workflow_dispatch:");
-    expect(workflow).toContain("options: [initial, status]");
+    expect(workflow).toContain("options: [initial]");
     for (const game of ["all", "cyberpunk-2077", "baldurs-gate-3", "hades-ii"]) {
       expect(workflow).toContain(game);
     }
