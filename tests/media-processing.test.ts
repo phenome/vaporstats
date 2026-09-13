@@ -16,7 +16,7 @@ import {
   type GeminiBatchPoll,
   type GeminiBatchTransport,
 } from "../src/lib/media-processing";
-import { getMediaOverview } from "../src/lib/media-overview";
+import { getMediaOverview, parseMediaOverview } from "../src/lib/media-overview";
 import { handleGameDetailRequest } from "../src/routes/api.games.$appid.detail";
 
 function adapter(native: Database): AppDatabase {
@@ -135,6 +135,37 @@ function overviewOutput(url: string): Record<string, unknown> {
   return { statements: [{ text: "The game presents a focused campaign with flexible combat, with the preview's Early Access and PC qualification retained.", sourceUrls: [url] }] };
 }
 
+function richOverviewOutput(urls: {
+  ign: string;
+  followup: string;
+  eurogamer: string;
+  republication: string;
+  explicitRepublication: string;
+}): Record<string, unknown> {
+  return {
+    statements: [
+      { text: "Critics agree that one outlet saw flexible combat.", sourceUrls: [urls.ign, urls.followup] },
+      { text: "Flexible combat has material differences in pacing.", sourceUrls: [urls.ign, urls.eurogamer, urls.republication, urls.explicitRepublication] },
+    ],
+    categories: [
+      {
+        name: "Gameplay & systems",
+        findings: [
+          { text: "Flexible builds support experimentation.", sourceUrls: [urls.ign] },
+          { text: "Combat pacing can feel deliberate or sluggish depending on build.", sourceUrls: [urls.ign, urls.eurogamer, urls.republication, urls.explicitRepublication], contested: true },
+          { text: "Outlets agree on a duplicated observation.", sourceUrls: [urls.eurogamer, urls.republication, urls.explicitRepublication] },
+        ],
+      },
+      { name: "Visuals & audio", findings: [{ text: "The city presentation stands out.", sourceUrls: [urls.followup] }] },
+      { name: "Unsupported category", findings: [{ text: "Must remain absent.", sourceUrls: [urls.ign] }] },
+    ],
+    prosCons: {
+      pros: [{ text: "Flexible builds reward experimentation.", sourceUrls: [urls.ign, urls.eurogamer] }],
+      cons: [],
+    },
+  };
+}
+
 function stableJson(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
   if (value && typeof value === "object") {
@@ -156,7 +187,38 @@ async function finishSingle(fixtureValue: ReturnType<typeof fixture>, transport:
 const cleanups: Array<() => void> = [];
 afterEach(() => { while (cleanups.length > 0) cleanups.pop()!(); });
 
+
 describe("bounded Gemini media processing", () => {
+  test("orders support after transitive duplicate grouping", () => {
+    const urls = {
+      first: "https://ign.com/articles/first",
+      second: "https://www.eurogamer.net/second",
+      bridge: "https://www.gamesradar.com/bridge",
+      independentIgn: "https://ign.com/articles/independent",
+      independentEurogamer: "https://www.eurogamer.net/independent",
+    };
+    const sources = new Map([
+      [urls.first, { outlet: "IGN", identities: ["origin-a"] }],
+      [urls.second, { outlet: "Eurogamer", identities: ["origin-b"] }],
+      [urls.bridge, { outlet: "GamesRadar+", identities: ["origin-a", "origin-b"] }],
+      [urls.independentIgn, { outlet: "IGN", identities: ["origin-c"] }],
+      [urls.independentEurogamer, { outlet: "Eurogamer", identities: ["origin-d"] }],
+    ]);
+    const parsed = parseMediaOverview({
+      statements: [{ text: "Flexible mission design.", sourceUrls: [urls.first] }],
+      categories: [{
+        name: "Gameplay & systems",
+        findings: [
+          { text: "Bridged combat pacing.", sourceUrls: [urls.first, urls.second, urls.bridge] },
+          { text: "Independent movement and combat.", sourceUrls: [urls.independentIgn, urls.independentEurogamer] },
+        ],
+      }],
+    }, APPIDS[0], sources);
+    expect(parsed?.categories[0]?.findings.map((finding) => finding.text)).toEqual([
+      "Independent movement and combat.",
+      "Bridged combat pacing.",
+    ]);
+  });
   test("authorizes a persisted discovery run, cleans/discards content, and produces a cited overview", async () => {
     const value = fixture(); cleanups.push(value.cleanup);
     const transport = new ControlledTransport();
@@ -176,16 +238,53 @@ describe("bounded Gemini media processing", () => {
     expect(authorization?.billing_confirmation).toBe(GEMINI_BATCH_BILLING_CONFIRMATION);
   });
 
-  test("keeps the #53 processing slice to one source per game", async () => {
+  test("processes every bounded source before one multi-outlet synthesis", async () => {
     const value = fixture(); cleanups.push(value.cleanup);
-    value.native.prepare("INSERT INTO media_sources (appid, pass, original_url, title, outlet, retrieved_at, type, hands_on, platform) VALUES (?, 'initial', ?, ?, 'Eurogamer', ?, 'review', 1, 'PC')").run(APPIDS[0], "https://www.eurogamer.net/cyberpunk-2077-review", "Cyberpunk 2077 review", "2026-09-11T00:00:00.000Z");
+    const secondUrl = "https://www.eurogamer.net/cyberpunk-2077-review";
+    value.native.prepare("INSERT INTO media_sources (appid, pass, original_url, title, outlet, retrieved_at, type, hands_on, platform) VALUES (?, 'initial', ?, ?, 'Eurogamer', ?, 'review', 1, 'PC')").run(APPIDS[0], secondUrl, "Cyberpunk 2077 review", "2026-09-11T00:00:00.000Z");
     await authorizeMediaProcessing(value.db, value.runId);
     const transport = new ControlledTransport();
-    transport.nextPolls.push({ state: "pending" });
-    await advanceMediaProcessing(value.db, { runId: value.runId, transport, articleFetch: async () => articleHtml(APPIDS[0]), pricingVersion: GEMINI_BATCH_PRICING_VERSION, capabilityVersion: GEMINI_BATCH_CAPABILITY_VERSION });
+    transport.nextPolls.push(
+      { state: "succeeded", output: extractionOutput(), usage: { inputTokens: 100, outputTokens: 20 } },
+      { state: "succeeded", output: extractionOutput(), usage: { inputTokens: 100, outputTokens: 20 } },
+      { state: "pending" },
+    );
+    const summary = await advanceMediaProcessing(value.db, { runId: value.runId, transport, articleFetch: async () => articleHtml(APPIDS[0]), pricingVersion: GEMINI_BATCH_PRICING_VERSION, capabilityVersion: GEMINI_BATCH_CAPABILITY_VERSION });
     const extractionJobs = await value.db.prepare("SELECT COUNT(*) AS count FROM media_processing_jobs WHERE stage = 'extraction'").first<{ count: number }>();
-    expect(extractionJobs?.count).toBe(1);
-    expect(transport.submissions).toHaveLength(1);
+    expect(extractionJobs?.count).toBe(2);
+    expect(transport.submissions).toHaveLength(3);
+    expect(summary.submitted).toBe(3);
+    const synthesisRequest = JSON.stringify(transport.requestBodies.at(-1));
+    expect(synthesisRequest).toContain(URLS[APPIDS[0]]);
+    expect(synthesisRequest).toContain(secondUrl);
+  });
+
+  test("does not process more than fifteen selected articles per game", async () => {
+    const value = fixture(); cleanups.push(value.cleanup);
+    for (let index = 1; index < 16; index += 1) {
+      value.native.prepare(
+        "INSERT INTO media_sources (appid, pass, original_url, title, outlet, retrieved_at, type) VALUES (?, 'initial', ?, ?, 'IGN', ?, 'review')",
+      ).run(
+        APPIDS[0],
+        `https://ign.com/articles/cyberpunk-review-${index}`,
+        `Cyberpunk 2077 Review ${index}`,
+        "2026-09-11T00:00:00.000Z",
+      );
+    }
+    await authorizeMediaProcessing(value.db, value.runId);
+    const transport = new ControlledTransport();
+    await advanceMediaProcessing(value.db, {
+      runId: value.runId,
+      transport,
+      articleFetch: async () => articleHtml(APPIDS[0]),
+      pricingVersion: GEMINI_BATCH_PRICING_VERSION,
+      capabilityVersion: GEMINI_BATCH_CAPABILITY_VERSION,
+    });
+    const extractionJobs = await value.db.prepare(
+      "SELECT COUNT(*) AS count FROM media_processing_jobs WHERE stage = 'extraction'",
+    ).first<{ count: number }>();
+    expect(extractionJobs?.count).toBe(15);
+    expect(transport.submissions).toHaveLength(15);
   });
 
   test("serves controlled authorized output through the detail API without provider work on reads", async () => {
@@ -402,6 +501,82 @@ describe("bounded Gemini media processing", () => {
     expect(synthesisRequest).not.toContain("Unsupported contribution");
     expect(synthesisRequest).not.toContain("Unsupported category");
     expect(synthesisRequest).not.toContain("Missing category contribution");
+  });
+
+  test("persists ordered cited synthesis without false cross-outlet support", async () => {
+    const value = fixture(); cleanups.push(value.cleanup);
+    const urls = {
+      ign: URLS[APPIDS[0]],
+      followup: "https://ign.com/articles/cyberpunk-review-followup",
+      eurogamer: "https://www.eurogamer.net/cyberpunk-2077-review",
+      republication: "https://www.gamesradar.com/cyberpunk-2077-review",
+      explicitRepublication: "https://kotaku.com/cyberpunk-2077-review-republication",
+    };
+    for (const [url, outlet, platform, build] of [
+      [urls.followup, "IGN", "PC", "release"],
+      [urls.eurogamer, "Eurogamer", null, null],
+      [urls.republication, "GamesRadar+", "PC", "release"],
+      [urls.explicitRepublication, "Kotaku", "PC", "release"],
+    ] as const) {
+      value.native.prepare(
+        "INSERT INTO media_sources (appid, pass, original_url, title, outlet, retrieved_at, type, hands_on, platform, build_context) VALUES (?, 'initial', ?, ?, ?, ?, 'review', 1, ?, ?)",
+      ).run(APPIDS[0], url, "Cyberpunk 2077 review", outlet, "2026-09-11T00:00:00.000Z", platform, build);
+    }
+    value.native.prepare("UPDATE media_sources SET author = 'Wire Author', title = 'Wire Original' WHERE original_url = ?").run(urls.eurogamer);
+    value.native.prepare("INSERT INTO apps (appid, name, slug, type, parent_appid) VALUES (2138330, 'Cyberpunk 2077: Phantom Liberty', 'cyberpunk-2077-phantom-liberty', 'expansion', ?)").run(APPIDS[0]);
+    const expansionUrl = "https://ign.com/articles/phantom-liberty-review";
+    value.native.prepare("INSERT INTO media_sources (appid, pass, original_url, title, outlet, retrieved_at, type) VALUES (2138330, 'initial', ?, 'Phantom Liberty review', 'IGN', ?, 'review')").run(expansionUrl, "2026-09-11T00:00:00.000Z");
+
+    await authorizeMediaProcessing(value.db, value.runId);
+    const transport = new ControlledTransport();
+    transport.nextPolls.push(
+      { state: "succeeded", output: extractionOutput(), usage: { inputTokens: 100, outputTokens: 20 } },
+      { state: "succeeded", output: extractionOutput(), usage: { inputTokens: 100, outputTokens: 20 } },
+      { state: "succeeded", output: extractionOutput(), usage: { inputTokens: 100, outputTokens: 20 } },
+      { state: "succeeded", output: extractionOutput(), usage: { inputTokens: 100, outputTokens: 20 } },
+      { state: "succeeded", output: { ...extractionOutput(), originatingAssessment: "Wire Author|Wire Original" }, usage: { inputTokens: 100, outputTokens: 20 } },
+      { state: "succeeded", output: richOverviewOutput(urls), usage: { inputTokens: 100, outputTokens: 60 } },
+    );
+    const articleFetch = async (url: string) => {
+      if (url === urls.eurogamer || url === urls.republication) {
+        return articleHtml(APPIDS[0]).replace("memorable encounters", "measured encounters");
+      }
+      if (url === urls.explicitRepublication) {
+        return articleHtml(APPIDS[0]).replace("memorable encounters", "republished encounters");
+      }
+      if (url === urls.followup) return articleHtml(APPIDS[0]).replace("memorable encounters", "later encounters");
+      return articleHtml(APPIDS[0]);
+    };
+    const first = await advanceMediaProcessing(value.db, { runId: value.runId, transport, articleFetch, pricingVersion: GEMINI_BATCH_PRICING_VERSION, capabilityVersion: GEMINI_BATCH_CAPABILITY_VERSION });
+    expect(first.submitted).toBe(6);
+    await advanceMediaProcessing(value.db, { runId: value.runId, transport, articleFetch, pricingVersion: GEMINI_BATCH_PRICING_VERSION, capabilityVersion: GEMINI_BATCH_CAPABILITY_VERSION });
+
+    const overview = await getMediaOverview(value.db, APPIDS[0], { includeUnpublished: true });
+    expect(overview?.statements.map((finding) => finding.text)).toEqual([
+      "Flexible combat has material differences in pacing.",
+    ]);
+    expect(overview?.categories.map((category) => category.name)).toEqual([
+      "Gameplay & systems",
+      "Visuals & audio",
+    ]);
+    expect(overview?.categories[0]?.findings.map((finding) => finding.text)).toEqual([
+      "Combat pacing can feel deliberate or sluggish depending on build.",
+      "Flexible builds support experimentation.",
+    ]);
+    expect(overview?.categories[0]?.findings[0]?.contested).toBe(true);
+    expect(overview?.categories[0]?.findings[0]?.sourceUrls).toEqual([
+      urls.ign,
+      urls.eurogamer,
+      urls.republication,
+      urls.explicitRepublication,
+    ]);
+    expect(overview?.prosCons?.pros[0]?.sourceUrls).toEqual([urls.ign, urls.eurogamer]);
+    expect(overview?.prosCons?.cons).toEqual([]);
+    const synthesisRequest = JSON.stringify(transport.requestBodies.at(-1));
+    expect(synthesisRequest).not.toContain(expansionUrl);
+    expect(synthesisRequest).toContain('\\"platform\\":null');
+    const synthesisJobs = await value.db.prepare("SELECT COUNT(*) AS count FROM media_processing_jobs WHERE stage = 'synthesis'").first<{ count: number }>();
+    expect(synthesisJobs?.count).toBe(1);
   });
   test("reopens submitted work, isolates partial failures, and reuses unchanged output", async () => {
     const value = fixture(APPIDS); cleanups.push(value.cleanup);

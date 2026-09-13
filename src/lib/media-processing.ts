@@ -2,21 +2,32 @@ import { createHash } from "node:crypto";
 import { Readability } from "@mozilla/readability";
 import { parseHTML } from "linkedom";
 import type { AppDatabase } from "./db";
-import { parseMediaOverview } from "./media-overview";
-import { MEDIA_GAME_CHOICES, MEDIA_OUTLETS, type MediaOutlet } from "./media-discovery";
+import {
+  createMediaEvidenceSource,
+  MEDIA_CATEGORY_NAMES,
+  parseMediaOverview,
+  type MediaEvidenceSource,
+} from "./media-overview";
+import {
+  MAX_MEDIA_ARTICLES_PER_GAME,
+  MAX_MEDIA_ARTICLES_TOTAL,
+  MEDIA_GAME_CHOICES,
+  MEDIA_OUTLETS,
+  type MediaOutlet,
+} from "./media-discovery";
 
 export const GEMINI_MEDIA_MODEL = "gemini-3.1-flash-lite";
 export const GEMINI_BATCH_PRICING_VERSION = "2026-09-11";
 export const GEMINI_BATCH_CAPABILITY_VERSION = "gemini-3.1-flash-lite-batch-paid-2026-09-11";
 export const GEMINI_BATCH_BILLING_CONFIRMATION = `pricing=${GEMINI_BATCH_PRICING_VERSION};capability=${GEMINI_BATCH_CAPABILITY_VERSION}`;
-const EXTRACTION_CONFIG_VERSION = "media-extraction-2026-09-11-v1";
-const SYNTHESIS_CONFIG_VERSION = "media-synthesis-2026-09-11-v1";
+const EXTRACTION_CONFIG_VERSION = "media-extraction-2026-09-13-v2";
+const SYNTHESIS_CONFIG_VERSION = "media-synthesis-2026-09-13-v2";
 const CLEANUP_VERSION = "media-cleanup-2026-09-11-v1";
 const INPUT_PRICE_MICRO_USD_PER_TOKEN = 0.125;
 const OUTPUT_PRICE_MICRO_USD_PER_TOKEN = 0.75;
 const LIFETIME_BUDGET_MICRO_USD = 5_000_000;
 const EXTRACTION_MAX_OUTPUT_TOKENS = 1_200;
-const SYNTHESIS_MAX_OUTPUT_TOKENS = 900;
+const SYNTHESIS_MAX_OUTPUT_TOKENS = 1_600;
 const MAX_INPUT_TOKENS = 24_000;
 const MAX_ARTICLE_CHARS = 120_000;
 const MAX_REDIRECTS = 5;
@@ -361,30 +372,41 @@ function synthesisIdentity(appid: number, extractions: ExtractionRow[]): string 
 
 function makeExtractionRequest(source: SourceRow, content: string, identity: string): GeminiRequest {
   return {
-    contents: [{ role: "user", parts: [{ text: `Analyze only this article about Steam app ${source.appid}. Return JSON only. Keep natural wording grounded in the article. Use exactly these optional category names inside categories and contribution.category: Gameplay & systems; Story & world; Visuals & audio; Social play; Technical experience & accessibility. Top-level keys must be categories, contributions, traits, qualifications, provenance. Contributions are objects with text, category, and sourceIdentity; traits and qualifications are arrays of strings; provenance is an array of sourceIdentity/sourceUrl objects. Preserve preview, platform, Early Access, and other qualifications. Do not infer consensus, other entities, or missing context.\nsourceIdentity: ${identity}\nsourceUrl: ${source.original_url}\narticleTitle: ${source.title}\narticle:\n${content}` }] }],
+    contents: [{ role: "user", parts: [{ text: `Analyze only this article about Steam app ${source.appid}. Return JSON only. Keep natural wording grounded in the article. Use exactly these optional category names inside categories and contribution.category: ${MEDIA_CATEGORY_NAMES.join("; ")}. Top-level keys must be categories, contributions, traits, qualifications, provenance, and optional originatingAssessment. Contributions are objects with text and category; traits and qualifications are arrays of strings. Set originatingAssessment only when the article explicitly identifies itself as a republication: use the original article URL when present, otherwise exactly "<author>|<original title>"; otherwise omit it. Preserve writer, preview, platform, Early Access, build, and other material qualifications. Do not infer consensus, other entities, editions, or missing context.\nsourceIdentity: ${identity}\nsourceUrl: ${source.original_url}\ntitle: ${source.title}\narticle:\n${content}` }] }],
     generationConfig: { responseMimeType: "application/json", maxOutputTokens: EXTRACTION_MAX_OUTPUT_TOKENS },
   };
 }
 
 function makeSynthesisRequest(appid: number, name: string, extractions: ExtractionRow[], sources: SourceRow[]): GeminiRequest {
   const sourceById = new Map(sources.map((source) => [source.id, source]));
-  const evidence = extractions.map((row) => ({ sourceIdentity: row.input_identity, sourceUrl: sourceById.get(row.source_id)?.original_url ?? "", extraction: parseExtraction(row.output_json) })).filter((item) => item.sourceUrl);
+  const evidence = extractions.map((row) => {
+    const source = sourceById.get(row.source_id);
+    return source ? {
+      sourceIdentity: row.input_identity,
+      sourceUrl: source.original_url,
+      outlet: source.outlet,
+      contentHash: row.content_hash,
+      context: metadataFor(source),
+      extraction: parseExtraction(row.output_json),
+    } : null;
+  }).filter((item) => item !== null);
   return {
-    contents: [{ role: "user", parts: [{ text: `Write a concise, natural game-first Overview for ${name || `game ${appid}`}. Return JSON only as {"statements":[{"text":"...","sourceUrls":["..."]}]}. Every statement must cite one or more URLs from the supplied evidence. Keep preview, platform, Early Access, and other qualifications. One article is not consensus; do not claim consensus. Do not invent context or entities. Build from article contributions, never from a previous Overview.\n${JSON.stringify(evidence)}` }] }],
+    contents: [{ role: "user", parts: [{ text: `Synthesize the current initial assessments for ${name || `game ${appid}`}. Return JSON only as {"statements":[{"text":"...","sourceUrls":["..."]}],"categories":[{"name":"...","findings":[{"text":"...","sourceUrls":["..."],"contested":true}]}],"prosCons":{"pros":[{"text":"...","sourceUrls":["..."]}],"cons":[...]}}. Write flowing, concise, game-first Overview statements. Write every text field as a direct game observation; never mention coverage, critics, reviewers, reviews, outlets, publications, sources, assessments, agreement, consensus, or frequency. Multiple citation URLs communicate repeated support. Include only supported sections named ${MEDIA_CATEGORY_NAMES.join("; ")}; omit unsupported sections. Provide one global pros/cons overview, omit unsupported sides, and do not force neutral characteristics into pros or cons. Every entry must cite every supporting article URL. Order findings by distinct supporting outlets, counting an outlet once and treating identical content or matching explicit originatingAssessment values as one assessment. More than one article from one outlet is not repeated cross-outlet support. Group genuinely opposing judgments on the same facet into one qualified contested entry with both sides cited; leave compatible different observations separate. Preserve material writer, preview, announcement, platform, build, and unknown-context distinctions. Do not infer consensus, identity, edition, features, or quality from missing coverage. Evidence belongs only to app ${appid}; do not transfer incidental comparisons, DLC, expansion, bundle, or focused edition evidence.\n${JSON.stringify(evidence)}` }] }],
     generationConfig: { responseMimeType: "application/json", maxOutputTokens: SYNTHESIS_MAX_OUTPUT_TOKENS },
   };
 }
 
-const CATEGORY_NAMES = new Set([
-  "Gameplay & systems",
-  "Story & world",
-  "Visuals & audio",
-  "Social play",
-  "Technical experience & accessibility",
-]);
+const CATEGORY_NAMES = new Set<string>(MEDIA_CATEGORY_NAMES);
 
 type Contribution = { text: string; category?: string; sourceIdentity: string };
-type StoredExtraction = { categories?: Record<string, string[]>; contributions: Contribution[]; traits: string[]; qualifications: string[]; provenance: Array<{ sourceIdentity: string; sourceUrl: string }> };
+type StoredExtraction = {
+  categories?: Record<string, string[]>;
+  contributions: Contribution[];
+  traits: string[];
+  qualifications: string[];
+  provenance: Array<{ sourceIdentity: string; sourceUrl: string }>;
+  originatingAssessment?: string;
+};
 
 function strings(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string" && cleanLine(item).length > 0).map((item) => cleanLine(item).slice(0, 1_000)).slice(0, 30) : [];
@@ -413,15 +435,30 @@ function parseExtraction(value: unknown): StoredExtraction {
     const object = jsonObject(item);
     return { sourceIdentity: typeof object.sourceIdentity === "string" ? object.sourceIdentity : "", sourceUrl: typeof object.sourceUrl === "string" ? object.sourceUrl : "" };
   }).filter((item) => item.sourceIdentity && item.sourceUrl).slice(0, 30) : [];
-  return { categories: Object.keys(categories).length > 0 ? categories : undefined, contributions: contributions.slice(0, 40), traits: strings(root.traits), qualifications: strings(root.qualifications), provenance };
+  const originatingAssessment = typeof root.originatingAssessment === "string"
+    ? cleanLine(root.originatingAssessment).slice(0, 500)
+    : "";
+  return {
+    categories: Object.keys(categories).length > 0 ? categories : undefined,
+    contributions: contributions.slice(0, 40),
+    traits: strings(root.traits),
+    qualifications: strings(root.qualifications),
+    provenance,
+    ...(originatingAssessment ? { originatingAssessment } : {}),
+  };
 }
 
 function storedExtractionJson(value: unknown, sourceIdentity: string, sourceUrl: string): string {
   const parsed = parseExtraction(value);
-  const provenance = parsed.provenance.filter((item) => item.sourceIdentity === sourceIdentity && item.sourceUrl === sourceUrl);
-  const contributions = parsed.contributions.map((item) => ({ ...item, sourceIdentity: item.sourceIdentity === sourceIdentity ? sourceIdentity : "" })).filter((item) => !item.sourceIdentity || item.sourceIdentity === sourceIdentity);
-  if (provenance.length === 0) provenance.push({ sourceIdentity, sourceUrl });
-  return JSON.stringify({ ...(parsed.categories ? { categories: parsed.categories } : {}), contributions, traits: parsed.traits, qualifications: parsed.qualifications, provenance });
+  const contributions = parsed.contributions.map((item) => ({ ...item, sourceIdentity }));
+  return JSON.stringify({
+    ...(parsed.categories ? { categories: parsed.categories } : {}),
+    contributions,
+    traits: parsed.traits,
+    qualifications: parsed.qualifications,
+    provenance: [{ sourceIdentity, sourceUrl }],
+    ...(parsed.originatingAssessment ? { originatingAssessment: parsed.originatingAssessment } : {}),
+  });
 }
 
 type AuthorizationRow = { run_id: number; status: string; stop_reason: string | null; billing_confirmation: string | null };
@@ -584,7 +621,22 @@ async function persistOverview(db: AppDatabase, job: JobRow, output: unknown, no
       status = "stale";
       return;
     }
-    const overview = parseMediaOverview(output, job.appid, new Set(sources.map((source) => source.original_url)));
+    const sourceById = new Map(sources.map((source) => [source.id, source]));
+    const evidenceSources = new Map<string, MediaEvidenceSource>();
+    for (const extraction of extractions) {
+      const source = sourceById.get(extraction.source_id);
+      if (!source) continue;
+      const originatingAssessment = parseExtraction(extraction.output_json).originatingAssessment;
+      evidenceSources.set(source.original_url, createMediaEvidenceSource({
+        outlet: source.outlet,
+        url: source.original_url,
+        contentHash: extraction.content_hash,
+        author: source.author,
+        title: source.title,
+        originatingAssessment,
+      }));
+    }
+    const overview = parseMediaOverview(output, job.appid, evidenceSources);
     if (!overview) {
       await db.prepare("UPDATE media_processing_jobs SET status = 'failed', error = ?, completed_at = ? WHERE id = ?").bind("Gemini synthesis returned no cited statements", now.toISOString(), job.id).run();
       return;
@@ -682,7 +734,17 @@ async function advanceMediaProcessingNow(db: AppDatabase, options: MediaProcessi
     await db.prepare("UPDATE media_processing_authorizations SET billing_confirmation = ?, updated_at = ? WHERE run_id = ?").bind(GEMINI_BATCH_BILLING_CONFIRMATION, now.toISOString(), auth.run_id).run();
   });
   const articleFetch = options.articleFetch ?? fetch;
-  const sources = await rows<SourceRow>(db, `SELECT id, appid, original_url, title, outlet, author, published_at, updated_at, retrieved_at, type, hands_on, affiliation, platform, build_context, normalized_content_hash, cleanup_version, processing_content, processing_input_identity FROM media_sources AS source WHERE pass = 'initial' AND appid IN (SELECT value FROM json_each(?)) AND id = (SELECT MIN(candidate.id) FROM media_sources AS candidate WHERE candidate.pass = 'initial' AND candidate.appid = source.appid) ORDER BY appid, id`, JSON.stringify(selectedGames));
+  const allSources = await rows<SourceRow>(db, `SELECT id, appid, original_url, title, outlet, author, published_at, updated_at, retrieved_at, type, hands_on, affiliation, platform, build_context, normalized_content_hash, cleanup_version, processing_content, processing_input_identity FROM media_sources WHERE pass = 'initial' AND appid IN (SELECT value FROM json_each(?)) ORDER BY appid, id`, JSON.stringify(selectedGames));
+  const sourceCountByGame = new Map<number, number>();
+  let boundedSourceCount = 0;
+  const sources = allSources.filter((source) => {
+    if (boundedSourceCount >= MAX_MEDIA_ARTICLES_TOTAL) return false;
+    const count = sourceCountByGame.get(source.appid) ?? 0;
+    if (count >= MAX_MEDIA_ARTICLES_PER_GAME) return false;
+    sourceCountByGame.set(source.appid, count + 1);
+    boundedSourceCount += 1;
+    return true;
+  });
   const sourceById = new Map(sources.map((source) => [source.id, source]));
   let extractionSubmitted = 0;
   let synthesisSubmitted = 0;
@@ -786,6 +848,13 @@ async function advanceMediaProcessingNow(db: AppDatabase, options: MediaProcessi
   const activeExtractions = await rows<ExtractionRow>(db, "SELECT e.id, e.source_id, e.input_identity, e.content_hash, e.cleanup_version, e.model, e.config_version, e.output_json, e.active FROM media_article_extractions e JOIN media_sources s ON s.id = e.source_id WHERE e.active = 1 AND s.pass = 'initial' AND s.appid IN (SELECT value FROM json_each(?))", JSON.stringify(selectedGames));
   const appids = [...new Set(activeExtractions.map((row) => sourceById.get(row.source_id)?.appid).filter((appid): appid is number => typeof appid === "number"))];
   for (const appid of appids) {
+    const pendingExtractions = Number((await first<{ count: number }>(
+      db,
+      "SELECT COUNT(*) AS count FROM media_processing_jobs WHERE run_id = ? AND appid = ? AND stage = 'extraction' AND status IN ('reserved', 'submitted', 'uncertain')",
+      auth.run_id,
+      appid,
+    ))?.count ?? 0);
+    if (pendingExtractions > 0) continue;
     const game = await first<{ name: string }>(db, "SELECT name FROM apps WHERE appid = ?", appid);
     const appSources = sources.filter((source) => source.appid === appid);
     const appExtractions = activeExtractions.filter((row) => sourceById.get(row.source_id)?.appid === appid);

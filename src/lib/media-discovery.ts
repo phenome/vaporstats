@@ -99,8 +99,8 @@ export interface MediaDiscoveryOptions {
 
 const MAX_QUERIES = 18;
 const MAX_ATTEMPTS_PER_OUTLET_DAY = 30;
-const MAX_ARTICLES_PER_GAME = 15;
-const MAX_ARTICLES_TOTAL = 45;
+export const MAX_MEDIA_ARTICLES_PER_GAME = 15;
+export const MAX_MEDIA_ARTICLES_TOTAL = 45;
 const MAX_REDIRECTS = 5;
 
 type RunRow = {
@@ -622,7 +622,7 @@ export async function runAuthorizedMediaDiscovery(db: AppDatabase, options: Medi
     const progressRows = await rows<ProgressRow>(db, "SELECT id, run_id, appid, pass, outlet, status, query_attempted_at, candidate_urls, candidate_index FROM media_discovery_progress WHERE appid IN (SELECT value FROM json_each(?)) AND pass = 'initial' ORDER BY appid, id", JSON.stringify(selectedGames));
     for (const appid of selectedGames) {
       const existingArticles = await first<{ count: number }>(db, "SELECT COUNT(*) AS count FROM media_sources WHERE appid = ? AND pass = 'initial'", appid);
-      if (Number(existingArticles?.count ?? 0) >= MAX_ARTICLES_PER_GAME) continue;
+      if (Number(existingArticles?.count ?? 0) >= MAX_MEDIA_ARTICLES_PER_GAME) continue;
       for (const outlet of MEDIA_OUTLETS) {
         if (stoppedOutlets.has(outlet.name)) continue;
         const progress = progressRows.find((row) => row.appid === appid && row.outlet === outlet.name) ?? null;
@@ -730,10 +730,10 @@ export async function runAuthorizedMediaDiscovery(db: AppDatabase, options: Medi
         if (selected) {
           const total = await first<{ count: number }>(db, "SELECT COUNT(*) AS count FROM media_sources WHERE pass = 'initial'");
           const gameTotal = await first<{ count: number }>(db, "SELECT COUNT(*) AS count FROM media_sources WHERE appid = ? AND pass = 'initial'", appid);
-          if (Number(total?.count ?? 0) < MAX_ARTICLES_TOTAL && Number(gameTotal?.count ?? 0) < MAX_ARTICLES_PER_GAME) {
+          if (Number(total?.count ?? 0) < MAX_MEDIA_ARTICLES_TOTAL && Number(gameTotal?.count ?? 0) < MAX_MEDIA_ARTICLES_PER_GAME) {
             await db.prepare("INSERT OR IGNORE INTO media_sources (appid, pass, original_url, discovery_url, title, outlet, author, published_at, updated_at, retrieved_at, type, hands_on, affiliation, platform, build_context) VALUES (?, 'initial', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").bind(selected.appid, selected.originalUrl, selected.discoveryUrl, selected.title, selected.outlet, selected.author, selected.publishedAt, selected.updatedAt, selected.retrievedAt, selected.type, selected.handsOn === null ? null : selected.handsOn ? 1 : 0, selected.affiliation, selected.platform, selected.buildContext).run();
           } else {
-            stopReasons.add(Number(gameTotal?.count ?? 0) >= MAX_ARTICLES_PER_GAME ? `article_cap:${appid}` : "article_cap");
+            stopReasons.add(Number(gameTotal?.count ?? 0) >= MAX_MEDIA_ARTICLES_PER_GAME ? `article_cap:${appid}` : "article_cap");
           }
         } else if (current.status !== "stopped") {
           stopReasons.add(`${outlet.name}:no_qualifying_article`);

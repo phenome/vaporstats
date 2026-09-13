@@ -10,6 +10,7 @@ import { handleGameDetailRequest } from "../src/routes/api.games.$appid.detail";
 import { handleGameHttpRequest } from "../src/routes/games.$game";
 import { MediaSources } from "../src/components/media-sources";
 import { MediaOverviewSection } from "../src/components/media-overview";
+import type { MediaOverview } from "../src/lib/media-overview";
 
 function createSqliteAppAdapter(native: Database): AppDatabase {
   return {
@@ -178,7 +179,12 @@ describe("game media sources", () => {
       });
 
       const overviewHtml = renderToString(React.createElement(MediaOverviewSection, {
-        overview: { appid: source.appid, statements: body.data.mediaOverview.statements },
+        overview: {
+          appid: source.appid,
+          statements: body.data.mediaOverview.statements,
+          categories: [],
+          prosCons: null,
+        },
         sources: [source],
       }));
       expect(overviewHtml).toContain("Overview");
@@ -194,6 +200,99 @@ describe("game media sources", () => {
       const ssrHtml = await ssrResponse.text();
       expect(ssrHtml).toContain("Night City supports several approaches");
       expect(ssrHtml).toContain('id=\"media-source-1\"');
+    } finally {
+      native.close(true);
+      if (previous === undefined) delete process.env.MEDIA_OVERVIEW_PUBLIC;
+      else process.env.MEDIA_OVERVIEW_PUBLIC = previous;
+    }
+  });
+
+  test("renders rich and disputed persisted synthesis while omitting absent categories", async () => {
+    const previous = process.env.MEDIA_OVERVIEW_PUBLIC;
+    process.env.MEDIA_OVERVIEW_PUBLIC = "true";
+    const { db, native } = createFixture();
+    try {
+      await seedGame(db, native);
+      const secondUrl = "https://www.eurogamer.net/cyberpunk-2077-review";
+      native.prepare(
+        "INSERT INTO media_sources (appid, pass, original_url, title, outlet, retrieved_at, type, hands_on) VALUES (?, 'initial', ?, 'Cyberpunk 2077 review', 'Eurogamer', ?, 'review', 1)",
+      ).run(source.appid, secondUrl, "2026-09-10T00:00:00.000Z");
+      native.prepare(
+        "INSERT INTO media_game_overviews (appid, input_identity, model, config_version, output_json) VALUES (?, ?, ?, ?, ?)",
+      ).run(
+        source.appid,
+        "rich-overview-input",
+        "gemini-3.1-flash-lite",
+        "media-synthesis-v2",
+        JSON.stringify({
+          statements: [{
+            text: "Night City supports several approaches to its missions.",
+            sourceUrls: [source.originalUrl, secondUrl],
+          }],
+          categories: [
+            {
+              name: "Gameplay & systems",
+              findings: [{
+                text: "Combat can reward specialization or feel restrictive depending on build.",
+                sourceUrls: [source.originalUrl, secondUrl],
+                contested: true,
+              }],
+            },
+            {
+              name: "Visuals & audio",
+              findings: [{
+                text: "Dense city detail supports the setting.",
+                sourceUrls: [source.originalUrl],
+              }],
+            },
+          ],
+          prosCons: {
+            pros: [{
+              text: "Missions allow varied approaches.",
+              sourceUrls: [source.originalUrl, secondUrl],
+            }],
+            cons: [],
+          },
+        }),
+      );
+
+      const response = await handleGameDetailRequest(
+        new Request("https://vaporstats.test/api/games/1091500/detail"),
+        db,
+        source.appid,
+      );
+      const body = await response.json() as {
+        data: { mediaOverview: MediaOverview | null };
+      };
+      const overview = body.data.mediaOverview;
+      expect(overview?.categories.map((category) => category.name)).toEqual([
+        "Gameplay & systems",
+        "Visuals & audio",
+      ]);
+      expect(overview?.prosCons?.cons).toEqual([]);
+      if (!overview) throw new Error("Expected persisted media overview");
+
+      const html = renderToString(React.createElement(MediaOverviewSection, {
+        overview,
+        sources: await getMediaSources(db, source.appid),
+      }));
+      expect(html).toContain("Gameplay &amp; systems");
+      expect(html).toContain("Visuals &amp; audio");
+      expect(html).toContain("Pros &amp; cons");
+      expect(html).toContain("Contested");
+      expect(html).toContain("data-contested");
+      expect(html).toContain('href="#media-source-1"');
+      expect(html).toContain('href="#media-source-2"');
+      expect(html).not.toContain("Story &amp; world");
+      expect(html).not.toContain(">Cons<");
+
+      const ssrResponse = await handleGameHttpRequest(
+        new Request("https://vaporstats.test/games/1091500-cyberpunk-2077"),
+        db,
+      );
+      const ssrHtml = await ssrResponse.text();
+      expect(ssrHtml).toContain("Contested");
+      expect(ssrHtml).toContain("Missions allow varied approaches.");
     } finally {
       native.close(true);
       if (previous === undefined) delete process.env.MEDIA_OVERVIEW_PUBLIC;
