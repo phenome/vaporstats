@@ -269,6 +269,11 @@ describe("bounded Gemini media processing", () => {
     expect(second.submitted).toBe(0);
     expect(fetches).toBe(1);
     expect(transport.submissions).toHaveLength(1);
+    await value.db.prepare("UPDATE media_processing_jobs SET error = 'transient provider lookup failure' WHERE stage = 'extraction'").run();
+    transport.polls.set("batches/test-1", { state: "succeeded", output: extractionOutput(), usage: { inputTokens: 100, outputTokens: 20 } });
+    await advanceMediaProcessing(value.db, { runId: value.runId, transport, articleFetch, pricingVersion: GEMINI_BATCH_PRICING_VERSION, capabilityVersion: GEMINI_BATCH_CAPABILITY_VERSION });
+    const recovered = await value.db.prepare("SELECT status, error FROM media_processing_jobs WHERE stage = 'extraction'").first<{ status: string; error: string | null }>();
+    expect(recovered).toEqual({ status: "succeeded", error: null });
   });
 
   test("refetches a newly authorized run and rebuilds changed article evidence", async () => {
@@ -436,7 +441,7 @@ describe("bounded Gemini media processing", () => {
       return Response.json({ state: { name: "BATCH_STATE_RUNNING" } });
     };
     const transport = createGeminiBatchTransport("secret-key", fetchFn);
-    expect(await transport.countTokens("gemini-3.1-flash-lite", { contents: [] })).toBe(7);
+    expect(await transport.countTokens("gemini-3.1-flash-lite", { contents: [], generationConfig: { maxOutputTokens: 8 } })).toBe(7);
     expect(await transport.submitBatch("gemini-3.1-flash-lite", [{ key: "one", request: { contents: [] } }])).toEqual({ name: "batches/official" });
     expect(await transport.pollBatch("batches/official")).toEqual({ state: "pending" });
     expect(calls.map((call) => call.url)).toEqual([
@@ -444,6 +449,30 @@ describe("bounded Gemini media processing", () => {
       "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite:batchGenerateContent",
       "https://generativelanguage.googleapis.com/v1beta/batches/official",
     ]);
+    expect(String(calls[0]!.init?.body)).not.toContain("generationConfig");
     expect(String(calls[1]!.init?.body)).not.toContain("secret-key");
+  });
+
+  test("normalizes the official nested inline Batch response", async () => {
+    const transport = createGeminiBatchTransport("secret-key", async () => Response.json({
+      metadata: { state: "BATCH_STATE_SUCCEEDED" },
+      response: {
+        "@type": "type.googleapis.com/google.ai.generativelanguage.v1main.GenerateContentBatchOutput",
+        inlinedResponses: {
+          inlinedResponses: [{
+            response: {
+              candidates: [{ content: { parts: [{ text: "{\"contributions\":[]}" }] } }],
+              usageMetadata: { promptTokenCount: 12, candidatesTokenCount: 3, thoughtsTokenCount: 2 },
+            },
+          }],
+        },
+      },
+    }));
+    const result = await transport.pollBatch("batches/official");
+    expect(result.state).toBe("succeeded");
+    expect(result.output).toBe("{\"contributions\":[]}");
+    expect(result.usage?.inputTokens).toBe(12);
+    expect(result.usage?.outputTokens).toBe(3);
+    expect(result.usage?.thinkingTokens).toBe(2);
   });
 });

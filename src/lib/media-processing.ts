@@ -149,7 +149,9 @@ async function transaction(db: AppDatabase, work: () => Promise<void>): Promise<
 }
 
 function providerError(status: number, body: unknown): GeminiHttpError {
-  const message = jsonObject(body).error;
+  const root = jsonObject(body);
+  const nested = jsonObject(root.error);
+  const message = nested.message ?? root.error;
   return new GeminiHttpError(status, typeof message === "string" ? message : `Gemini HTTP ${status}`);
 }
 
@@ -171,7 +173,8 @@ export function createGeminiBatchTransport(apiKey: string, fetchFn: MediaFetch =
   };
   return {
     async countTokens(model, input) {
-      const body = await request(`${base}/models/${encodeURIComponent(model)}:countTokens`, { method: "POST", body: JSON.stringify(input) });
+      const { generationConfig: _generationConfig, ...countInput } = input;
+      const body = await request(`${base}/models/${encodeURIComponent(model)}:countTokens`, { method: "POST", body: JSON.stringify(countInput) });
       const root = jsonObject(body);
       const count = root.totalTokens ?? root.total_tokens;
       if (typeof count !== "number" || !Number.isInteger(count) || count < 0) throw new Error("Gemini countTokens returned no bounded token count");
@@ -211,13 +214,7 @@ export function createGeminiBatchTransport(apiKey: string, fetchFn: MediaFetch =
       ).toUpperCase();
       const responseBody = root.response ?? root.result ?? root.output ?? root.responses ?? root.inlinedResponses;
       const responseRoot = jsonObject(responseBody);
-      const inlineResponses = Array.isArray(responseBody)
-        ? responseBody
-        : Array.isArray(responseRoot.inlinedResponses)
-          ? responseRoot.inlinedResponses
-          : Array.isArray(responseRoot.responses)
-            ? responseRoot.responses
-            : [];
+      const inlineResponses = batchInlineResponses(responseBody);
       const inline = jsonObject(inlineResponses[0]);
       const inlineResponse = jsonObject(inline.response ?? inline.output);
       const usage = normalizeUsage(
@@ -263,16 +260,23 @@ function normalizeUsage(value: unknown): GeminiBatchUsage | null {
   };
 }
 
+function batchInlineResponses(value: unknown): unknown[] {
+  if (Array.isArray(value)) return value;
+  const root = jsonObject(value);
+  if (root.inlinedResponses !== undefined) return batchInlineResponses(root.inlinedResponses);
+  if (root.responses !== undefined) return batchInlineResponses(root.responses);
+  return [];
+}
+
 function normalizeBatchOutput(value: unknown): unknown {
-  if (Array.isArray(value)) {
-    const first = value[0];
+  const inlineResponses = batchInlineResponses(value);
+  if (inlineResponses.length > 0) {
+    const first = inlineResponses[0];
     if (jsonObject(first).response !== undefined) return normalizeBatchOutput(jsonObject(first).response);
     if (jsonObject(first).output !== undefined) return normalizeBatchOutput(jsonObject(first).output);
     return normalizeBatchOutput(first);
   }
   const root = jsonObject(value);
-  if (root.inlinedResponses && Array.isArray(root.inlinedResponses)) return normalizeBatchOutput(root.inlinedResponses);
-  if (root.responses && Array.isArray(root.responses)) return normalizeBatchOutput(root.responses);
   if (root.candidates && Array.isArray(root.candidates)) {
     const text = jsonObject(jsonObject(root.candidates[0]).content).parts;
     if (Array.isArray(text)) return text.map((part) => jsonObject(part).text).filter((part): part is string => typeof part === "string").join("");
@@ -564,7 +568,7 @@ async function persistExtraction(db: AppDatabase, job: JobRow, output: unknown, 
     const stored = storedExtractionJson(output, job.input_identity, source.original_url);
     await db.prepare("UPDATE media_article_extractions SET active = 0 WHERE source_id = ? AND active = 1").bind(source.id).run();
     await db.prepare("INSERT OR IGNORE INTO media_article_extractions (source_id, input_identity, content_hash, cleanup_version, model, config_version, output_json, active, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)").bind(source.id, job.input_identity, source.normalized_content_hash ?? "", CLEANUP_VERSION, job.model, job.config_version, stored, now.toISOString()).run();
-    await db.prepare("UPDATE media_processing_jobs SET status = 'succeeded', output_json = ?, completed_at = ? WHERE id = ?").bind(stored, now.toISOString(), job.id).run();
+    await db.prepare("UPDATE media_processing_jobs SET status = 'succeeded', output_json = ?, error = NULL, completed_at = ? WHERE id = ?").bind(stored, now.toISOString(), job.id).run();
     status = "succeeded";
   });
   return status;
@@ -587,7 +591,7 @@ async function persistOverview(db: AppDatabase, job: JobRow, output: unknown, no
     }
     await db.prepare("UPDATE media_game_overviews SET active = 0 WHERE appid = ? AND active = 1").bind(job.appid).run();
     await db.prepare("INSERT OR IGNORE INTO media_game_overviews (appid, input_identity, model, config_version, output_json, active, created_at) VALUES (?, ?, ?, ?, ?, 1, ?)").bind(job.appid, job.input_identity, job.model, job.config_version, JSON.stringify(overview), now.toISOString()).run();
-    await db.prepare("UPDATE media_processing_jobs SET status = 'succeeded', output_json = ?, completed_at = ? WHERE id = ?").bind(JSON.stringify(overview), now.toISOString(), job.id).run();
+    await db.prepare("UPDATE media_processing_jobs SET status = 'succeeded', output_json = ?, error = NULL, completed_at = ? WHERE id = ?").bind(JSON.stringify(overview), now.toISOString(), job.id).run();
     status = "succeeded";
   });
   return status;
