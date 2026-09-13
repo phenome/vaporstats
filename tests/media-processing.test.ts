@@ -600,6 +600,26 @@ describe("bounded Gemini media processing", () => {
     expect(reused.reused).toBeGreaterThan(0);
     expect(transport.submissions).toHaveLength(submissionCount);
   });
+  test("reconciles submitted work from an earlier authorization", async () => {
+    const value = fixture(); cleanups.push(value.cleanup);
+    await authorizeMediaProcessing(value.db, value.runId);
+    const transport = new ControlledTransport();
+    transport.nextPolls.push(
+      { state: "succeeded", output: extractionOutput(), usage: { inputTokens: 100, outputTokens: 20 } },
+      { state: "pending" },
+    );
+    await advanceMediaProcessing(value.db, { runId: value.runId, transport, articleFetch: async () => articleHtml(APPIDS[0]), pricingVersion: GEMINI_BATCH_PRICING_VERSION, capabilityVersion: GEMINI_BATCH_CAPABILITY_VERSION });
+
+    value.native.prepare("INSERT INTO media_discovery_runs (pass, identity_key, selected_games, status) VALUES ('initial', ?, ?, 'completed')").run("initial:later-authorization:test", JSON.stringify([APPIDS[0]]));
+    const laterRun = value.native.prepare("SELECT id FROM media_discovery_runs ORDER BY id DESC LIMIT 1").get() as { id: number };
+    await authorizeMediaProcessing(value.db, laterRun.id);
+    transport.polls.set("batches/test-2", { state: "succeeded", output: overviewOutput(URLS[APPIDS[0]]), usage: { inputTokens: 100, outputTokens: 20 } });
+
+    const result = await advanceMediaProcessing(value.db, { runId: laterRun.id, transport, articleFetch: async () => articleHtml(APPIDS[0]), pricingVersion: GEMINI_BATCH_PRICING_VERSION, capabilityVersion: GEMINI_BATCH_CAPABILITY_VERSION });
+    expect(result.status).toBe("completed");
+    expect(await getMediaOverview(value.db, APPIDS[0], { includeUnpublished: true })).not.toBeNull();
+  });
+
 
   test("changes metadata identity and rejects stale results", async () => {
     const value = fixture(); cleanups.push(value.cleanup);

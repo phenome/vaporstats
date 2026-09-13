@@ -826,7 +826,7 @@ async function advanceMediaProcessingNow(db: AppDatabase, options: MediaProcessi
     if (await submitJob(db, job, request, transport, options.geminiApiKey, now, source.id) === "submitted") extractionSubmitted += 1;
   }
 
-  const submittedJobs = await rows<JobRow>(db, "SELECT id, run_id, stage, appid, source_id, request_key, input_identity, model, config_version, max_input_tokens, max_output_tokens, reserved_microusd, charged_microusd, reservation_active, status, provider_batch_id, output_json, usage_json, error FROM media_processing_jobs WHERE run_id = ? AND status = 'submitted' ORDER BY id", auth.run_id);
+  const submittedJobs = await rows<JobRow>(db, "SELECT id, run_id, stage, appid, source_id, request_key, input_identity, model, config_version, max_input_tokens, max_output_tokens, reserved_microusd, charged_microusd, reservation_active, status, provider_batch_id, output_json, usage_json, error FROM media_processing_jobs WHERE status = 'submitted' AND appid IN (SELECT value FROM json_each(?)) ORDER BY id", JSON.stringify(selectedGames));
   let succeeded = 0;
   let failed = 0;
   let uncertain = 0;
