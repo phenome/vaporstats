@@ -113,8 +113,8 @@ class ControlledTransport implements GeminiBatchTransport {
   }
 }
 
-function extractionOutput(): Record<string, unknown> {
-  return { contributions: [{ text: "The combat supports flexible builds", category: "Gameplay & systems" }], traits: ["build experimentation"], qualifications: ["Early Access", "PC preview"], provenance: [] };
+function extractionOutput(trait = "build experimentation"): Record<string, unknown> {
+  return { contributions: [{ text: "The combat supports flexible builds", category: "Gameplay & systems" }], traits: [trait], qualifications: ["Early Access", "PC preview"], provenance: [] };
 }
 
 function extractionOutputWithUnsupportedCategories(): Record<string, unknown> {
@@ -205,6 +205,7 @@ afterEach(() => { while (cleanups.length > 0) cleanups.pop()!(); });
     const url = URLS[APPIDS[0]];
     const parsed = parseMediaOverview({
       statements: [{ text: "The game supports varied tactics.", sourceUrls: [url] }],
+      categories: [{ name: "Gameplay & systems", findings: [{ text: "Stealth is useful but inconsistently supported.", sourceUrls: [url], contested: true }] }],
       tags: [
         { label: "  First-Person Shooter! ", sourceUrls: [url] },
         { label: "first person shooter", sourceUrls: [url] },
@@ -216,6 +217,7 @@ afterEach(() => { while (cleanups.length > 0) cleanups.pop()!(); });
       slug: "first-person-shooter",
     });
     expect(parsed?.tags).toEqual([{ label: "First-Person Shooter", slug: "first-person-shooter" }]);
+    expect(parsed?.categories[0]?.findings[0]?.contested).toBe(true);
   });
 
 
@@ -285,7 +287,7 @@ describe("bounded Gemini media processing", () => {
     transport.nextPolls.push(
       { state: "succeeded", output: extractionOutput(), usage: { inputTokens: 100, outputTokens: 20 } },
       { state: "succeeded", output: extractionOutput(), usage: { inputTokens: 100, outputTokens: 20 } },
-      { state: "succeeded", output: extractionOutput(), usage: { inputTokens: 100, outputTokens: 20 } },
+      { state: "succeeded", output: extractionOutput("flexible character builds"), usage: { inputTokens: 100, outputTokens: 20 } },
       { state: "succeeded", output: overviewOutput(URLS[APPIDS[1]]), usage: { inputTokens: 100, outputTokens: 20 } },
       { state: "succeeded", output: overviewOutputForUrls([URLS[APPIDS[0]], secondUrl]), usage: { inputTokens: 100, outputTokens: 20 } },
     );
