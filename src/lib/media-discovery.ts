@@ -1,6 +1,7 @@
 import { Readability } from "@mozilla/readability";
 import { parseHTML } from "linkedom";
 import type { AppDatabase } from "./db";
+import { ELIGIBLE_MEDIA_ENTITY_SQL } from "./media-similarity";
 
 const MEDIA_GAME_METADATA = [
   { choice: "cyberpunk-2077", appid: 1091500, name: "Cyberpunk 2077", aliases: ["cyberpunk 2077"] },
@@ -134,6 +135,88 @@ type ProgressRow = {
 type TavilyResult = { url?: unknown; published_date?: unknown };
 
 type Candidate = { url: string; publishedDate: string | null };
+type MediaTarget = {
+  appid: number;
+  name: string;
+  parentAppid: number | null;
+  aliases: readonly string[];
+};
+
+type MediaTargetRow = {
+  appid: number;
+  name: string;
+  parent_appid: number | null;
+};
+
+function normalizeTitle(value: string): string {
+  return value.toLowerCase().replace(/[‘’]/g, "'").replace(/\s+/g, " ").trim();
+}
+function hasEntityAlias(text: string, alias: string): boolean {
+  for (let offset = 0; offset <= text.length - alias.length;) {
+    const index = text.indexOf(alias, offset);
+    if (index < 0) return false;
+    const before = text[index - 1];
+    const after = text[index + alias.length];
+    if ((!before || !/[a-z0-9]/.test(before)) && (!after || !/[a-z0-9]/.test(after))) return true;
+    offset = index + alias.length;
+  }
+  return false;
+}
+
+function rootAppid(target: MediaTarget): number {
+  return target.parentAppid ?? target.appid;
+}
+
+
+
+async function loadMediaTargets(db: AppDatabase, roots: readonly number[]): Promise<MediaTarget[]> {
+  const rootsJson = JSON.stringify(roots);
+  const targetRows = await rows<MediaTargetRow>(
+    db,
+    `SELECT app.appid, app.name, app.parent_appid
+     FROM apps AS app
+     WHERE app.appid IN (SELECT value FROM json_each(?))
+       AND app.type = 'game'
+       AND app.is_playable = 1
+       AND app.is_eligible = 1
+       AND app.parent_appid IS NULL
+     UNION ALL
+     SELECT child.appid, child.name, child.parent_appid
+     FROM apps AS child
+     JOIN apps AS parent ON parent.appid = child.parent_appid
+     WHERE child.parent_appid IN (SELECT value FROM json_each(?))
+       AND child.type IN ('dlc', 'expansion')
+       AND child.is_eligible = 1
+       AND parent.type = 'game'
+       AND parent.is_playable = 1
+       AND parent.is_eligible = 1
+       AND parent.parent_appid IS NULL
+       AND NOT EXISTS (
+         SELECT 1
+         FROM app_relationships AS relationship
+         WHERE relationship.child_appid = child.appid
+           AND relationship.relationship_type IN ('server', 'tool', 'demo', 'test', 'soundtrack')
+       )
+     ORDER BY appid`,
+    rootsJson,
+    rootsJson,
+  );
+  return targetRows.map((row) => {
+    const metadata = row.parent_appid === null
+      ? MEDIA_GAME_METADATA.find((game) => game.appid === row.appid)
+      : undefined;
+    const normalizedName = normalizeTitle(row.name);
+    const parentName = row.parent_appid === null
+      ? ""
+      : normalizeTitle(targetRows.find((candidate) => candidate.appid === row.parent_appid)?.name ?? "");
+    const suffix = parentName ? normalizedName.slice(parentName.length) : "";
+    const childName = parentName && normalizedName.startsWith(parentName) && /^[\s:–—-]+/.test(suffix)
+      ? suffix.replace(/^[\s:–—-]+/, "").trim()
+      : "";
+    const aliases = [...new Set([normalizedName, childName, ...(metadata?.aliases ?? []).map(normalizeTitle)].filter(Boolean))];
+    return { appid: row.appid, name: row.name, parentAppid: row.parent_appid, aliases };
+  });
+}
 
 
 function validGameIds(games: readonly number[]): number[] {
@@ -342,7 +425,7 @@ function meta(document: Document, ...names: string[]): string | null {
   return null;
 }
 
-function parseSource(html: string, finalUrl: string, appid: number, outlet: MediaOutlet, retrievedAt: string): MediaSource | null {
+function parseSource(html: string, finalUrl: string, target: MediaTarget, targets: readonly MediaTarget[], outlet: MediaOutlet, retrievedAt: string): MediaSource | null {
   let document: Document;
   try {
     document = parseHTML(html).document as unknown as Document;
@@ -370,14 +453,35 @@ function parseSource(html: string, finalUrl: string, appid: number, outlet: Medi
   const readableArticleText = readable?.textContent ?? document.querySelector("article")?.textContent ?? document.body?.textContent;
   const fullArticleText = typeof readableArticleText === "string" ? readableArticleText.replace(/\s+/g, " ").trim() : "";
   if (!title || fullArticleText.length < 120) return null;
-  const titleLower = title.toLowerCase().replace(/[‘’]/g, "'");
-  const bodyLower = fullArticleText.toLowerCase().replace(/[‘’]/g, "'");
-  const game = MEDIA_GAME_METADATA.find((item) => item.appid === appid);
-  if (!game) return null;
-  const titledGames = MEDIA_GAME_METADATA.filter((item) => item.aliases.some((alias) => titleLower.includes(alias)));
-  if (titledGames.length !== 1 || titledGames[0]!.appid !== appid) return null;
+  const titleLower = normalizeTitle(title);
+  const bodyLower = normalizeTitle(fullArticleText);
+  const articleLeadLower = bodyLower.slice(0, 240);
+  const titleMatches = targets.flatMap((candidate) =>
+    candidate.aliases.filter((alias) => hasEntityAlias(titleLower, alias)).map((alias) => {
+      const parent = candidate.parentAppid === null ? null : targets.find((item) => item.appid === candidate.parentAppid);
+      const parentAlias = parent?.aliases.find((parentAlias) => hasEntityAlias(titleLower, parentAlias)) ?? null;
+      return { target: candidate, alias, score: alias.length + (parentAlias?.length ?? 0) };
+    }),
+  ).sort((left, right) => right.score - left.score || right.alias.length - left.alias.length);
+  const selected = titleMatches[0];
+  if (!selected) return null;
+  const titleTargets = [...new Map(titleMatches.map((match) => [match.target.appid, match.target])).values()];
+  const selectedRootAppid = rootAppid(selected.target);
+  if (titleTargets.some((candidate) => rootAppid(candidate) !== selectedRootAppid)) return null;
+  const titleChildren = titleTargets.filter((candidate) => candidate.parentAppid !== null);
+  if (titleChildren.length > 1) return null;
+  const articleLeadTargets = targets.filter((candidate) => candidate.aliases.some((alias) => hasEntityAlias(articleLeadLower, alias)));
+  const articleLeadFamilies = new Set(articleLeadTargets.map(rootAppid));
+  if (articleLeadFamilies.size > 1 || [...articleLeadFamilies].some((appid) => appid !== selectedRootAppid)) return null;
+  const childMentions = articleLeadTargets.filter((candidate) => candidate.parentAppid !== null);
+  if (childMentions.length > 1) return null;
+  const titleChild = titleChildren[0] ?? null;
+  const leadChild = childMentions[0] ?? null;
+  if (titleChild && leadChild && titleChild.appid !== leadChild.appid) return null;
+  const attributedTarget = titleChild ?? leadChild ?? selected.target;
+  const rootCanAttributeChild = target.parentAppid === null && attributedTarget.parentAppid === target.appid;
+  if (attributedTarget.appid !== target.appid && !rootCanAttributeChild) return null;
   if (/\b(announcement|announces|revealed|reveal|trailer|launches|patch notes|update notes|roadmap)\b/.test(titleLower)) return null;
-  if (appid === 1091500 && (/\bphantom\s+liberty\b/.test(titleLower) || /\bphantom\s+liberty\b/.test(bodyLower.slice(0, 240)))) return null;
   const reviewScoreNews = /\b(?:review\s+scores?|(?:gets?|earns?|receives?|scores?|rated)\s+(?:a\s+)?\d+(?:\.\d+)?\s*(?:\/\s*\d+|out of \d+))\b/.test(titleLower);
   const coTitledReview = /\b(?:and|&)\s+.+?\s+reviews?\b/.test(titleLower);
   const reviewRelatedNews = /\breviews?\s*(?:[:\-–—]\s*|\s+)(?:embargo(?:es)?|details?|reactions?|coverage|codes?|copies|policies?|discourse)\b|\b(?:embargo(?:es)?|details?|reactions?|coverage|codes?|copies|policies?|discourse)\s*(?:[:\-–—]\s*|\s+)(?:about|around|for|on|of|to)?\s*reviews?\b/.test(titleLower);
@@ -407,7 +511,7 @@ function parseSource(html: string, finalUrl: string, appid: number, outlet: Medi
   const platform = cleanText(platformMeta) ?? (/\b(pc|playstation|xbox|switch)\b/i.exec(fullArticleText.slice(0, 4_000))?.[1] ?? null);
   const buildContext = cleanText(buildMeta) ?? (/\bearly\s+access\b/i.test(`${title} ${fullArticleText}`) ? "Early Access" : null);
   return {
-    appid,
+    appid: attributedTarget.appid,
     originalUrl: normalizedUrl,
     discoveryUrl: null,
     title,
@@ -535,38 +639,38 @@ type MediaRunCounts = {
   outletShortfall: MediaOutletShortfall | null;
 };
 
-async function mediaRunCounts(db: AppDatabase, selectedGames: readonly number[]): Promise<MediaRunCounts> {
-  const selectedGamesJson = JSON.stringify(selectedGames);
+async function mediaRunCounts(db: AppDatabase, targetAppids: readonly number[]): Promise<MediaRunCounts> {
+  const targetAppidsJson = JSON.stringify(targetAppids);
   const articleCount = Number((await first<{ count: number }>(
     db,
     "SELECT COUNT(*) AS count FROM media_sources WHERE pass = 'initial' AND appid IN (SELECT value FROM json_each(?))",
-    selectedGamesJson,
+    targetAppidsJson,
   ))?.count ?? 0);
   const queryCount = Number((await first<{ count: number }>(
     db,
     "SELECT COUNT(*) AS count FROM media_discovery_progress WHERE query_attempted_at IS NOT NULL AND pass = 'initial' AND appid IN (SELECT value FROM json_each(?))",
-    selectedGamesJson,
+    targetAppidsJson,
   ))?.count ?? 0);
   const progressCandidates = await rows<{ candidate_urls: string }>(
     db,
     "SELECT candidate_urls FROM media_discovery_progress WHERE query_attempted_at IS NOT NULL AND pass = 'initial' AND appid IN (SELECT value FROM json_each(?))",
-    selectedGamesJson,
+    targetAppidsJson,
   );
   const discoveredCount = progressCandidates.reduce((total, row) => total + json<Candidate[]>(row.candidate_urls, []).length, 0);
   const attemptCount = Number((await first<{ count: number }>(
     db,
     "SELECT COUNT(*) AS count FROM media_discovery_attempts WHERE pass = 'initial' AND appid IN (SELECT value FROM json_each(?))",
-    selectedGamesJson,
+    targetAppidsJson,
   ))?.count ?? 0);
   const sourceFailures = Number((await first<{ count: number }>(
     db,
     "SELECT COUNT(*) AS count FROM media_discovery_attempts WHERE pass = 'initial' AND succeeded = 0 AND appid IN (SELECT value FROM json_each(?))",
-    selectedGamesJson,
+    targetAppidsJson,
   ))?.count ?? 0);
   const acceptedOutlets = await rows<{ outlet: MediaOutlet }>(
     db,
     "SELECT DISTINCT outlet FROM media_sources WHERE pass = 'initial' AND appid IN (SELECT value FROM json_each(?))",
-    selectedGamesJson,
+    targetAppidsJson,
   );
   const acceptedOutletNames = new Set(acceptedOutlets.map((row) => row.outlet));
   const missingOutlets = MEDIA_OUTLETS.filter((item) => !acceptedOutletNames.has(item.name)).map((item) => item.name);
@@ -592,12 +696,14 @@ export async function runAuthorizedMediaDiscovery(db: AppDatabase, options: Medi
   }
   const run = await loadRun(db, options.runId);
   const selectedGames = json<number[]>(run.selected_games, []);
+  const discoveryTargets = await loadMediaTargets(db, selectedGames);
+  const targetAppids = discoveryTargets.map((target) => target.appid);
   const fetchFn = options.fetch ?? fetch;
   const apiKey = options.tavilyApiKey ?? process.env.TAVILY_API_KEY;
   let usageSummary: MediaRunSummary["usage"] = { ...EMPTY_USAGE_SUMMARY };
   try {
     const clock: MediaClock = () => isoNow(options.now);
-    await reopenDayScopedProgress(db, run.id, selectedGames, dayKey(clock()));
+    await reopenDayScopedProgress(db, run.id, targetAppids, dayKey(clock()));
     const stopReasons = new Set<string>();
     const stoppedOutlets = new Set<MediaOutlet>();
     let searchCreditBudget: number | null = null;
@@ -619,12 +725,13 @@ export async function runAuthorizedMediaDiscovery(db: AppDatabase, options: Medi
     }
   }
   if (stopReasons.size === 0) {
-    const progressRows = await rows<ProgressRow>(db, "SELECT id, run_id, appid, pass, outlet, status, query_attempted_at, candidate_urls, candidate_index FROM media_discovery_progress WHERE appid IN (SELECT value FROM json_each(?)) AND pass = 'initial' ORDER BY appid, id", JSON.stringify(selectedGames));
-    for (const appid of selectedGames) {
+    const progressRows = await rows<ProgressRow>(db, "SELECT id, run_id, appid, pass, outlet, status, query_attempted_at, candidate_urls, candidate_index FROM media_discovery_progress WHERE appid IN (SELECT value FROM json_each(?)) AND pass = 'initial' ORDER BY appid, id", JSON.stringify(targetAppids));
+    const targetOutlets = MEDIA_OUTLETS.flatMap((outlet) => discoveryTargets.map((target) => ({ outlet, target })));
+    for (const { outlet, target } of targetOutlets) {
+      const appid = target.appid;
       const existingArticles = await first<{ count: number }>(db, "SELECT COUNT(*) AS count FROM media_sources WHERE appid = ? AND pass = 'initial'", appid);
       if (Number(existingArticles?.count ?? 0) >= MAX_MEDIA_ARTICLES_PER_GAME) continue;
-      for (const outlet of MEDIA_OUTLETS) {
-        if (stoppedOutlets.has(outlet.name)) continue;
+      if (stoppedOutlets.has(outlet.name)) continue;
         const progress = progressRows.find((row) => row.appid === appid && row.outlet === outlet.name) ?? null;
         let progressId = progress?.id;
         if (!progressId) {
@@ -650,13 +757,11 @@ export async function runAuthorizedMediaDiscovery(db: AppDatabase, options: Medi
             stopReasons.add("tavily_credits_exhausted");
             continue;
           }
-          const priorQueries = Number((await first<{ count: number }>(db, "SELECT COUNT(*) AS count FROM media_discovery_progress WHERE query_attempted_at IS NOT NULL"))?.count ?? 0);
-          if (priorQueries >= MAX_QUERIES) {
-            await stopProgress(db, progressId, "query_cap");
+          if (searchesIssued >= MAX_QUERIES) {
             stopReasons.add("query_cap");
-            continue;
+            break;
           }
-          const query = `${MEDIA_GAME_METADATA.find((game) => game.appid === appid)?.name ?? "Game"} review preview`;
+          const query = `${target.name} review preview`;
           searchesIssued += 1;
           const attemptNow = clock();
           await db.prepare(
@@ -696,8 +801,7 @@ export async function runAuthorizedMediaDiscovery(db: AppDatabase, options: Medi
             continue;
           }
         }
-        let review: MediaSource | null = null;
-        let preview: MediaSource | null = null;
+        const selections = new Map<number, { review: MediaSource | null; preview: MediaSource | null }>();
         for (; index < candidates.length; index += 1) {
           const fetchCapNow = clock();
           if ((await attemptsToday(db, appid, outlet.name, fetchCapNow)) >= MAX_ATTEMPTS_PER_OUTLET_DAY) {
@@ -720,29 +824,35 @@ export async function runAuthorizedMediaDiscovery(db: AppDatabase, options: Medi
             }
             continue;
           }
-          const source = parseSource(fetched.html, fetched.finalUrl, appid, outlet.name, clock().toISOString());
+          const source = parseSource(fetched.html, fetched.finalUrl, target, discoveryTargets, outlet.name, clock().toISOString());
           if (!source) continue;
           source.discoveryUrl = candidates[index]!.url;
-          if (source.type === "review") review = !review || candidateDate(source) < candidateDate(review) ? source : review;
-          else preview = !preview || candidateDate(source) < candidateDate(preview) ? source : preview;
+          const selection = selections.get(source.appid) ?? { review: null, preview: null };
+          if (source.type === "review") {
+            selection.review = !selection.review || candidateDate(source) < candidateDate(selection.review) ? source : selection.review;
+          } else {
+            selection.preview = !selection.preview || candidateDate(source) < candidateDate(selection.preview) ? source : selection.preview;
+          }
+          selections.set(source.appid, selection);
         }
-        const selected = review ?? preview;
-        if (selected) {
+        for (const selection of selections.values()) {
+          const selected = selection.review ?? selection.preview;
+          if (!selected) continue;
           const total = await first<{ count: number }>(db, "SELECT COUNT(*) AS count FROM media_sources WHERE pass = 'initial'");
-          const gameTotal = await first<{ count: number }>(db, "SELECT COUNT(*) AS count FROM media_sources WHERE appid = ? AND pass = 'initial'", appid);
+          const gameTotal = await first<{ count: number }>(db, "SELECT COUNT(*) AS count FROM media_sources WHERE appid = ? AND pass = 'initial'", selected.appid);
           if (Number(total?.count ?? 0) < MAX_MEDIA_ARTICLES_TOTAL && Number(gameTotal?.count ?? 0) < MAX_MEDIA_ARTICLES_PER_GAME) {
             await db.prepare("INSERT OR IGNORE INTO media_sources (appid, pass, original_url, discovery_url, title, outlet, author, published_at, updated_at, retrieved_at, type, hands_on, affiliation, platform, build_context) VALUES (?, 'initial', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").bind(selected.appid, selected.originalUrl, selected.discoveryUrl, selected.title, selected.outlet, selected.author, selected.publishedAt, selected.updatedAt, selected.retrievedAt, selected.type, selected.handsOn === null ? null : selected.handsOn ? 1 : 0, selected.affiliation, selected.platform, selected.buildContext).run();
           } else {
-            stopReasons.add(Number(gameTotal?.count ?? 0) >= MAX_MEDIA_ARTICLES_PER_GAME ? `article_cap:${appid}` : "article_cap");
+            stopReasons.add(Number(gameTotal?.count ?? 0) >= MAX_MEDIA_ARTICLES_PER_GAME ? `article_cap:${selected.appid}` : "article_cap");
           }
-        } else if (current.status !== "stopped") {
+        }
+        if (selections.size === 0 && current.status !== "stopped") {
           stopReasons.add(`${outlet.name}:no_qualifying_article`);
         }
         await db.prepare("UPDATE media_discovery_progress SET status = 'completed', updated_at = CURRENT_TIMESTAMP WHERE id = ? AND status <> 'stopped'").bind(progressId).run();
-      }
     }
   }
-  const counts = await mediaRunCounts(db, selectedGames);
+  const counts = await mediaRunCounts(db, targetAppids);
   const providerStopped = [...stopReasons].some((reason) =>
     reason === "missing_tavily_key" || reason === "tavily_usage_error" || reason.startsWith("tavily_"),
   );
@@ -775,7 +885,7 @@ export async function runAuthorizedMediaDiscovery(db: AppDatabase, options: Medi
   await db.prepare("UPDATE media_discovery_runs SET status = ?, article_count = ?, query_count = ?, attempt_count = ?, stop_reason = ?, summary = ?, usage = ?, finished_at = CURRENT_TIMESTAMP WHERE id = ?").bind(status, counts.articles, counts.queries, counts.attempts, stopReason, JSON.stringify(durableSummary), JSON.stringify(usageSummary), run.id).run();
   return { runId: run.id, pass: "initial", status, games: selectedGames, resumed: run.resumed === 1, newIdentity: run.resumed !== 1, queries: counts.queries, attempts: counts.attempts, articles: counts.articles, stopReasons: [...stopReasons].sort(), summary, usage: usageSummary };
   } catch (error) {
-    const counts = await mediaRunCounts(db, selectedGames);
+    const counts = await mediaRunCounts(db, targetAppids);
     const stopReason = "execution_error";
     const failureMessage = boundedError(error, apiKey);
     const summary: MediaRunSummary["summary"] = {
@@ -814,11 +924,25 @@ export async function runAuthorizedMediaDiscovery(db: AppDatabase, options: Medi
 }
 
 export async function getMediaSources(db: AppDatabase, appid: number): Promise<MediaSource[]> {
+  if (!Number.isInteger(appid) || appid <= 0) return [];
   const sourceRows = await rows<{
     appid: number; original_url: string; discovery_url: string | null; title: string; outlet: MediaOutlet;
     author: string | null; published_at: string | null; updated_at: string | null; retrieved_at: string;
     type: MediaArticleType; hands_on: number | null; affiliation: string | null; platform: string | null; build_context: string | null;
-  }>(db, "SELECT appid, original_url, discovery_url, title, outlet, author, published_at, updated_at, retrieved_at, type, hands_on, affiliation, platform, build_context FROM media_sources WHERE appid = ? AND pass = 'initial' ORDER BY COALESCE(published_at, retrieved_at), id", appid);
+  }>(
+    db,
+    `SELECT source.appid, source.original_url, source.discovery_url, source.title, source.outlet,
+            source.author, source.published_at, source.updated_at, source.retrieved_at,
+            source.type, source.hands_on, source.affiliation, source.platform, source.build_context
+     FROM media_sources AS source
+     JOIN apps AS app
+       ON app.appid = source.appid
+      AND app.is_eligible = 1
+      AND ${ELIGIBLE_MEDIA_ENTITY_SQL}
+     WHERE source.appid = ? AND source.pass = 'initial'
+     ORDER BY COALESCE(source.published_at, source.retrieved_at), source.id`,
+    appid,
+  );
   return sourceRows.map((row) => ({ appid: row.appid, originalUrl: row.original_url, discoveryUrl: row.discovery_url, title: row.title, outlet: row.outlet, author: row.author, publishedAt: row.published_at, updatedAt: row.updated_at, retrievedAt: row.retrieved_at, type: row.type, handsOn: row.hands_on === null ? null : row.hands_on === 1, affiliation: row.affiliation, platform: row.platform, buildContext: row.build_context }));
 }
 

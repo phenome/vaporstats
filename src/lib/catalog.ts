@@ -1,6 +1,7 @@
 import type { AppDatabase } from "./db";
 import { toSlug } from "./slug";
 import { normalizeMediaTag } from "./media-overview";
+import { getChildApp, type RelatedAppEntity } from "./related";
 
 export type ReleaseDateSource =
   | "original_release_date"
@@ -200,39 +201,29 @@ export async function getGameByAppId(
 ): Promise<GameDetail | null> {
   const appStmt = db
     .prepare(
-      `SELECT * FROM apps 
-       WHERE appid = ? 
-         AND is_playable = 1 
-         AND is_eligible = 1 
+      `SELECT * FROM apps
+       WHERE appid = ?
+         AND is_playable = 1
+         AND is_eligible = 1
          AND parent_appid IS NULL`
     )
     .bind(appid);
   const row = await appStmt.first<RawAppRow>();
+  return row ? getGameDetailFromRow(db, row) : null;
+}
 
-  if (!row) {
-    return null;
-  }
-
+async function getGameDetailFromRow(db: AppDatabase, row: RawAppRow): Promise<GameDetail> {
   const entity = mapRowToEntity(row);
-
-  let latest_players: number | null = null;
-  let peak_players: number | null = null;
-  let last_observed_at: string | null = null;
-
-  const obsStmt = db
+  const observation = await db
     .prepare(
-      `SELECT current_players, observed_at FROM observations
+      `SELECT current_players, observed_at
+       FROM observations
        WHERE appid = ?
        ORDER BY observed_at DESC
        LIMIT 1`
     )
-    .bind(appid);
-  const obs = await obsStmt.first<{ current_players: number; observed_at: string }>();
-  if (obs && typeof obs.current_players === "number") {
-    latest_players = obs.current_players;
-    last_observed_at = obs.observed_at;
-  }
-  let release_events: GameReleaseEvent[] = [];
+    .bind(row.appid)
+    .first<{ current_players: number; observed_at: string }>();
 
   const eventResult = await db
     .prepare(
@@ -253,17 +244,47 @@ export async function getGameByAppId(
          )
        ORDER BY event_date DESC, event_type ASC`
     )
-    .bind(appid)
+    .bind(row.appid)
     .all<GameReleaseEvent>();
-  release_events = eventResult.results ?? [];
-
 
   return {
     ...entity,
-    latest_players,
-    peak_players,
-    last_observed_at,
-    release_events,
+    latest_players:
+      observation && typeof observation.current_players === "number"
+        ? observation.current_players
+        : null,
+    peak_players: null,
+    last_observed_at: observation?.observed_at ?? null,
+    release_events: eventResult.results ?? [],
+  };
+}
+
+/**
+ * Loads complete detail for an eligible child after validating its canonical
+ * parent-child relationship. The returned child summary is retained for
+ * hierarchy rendering while `game` carries the full catalog detail shape.
+ */
+export async function getChildGameDetail(
+  db: AppDatabase,
+  parentAppId: number,
+  childAppId: number,
+): Promise<{ parent: CatalogEntity; child: RelatedAppEntity; game: GameDetail } | null> {
+  const result = await getChildApp(db, parentAppId, childAppId);
+  if (!result) return null;
+
+  const row = await db
+    .prepare(
+      `SELECT * FROM apps
+       WHERE appid = ? AND is_eligible = 1
+       LIMIT 1`,
+    )
+    .bind(result.child.appid)
+    .first<RawAppRow>();
+  if (!row) return null;
+
+  return {
+    ...result,
+    game: await getGameDetailFromRow(db, row),
   };
 }
 

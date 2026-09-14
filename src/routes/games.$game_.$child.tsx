@@ -5,61 +5,106 @@ import { useQuery } from "@tanstack/react-query";
 import { createServerFn } from "@tanstack/react-start";
 import { getDb } from "../lib/db-access";
 import type { AppDatabase } from "../lib/db";
-import {
-  getChildApp,
-  getCanonicalChildPath,
-} from "../lib/related";
+import { getChildGameDetail } from "../lib/catalog";
+import { getCanonicalChildPath } from "../lib/related";
 import {
   getCurrentPrice,
   getPriceHistory,
+  type PriceHistoryRange,
 } from "../lib/prices";
 import { parseGameSlug, toSlug } from "../lib/slug";
+import {
+  parseNumericPriceRange,
+  cleanGameSearchParams,
+  NUMERIC_TO_PRICE_RANGE,
+  DEFAULT_NUMERIC_PRICE_RANGE,
+  PRICE_TO_NUMERIC_RANGE,
+  type NumericPriceRange,
+} from "../lib/game-params";
 import { CACHE_POLICIES, getEntityCacheHeaders } from "../lib/cache";
 import { AppLink } from "../components/app-link";
 import { RouteDataError, RouteLoading } from "../components/route-state";
 import { GamePageSkeleton } from "../components/route-skeletons";
 import { ChildAppPageView } from "../components/child-app-page";
+import { getMediaGameMatches, getMediaGameMatchPaths } from "../lib/media-similarity";
+import { getMediaSources } from "../lib/media-discovery";
+import { getMediaOverview } from "../lib/media-overview";
 
 const getChildData = createServerFn({ method: "GET" })
-  .validator((data: { parentAppId: number; childAppId: number }) => {
+  .validator((data: { parentAppId: number; childAppId: number; priceRange: PriceHistoryRange }) => {
     if (
       !data ||
       !Number.isInteger(data.parentAppId) ||
       data.parentAppId <= 0 ||
       !Number.isInteger(data.childAppId) ||
-      data.childAppId <= 0
+      data.childAppId <= 0 ||
+      !["30d", "6m", "1y", "all"].includes(data.priceRange)
     ) {
-      throw new Error("Invalid related app IDs");
+      throw new Error("Invalid related app IDs or price range");
     }
     return data;
   })
   .handler(async ({ data }) => {
     const db = await getDb();
-    const result = await getChildApp(db, data.parentAppId, data.childAppId);
+    const result = await getChildGameDetail(db, data.parentAppId, data.childAppId);
     if (!result) return null;
-
-    const currentPrice = await getCurrentPrice(db, result.child.appid);
-    const priceHistory = await getPriceHistory(db, result.child.appid, "all", { currentPrice });
-    return { parent: result.parent, child: result.child, price: currentPrice, priceHistory };
+    const [currentPrice, mediaMatches, sources, mediaOverview] = await Promise.all([
+      getCurrentPrice(db, result.game.appid),
+      getMediaGameMatches(db, result.game.appid),
+      getMediaSources(db, result.game.appid),
+      getMediaOverview(db, result.game.appid),
+    ]);
+    const [priceHistory, mediaMatchPaths] = await Promise.all([
+      getPriceHistory(db, result.game.appid, data.priceRange, { currentPrice }),
+      getMediaGameMatchPaths(db, mediaMatches),
+    ]);
+    return {
+      parent: result.parent,
+      child: result.child,
+      game: result.game,
+      price: currentPrice,
+      priceHistory,
+      sources,
+      mediaOverview,
+      mediaMatches,
+      mediaMatchPaths,
+    };
   });
 
-export function childQueryOptions(parentAppId: number, childAppId: number) {
+export function childQueryOptions(
+  parentAppId: number,
+  childAppId: number,
+  priceRange: PriceHistoryRange = "all",
+) {
   return {
-    queryKey: ["child-app", parentAppId, childAppId],
-    queryFn: () => getChildData({ data: { parentAppId, childAppId } }),
+    queryKey: ["child-app", parentAppId, childAppId, priceRange],
+    queryFn: () => getChildData({ data: { parentAppId, childAppId, priceRange } }),
   };
 }
 
 export const Route = createFileRoute("/games/$game_/$child")({
   headers: () => getEntityCacheHeaders(),
-  loader: ({ params, context }) => {
+  validateSearch: (search: Record<string, unknown>) => {
+    const result: { pricerange?: number } = {};
+    if (search.pricerange !== undefined) {
+      const parsed = parseNumericPriceRange(search.pricerange);
+      if (parsed !== DEFAULT_NUMERIC_PRICE_RANGE) result.pricerange = parsed;
+    }
+    return result;
+  },
+  loaderDeps: ({ search }) => ({
+    pricerange: parseNumericPriceRange(search.pricerange),
+  }),
+  loader: ({ params, deps, context }) => {
     const p = parseGameSlug(params.game);
     const c = parseGameSlug(params.child);
     if (!p || !c) {
       throw notFound();
     }
 
-    void context.queryClient.prefetchQuery(childQueryOptions(p.appid, c.appid));
+    void context.queryClient.prefetchQuery(
+      childQueryOptions(p.appid, c.appid, NUMERIC_TO_PRICE_RANGE[deps.pricerange]),
+    );
     return {
       parentAppId: p.appid,
       childAppId: c.appid,
@@ -72,7 +117,10 @@ export const Route = createFileRoute("/games/$game_/$child")({
 
 function ChildRouteComponent() {
   const { parentAppId, childAppId, requestPath } = Route.useLoaderData();
-  const { data, isLoading, isError } = useQuery(childQueryOptions(parentAppId, childAppId));
+  const search = Route.useSearch();
+  const numericPriceRange = parseNumericPriceRange(search.pricerange);
+  const priceRange = NUMERIC_TO_PRICE_RANGE[numericPriceRange];
+  const { data, isLoading, isError } = useQuery(childQueryOptions(parentAppId, childAppId, priceRange));
   const navigate = Route.useNavigate();
 
   React.useEffect(() => {
@@ -84,9 +132,9 @@ function ChildRouteComponent() {
       data.child.name
     );
     if (requestPath !== canonicalPath) {
-      void navigate({ to: canonicalPath, replace: true });
+      void navigate({ to: canonicalPath, search, replace: true, resetScroll: false });
     }
-  }, [data, navigate, requestPath]);
+  }, [data, navigate, requestPath, search]);
 
   if (isLoading) {
     return <GamePageSkeleton />;
@@ -108,15 +156,31 @@ function ChildRouteComponent() {
     return <RouteLoading label="Redirecting to the canonical related app page..." />;
   }
 
+  const handlePriceRangeChange = (nextPriceRange: NumericPriceRange) => {
+    void navigate({
+      search: cleanGameSearchParams({ pricerange: nextPriceRange }),
+      replace: true,
+      resetScroll: false,
+    });
+  };
+
   return (
     <ChildAppPageView
       parent={data.parent}
       child={data.child}
+      game={data.game}
       price={data.price}
       priceHistory={data.priceHistory}
+      sources={data.sources}
+      mediaOverview={data.mediaOverview}
+      mediaMatches={data.mediaMatches}
+      mediaMatchPaths={data.mediaMatchPaths}
+      pricerange={numericPriceRange}
+      onPriceRangeChange={handlePriceRangeChange}
     />
   );
 }
+
 
 function ChildNotFoundComponent() {
   return (
@@ -172,7 +236,9 @@ export async function handleChildHttpRequest(
     });
   }
 
-  const result = await getChildApp(db, p.appid, c.appid);
+  const numericPriceRange = parseNumericPriceRange(url.searchParams.get("pricerange"));
+  const priceRange = NUMERIC_TO_PRICE_RANGE[numericPriceRange];
+  const result = await getChildGameDetail(db, p.appid, c.appid);
   if (!result) {
     const notFoundHtml = renderToString(<ChildNotFoundComponent />);
     return new Response(wrapHtml("Related App Not Found", notFoundHtml), {
@@ -191,19 +257,41 @@ export async function handleChildHttpRequest(
       result.child.appid,
       result.child.name
     );
+    const location = numericPriceRange !== DEFAULT_NUMERIC_PRICE_RANGE
+      ? `${canonicalPath}?pricerange=${numericPriceRange}`
+      : canonicalPath;
     return new Response(null, {
       status: 301,
       headers: {
-        Location: canonicalPath,
+        Location: location,
         "Cache-Control": CACHE_POLICIES.entity,
       },
     });
   }
 
-  const currentPrice = await getCurrentPrice(db, result.child.appid);
-  const priceHistory = await getPriceHistory(db, result.child.appid, "all", { currentPrice });
+  const [currentPrice, mediaMatches, sources, mediaOverview] = await Promise.all([
+    getCurrentPrice(db, result.game.appid),
+    getMediaGameMatches(db, result.game.appid),
+    getMediaSources(db, result.game.appid),
+    getMediaOverview(db, result.game.appid),
+  ]);
+  const [priceHistory, mediaMatchPaths] = await Promise.all([
+    getPriceHistory(db, result.game.appid, priceRange, { currentPrice }),
+    getMediaGameMatchPaths(db, mediaMatches),
+  ]);
   const appHtml = renderToString(
-    <ChildAppPageView parent={result.parent} child={result.child} price={currentPrice} priceHistory={priceHistory} />
+    <ChildAppPageView
+      parent={result.parent}
+      child={result.child}
+      game={result.game}
+      price={currentPrice}
+      priceHistory={priceHistory}
+      sources={sources}
+      mediaOverview={mediaOverview}
+      mediaMatches={mediaMatches}
+      mediaMatchPaths={mediaMatchPaths}
+      pricerange={numericPriceRange}
+    />
   );
   return new Response(wrapHtml(`${result.child.name} - ${result.parent.name} - VaporStats`, appHtml), {
     status: 200,

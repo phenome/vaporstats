@@ -213,11 +213,14 @@ async function performIngestionTick(options: IngestionTickOptions): Promise<Inge
   }
   let mediaProcessing: MediaProcessingSummary | undefined;
   const pendingMediaProcessing = await options.db
-    .prepare("SELECT run_id FROM media_processing_authorizations WHERE status IN ('queued', 'waiting') ORDER BY authorized_at LIMIT 1")
+    .prepare("SELECT a.run_id FROM media_processing_authorizations AS a JOIN media_discovery_runs AS r ON r.id = a.run_id WHERE a.status IN ('queued', 'waiting') AND r.status NOT IN ('queued', 'running') ORDER BY a.authorized_at LIMIT 1")
     .first<{ run_id: number }>();
-  if (pendingMediaProcessing) {
+  const submittedMediaProcessing = await options.db
+    .prepare("SELECT run_id FROM media_processing_jobs WHERE status = 'submitted' ORDER BY id LIMIT 1")
+    .first<{ run_id: number }>();
+  if (pendingMediaProcessing || submittedMediaProcessing) {
     mediaProcessing = await advanceMediaProcessing(options.db, {
-      runId: pendingMediaProcessing.run_id,
+      ...(pendingMediaProcessing ? { runId: pendingMediaProcessing.run_id } : {}),
       geminiApiKey: options.geminiApiKey ?? process.env.GEMINI_API_KEY,
       pricingVersion: options.geminiPricingVersion ?? process.env.GEMINI_BATCH_PRICING_VERSION,
       capabilityVersion: options.geminiCapabilityVersion ?? process.env.GEMINI_BATCH_CAPABILITY_VERSION,

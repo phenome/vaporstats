@@ -192,6 +192,11 @@ const SEARCH_PARENT_COLUMNS = [
 
 /**
  * Persists a normalized relationship between parent game and child app.
+ *
+ * The relationship table is separate from apps.parent_appid: the latter is
+ * the direct catalog parent and must remain authoritative when the two
+ * sources disagree. Relationship-only children are represented by a null
+ * direct parent and are resolved by the relationship queries below.
  */
 export async function upsertAppRelationship(
   db: AppDatabase,
@@ -223,18 +228,6 @@ export async function upsertAppRelationship(
       .bind(rel.parent_appid, rel.child_appid, normType, prominence);
     await stmt.run();
   }
-
-  // Ensure apps table also reflects parent_appid and type
-  const appStmt = db
-    .prepare(
-      `UPDATE apps 
-       SET parent_appid = ?,
-           type = ?,
-           updated_at = CURRENT_TIMESTAMP
-       WHERE appid = ?`
-    )
-    .bind(rel.parent_appid, normType, rel.child_appid);
-  await appStmt.run();
 }
 
 /**
@@ -265,10 +258,10 @@ export async function getRelatedApps(
           "FROM app_relationships r JOIN apps a ON a.appid = r.child_appid " +
           "WHERE r.parent_appid = ? AND a.is_eligible = 1 " +
           "AND NOT EXISTS (SELECT 1 FROM apps direct " +
-          "WHERE direct.appid = a.appid AND direct.parent_appid = ?)" +
+          "WHERE direct.appid = a.appid AND direct.parent_appid IS NOT NULL)" +
           ") AS related ORDER BY prominence DESC, release_date DESC, name ASC"
       )
-      .bind(parentAppId, parentAppId, parentAppId, parentAppId);
+      .bind(parentAppId, parentAppId, parentAppId);
     const res = await stmt.all<RawRelatedRow>();
     rows = res.results ?? [];
   } else {
@@ -370,10 +363,10 @@ export async function getChildApp(
           "FROM app_relationships r JOIN apps a ON a.appid = r.child_appid " +
           "WHERE r.parent_appid = ? AND r.child_appid = ? AND a.is_eligible = 1 " +
           "AND NOT EXISTS (SELECT 1 FROM apps direct " +
-          "WHERE direct.appid = a.appid AND direct.parent_appid = ?)" +
+          "WHERE direct.appid = a.appid AND direct.parent_appid IS NOT NULL)" +
           ") AS child LIMIT 1"
       )
-      .bind(parentAppId, childAppId, parentAppId, parentAppId, childAppId, parentAppId);
+      .bind(parentAppId, childAppId, parentAppId, parentAppId, childAppId);
     childRow = await childStmt.first<RawRelatedRow>();
   } else {
     childRow = await db

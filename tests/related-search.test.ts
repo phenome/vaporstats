@@ -33,6 +33,7 @@ import { SiteHeader } from "../src/components/site-header";
 import { handleGameHttpRequest } from "../src/routes/games.$game";
 import { ChildAppPageView } from "../src/components/child-app-page";
 import { handleChildHttpRequest } from "../src/routes/games.$game_.$child";
+import { handleGameDetailRequest } from "../src/routes/api.games.$appid.detail";
 import { SearchResultsPageView } from "../src/components/search-page";
 import { handleSearchHttpRequest } from "../src/routes/search";
 import { handleSearchApiRequest } from "../src/routes/api.search";
@@ -280,15 +281,15 @@ describe("Related Apps and Search", () => {
     // Canonical link rendered correctly
     expect(html).toContain("/games/1091500-cyberpunk-2077/2138330-cyberpunk-2077-phantom-liberty");
 
-    // Integration check: verify parent game HTTP request renders RelatedApps grouped beneath the playable game
-    const parentReq = new Request("https://vaporstats.com/games/1091500-cyberpunk-2077");
-    const parentRes = await handleGameHttpRequest(parentReq, db);
-    expect(parentRes.status).toBe(200);
-    const parentHtml = await parentRes.text();
-    expect(parentHtml).toContain("Major Expansions &amp; Content");
-    expect(parentHtml).toContain("Phantom Liberty");
-    expect(parentHtml).toContain("Downloadable Content (DLC)");
-    expect(parentHtml).toContain("Cosmetic Pack");
+    // Root stale-slug redirects retain validated graph, price, and event state.
+    const staleRootReq = new Request(
+      "https://vaporstats.com/games/1091500-old-cyberpunk?range=2&pricerange=2&event=full-release-2023",
+    );
+    const staleRootRes = await handleGameHttpRequest(staleRootReq, db);
+    expect(staleRootRes.status).toBe(301);
+    expect(staleRootRes.headers.get("Location")).toBe(
+      "/games/1091500-cyberpunk-2077?range=2&pricerange=2&event=full-release-2023",
+    );
 
     console.log("parent related grouping");
   });
@@ -313,9 +314,23 @@ describe("Related Apps and Search", () => {
       is_eligible: true,
       parent_appid: 1091500,
       release_date: "2023-09-26",
+      steam_release_date: "2023-09-26",
+      original_release_date: "2023-09-26",
+      original_steam_release_date: "2023-09-26",
+      release_from_early_access_date: "2023-09-26",
+      release_date_source: "steam_release_date",
+      is_early_access: false,
+      has_left_early_access: true,
       description: "Phantom Liberty is a spy-thriller expansion for Cyberpunk 2077.",
+      header_image: "https://example.com/phantom-header.jpg",
+      header_lqip: "data:image/png;base64,header",
+      icon_hash: "phantom-icon-hash",
+      icon_lqip: "data:image/png;base64,icon",
       developer: "CD PROJEKT RED",
       publisher: "CD PROJEKT RED",
+      metacritic_score: 89,
+      metacritic_url: "https://www.metacritic.com/game/phantom-liberty/",
+      metacritic_observed_at: "2026-09-01T00:00:00Z",
     });
     await upsertAppRelationship(db, {
       parent_appid: 1091500,
@@ -323,9 +338,28 @@ describe("Related Apps and Search", () => {
       relationship_type: "expansion",
       prominence: 1,
     });
+    await db
+      .prepare(
+        "INSERT INTO app_release_events (appid, event_type, source, event_date) VALUES (?, ?, ?, ?)",
+      )
+      .bind(2138330, "early_access", "original_steam_release_date", "2022-12-01")
+      .run();
+    await db
+      .prepare(
+        "INSERT INTO app_release_events (appid, event_type, source, event_date) VALUES (?, ?, ?, ?)",
+      )
+      .bind(2138330, "full_release", "release_from_early_access_date", "2023-09-26")
+      .run();
+    await db
+      .prepare(
+        "INSERT INTO app_release_events (appid, event_type, source, event_date) VALUES (?, ?, ?, ?)",
+      )
+      .bind(2138330, "patch", "original_release_date", "2024-01-15")
+      .run();
+
 
     const req = new Request(
-      "https://vaporstats.com/games/1091500-cyberpunk-2077/2138330-cyberpunk-2077-phantom-liberty"
+      "https://vaporstats.com/games/1091500-cyberpunk-2077/2138330-cyberpunk-2077-phantom-liberty?pricerange=2"
     );
     const res = await handleChildHttpRequest(req, db);
 
@@ -342,7 +376,98 @@ describe("Related Apps and Search", () => {
     expect(body).toContain("Subordinate Related Entity");
     expect(body).toContain("Major Expansion");
     expect(body).toContain("/games/1091500-cyberpunk-2077");
+    expect(body).not.toContain("Media matches");
+    expect(body).toMatch(/aria-pressed="true"[^>]*>6m<\/button>/);
 
+    const detailRes = await handleGameDetailRequest(
+      new Request("https://vaporstats.com/api/games/2138330/detail"),
+      db,
+      2138330,
+    );
+    expect(detailRes.status).toBe(200);
+    const detailJson = (await detailRes.json()) as {
+      data: {
+        game: {
+          appid: number;
+          release_date: string | null;
+          steam_release_date: string | null;
+          original_release_date: string | null;
+          original_steam_release_date: string | null;
+          release_from_early_access_date: string | null;
+          is_early_access: boolean | null;
+          has_left_early_access: boolean | null;
+          header_lqip: string | null;
+          icon_hash: string | null;
+          icon_lqip: string | null;
+          metacritic_score: number | null;
+          metacritic_url: string | null;
+          release_events: Array<{ event_type: string; event_date: string; source: string }>;
+        };
+        mediaMatches: unknown[];
+        mediaMatchPaths: Record<string, string>;
+      };
+    };
+    expect(detailJson.data.game.appid).toBe(2138330);
+    expect(detailJson.data.game.release_date).toBe("2023-09-26");
+    expect(detailJson.data.game.steam_release_date).toBe("2023-09-26");
+    expect(detailJson.data.game.original_release_date).toBe("2023-09-26");
+    expect(detailJson.data.game.original_steam_release_date).toBe("2023-09-26");
+    expect(detailJson.data.game.release_from_early_access_date).toBe("2023-09-26");
+    expect(detailJson.data.game.is_early_access).toBe(false);
+    expect(detailJson.data.game.has_left_early_access).toBe(true);
+    expect(detailJson.data.game.header_lqip).toBe("data:image/png;base64,header");
+    expect(detailJson.data.game.icon_hash).toBe("phantom-icon-hash");
+    expect(detailJson.data.game.icon_lqip).toBe("data:image/png;base64,icon");
+    expect(detailJson.data.game.metacritic_score).toBe(89);
+    expect(detailJson.data.game.metacritic_url).toBe("https://www.metacritic.com/game/phantom-liberty/");
+    expect(detailJson.data.game.release_events).toEqual([
+      { event_type: "patch", event_date: "2024-01-15", source: "original_release_date" },
+      { event_type: "full_release", event_date: "2023-09-26", source: "release_from_early_access_date" },
+    ]);
+    expect(detailJson.data.mediaMatches).toEqual([]);
+    expect(detailJson.data.mediaMatchPaths).toEqual({});
+
+    const childResult = await getChildApp(db, 1091500, 2138330);
+    expect(childResult).not.toBeNull();
+    const childMatches = [
+      {
+        dimension: "gameplay" as const,
+        similarity: 0.9,
+        matchedGame: { appid: 730, name: "Counter-Strike 2", slug: "counter-strike-2" },
+      },
+      {
+        dimension: "story_world" as const,
+        similarity: 0.8,
+        matchedGame: { appid: 2138331, name: "Another Expansion", slug: "another-expansion" },
+      },
+    ];
+    const childPageHtml = renderToString(
+      React.createElement(ChildAppPageView, {
+        parent: childResult!.parent,
+        child: childResult!.child,
+        mediaMatches: childMatches,
+        mediaMatchPaths: {
+          730: "/games/730-counter-strike-2",
+          2138331: "/games/1091500-cyberpunk-2077/2138331-another-expansion",
+        },
+      }),
+    );
+    expect(childPageHtml).toContain("Media matches");
+    expect(childPageHtml).toContain("Gameplay &amp; systems");
+    expect(childPageHtml).toContain("Story &amp; world");
+    expect(childPageHtml).toContain('href="/games/730-counter-strike-2"');
+    expect(childPageHtml).toContain(
+      'href="/games/1091500-cyberpunk-2077/2138331-another-expansion"',
+    );
+    const childPageWithoutMatches = renderToString(
+      React.createElement(ChildAppPageView, {
+        parent: childResult!.parent,
+        child: childResult!.child,
+        mediaMatches: [],
+        mediaMatchPaths: {},
+      }),
+    );
+    expect(childPageWithoutMatches).not.toContain("Media matches");
     console.log("canonical child route");
   });
 
@@ -392,6 +517,78 @@ describe("Related Apps and Search", () => {
       child_appid: 2322010,
       relationship_type: "server",
     });
+    // A relationship row must not override a conflicting direct parent.
+    await upsertApp(db, {
+      appid: 2138331,
+      name: "Conflicting Phantom Liberty",
+      type: "expansion",
+      is_playable: false,
+      is_eligible: true,
+      parent_appid: 730,
+    });
+    await upsertAppRelationship(db, {
+      parent_appid: 1091500,
+      child_appid: 2138331,
+      relationship_type: "expansion",
+    });
+
+    // Relationship-only children remain valid when no direct parent exists.
+    await upsertApp(db, {
+      appid: 2138332,
+      name: "Relationship Only Expansion",
+      type: "expansion",
+      is_playable: false,
+      is_eligible: true,
+      parent_appid: null,
+    });
+    await upsertAppRelationship(db, {
+      parent_appid: 1091500,
+      child_appid: 2138332,
+      relationship_type: "expansion",
+    });
+
+    const conflictingRelated = await getRelatedApps(db, 1091500);
+    expect(conflictingRelated.expansions.map((child) => child.appid)).not.toContain(2138331);
+    expect((await getRelatedApps(db, 730)).expansions.map((child) => child.appid)).toContain(2138331);
+    expect(await getChildApp(db, 1091500, 2138331)).toBeNull();
+    expect(await getChildApp(db, 730, 2138331)).not.toBeNull();
+    expect(await getChildApp(db, 1091500, 2138332)).not.toBeNull();
+    expect(getCanonicalChildPath(730, "Counter-Strike 2", 2138331, "Conflicting Phantom Liberty")).toBe(
+      "/games/730-counter-strike-2/2138331-conflicting-phantom-liberty",
+    );
+    expect(parseChildSlug(
+      "730-counter-strike-2",
+      "2138331-conflicting-phantom-liberty",
+    )).toEqual({
+      parentAppId: 730,
+      parentSlug: "counter-strike-2",
+      childAppId: 2138331,
+      childSlug: "conflicting-phantom-liberty",
+    });
+
+    const conflictingUnderA = await handleChildHttpRequest(
+      new Request(
+        "https://vaporstats.com/games/1091500-cyberpunk-2077/2138331-conflicting-phantom-liberty",
+      ),
+      db,
+    );
+    expect(conflictingUnderA.status).toBe(404);
+    const conflictingUnderB = await handleChildHttpRequest(
+      new Request(
+        "https://vaporstats.com/games/730-counter-strike-2/2138331-conflicting-phantom-liberty",
+      ),
+      db,
+    );
+    expect(conflictingUnderB.status).toBe(200);
+
+
+    const relationshipOnlyRoute = await handleChildHttpRequest(
+      new Request(
+        "https://vaporstats.com/games/1091500-cyberpunk-2077/2138332-relationship-only-expansion",
+      ),
+      db,
+    );
+    expect(relationshipOnlyRoute.status).toBe(200);
 
     // 1. Stale child slug triggers 301 redirect to canonical URL
     const staleChildReq = new Request(

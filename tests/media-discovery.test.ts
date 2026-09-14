@@ -167,7 +167,7 @@ describe("bounded media discovery", () => {
     expect(attemptRows.results.some((row) => row.kind === "redirect")).toBe(true);
     cleanup();
   });
-  test("rejects wrong entities, roundups, developer pages, announcements, and Phantom Liberty", async () => {
+  test("rejects wrong entities, roundups, developer pages, and announcements", async () => {
     const { db, cleanup } = fixture();
     const fetchFn = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
       const url = String(input);
@@ -177,7 +177,7 @@ describe("bounded media discovery", () => {
         return Response.json({ request_id: "search", usage: { credits_used: 1 }, results: [{ url: `https://${payload.include_domains[0]}/articles/1091500-${payload.include_domains[0]}` }] });
       }
       const domain = new URL(url).hostname;
-      if (domain === "ign.com") return new Response(html(1091500, "Cyberpunk 2077 Review", { body: "Phantom Liberty is the expansion under review, with Dogtown missions and expansion systems. ".repeat(5) }));
+      if (domain === "ign.com") return new Response(html(1091500, "Cyberpunk 2077 Review", { body: "Cyberpunk 2077 delivers a substantial playable campaign with detailed systems and memorable encounters. ".repeat(5) }));
       if (domain === "eurogamer.net") return new Response(html(1091500, "The Witcher 3 Review", { body: "The Witcher 3 remains a vast and richly written fantasy RPG with memorable quests and detailed exploration. ".repeat(5) }));
       if (domain === "gamespot.com") return new Response(html(1091500, "Cyberpunk 2077 Roundup"));
       if (domain === "pcgamer.com") return new Response(html(1091500, "Cyberpunk 2077 Announcement"));
@@ -188,9 +188,144 @@ describe("bounded media discovery", () => {
     const authorization = await authorizeMediaRun(db, { pass: "initial", games: [1091500] });
     const result = await runAuthorizedMediaDiscovery(db, { runId: authorization.runId, tavilyApiKey: "test-key", fetch: fetchFn, now: new Date("2026-09-10T00:00:00.000Z") });
     const sources = await getMediaSources(db, 1091500);
-    expect(sources.map((source) => [source.outlet, source.type])).toEqual([["GamesRadar+", "preview"]]);
-    expect(result.stopReasons).toEqual(expect.arrayContaining(["IGN:no_qualifying_article", "Eurogamer:no_qualifying_article", "GameSpot:no_qualifying_article", "PC Gamer:no_qualifying_article", "Kotaku:no_qualifying_article"]));
+    expect(sources.map((source) => [source.outlet, source.type])).toEqual([["IGN", "review"], ["GamesRadar+", "preview"]]);
+    expect(result.stopReasons).toEqual(expect.arrayContaining(["Eurogamer:no_qualifying_article", "GameSpot:no_qualifying_article", "PC Gamer:no_qualifying_article", "Kotaku:no_qualifying_article"]));
     cleanup();
+  });
+  test("discovers eligible child coverage as its own entity without accepting unrelated articles", async () => {
+    const { native, db, cleanup } = fixture();
+    const childAppid = 2138330;
+    const accessoryAppid = 2138331;
+    native.prepare("INSERT INTO apps (appid, name, slug, type, is_eligible, is_playable, parent_appid) VALUES (?, ?, ?, 'expansion', 1, 1, ?)").run(childAppid, "Phantom Liberty", "phantom-liberty", 1091500);
+    native.prepare("INSERT INTO apps (appid, name, slug, type, is_eligible, is_playable, parent_appid) VALUES (?, ?, ?, 'dlc', 1, 1, ?)").run(accessoryAppid, "Phantom Liberty Soundtrack", "phantom-liberty-soundtrack", 1091500);
+    native.prepare("INSERT INTO app_relationships (parent_appid, child_appid, relationship_type) VALUES (?, ?, 'soundtrack')").run(1091500, accessoryAppid);
+    const searchQueries: string[] = [];
+    const fetchFn = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const url = String(input);
+      if (url.endsWith("/usage")) return Response.json({ account: { current_plan: "free" }, plan_usage: 0, plan_limit: 100, paygo_usage: 0, paygo_limit: 0 });
+      if (url.endsWith("/search")) {
+        const payload = JSON.parse(String(init?.body)) as { include_domains: string[]; query: string };
+        searchQueries.push(payload.query);
+        const child = payload.query.includes("Phantom Liberty");
+        const domain = payload.include_domains[0]!;
+        const marker = child && domain === "pcgamer.com" ? "-multi" : child && domain === "gamesradar.com" ? "-unrelated" : "";
+        return Response.json({ request_id: `search-${domain}-${child ? "child" : "root"}`, usage: { credits_used: 1 }, results: [{ url: `https://${domain}/articles/${child ? "child" : "root"}-${domain.replaceAll(".", "-")}${marker}` }] });
+      }
+      const path = new URL(url).pathname;
+      if (path.includes("multi")) return new Response(html(1091500, "Cyberpunk 2077 and Hades II Reviews"));
+      if (path.includes("unrelated")) return new Response(html(1091500, "The Witcher 3 Review"));
+      if (path.includes("child-")) return new Response(html(1091500, "Cyberpunk 2077: Phantom Liberty Review"));
+      return new Response(html(1091500, "Cyberpunk 2077 Review"));
+    };
+    const authorization = await authorizeMediaRun(db, { pass: "initial", games: [1091500, 1086940, 1145350] });
+    const result = await runAuthorizedMediaDiscovery(db, { runId: authorization.runId, tavilyApiKey: "test-key", fetch: fetchFn, now: new Date("2026-09-10T00:00:00.000Z") });
+    const rootSources = await getMediaSources(db, 1091500);
+    const childSources = await getMediaSources(db, childAppid);
+    const progressRows = await db.prepare("SELECT appid FROM media_discovery_progress ORDER BY appid").all<{ appid: number }>();
+    expect(searchQueries).toContain("Cyberpunk 2077 review preview");
+    expect(searchQueries).toContain("Phantom Liberty review preview");
+    expect(result.queries).toBe(18);
+    expect(progressRows.results.map((row) => row.appid)).not.toContain(accessoryAppid);
+    expect(rootSources.length).toBeGreaterThan(0);
+    expect(rootSources.every((source) => source.title === "Cyberpunk 2077 Review")).toBe(true);
+    expect(childSources.length).toBeGreaterThan(0);
+    expect(childSources.every((source) => source.title.includes("Phantom Liberty"))).toBe(true);
+    expect(childSources.some((source) => source.title.includes("Hades II") || source.title.includes("Witcher 3"))).toBe(false);
+    const resumedAuthorization = await authorizeMediaRun(db, { pass: "initial", games: [1091500, 1086940, 1145350] });
+    await runAuthorizedMediaDiscovery(db, { runId: resumedAuthorization.runId, tavilyApiKey: "test-key", fetch: fetchFn, now: new Date("2026-09-10T01:00:00.000Z") });
+    expect(searchQueries).toHaveLength(24);
+    const cappedProgress = await db.prepare("SELECT COUNT(*) AS count FROM media_discovery_progress WHERE stop_reason = 'query_cap'").first<{ count: number }>();
+    expect(cappedProgress).toEqual({ count: 0 });
+    cleanup();
+  });
+  test("attributes generic parent-titled child coverage from the article lead", async () => {
+    const { native, db, cleanup } = fixture();
+    const childAppid = 1145351;
+    native.prepare("INSERT INTO apps (appid, name, slug, type, is_eligible, is_playable, parent_appid) VALUES (?, ?, ?, 'expansion', 1, 1, ?)").run(childAppid, "Hades II: The Unseen", "hades-ii-the-unseen", 1145350);
+    native.prepare("INSERT INTO apps (appid, name, slug, type, is_eligible, is_playable, parent_appid) VALUES (?, ?, ?, 'expansion', 1, 1, ?)").run(1145352, "Hades III", "hades-iii", 1145350);
+    const childLead = "The Unseen is a substantial expansion with a focused campaign, deeper systems, and memorable encounters. ".repeat(5);
+    const fetchFn = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const url = String(input);
+      if (url.endsWith("/usage")) return Response.json({ account: { current_plan: "free" }, plan_usage: 1, plan_limit: 100, paygo_usage: 0, paygo_limit: 0 });
+      if (url.endsWith("/search")) {
+        const payload = JSON.parse(String(init?.body)) as { include_domains: string[]; query: string };
+        const child = payload.query.includes("The Unseen");
+        const domain = payload.include_domains[0]!;
+        const suffix = domain.replaceAll(".", "-");
+        const results = !child && domain === "ign.com"
+          ? [{ url: `https://${domain}/articles/root-child-${suffix}` }, { url: `https://${domain}/articles/root-exact-${suffix}` }]
+          : [{ url: `https://${domain}/articles/${child ? "child" : "root"}-${suffix}` }];
+        return Response.json({ request_id: `search-${domain}`, usage: { credits_used: 1 }, results });
+      }
+      const path = new URL(url).pathname;
+      if (path.includes("child")) return new Response(html(1145350, "Hades II Review", { body: childLead }));
+      return new Response(html(1145350, "Hades II Review", { body: `I found ${NAMES[1145350]} substantial, with detailed systems and memorable encounters. `.repeat(5) }));
+    };
+    const authorization = await authorizeMediaRun(db, { pass: "initial", games: [1145350] });
+    await runAuthorizedMediaDiscovery(db, { runId: authorization.runId, tavilyApiKey: "test-key", fetch: fetchFn, now: new Date("2026-09-10T00:00:00.000Z") });
+    const rootSources = await getMediaSources(db, 1145350);
+    const childSources = await getMediaSources(db, childAppid);
+    expect(rootSources.some((source) => source.originalUrl.includes("root-child"))).toBe(false);
+    expect(rootSources.some((source) => source.originalUrl.includes("root-exact"))).toBe(true);
+    expect(childSources).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        appid: childAppid,
+        originalUrl: "https://ign.com/articles/root-child-ign-com",
+        title: "Hades II Review",
+      }),
+    ]));
+    cleanup();
+  });
+
+  test("does not let historical root queries consume a later child-query cap", async () => {
+    const { native, db, cleanup } = fixture();
+    const childAppid = 2138330;
+    const searchQueries: string[] = [];
+    const fetchFn = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const url = String(input);
+      if (url.endsWith("/usage")) return Response.json({ account: { current_plan: "free" }, plan_usage: 0, plan_limit: 100, paygo_usage: 0, paygo_limit: 0 });
+      if (url.endsWith("/search")) {
+        const payload = JSON.parse(String(init?.body)) as { include_domains: string[]; query: string };
+        searchQueries.push(payload.query);
+        const child = payload.query.includes("Phantom Liberty");
+        const appid = payload.query.includes("Baldur") ? 1086940 : payload.query.includes("Hades") ? 1145350 : 1091500;
+        const slug = child ? "phantom-liberty" : String(appid);
+        const domain = payload.include_domains[0]!;
+        return Response.json({ request_id: `search-${domain}-${child ? "child" : "root"}`, usage: { credits_used: 1 }, results: [{ url: `https://${domain}/articles/${slug}` }] });
+      }
+      const path = new URL(url).pathname;
+      if (path.includes("phantom-liberty")) return new Response(html(1091500, "Cyberpunk 2077: Phantom Liberty Review", { body: "Phantom Liberty has a substantial playable campaign with detailed systems and memorable encounters. ".repeat(5) }));
+      const appid = path.includes("1086940") ? 1086940 : path.includes("1145350") ? 1145350 : 1091500;
+      return new Response(html(appid, `${NAMES[appid]} Review`));
+    };
+    try {
+      const firstAuthorization = await authorizeMediaRun(db, { pass: "initial", games: [1091500, 1086940, 1145350] });
+      const first = await runAuthorizedMediaDiscovery(db, { runId: firstAuthorization.runId, tavilyApiKey: "test-key", fetch: fetchFn, now: new Date("2026-09-10T00:00:00.000Z") });
+      expect(first.queries).toBe(18);
+      expect(searchQueries).toHaveLength(18);
+      expect(searchQueries.every((query) => !query.includes("Phantom Liberty"))).toBe(true);
+
+      native.prepare("INSERT INTO apps (appid, name, slug, type, is_eligible, is_playable, parent_appid) VALUES (?, ?, ?, 'expansion', 1, 1, ?)").run(childAppid, "Phantom Liberty", "phantom-liberty", 1091500);
+
+      const laterAuthorization = await authorizeMediaRun(db, { pass: "initial", games: [1091500, 1086940, 1145350] });
+      const later = await runAuthorizedMediaDiscovery(db, { runId: laterAuthorization.runId, tavilyApiKey: "test-key", fetch: fetchFn, now: new Date("2026-09-11T00:00:00.000Z") });
+      const laterQueries = searchQueries.slice(18);
+      expect(laterQueries.length).toBeGreaterThan(0);
+      expect(laterQueries.length).toBeLessThanOrEqual(18);
+      expect(laterQueries.every((query) => query === "Phantom Liberty review preview")).toBe(true);
+      expect(later.queries).toBe(24);
+      expect(await getMediaSources(db, childAppid)).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          appid: childAppid,
+          originalUrl: "https://ign.com/articles/phantom-liberty",
+          discoveryUrl: "https://ign.com/articles/phantom-liberty",
+          title: "Cyberpunk 2077: Phantom Liberty Review",
+          type: "review",
+        }),
+      ]));
+    } finally {
+      cleanup();
+    }
   });
 
   test("rejects review-drama, score-news, co-titled, and substantive comparisons while keeping incidental comparisons", async () => {

@@ -3,6 +3,10 @@ import { Database, type SQLQueryBindings } from "bun:sqlite";
 import type { AppDatabase, AppPreparedStatement } from "../src/lib/db";
 import { applyMigrations } from "../src/lib/migrations";
 import { runIngestionTick, startIngestionScheduler, type IngestionCron } from "../workers/ingestion";
+import {
+  GEMINI_BATCH_CAPABILITY_VERSION,
+  GEMINI_BATCH_PRICING_VERSION,
+} from "../src/lib/media-processing";
 import { runDailyRollupJob } from "../workers/player-rollups";
 import { runPlayerCollectionTick } from "../workers/player-collector";
 import {
@@ -111,6 +115,54 @@ describe("Bun ingestion scheduling and player rollups", () => {
     startIngestionScheduler({ db: createAppDatabase(), cron, runImmediately: false });
 
     expect(calls).toEqual([{ expression: "*/15 * * * *", options: { tz: "UTC" } }]);
+  });
+  test("resumes submitted media processing without a queued authorization", async () => {
+    const db = createAppDatabase();
+    const appid = 730;
+    const anchorTime = new Date("2026-09-13T03:10:00.000Z");
+    await db.prepare(
+      "INSERT INTO apps (appid, name, slug, is_eligible, is_playable) VALUES (?, ?, ?, 0, 0)",
+    ).bind(appid, "Test Game", "test-game").run();
+    await db.prepare(
+      "INSERT INTO media_discovery_runs (pass, identity_key, selected_games, status) VALUES ('initial', ?, ?, 'completed')",
+    ).bind("initial:worker-submitted-test", JSON.stringify([appid])).run();
+    const run = await db.prepare(
+      "SELECT id FROM media_discovery_runs WHERE identity_key = ?",
+    ).bind("initial:worker-submitted-test").first<{ id: number }>();
+    await db.prepare(
+      "INSERT INTO media_processing_jobs (run_id, stage, appid, request_key, input_identity, model, config_version, max_input_tokens, max_output_tokens, reserved_microusd, reservation_active, status, provider_batch_id) VALUES (?, 'explanation', ?, ?, ?, ?, ?, 1, 1, 100, 1, 'submitted', ?)",
+    ).bind(run?.id, appid, "worker-submitted-job", "worker-input", "test-model", "test-config", "batches/worker-test").run();
+    await setDailyCheckpoint(db, "2026-09-12");
+
+    let polls = 0;
+    const customFetch = (async (input: RequestInfo | URL) => {
+      if (String(input).includes("generativelanguage.googleapis.com")) {
+        polls += 1;
+        return Response.json({ metadata: { state: "BATCH_STATE_SUCCEEDED" } });
+      }
+      return new Response(null, { status: 404 });
+    }) as typeof fetch;
+
+    const result = await runIngestionTick({
+      db,
+      anchorTime,
+      customFetch,
+      geminiApiKey: "test-gemini-key",
+      geminiPricingVersion: GEMINI_BATCH_PRICING_VERSION,
+      geminiCapabilityVersion: GEMINI_BATCH_CAPABILITY_VERSION,
+    });
+    const job = await db.prepare(
+      "SELECT status FROM media_processing_jobs WHERE request_key = ?",
+    ).bind("worker-submitted-job").first<{ status: string }>();
+
+    expect(result.status).toBe("completed");
+    expect(result.mediaProcessing).toMatchObject({
+      runId: run?.id,
+      status: "completed",
+      submitted: 0,
+    });
+    expect(polls).toBe(1);
+    expect(job).toEqual({ status: "stale" });
   });
   test("bootstraps player tracking after an empty daily discovery", async () => {
     const db = createAppDatabase();

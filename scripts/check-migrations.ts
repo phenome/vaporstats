@@ -27,12 +27,11 @@ const expectedTables = [
   "player_score_history",
   "player_score_state",
   "critic_records",
-  "media_article_embeddings",
+  "media_game_embeddings",
   "media_article_extractions",
   "media_discovery_attempts",
   "media_discovery_progress",
   "media_discovery_runs",
-  "media_game_matches",
   "media_game_overviews",
   "media_processing_authorizations",
   "media_processing_jobs",
@@ -110,6 +109,32 @@ function verifyExistingRowsSurviveUpgrade(): void {
         "INSERT INTO media_discovery_runs (pass, identity_key, selected_games, status) VALUES ('initial', ?, ?, 'completed')"
       )
       .run("migration-preservation-media", "[900001]");
+    const preservedSource = legacy
+      .query<{ id: number }, [number]>("SELECT id FROM media_sources WHERE appid = ?")
+      .get(900001);
+    const preservedRun = legacy
+      .query<{ id: number }, [string]>("SELECT id FROM media_discovery_runs WHERE identity_key = ?")
+      .get("migration-preservation-media");
+    if (!preservedSource || !preservedRun) throw new Error("Preservation fixtures were not created");
+    legacy
+      .query(
+        "INSERT INTO media_processing_jobs (run_id, stage, appid, matched_appid, dimension, source_id, request_key, input_identity, model, config_version, max_input_tokens, max_output_tokens, reserved_microusd, charged_microusd, reservation_active, status, provider_batch_id, output_json) VALUES (?, 'explanation', ?, NULL, 'gameplay', ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'succeeded', ?, ?)",
+      )
+      .run(
+        preservedRun.id,
+        900001,
+        preservedSource.id,
+        "migration-preservation-job",
+        "preserved-explanation-input",
+        "gemini-3.1-flash-lite",
+        "preserved-config",
+        10,
+        20,
+        1234,
+        777,
+        "preserved-provider-batch",
+        JSON.stringify({ trait: "legacy pair trait", explanation: "legacy generated pair prose" }),
+      );
   } finally {
     legacy.close(true);
   }
@@ -231,6 +256,25 @@ function verifyExistingRowsSurviveUpgrade(): void {
     if (!authorization || authorization.billing_confirmation !== null) {
       throw new Error("New billing confirmation was not NULL after migration");
     }
+    const processingJob = upgraded
+      .query<
+        { stage: string; reserved_microusd: number; charged_microusd: number; reservation_active: number; status: string; output_json: string | null },
+        [string]
+      >(
+        "SELECT stage, reserved_microusd, charged_microusd, reservation_active, status, output_json FROM media_processing_jobs WHERE request_key = ?",
+      )
+      .get("migration-preservation-job");
+    if (
+      !processingJob ||
+      processingJob.stage !== "explanation" ||
+      processingJob.reserved_microusd !== 1234 ||
+      processingJob.charged_microusd !== 777 ||
+      processingJob.reservation_active !== 0 ||
+      processingJob.status !== "succeeded" ||
+      processingJob.output_json !== null
+    ) {
+      throw new Error("Historical processing-job spend data was not preserved during migration");
+    }
 
   } finally {
     upgraded.close(true);
@@ -256,6 +300,10 @@ try {
   const missingTables = expectedTables.filter((table) => !foundTables.has(table));
   if (missingTables.length > 0) {
     throw new Error("Missing SQLite tables: " + missingTables.join(", "));
+  }
+  const obsoleteTables = ["media_article_embeddings", "media_game_matches"].filter((table) => foundTables.has(table));
+  if (obsoleteTables.length > 0) {
+    throw new Error("Obsolete SQLite tables remain: " + obsoleteTables.join(", "));
   }
   if (!foundTables.has(DRIZZLE_MIGRATION_TABLE) || foundTables.has(MIGRATION_TABLE)) {
     throw new Error("Unexpected migration journal tables");
@@ -312,14 +360,67 @@ try {
     throw new Error("Missing nullable media_processing_authorizations.billing_confirmation column");
   }
 
-  for (const [table, columns] of [
-    ["media_article_embeddings", ["source_id", "dimension", "input_identity", "extraction_input_identity", "model", "dimensions", "config_version", "vector", "active"]],
-    ["media_game_matches", ["appid", "matched_appid", "dimension", "trait", "explanation", "similarity", "current_source_ids", "matched_source_ids", "input_identity", "active"]],
-  ] as const) {
-    const found = new Set(database.query<{ name: string }, []>(`PRAGMA table_info(${table})`).all().map((column) => column.name));
-    for (const column of columns) {
-      if (!found.has(column)) throw new Error(`Missing ${table}.${column} column`);
+  const gameEmbeddingColumns = new Set(
+    database
+      .query<{ name: string }, []>("PRAGMA table_info(media_game_embeddings)")
+      .all()
+      .map((column) => column.name),
+  );
+  for (const column of [
+    "id",
+    "appid",
+    "dimension",
+    "input_identity",
+    "overview_input_identity",
+    "model",
+    "dimensions",
+    "config_version",
+    "vector",
+    "active",
+    "created_at",
+  ]) {
+    if (!gameEmbeddingColumns.has(column)) {
+      throw new Error("Missing media_game_embeddings." + column + " column");
     }
+  }
+  database
+    .query(
+      "INSERT INTO apps (appid, name, slug) VALUES (?, ?, ?)"
+    )
+    .run(900002, "Embedding Constraint Check", "embedding-constraint-check");
+  const embeddingInsert = database.query(
+    "INSERT INTO media_game_embeddings (appid, dimension, input_identity, overview_input_identity, model, dimensions, config_version, vector, active) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+  );
+  embeddingInsert.run(
+    900002,
+    "gameplay",
+    "valid-input",
+    "valid-overview",
+    "gemini-embedding-2",
+    3072,
+    "config",
+    new Uint8Array(12288),
+    1
+  );
+  let textVectorAccepted = false;
+  try {
+    embeddingInsert.run(
+      900002,
+      "story_world",
+      "text-input",
+      "text-overview",
+      "gemini-embedding-2",
+      3072,
+      "config",
+      "x".repeat(12288),
+      0
+    );
+    textVectorAccepted = true;
+  } catch {
+    // Expected: the vector must be a BLOB, not merely a value of the right length.
+  }
+  if (textVectorAccepted) {
+    throw new Error("media_game_embeddings accepts a 12,288-character TEXT vector");
   }
 
   const appliedMigrations = database

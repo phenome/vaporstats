@@ -1,27 +1,56 @@
 import React from "react";
-import type { CatalogEntity } from "../lib/catalog";
+import type { CatalogEntity, GameDetail } from "../lib/catalog";
 import type { RelatedAppEntity } from "../lib/related";
-import type { PriceState, PriceHistoryResult } from "../lib/prices";
+import type { PriceState, PriceHistoryResult, PriceHistoryRange } from "../lib/prices";
 import { PriceHistoryChart } from "./price-history";
 import { PriceSummary } from "./price-summary";
 import { getCanonicalGamePath, getCanonicalPublisherPath } from "../lib/slug";
+import type { MediaGameMatch } from "../lib/media-similarity";
+import type { MediaOverview } from "../lib/media-overview";
+import type { MediaSource } from "../lib/media-discovery";
 import { AppLink } from "./app-link";
+import { MediaMatchesSection } from "./media-matches";
+import { MediaOverviewSection } from "./media-overview";
+import { MediaSources } from "./media-sources";
+import {
+  NUMERIC_TO_PRICE_RANGE,
+  PRICE_TO_NUMERIC_RANGE,
+  DEFAULT_NUMERIC_PRICE_RANGE,
+  type NumericPriceRange,
+} from "../lib/game-params";
 
 export interface ChildAppPageViewProps {
   parent: CatalogEntity;
   child: RelatedAppEntity;
+  game?: GameDetail;
   price?: PriceState | null;
   priceHistory?: PriceHistoryResult | null;
+  sources?: MediaSource[];
+  mediaOverview?: MediaOverview | null;
+  mediaMatches?: MediaGameMatch[];
+  mediaMatchPaths?: Readonly<Record<number, string>>;
+  pricerange?: NumericPriceRange;
+  onPriceRangeChange?: (pricerange: NumericPriceRange) => void;
 }
 
 export function ChildAppPageView({
   parent,
   child,
+  game,
   price,
   priceHistory,
+  sources = [],
+  mediaOverview = null,
+  mediaMatches = [],
+  mediaMatchPaths = {},
+  pricerange,
+  onPriceRangeChange,
 }: ChildAppPageViewProps) {
   const parentUrl = getCanonicalGamePath(parent.appid, parent.name);
   const isExpansion = child.type === "expansion" || child.prominence > 0;
+  const detail = game ?? child;
+  const priceRange = NUMERIC_TO_PRICE_RANGE[pricerange ?? DEFAULT_NUMERIC_PRICE_RANGE];
+  const controlledPriceRange = pricerange !== undefined || onPriceRangeChange !== undefined;
 
   return (
     <div className="max-w-7xl mx-auto px-4 py-8 space-y-6 font-mono">
@@ -74,9 +103,9 @@ export function ChildAppPageView({
             <span className="text-xs text-zinc-500 tabular-nums">{`AppID #${child.appid}`}</span>
           </div>
           <div className="flex items-center gap-4 text-xs">
-            {child.release_date && (
+            {detail.release_date && (
               <div className="text-zinc-400">
-                RELEASED: <span className="text-zinc-200">{child.release_date}</span>
+                RELEASED: <span className="text-zinc-200">{detail.release_date}</span>
               </div>
             )}
             <a
@@ -91,9 +120,9 @@ export function ChildAppPageView({
         </div>
 
         <div className="flex flex-col md:flex-row gap-6 items-start">
-          {child.header_image ? (
+          {detail.header_image ? (
             <img
-              src={child.header_image}
+              src={detail.header_image}
               alt=""
               className="w-full md:w-80 h-36 object-cover border border-zinc-800 shrink-0"
             />
@@ -107,7 +136,7 @@ export function ChildAppPageView({
             <h1 className="text-xl sm:text-2xl font-bold text-zinc-100">{child.name}</h1>
 
             <p className="text-xs text-zinc-400 leading-relaxed">
-              {child.description || "No official description provided."}
+              {detail.description || "No official description provided."}
             </p>
 
             <div className="pt-3 border-t border-zinc-900 grid grid-cols-1 sm:grid-cols-3 gap-4 text-xs">
@@ -120,12 +149,12 @@ export function ChildAppPageView({
               <div>
                 <div className="text-zinc-600 text-[10px] uppercase">Developer</div>
                 <div className="text-zinc-200 truncate">
-                  {child.developer ? (
+                  {detail.developer ? (
                     <AppLink
-                      href={getCanonicalPublisherPath(child.developer)}
+                      href={getCanonicalPublisherPath(detail.developer)}
                       className="hover:text-orange-400 hover:underline transition-colors"
                     >
-                      {child.developer}
+                      {detail.developer}
                     </AppLink>
                   ) : (
                     "Unknown"
@@ -135,12 +164,12 @@ export function ChildAppPageView({
               <div>
                 <div className="text-zinc-600 text-[10px] uppercase">Publisher</div>
                 <div className="text-zinc-200 truncate">
-                  {child.publisher ? (
+                  {detail.publisher ? (
                     <AppLink
-                      href={getCanonicalPublisherPath(child.publisher)}
+                      href={getCanonicalPublisherPath(detail.publisher)}
                       className="hover:text-orange-400 hover:underline transition-colors"
                     >
-                      {child.publisher}
+                      {detail.publisher}
                     </AppLink>
                   ) : (
                     "Unknown"
@@ -158,9 +187,18 @@ export function ChildAppPageView({
       <PriceHistoryChart
         key={`price-${child.appid}`}
         appid={child.appid}
-        initialRange="all"
+        range={controlledPriceRange ? priceRange : undefined}
+        onRangeChange={
+          onPriceRangeChange
+            ? (range: PriceHistoryRange) => onPriceRangeChange(PRICE_TO_NUMERIC_RANGE[range])
+            : undefined
+        }
+        initialRange={priceRange}
         initialData={priceHistory ?? undefined}
       />
+      {mediaOverview && <MediaOverviewSection overview={mediaOverview} sources={sources} />}
+      {sources.length > 0 && <MediaSources sources={sources} />}
+      <MediaMatchesSection matches={mediaMatches} paths={mediaMatchPaths} />
 
 
       {/* Return Navigation */}

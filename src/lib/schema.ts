@@ -962,16 +962,16 @@ export const mediaArticleExtractions = sqliteTable(
   ],
 );
 
-export const mediaArticleEmbeddings = sqliteTable(
-  "media_article_embeddings",
+export const mediaGameEmbeddings = sqliteTable(
+  "media_game_embeddings",
   {
     id: integer("id").primaryKey({ autoIncrement: true }),
-    sourceId: integer("source_id")
+    appid: integer("appid")
       .notNull()
-      .references(() => mediaSources.id, { onDelete: "cascade" }),
+      .references(() => apps.appid, { onDelete: "cascade" }),
     dimension: text("dimension").notNull(),
     inputIdentity: text("input_identity").notNull(),
-    extractionInputIdentity: text("extraction_input_identity").notNull(),
+    overviewInputIdentity: text("overview_input_identity").notNull(),
     model: text("model").notNull(),
     dimensions: integer("dimensions").notNull(),
     configVersion: text("config_version").notNull(),
@@ -980,47 +980,22 @@ export const mediaArticleEmbeddings = sqliteTable(
     createdAt: text("created_at").notNull().default(currentTimestamp),
   },
   (table) => [
-    uniqueIndex("uq_media_article_embeddings_input").on(table.sourceId, table.dimension, table.inputIdentity),
-    index("idx_media_article_embeddings_active").on(table.sourceId, table.dimension, table.active),
-    check("media_article_embeddings_dimension_check", sql`${table.dimension} IN ('gameplay', 'story_world')`),
-    check("media_article_embeddings_dimensions_check", sql`${table.dimensions} = 3072`),
-    check("media_article_embeddings_active_check", sql`${table.active} IN (0, 1)`),
-  ],
-);
-
-export const mediaGameMatches = sqliteTable(
-  "media_game_matches",
-  {
-    id: integer("id").primaryKey({ autoIncrement: true }),
-    appid: integer("appid")
-      .notNull()
-      .references(() => apps.appid, { onDelete: "cascade" }),
-    matchedAppid: integer("matched_appid")
-      .notNull()
-      .references(() => apps.appid, { onDelete: "cascade" }),
-    dimension: text("dimension").notNull(),
-    trait: text("trait").notNull(),
-    explanation: text("explanation").notNull(),
-    similarity: real("similarity").notNull(),
-    currentSourceIds: text("current_source_ids").notNull(),
-    matchedSourceIds: text("matched_source_ids").notNull(),
-    currentExtractionIdentities: text("current_extraction_identities").notNull(),
-    matchedExtractionIdentities: text("matched_extraction_identities").notNull(),
-    currentVectorIdentities: text("current_vector_identities").notNull(),
-    matchedVectorIdentities: text("matched_vector_identities").notNull(),
-    inputIdentity: text("input_identity").notNull(),
-    model: text("model").notNull(),
-    configVersion: text("config_version").notNull(),
-    active: integer("active").notNull().default(1),
-    createdAt: text("created_at").notNull().default(currentTimestamp),
-  },
-  (table) => [
-    uniqueIndex("uq_media_game_matches_input").on(table.appid, table.matchedAppid, table.dimension, table.inputIdentity),
-    index("idx_media_game_matches_active").on(table.appid, table.matchedAppid, table.dimension, table.active),
-    check("media_game_matches_pair_check", sql`${table.appid} < ${table.matchedAppid}`),
-    check("media_game_matches_dimension_check", sql`${table.dimension} IN ('gameplay', 'story_world')`),
-    check("media_game_matches_similarity_check", sql`${table.similarity} >= -1 AND ${table.similarity} <= 1`),
-    check("media_game_matches_active_check", sql`${table.active} IN (0, 1)`),
+    uniqueIndex("uq_media_game_embeddings_input").on(
+      table.appid,
+      table.dimension,
+      table.inputIdentity,
+      table.model,
+      table.dimensions,
+      table.configVersion,
+    ),
+    uniqueIndex("uq_media_game_embeddings_active")
+      .on(table.appid, table.dimension)
+      .where(sql`${table.active} = 1`),
+    index("idx_media_game_embeddings_active").on(table.appid, table.dimension, table.active),
+    check("media_game_embeddings_dimension_check", sql`${table.dimension} IN ('gameplay', 'story_world')`),
+    check("media_game_embeddings_dimensions_check", sql`${table.dimensions} = 3072`),
+    check("media_game_embeddings_vector_check", sql`typeof(${table.vector}) = 'blob' AND length(${table.vector}) = 12288`),
+    check("media_game_embeddings_active_check", sql`${table.active} IN (0, 1)`),
   ],
 );
 

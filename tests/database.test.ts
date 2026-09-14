@@ -64,12 +64,11 @@ describe("Bun SQLite persistence", () => {
       "apps",
       "checkpoints",
       "critic_records",
-      "media_article_embeddings",
       "media_article_extractions",
       "media_discovery_attempts",
       "media_discovery_progress",
       "media_discovery_runs",
-      "media_game_matches",
+      "media_game_embeddings",
       "media_game_overviews",
       "media_processing_authorizations",
       "media_processing_jobs",
@@ -111,16 +110,103 @@ describe("Bun SQLite persistence", () => {
     );
     expect(billingConfirmationColumn).toBeDefined();
     expect(billingConfirmationColumn?.type.toLowerCase()).toBe("text");
-    const embeddingColumns = await db.prepare("PRAGMA table_info(media_article_embeddings)").all<{ name: string }>();
+    const embeddingColumns = await db.prepare("PRAGMA table_info(media_game_embeddings)").all<{ name: string }>();
     expect(embeddingColumns.results.map((column) => column.name)).toEqual(expect.arrayContaining([
-      "source_id", "dimension", "input_identity", "extraction_input_identity", "model", "dimensions", "config_version", "vector",
+      "appid",
+      "dimension",
+      "input_identity",
+      "overview_input_identity",
+      "model",
+      "dimensions",
+      "config_version",
+      "vector",
+      "active",
     ]));
-    const matchColumns = await db.prepare("PRAGMA table_info(media_game_matches)").all<{ name: string }>();
-    expect(matchColumns.results.map((column) => column.name)).toEqual(expect.arrayContaining([
-      "appid", "matched_appid", "dimension", "trait", "explanation", "similarity", "current_source_ids", "matched_source_ids",
-    ]));
+    const obsoleteTables = await db
+      .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name IN (?, ?)")
+      .bind("media_article_embeddings", "media_game_matches")
+      .all<{ name: string }>();
+    expect(obsoleteTables.results).toEqual([]);
     expect(billingConfirmationColumn?.notnull).toBe(0);
     expect(migrations.results).toHaveLength(migrationNames.length);
+  });
+  test("enforces game embedding identity, vector, and foreign-key constraints", async () => {
+    const db = await getDb();
+    await db
+      .prepare("INSERT INTO apps (appid, name, slug) VALUES (?, ?, ?)")
+      .bind(30, "Embedding Test", "embedding-test")
+      .run();
+    const vector = new Uint8Array(3072 * Float32Array.BYTES_PER_ELEMENT);
+    const insert = db
+      .prepare(
+        "INSERT INTO media_game_embeddings (appid, dimension, input_identity, overview_input_identity, model, dimensions, config_version, vector, active) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      )
+      .bind(30, "gameplay", "input-a", "overview-a", "gemini-embedding-2", 3072, "config-a", vector, 1);
+
+    await insert.run();
+    await expect(
+      db
+        .prepare(
+          "INSERT INTO media_game_embeddings (appid, dimension, input_identity, overview_input_identity, model, dimensions, config_version, vector, active) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)",
+        )
+        .bind(
+          30,
+          "story_world",
+          "input-text-vector",
+          "overview-a",
+          "gemini-embedding-2",
+          3072,
+          "config-a",
+          "x".repeat(12288),
+        )
+        .run(),
+    ).rejects.toThrow();
+    await expect(
+      db
+        .prepare(
+          "INSERT INTO media_game_embeddings (appid, dimension, input_identity, overview_input_identity, model, dimensions, config_version, vector, active) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)",
+        )
+        .bind(30, "gameplay", "input-b", "overview-a", "gemini-embedding-2", 3072, "config-a", vector)
+        .run(),
+    ).rejects.toThrow();
+    await db
+      .prepare(
+        "INSERT INTO media_game_embeddings (appid, dimension, input_identity, overview_input_identity, model, dimensions, config_version, vector, active) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)",
+      )
+      .bind(30, "gameplay", "input-a", "overview-a", "old-model", 3072, "old-config", vector)
+      .run();
+    await expect(
+      db
+        .prepare(
+          "INSERT INTO media_game_embeddings (appid, dimension, input_identity, overview_input_identity, model, dimensions, config_version, vector) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(30, "invalid", "input-c", "overview-a", "gemini-embedding-2", 3072, "config-a", vector)
+        .run(),
+    ).rejects.toThrow();
+    await expect(
+      db
+        .prepare(
+          "INSERT INTO media_game_embeddings (appid, dimension, input_identity, overview_input_identity, model, dimensions, config_version, vector) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(30, "story_world", "input-d", "overview-a", "gemini-embedding-2", 1536, "config-a", vector)
+        .run(),
+    ).rejects.toThrow();
+    await expect(
+      db
+        .prepare(
+          "INSERT INTO media_game_embeddings (appid, dimension, input_identity, overview_input_identity, model, dimensions, config_version, vector) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(30, "story_world", "input-e", "overview-a", "gemini-embedding-2", 3072, "config-a", new Uint8Array(4))
+        .run(),
+    ).rejects.toThrow();
+    await expect(
+      db
+        .prepare(
+          "INSERT INTO media_game_embeddings (appid, dimension, input_identity, overview_input_identity, model, dimensions, config_version, vector) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(999, "story_world", "input-f", "overview-a", "gemini-embedding-2", 3072, "config-a", vector)
+        .run(),
+    ).rejects.toThrow();
   });
 
   test("persists rows after reopening the same file without replaying migrations", async () => {
@@ -199,6 +285,64 @@ describe("Bun SQLite persistence", () => {
         "INSERT INTO media_discovery_runs (pass, identity_key, selected_games, status) VALUES ('initial', ?, ?, 'completed')"
       )
       .run("adopted-media-run", "[11]");
+    const source = legacy
+      .query<{ id: number }, [number]>("SELECT id FROM media_sources WHERE appid = ?")
+      .get(11);
+    const run = legacy
+      .query<{ id: number }, [string]>("SELECT id FROM media_discovery_runs WHERE identity_key = ?")
+      .get("adopted-media-run");
+    if (!source || !run) throw new Error("legacy media fixture was not created");
+    legacy
+      .query(
+        "INSERT INTO media_processing_jobs (run_id, stage, appid, dimension, source_id, request_key, input_identity, model, config_version, max_input_tokens, max_output_tokens, reserved_microusd, charged_microusd, reservation_active, status, output_json) VALUES (?, 'explanation', ?, 'story_world', ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'succeeded', ?)",
+      )
+      .run(
+        run.id,
+        11,
+        source.id,
+        "adopted-processing-job",
+        "adopted-input",
+        "gemini-3.1-flash-lite",
+        "adopted-config",
+        10,
+        20,
+        500,
+        450,
+        JSON.stringify({ trait: "legacy pair trait", explanation: "legacy generated pair prose" }),
+      );
+    const migrationJobs = legacy.query(
+      "INSERT INTO media_processing_jobs (run_id, stage, appid, dimension, source_id, request_key, input_identity, model, config_version, max_input_tokens, max_output_tokens, reserved_microusd, charged_microusd, reservation_active, status, error, completed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    );
+    for (const job of [
+      ["embedding", 11, "gameplay", source.id, "legacy-embedding-reservation", "legacy-embedding-input", "legacy-embedding-model", "media-embedding-legacy", 600, null, 1, "reserved", null, null],
+      ["explanation", 11, "story_world", source.id, "legacy-explanation-reservation", "legacy-explanation-input", "gemini-3.1-flash-lite", "media-explanation-legacy", 700, null, 1, "reserved", null, null],
+      ["synthesis", 11, "story_world", null, "legacy-synthesis-v4-reservation", "legacy-synthesis-input", "gemini-3.1-flash-lite", "media-synthesis-2026-09-13-v4", 800, 123, 1, "reserved", null, null],
+      ["embedding", 11, "gameplay", null, "embedding:11:gameplay:current-overview-input:current-embedding-input", "current-embedding-input", "gemini-embedding-2", "media-embedding-2026-09-13-v1", 900, null, 1, "reserved", null, null],
+      ["embedding", 11, null, null, "invalid-current-aggregate-embedding-reservation", "invalid-current-embedding-input", "gemini-embedding-2", "media-embedding-2026-09-13-v1", 950, null, 1, "reserved", null, null],
+      ["extraction", 11, null, source.id, "current-extraction-reservation", "current-extraction-input", "gemini-3.1-flash-lite", "media-extraction-2026-09-13-v3", 1000, null, 1, "reserved", null, null],
+      ["synthesis", 11, "story_world", null, "current-synthesis-reservation", "current-synthesis-input", "gemini-3.1-flash-lite", "media-synthesis-2026-09-13-v5", 1100, null, 1, "reserved", null, null],
+      ["embedding", 11, "gameplay", source.id, "submitted-legacy-embedding", "submitted-embedding-input", "legacy-embedding-model", "media-embedding-legacy", 1200, null, 1, "submitted", null, null],
+    ] as const) {
+      migrationJobs.run(
+        run.id,
+        job[0],
+        job[1],
+        job[2],
+        job[3],
+        job[4],
+        job[5],
+        job[6],
+        job[7],
+        10,
+        20,
+        job[8],
+        job[9],
+        job[10],
+        job[11],
+        job[12],
+        job[13],
+      );
+    }
     legacy.close(true);
 
     const db = await getDb();
@@ -247,6 +391,170 @@ describe("Bun SQLite persistence", () => {
       .bind(mediaRun.id)
       .first<{ billing_confirmation: string | null }>();
     expect(authorization).toEqual({ billing_confirmation: null });
+    const processingJob = await db
+      .prepare(
+        "SELECT stage, reserved_microusd, charged_microusd, reservation_active, status, output_json FROM media_processing_jobs WHERE request_key = ?",
+      )
+      .bind("adopted-processing-job")
+      .first<{
+        stage: string;
+        reserved_microusd: number;
+        charged_microusd: number;
+        reservation_active: number;
+        status: string;
+        output_json: string | null;
+      }>();
+    expect(processingJob).toEqual({
+      stage: "explanation",
+      reserved_microusd: 500,
+      charged_microusd: 450,
+      reservation_active: 0,
+      status: "succeeded",
+      output_json: null,
+    });
+    const retiredJobs = await db
+      .prepare(
+        "SELECT request_key, stage, config_version, reserved_microusd, charged_microusd, reservation_active, status, error, completed_at FROM media_processing_jobs WHERE request_key IN (?, ?, ?) ORDER BY request_key",
+      )
+      .bind(
+        "legacy-embedding-reservation",
+        "legacy-explanation-reservation",
+        "legacy-synthesis-v4-reservation",
+      )
+      .all<{
+        request_key: string;
+        stage: string;
+        config_version: string;
+        reserved_microusd: number;
+        charged_microusd: number | null;
+        reservation_active: number;
+        status: string;
+        error: string | null;
+        completed_at: string | null;
+      }>();
+    expect(retiredJobs.results).toHaveLength(3);
+    expect(retiredJobs.results).toEqual([
+      {
+        request_key: "legacy-embedding-reservation",
+        stage: "embedding",
+        config_version: "media-embedding-legacy",
+        reserved_microusd: 600,
+        charged_microusd: null,
+        reservation_active: 0,
+        status: "stale",
+        error: "obsolete reservation retired by migration",
+        completed_at: expect.stringMatching(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/),
+      },
+      {
+        request_key: "legacy-explanation-reservation",
+        stage: "explanation",
+        config_version: "media-explanation-legacy",
+        reserved_microusd: 700,
+        charged_microusd: null,
+        reservation_active: 0,
+        status: "stale",
+        error: "obsolete reservation retired by migration",
+        completed_at: expect.stringMatching(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/),
+      },
+      {
+        request_key: "legacy-synthesis-v4-reservation",
+        stage: "synthesis",
+        config_version: "media-synthesis-2026-09-13-v4",
+        reserved_microusd: 800,
+        charged_microusd: 123,
+        reservation_active: 0,
+        status: "stale",
+        error: "obsolete reservation retired by migration",
+        completed_at: expect.stringMatching(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/),
+      },
+    ]);
+    const invalidAggregateReservation = await db
+      .prepare("SELECT status, reservation_active, error FROM media_processing_jobs WHERE request_key = ?")
+      .bind("invalid-current-aggregate-embedding-reservation")
+      .first<{ status: string; reservation_active: number; error: string | null }>();
+    expect(invalidAggregateReservation).toEqual({
+      status: "stale",
+      reservation_active: 0,
+      error: "obsolete reservation retired by migration",
+    });
+    const unaffectedJobs = await db
+      .prepare(
+        "SELECT request_key, stage, model, config_version, reserved_microusd, charged_microusd, reservation_active, status, error, completed_at FROM media_processing_jobs WHERE request_key IN (?, ?, ?, ?) ORDER BY request_key",
+      )
+      .bind(
+        "embedding:11:gameplay:current-overview-input:current-embedding-input",
+        "current-extraction-reservation",
+        "current-synthesis-reservation",
+        "submitted-legacy-embedding",
+      )
+      .all<{
+        request_key: string;
+        stage: string;
+        model: string;
+        config_version: string;
+        reserved_microusd: number;
+        charged_microusd: number | null;
+        reservation_active: number;
+        status: string;
+        error: string | null;
+        completed_at: string | null;
+      }>();
+    expect(unaffectedJobs.results).toEqual([
+      {
+        request_key: "current-extraction-reservation",
+        stage: "extraction",
+        model: "gemini-3.1-flash-lite",
+        config_version: "media-extraction-2026-09-13-v3",
+        reserved_microusd: 1000,
+        charged_microusd: null,
+        reservation_active: 1,
+        status: "reserved",
+        error: null,
+        completed_at: null,
+      },
+      {
+        request_key: "current-synthesis-reservation",
+        stage: "synthesis",
+        model: "gemini-3.1-flash-lite",
+        config_version: "media-synthesis-2026-09-13-v5",
+        reserved_microusd: 1100,
+        charged_microusd: null,
+        reservation_active: 1,
+        status: "reserved",
+        error: null,
+        completed_at: null,
+      },
+      {
+        request_key: "embedding:11:gameplay:current-overview-input:current-embedding-input",
+        stage: "embedding",
+        model: "gemini-embedding-2",
+        config_version: "media-embedding-2026-09-13-v1",
+        reserved_microusd: 900,
+        charged_microusd: null,
+        reservation_active: 1,
+        status: "reserved",
+        error: null,
+        completed_at: null,
+      },
+      {
+        request_key: "submitted-legacy-embedding",
+        stage: "embedding",
+        model: "legacy-embedding-model",
+        config_version: "media-embedding-legacy",
+        reserved_microusd: 1200,
+        charged_microusd: null,
+        reservation_active: 1,
+        status: "submitted",
+        error: null,
+        completed_at: null,
+      },
+    ]);
+    const budgetState = await db
+      .prepare(
+        "SELECT COALESCE(SUM(CASE WHEN reservation_active = 1 THEN reserved_microusd ELSE 0 END), 0) AS outstanding, COALESCE(SUM(CASE WHEN reservation_active = 0 THEN COALESCE(charged_microusd, 0) ELSE 0 END), 0) AS charged, COALESCE(SUM(CASE WHEN reservation_active = 1 THEN reserved_microusd ELSE COALESCE(charged_microusd, 0) END), 0) AS total, COALESCE(SUM(CASE WHEN status = 'reserved' THEN 1 ELSE 0 END), 0) AS pending FROM media_processing_jobs",
+      )
+      .first<{ outstanding: number; charged: number; total: number; pending: number }>();
+    expect(budgetState).toEqual({ outstanding: 4200, charged: 573, total: 4773, pending: 3 });
     expect(ledger).toBeNull();
     expect(journal.results).toHaveLength(migrationNames.length);
     expect(await db.prepare("SELECT 1 FROM app_release_events LIMIT 1").first()).toBeNull();

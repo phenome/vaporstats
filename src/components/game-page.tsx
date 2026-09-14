@@ -18,9 +18,9 @@ import { GameReception, GameScoreHero } from "./game-reception";
 import { MediaSources } from "./media-sources";
 import { MediaOverviewSection } from "./media-overview";
 import { MediaMatchesSection } from "./media-matches";
+import type { MediaGameMatch } from "../lib/media-similarity";
 import type { MediaSource } from "../lib/media-discovery";
 import type { MediaOverview } from "../lib/media-overview";
-import type { MediaGameMatch } from "../lib/media-similarity";
 import {
   NUMERIC_TO_HISTORY_RANGE,
   NUMERIC_TO_PRICE_RANGE,
@@ -273,6 +273,7 @@ export interface GamePageProps {
   sources?: MediaSource[];
   mediaOverview?: MediaOverview | null;
   mediaMatches?: MediaGameMatch[];
+  mediaMatchPaths?: Readonly<Record<number, string>>;
   range?: NumericRange;
   pricerange?: NumericPriceRange;
   eventId?: string | null;
@@ -290,6 +291,7 @@ export function GamePageView({
   sources = [],
   mediaOverview = null,
   mediaMatches = [],
+  mediaMatchPaths = {},
   range,
   pricerange,
   eventId,
@@ -700,7 +702,7 @@ export function GamePageView({
       </div>
       {mediaOverview && <MediaOverviewSection overview={mediaOverview} sources={sources} />}
       {sources.length > 0 && <MediaSources sources={sources} />}
-      {hasMediaMatches && <MediaMatchesSection matches={mediaMatches} />}
+      <MediaMatchesSection matches={mediaMatches} paths={mediaMatchPaths} />
 
       <GameReception
         key={game.appid}

@@ -1,15 +1,17 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { getDb } from "../lib/db-access";
 import type { AppDatabase } from "../lib/db";
-import { getGameByAppId, type GameDetail } from "../lib/catalog";
-import { ensureAppLqips } from "../lib/lqip";
+import { getGameByAppId, getChildGameDetail, type GameDetail } from "../lib/catalog";
 import { getRelatedApps, type GroupedRelatedApps } from "../lib/related";
+
+import { ensureAppLqips } from "../lib/lqip";
 import { getPlayerHistory, type PlayerHistoryResult } from "../lib/player-history";
 import { getCurrentPrice, getPriceHistory, type PriceState, type PriceHistoryResult } from "../lib/prices";
 import { CACHE_POLICIES, getEntityCacheHeaders } from "../lib/cache";
 import { getMediaSources, type MediaSource } from "../lib/media-discovery";
 import { getMediaOverview, type MediaOverview } from "../lib/media-overview";
-import { getMediaGameMatches, type MediaGameMatch } from "../lib/media-similarity";
+import { getMediaGameMatches, getMediaGameMatchPaths, type MediaGameMatch } from "../lib/media-similarity";
+
 
 export interface GameDetailResponseData {
   game: GameDetail;
@@ -20,6 +22,7 @@ export interface GameDetailResponseData {
   sources: MediaSource[];
   mediaOverview: MediaOverview | null;
   mediaMatches: MediaGameMatch[];
+  mediaMatchPaths: Record<number, string>;
 }
 
 export async function handleGameDetailRequest(
@@ -55,11 +58,45 @@ export async function handleGameDetailRequest(
     );
   }
 
-  const game = await getGameByAppId(db, appid);
+  let game = await getGameByAppId(db, appid);
+  if (!game) {
+    const childIdentity = await db
+      .prepare(
+        `SELECT parent_appid
+         FROM apps
+         WHERE appid = ? AND is_eligible = 1
+           AND parent_appid IS NOT NULL
+         LIMIT 1`,
+      )
+      .bind(appid)
+      .first<{ parent_appid: number }>();
+    let parentAppId = childIdentity?.parent_appid ?? null;
+    if (!parentAppId) {
+      const relationshipTable = await db
+        .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='app_relationships'")
+        .first<{ name: string }>();
+      if (relationshipTable) {
+        const relationship = await db
+          .prepare(
+            `SELECT parent_appid
+             FROM app_relationships
+             WHERE child_appid = ?
+             ORDER BY prominence DESC, parent_appid ASC
+             LIMIT 1`,
+          )
+          .bind(appid)
+          .first<{ parent_appid: number }>();
+        parentAppId = relationship?.parent_appid ?? null;
+      }
+    }
+    if (parentAppId) {
+      game = (await getChildGameDetail(db, parentAppId, appid))?.game ?? null;
+    }
+  }
   if (!game) {
     return new Response(
       JSON.stringify({ status: "error", error: "Game not found" }),
-      { status: 404, headers: { "Content-Type": "application/json", "Cache-Control": CACHE_POLICIES.noStore } }
+      { status: 404, headers: { "Content-Type": "application/json", "Cache-Control": CACHE_POLICIES.noStore } },
     );
   }
 
@@ -72,6 +109,7 @@ export async function handleGameDetailRequest(
     getMediaOverview(db, game.appid),
     getMediaGameMatches(db, game.appid),
   ]);
+  const mediaMatchPaths = await getMediaGameMatchPaths(db, mediaMatches);
   game.header_lqip = lqips.header_lqip;
   game.icon_lqip = lqips.icon_lqip;
   const priceHistory = await getPriceHistory(db, game.appid, "all", { currentPrice });
@@ -85,6 +123,7 @@ export async function handleGameDetailRequest(
     sources,
     mediaOverview,
     mediaMatches,
+    mediaMatchPaths,
   };
 
   return Response.json(

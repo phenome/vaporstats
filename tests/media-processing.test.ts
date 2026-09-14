@@ -17,6 +17,7 @@ import {
   type GeminiBatchTransport,
 } from "../src/lib/media-processing";
 import { getMediaOverview, normalizeMediaTag, parseMediaOverview } from "../src/lib/media-overview";
+import { getMediaSources } from "../src/lib/media-discovery";
 import { handleGameDetailRequest } from "../src/routes/api.games.$appid.detail";
 
 function adapter(native: Database): AppDatabase {
@@ -277,6 +278,84 @@ describe("bounded Gemini media processing", () => {
     expect(persistedExtraction?.output_json).not.toContain("secret-not-content");
     const authorization = await value.db.prepare("SELECT billing_confirmation FROM media_processing_authorizations WHERE run_id = ?").bind(value.runId).first<{ billing_confirmation: string | null }>();
     expect(authorization?.billing_confirmation).toBe(GEMINI_BATCH_BILLING_CONFIRMATION);
+  });
+  test("processes an authorized root's eligible child as an independent durable entity", async () => {
+    const value = fixture(); cleanups.push(value.cleanup);
+    const childAppid = 2138330;
+    const childUrl = "https://ign.com/articles/phantom-liberty-review";
+    value.native.prepare("INSERT INTO apps (appid, name, slug, type, parent_appid) VALUES (?, ?, ?, 'expansion', ?)").run(childAppid, "Cyberpunk 2077: Phantom Liberty", "cyberpunk-2077-phantom-liberty", APPIDS[0]);
+    value.native.prepare("INSERT INTO media_sources (appid, pass, original_url, title, outlet, retrieved_at, type, hands_on, platform, build_context) VALUES (?, 'initial', ?, ?, 'IGN', ?, 'review', 1, 'PC', 'Early Access')").run(childAppid, childUrl, "Phantom Liberty Review", "2026-09-11T00:00:00.000Z");
+    await authorizeMediaProcessing(value.db, value.runId);
+    const transport = new ControlledTransport();
+    transport.nextPolls.push(
+      { state: "succeeded", output: extractionOutput(), usage: { inputTokens: 100, outputTokens: 20 } },
+      { state: "succeeded", output: extractionOutput("expansion combat"), usage: { inputTokens: 100, outputTokens: 20 } },
+      { state: "succeeded", output: overviewOutput(URLS[APPIDS[0]]), usage: { inputTokens: 100, outputTokens: 20 } },
+      { state: "succeeded", output: overviewOutput(childUrl), usage: { inputTokens: 100, outputTokens: 20 } },
+    );
+    const first = await advanceMediaProcessing(value.db, {
+      runId: value.runId,
+      transport,
+      articleFetch: async (url) => url === childUrl ? articleHtml(APPIDS[0]).replaceAll("Cyberpunk 2077", "Phantom Liberty") : articleHtml(APPIDS[0]),
+      pricingVersion: GEMINI_BATCH_PRICING_VERSION,
+      capabilityVersion: GEMINI_BATCH_CAPABILITY_VERSION,
+    });
+    expect(first.submitted).toBe(4);
+    await advanceMediaProcessing(value.db, {
+      runId: value.runId,
+      transport,
+      articleFetch: async (url) => url === childUrl ? articleHtml(APPIDS[0]).replaceAll("Cyberpunk 2077", "Phantom Liberty") : articleHtml(APPIDS[0]),
+      pricingVersion: GEMINI_BATCH_PRICING_VERSION,
+      capabilityVersion: GEMINI_BATCH_CAPABILITY_VERSION,
+    });
+    expect(await getMediaOverview(value.db, APPIDS[0], { includeUnpublished: true })).not.toBeNull();
+    expect(await getMediaOverview(value.db, childAppid, { includeUnpublished: true })).not.toBeNull();
+    await value.db.prepare("UPDATE apps SET type = 'soundtrack' WHERE appid = ?").bind(childAppid).run();
+    expect(await getMediaSources(value.db, childAppid)).toEqual([]);
+    expect(await getMediaOverview(value.db, childAppid, { includeUnpublished: true })).toBeNull();
+    await value.db.prepare("UPDATE apps SET type = 'expansion' WHERE appid = ?").bind(childAppid).run();
+    const overviewAppids = await value.db.prepare("SELECT appid FROM media_game_overviews WHERE active = 1 ORDER BY appid").all<{ appid: number }>();
+    expect(overviewAppids.results?.map(({ appid }) => appid)).toEqual([APPIDS[0], childAppid]);
+    const activeSources = await value.db.prepare(
+      "SELECT s.appid, s.original_url FROM media_article_extractions e JOIN media_sources s ON s.id = e.source_id WHERE e.active = 1 ORDER BY s.appid",
+    ).all<{ appid: number; original_url: string }>();
+    expect(activeSources.results).toEqual([
+      { appid: APPIDS[0], original_url: URLS[APPIDS[0]] },
+      { appid: childAppid, original_url: childUrl },
+    ]);
+  });
+  test("excludes ineligible and accessory children from authorized processing", async () => {
+    const value = fixture(); cleanups.push(value.cleanup);
+    const ineligibleChild = 2138330;
+    const accessoryChild = 2138331;
+    const childRows = [
+      [ineligibleChild, "Cyberpunk 2077: Ineligible Expansion", "https://ign.com/articles/ineligible-expansion-review"],
+      [accessoryChild, "Cyberpunk 2077 Dedicated Server", "https://ign.com/articles/dedicated-server-review"],
+    ] as const;
+    for (const [appid, name, url] of childRows) {
+      value.native.prepare("INSERT INTO apps (appid, name, slug, type, parent_appid) VALUES (?, ?, ?, 'expansion', ?)").run(appid, name, name.toLowerCase().replaceAll(" ", "-"), APPIDS[0]);
+      value.native.prepare("INSERT INTO media_sources (appid, pass, original_url, title, outlet, retrieved_at, type) VALUES (?, 'initial', ?, ?, 'IGN', ?, 'review')").run(appid, url, name, "2026-09-11T00:00:00.000Z");
+    }
+    value.native.prepare("UPDATE apps SET is_eligible = 0 WHERE appid = ?").run(ineligibleChild);
+    value.native.prepare("INSERT INTO app_relationships (parent_appid, child_appid, relationship_type) VALUES (?, ?, 'server')").run(APPIDS[0], accessoryChild);
+    await authorizeMediaProcessing(value.db, value.runId);
+    const transport = new ControlledTransport();
+    transport.nextPolls.push(
+      { state: "succeeded", output: extractionOutput(), usage: { inputTokens: 100, outputTokens: 20 } },
+      { state: "succeeded", output: overviewOutput(URLS[APPIDS[0]]), usage: { inputTokens: 100, outputTokens: 20 } },
+    );
+    const result = await advanceMediaProcessing(value.db, {
+      runId: value.runId,
+      transport,
+      articleFetch: async () => articleHtml(APPIDS[0]),
+      pricingVersion: GEMINI_BATCH_PRICING_VERSION,
+      capabilityVersion: GEMINI_BATCH_CAPABILITY_VERSION,
+    });
+    expect(result.submitted).toBe(2);
+    const jobAppids = await value.db.prepare("SELECT DISTINCT appid FROM media_processing_jobs WHERE run_id = ? ORDER BY appid").bind(value.runId).all<{ appid: number }>();
+    expect(jobAppids.results?.map(({ appid }) => appid)).toEqual([APPIDS[0]]);
+    const childJobs = await value.db.prepare("SELECT COUNT(*) AS count FROM media_processing_jobs WHERE appid IN (?, ?)").bind(ineligibleChild, accessoryChild).first<{ count: number }>();
+    expect(Number(childJobs?.count ?? 0)).toBe(0);
   });
   test("keeps memberships scoped to each entity and preserves unaffected current support", async () => {
     const value = fixture(APPIDS); cleanups.push(value.cleanup);
@@ -641,9 +720,6 @@ describe("bounded Gemini media processing", () => {
       ).run(APPIDS[0], url, "Cyberpunk 2077 review", outlet, "2026-09-11T00:00:00.000Z", platform, build);
     }
     value.native.prepare("UPDATE media_sources SET author = 'Wire Author', title = 'Wire Original' WHERE original_url = ?").run(urls.eurogamer);
-    value.native.prepare("INSERT INTO apps (appid, name, slug, type, parent_appid) VALUES (2138330, 'Cyberpunk 2077: Phantom Liberty', 'cyberpunk-2077-phantom-liberty', 'expansion', ?)").run(APPIDS[0]);
-    const expansionUrl = "https://ign.com/articles/phantom-liberty-review";
-    value.native.prepare("INSERT INTO media_sources (appid, pass, original_url, title, outlet, retrieved_at, type) VALUES (2138330, 'initial', ?, 'Phantom Liberty review', 'IGN', ?, 'review')").run(expansionUrl, "2026-09-11T00:00:00.000Z");
 
     await authorizeMediaProcessing(value.db, value.runId);
     const transport = new ControlledTransport();
@@ -691,7 +767,6 @@ describe("bounded Gemini media processing", () => {
     expect(overview?.prosCons?.pros[0]?.sourceUrls).toEqual([urls.ign, urls.eurogamer]);
     expect(overview?.prosCons?.cons).toEqual([]);
     const synthesisRequest = JSON.stringify(transport.requestBodies.at(-1));
-    expect(synthesisRequest).not.toContain(expansionUrl);
     expect(synthesisRequest).toContain('\\"platform\\":null');
     const synthesisJobs = await value.db.prepare("SELECT COUNT(*) AS count FROM media_processing_jobs WHERE stage = 'synthesis'").first<{ count: number }>();
     expect(synthesisJobs?.count).toBe(1);
@@ -709,14 +784,11 @@ describe("bounded Gemini media processing", () => {
     reopenedNative.exec("PRAGMA foreign_keys = ON");
     cleanups.push(() => reopenedNative.close(true));
     const reopenedDb = adapter(reopenedNative);
-    await advanceMediaProcessing(reopenedDb, { runId: value.runId, transport, articleFetch: async (url) => articleHtml(url.includes("baldurs") ? APPIDS[1] : APPIDS[0]), pricingVersion: GEMINI_BATCH_PRICING_VERSION, capabilityVersion: GEMINI_BATCH_CAPABILITY_VERSION });
+    const reopened = await advanceMediaProcessing(reopenedDb, { runId: value.runId, transport, articleFetch: async (url) => articleHtml(url.includes("baldurs") ? APPIDS[1] : APPIDS[0]), pricingVersion: GEMINI_BATCH_PRICING_VERSION, capabilityVersion: GEMINI_BATCH_CAPABILITY_VERSION });
     expect(await getMediaOverview(reopenedDb, APPIDS[1], { includeUnpublished: true })).not.toBeNull();
     expect(await getMediaOverview(reopenedDb, APPIDS[0], { includeUnpublished: true })).toBeNull();
-    const submissionCount = transport.submissions.length;
-    const reused = await advanceMediaProcessing(reopenedDb, { runId: value.runId, transport, articleFetch: async (url) => articleHtml(url.includes("baldurs") ? APPIDS[1] : APPIDS[0]), pricingVersion: GEMINI_BATCH_PRICING_VERSION, capabilityVersion: GEMINI_BATCH_CAPABILITY_VERSION });
-    expect(reused.submitted).toBe(0);
-    expect(reused.reused).toBeGreaterThan(0);
-    expect(transport.submissions).toHaveLength(submissionCount);
+    expect(reopened.submitted).toBe(0);
+    expect(reopened.reused).toBeGreaterThan(0);
   });
   test("reconciles submitted work from an earlier authorization", async () => {
     const value = fixture(); cleanups.push(value.cleanup);
@@ -755,6 +827,148 @@ describe("bounded Gemini media processing", () => {
     expect(active?.count).toBe(0);
     const source = await value.db.prepare("SELECT processing_input_identity FROM media_sources WHERE appid = ?").bind(APPIDS[0]).first<{ processing_input_identity: string }>();
     expect(source?.processing_input_identity).toBeTruthy();
+  });
+
+  test("polls submitted work even when its authorization is already completed", async () => {
+    const value = fixture(); cleanups.push(value.cleanup);
+    await authorizeMediaProcessing(value.db, value.runId);
+    const transport = new ControlledTransport();
+    transport.nextPolls.push({ state: "pending" });
+    await advanceMediaProcessing(value.db, {
+      runId: value.runId,
+      transport,
+      articleFetch: async () => articleHtml(APPIDS[0]),
+      pricingVersion: GEMINI_BATCH_PRICING_VERSION,
+      capabilityVersion: GEMINI_BATCH_CAPABILITY_VERSION,
+    });
+    await value.db.prepare("UPDATE media_processing_authorizations SET status = 'completed' WHERE run_id = ?").bind(value.runId).run();
+    transport.polls.set("batches/test-1", { state: "succeeded", output: extractionOutput(), usage: { inputTokens: 100, outputTokens: 20 } });
+    const result = await advanceMediaProcessing(value.db, {
+      transport,
+      articleFetch: async () => articleHtml(APPIDS[0]),
+      pricingVersion: GEMINI_BATCH_PRICING_VERSION,
+      capabilityVersion: GEMINI_BATCH_CAPABILITY_VERSION,
+    });
+    const job = await value.db.prepare("SELECT status, reservation_active, charged_microusd FROM media_processing_jobs WHERE stage = 'extraction'").first<{ status: string; reservation_active: number; charged_microusd: number | null }>();
+    expect(result.runId).toBe(value.runId);
+    expect(result.submitted).toBe(0);
+    expect(job).toMatchObject({ status: "succeeded", reservation_active: 0 });
+    expect(job?.charged_microusd).toBeGreaterThan(0);
+  });
+
+  test("reconciles globally submitted work after its authorization is removed", async () => {
+    const value = fixture(); cleanups.push(value.cleanup);
+    await authorizeMediaProcessing(value.db, value.runId);
+    const transport = new ControlledTransport();
+    transport.nextPolls.push({ state: "pending" });
+    await advanceMediaProcessing(value.db, {
+      runId: value.runId,
+      transport,
+      articleFetch: async () => articleHtml(APPIDS[0]),
+      pricingVersion: GEMINI_BATCH_PRICING_VERSION,
+      capabilityVersion: GEMINI_BATCH_CAPABILITY_VERSION,
+    });
+    await value.db.prepare("DELETE FROM media_processing_authorizations WHERE run_id = ?").bind(value.runId).run();
+    transport.polls.set("batches/test-1", { state: "succeeded", output: extractionOutput(), usage: { inputTokens: 100, outputTokens: 20 } });
+
+    const result = await advanceMediaProcessing(value.db, {
+      transport,
+      pricingVersion: GEMINI_BATCH_PRICING_VERSION,
+      capabilityVersion: GEMINI_BATCH_CAPABILITY_VERSION,
+    });
+    const job = await value.db.prepare("SELECT status, reservation_active FROM media_processing_jobs WHERE stage = 'extraction'").first<{ status: string; reservation_active: number }>();
+    expect(result).toMatchObject({ runId: value.runId, status: "completed", completed: 1 });
+    expect(job).toEqual({ status: "succeeded", reservation_active: 0 });
+  });
+  test("settles terminal jobs conservatively when provider usage is absent", async () => {
+    const value = fixture(); cleanups.push(value.cleanup);
+    await authorizeMediaProcessing(value.db, value.runId);
+    const transport = new ControlledTransport();
+    transport.nextPolls.push({ state: "pending" });
+    await advanceMediaProcessing(value.db, {
+      runId: value.runId,
+      transport,
+      articleFetch: async () => articleHtml(APPIDS[0]),
+      pricingVersion: GEMINI_BATCH_PRICING_VERSION,
+      capabilityVersion: GEMINI_BATCH_CAPABILITY_VERSION,
+    });
+    const before = await value.db.prepare("SELECT reserved_microusd FROM media_processing_jobs WHERE stage = 'extraction'").first<{ reserved_microusd: number }>();
+    if (!before) throw new Error("Extraction reservation was not created");
+    transport.polls.set("batches/test-1", { state: "succeeded", output: extractionOutput() });
+    const result = await advanceMediaProcessing(value.db, {
+      runId: value.runId,
+      transport,
+      articleFetch: async () => articleHtml(APPIDS[0]),
+      pricingVersion: GEMINI_BATCH_PRICING_VERSION,
+      capabilityVersion: GEMINI_BATCH_CAPABILITY_VERSION,
+    });
+    const settled = await value.db.prepare("SELECT status, reserved_microusd, charged_microusd, reservation_active FROM media_processing_jobs WHERE stage = 'extraction'").first<{ status: string; reserved_microusd: number; charged_microusd: number; reservation_active: number }>();
+    expect(result.completed).toBeGreaterThan(0);
+    expect(settled).toEqual({
+      status: "succeeded",
+      reserved_microusd: before.reserved_microusd,
+      charged_microusd: before.reserved_microusd,
+      reservation_active: 0,
+    });
+  });
+
+
+  test("keeps authorization waiting while an uncertain reservation remains", async () => {
+    const value = fixture(); cleanups.push(value.cleanup);
+    await authorizeMediaProcessing(value.db, value.runId);
+    await value.db.prepare("DELETE FROM media_sources WHERE appid = ?").bind(APPIDS[0]).run();
+    await value.db.prepare(
+      "INSERT INTO media_game_overviews (appid, input_identity, model, config_version, output_json, active) VALUES (?, ?, ?, ?, ?, 1)",
+    ).bind(APPIDS[0], "uncertain-overview-input", "test-model", "test-config", "{}").run();
+    await value.db.prepare(
+      "INSERT INTO media_processing_jobs (run_id, stage, appid, request_key, input_identity, model, config_version, max_input_tokens, max_output_tokens, reserved_microusd, reservation_active, status, usage_json) VALUES (?, 'extraction', ?, 'uncertain-job', 'uncertain-input', 'test-model', 'test-config', 1, 1, 1234, 1, 'uncertain', '{}')",
+    ).bind(value.runId, APPIDS[0]).run();
+
+    const transport = new ControlledTransport();
+    const result = await advanceMediaProcessing(value.db, {
+      runId: value.runId,
+      transport,
+      articleFetch: async () => articleHtml(APPIDS[0]),
+      pricingVersion: GEMINI_BATCH_PRICING_VERSION,
+      capabilityVersion: GEMINI_BATCH_CAPABILITY_VERSION,
+    });
+    const authorization = await value.db.prepare(
+      "SELECT status, stop_reason FROM media_processing_authorizations WHERE run_id = ?",
+    ).bind(value.runId).first<{ status: string; stop_reason: string | null }>();
+
+    expect(result).toMatchObject({
+      status: "waiting",
+      submitted: 0,
+      uncertain: 1,
+      outstandingReservedMicrousd: 1234,
+      overviewAppids: [APPIDS[0]],
+    });
+    expect(authorization).toEqual({ status: "waiting", stop_reason: null });
+    expect(transport.submissions).toHaveLength(0);
+  });
+  test("polls existing submitted work before rejecting current pricing or capability", async () => {
+    const value = fixture(); cleanups.push(value.cleanup);
+    await authorizeMediaProcessing(value.db, value.runId);
+    const transport = new ControlledTransport();
+    transport.nextPolls.push({ state: "pending" });
+    await advanceMediaProcessing(value.db, {
+      runId: value.runId,
+      transport,
+      articleFetch: async () => articleHtml(APPIDS[0]),
+      pricingVersion: GEMINI_BATCH_PRICING_VERSION,
+      capabilityVersion: GEMINI_BATCH_CAPABILITY_VERSION,
+    });
+    await value.db.prepare("UPDATE media_processing_authorizations SET status = 'completed' WHERE run_id = ?").bind(value.runId).run();
+    transport.polls.set("batches/test-1", { state: "succeeded", output: extractionOutput(), usage: { inputTokens: 100, outputTokens: 20 } });
+    const result = await advanceMediaProcessing(value.db, {
+      transport,
+      pricingVersion: "stale-pricing",
+      capabilityVersion: GEMINI_BATCH_CAPABILITY_VERSION,
+    });
+    const job = await value.db.prepare("SELECT status, reservation_active FROM media_processing_jobs WHERE stage = 'extraction'").first<{ status: string; reservation_active: number }>();
+    expect(result.status).toBe("completed");
+    expect(result.stopReasons).toEqual([]);
+    expect(job).toEqual({ status: "succeeded", reservation_active: 0 });
   });
 
   test("uses the official Gemini count, create, and poll REST paths", async () => {

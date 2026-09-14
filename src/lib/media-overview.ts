@@ -1,4 +1,5 @@
 import type { AppDatabase } from "./db";
+import { ELIGIBLE_MEDIA_ENTITY_SQL } from "./media-similarity";
 
 export const MEDIA_CATEGORY_NAMES = [
   "Gameplay & systems",
@@ -241,7 +242,15 @@ export async function getMediaOverview(
   if (!options.includeUnpublished && !publicEnabled) return null;
   const row = await first<{ output_json: string }>(
     db,
-    "SELECT output_json FROM media_game_overviews WHERE appid = ? AND active = 1 ORDER BY id DESC LIMIT 1",
+    `SELECT overview.output_json
+     FROM media_game_overviews AS overview
+     JOIN apps AS app
+       ON app.appid = overview.appid
+      AND app.is_eligible = 1
+      AND ${ELIGIBLE_MEDIA_ENTITY_SQL}
+     WHERE overview.appid = ? AND overview.active = 1
+     ORDER BY overview.id DESC
+     LIMIT 1`,
     appid,
   );
   if (!row) return null;

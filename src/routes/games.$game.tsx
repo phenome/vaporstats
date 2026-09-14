@@ -10,7 +10,7 @@ import type { AppDatabase } from "../lib/db";
 import { getCurrentPrice, getPriceHistory } from "../lib/prices";
 import { getMediaSources } from "../lib/media-discovery";
 import { getMediaOverview } from "../lib/media-overview";
-import { getMediaGameMatches } from "../lib/media-similarity";
+import { getMediaGameMatches, getMediaGameMatchPaths } from "../lib/media-similarity";
 import { parseGameSlug, toSlug, getCanonicalGamePath } from "../lib/slug";
 import { gameScoreHistoryQueryOptions, gameScoreSummaryQueryOptions } from "../lib/score-query";
 import { createQueryClient } from "../lib/query-client";
@@ -105,7 +105,7 @@ function GameRouteComponent() {
     return <GamePageSkeleton />;
   }
 
-  const { game, related, playerHistory, price, priceHistory, sources, mediaOverview, mediaMatches } = data;
+  const { game, related, playerHistory, price, priceHistory, sources, mediaOverview, mediaMatches, mediaMatchPaths } = data;
   const canonicalSlug = toSlug(game.name);
   if (slug !== canonicalSlug) {
     return (
@@ -167,6 +167,7 @@ function GameRouteComponent() {
       sources={sources}
       mediaOverview={mediaOverview}
       mediaMatches={mediaMatches}
+      mediaMatchPaths={mediaMatchPaths}
       range={numericRange}
       pricerange={numericPriceRange}
       eventId={activeEvent}
@@ -236,17 +237,41 @@ export async function handleGameHttpRequest(
     });
   }
 
+  const numericRange = parseNumericRange(url.searchParams.get("range"));
+  const numericPriceRange = parseNumericPriceRange(url.searchParams.get("pricerange"));
+  const rawEvent = url.searchParams.get("event")?.trim().replace(/^["']|["']$/g, "") ?? "";
+  const activeEvent = rawEvent.length > 0 ? rawEvent : null;
   const canonicalSlug = toSlug(game.name);
   if (parsed.slug !== canonicalSlug) {
     const canonicalPath = getCanonicalGamePath(game.appid, game.name);
+    const redirectSearch = new URLSearchParams();
+    const rawRange = url.searchParams.get("range");
+    const rangeValue = rawRange === null ? NaN : Number(rawRange.trim());
+    if (Number.isFinite(rangeValue) && Math.floor(rangeValue) >= 1 && Math.floor(rangeValue) <= 5) {
+      redirectSearch.set("range", String(numericRange));
+    }
+    const rawPriceRange = url.searchParams.get("pricerange");
+    const priceRangeValue = rawPriceRange === null ? NaN : Number(rawPriceRange.trim());
+    if (
+      Number.isFinite(priceRangeValue) &&
+      Math.floor(priceRangeValue) >= 1 &&
+      Math.floor(priceRangeValue) <= 4
+    ) {
+      redirectSearch.set("pricerange", String(numericPriceRange));
+    }
+    if (activeEvent && url.searchParams.has("event")) {
+      redirectSearch.set("event", activeEvent);
+    }
+    const location = redirectSearch.size > 0 ? `${canonicalPath}?${redirectSearch}` : canonicalPath;
     return new Response(null, {
       status: 301,
       headers: {
-        Location: canonicalPath,
+        Location: location,
         "Cache-Control": CACHE_POLICIES.entity,
       },
     });
   }
+
   const [related, playerHistory, currentPrice, sources, mediaOverview, mediaMatches] = await Promise.all([
     getRelatedApps(db, game.appid),
     getPlayerHistory(db, game.appid, "30d"),
@@ -255,6 +280,7 @@ export async function handleGameHttpRequest(
     getMediaOverview(db, game.appid),
     getMediaGameMatches(db, game.appid),
   ]);
+  const mediaMatchPaths = await getMediaGameMatchPaths(db, mediaMatches);
   const priceHistory = await getPriceHistory(db, game.appid, "all", { currentPrice });
   const appHtml = renderToString(
     <QueryClientProvider client={createQueryClient()}>
@@ -267,6 +293,10 @@ export async function handleGameHttpRequest(
         sources={sources}
         mediaOverview={mediaOverview}
         mediaMatches={mediaMatches}
+        mediaMatchPaths={mediaMatchPaths}
+        range={numericRange}
+        pricerange={numericPriceRange}
+        eventId={activeEvent}
       />
     </QueryClientProvider>
   );
