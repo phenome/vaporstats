@@ -80,6 +80,30 @@ const DISALLOWED_TAGS: Record<string, true> = {
   canvas: true,
 };
 
+function wrapStickySections(root: HTMLElement): void {
+  let section: HTMLElement | null = null;
+
+  for (const node of Array.from(root.childNodes)) {
+    const isHeader =
+      node.nodeType === 1 &&
+      (node as Element).classList.contains("score-event-section-header");
+    if (isHeader) {
+      section = root.ownerDocument.createElement("section") as HTMLElement;
+      section.className = "score-event-section";
+      root.insertBefore(section, node);
+    }
+    if (section) section.appendChild(node);
+  }
+}
+
+function removeImageStickyHeaders(root: HTMLElement): void {
+  for (const heading of Array.from(root.querySelectorAll(".score-event-section-header"))) {
+    if (heading.querySelector("img") || !heading.textContent?.trim()) {
+      heading.classList.remove("score-event-section-header");
+    }
+  }
+}
+
 /**
  * Sanitizes reader HTML to prevent XSS and style poisoning.
  * Strips active scripts, frames, inline style attributes, and event handlers.
@@ -160,6 +184,8 @@ export function sanitizeReaderHtml(dirtyHtml: string, baseUrl?: string): string 
     }
   }
 
+  removeImageStickyHeaders(root);
+  wrapStickySections(root);
   return root.innerHTML;
 }
 
@@ -314,7 +340,9 @@ export function bbcodeToHtml(bbcode: string): string {
 
   // Tag h1, h2, and h3 headings with score-event-section-header
   text = text.replace(/<(h[1-3])(?:\s+class="([^"]*)")?>([\s\S]*?)<\/\1>/gi, (_, tag: string, cls: string | undefined, content: string) => {
-    if (cls?.includes("score-event-section-header")) return `<${tag} class="${cls}">${content}</${tag}>`;
+    if (cls?.includes("score-event-section-header") || /<img\b/i.test(content)) {
+      return `<${tag}${cls ? ` class="${cls}"` : ""}>${content}</${tag}>`;
+    }
     const combined = cls ? `${cls} score-event-section-header` : "score-event-section-header";
     return `<${tag} class="${combined}">${content}</${tag}>`;
   });

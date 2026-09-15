@@ -244,6 +244,23 @@ describe("Steam Store BBCode and Event Extraction", () => {
     expect(html).toContain('<h1 class="score-event-section-header">Photo Mode</h1>');
   });
 
+  test("bounds sticky headers to their sections and ignores image headings", () => {
+    const html = bbcodeToHtml(
+      "[h1][img]https://example.com/banner.png[/img][/h1][h2]First section[/h2][p]First body[/p][h2]Second section[/h2][p]Second body[/p]",
+    );
+    expect(html).not.toContain('<h1 class="score-event-section-header"><img');
+
+    const sanitized = sanitizeReaderHtml(html);
+    expect(sanitized.match(/<section class="score-event-section">/g)).toHaveLength(2);
+    expect(sanitized).toContain('<h1><img loading="lazy" src="https://example.com/banner.png"></h1>');
+    expect(sanitized).toContain(
+      '<section class="score-event-section"><h2 class="score-event-section-header">First section</h2><p>First body</p></section>',
+    );
+    expect(sanitized).toContain(
+      '<section class="score-event-section"><h2 class="score-event-section-header">Second section</h2><p>Second body</p></section>',
+    );
+  });
+
   test("handles BBCode attributes and YouTube preview embeds", () => {
     const bbcode = `[p align="start"]To survive in Night City, you need someone to watch your back.[/p][previewyoutube="KO0a5vujTB0;full"][/previewyoutube][p align="start"]Check out: http://cdpred.ly/AAY[/p]`;
 
