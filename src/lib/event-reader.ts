@@ -317,9 +317,11 @@ export function bbcodeToHtml(bbcode: string): string {
   text = text.replace(/\[\*\]/gi, "<li>");
   text = text.replace(/\[list\]/gi, "<ul>");
   text = text.replace(/\[\/list\]/gi, "</ul>");
+  text = text.replace(/\[olist\]/gi, "<ol>");
+  text = text.replace(/\[\/olist\]/gi, "</ol>");
 
-  // Close any unclosed <li> before next <li>, </ul>, or end
-  text = text.replace(/<li>([\s\S]*?)(?=(?:<li>|<\/ul>|$))/gi, (match, inner) => {
+  // Close any unclosed <li> before next <li>, list end, or end
+  text = text.replace(/<li>([\s\S]*?)(?=(?:<li>|<\/(?:ul|ol)>|$))/gi, (match, inner) => {
     if (inner.includes("</li>")) return match;
     return `<li>${inner.trim()}</li>`;
   });
@@ -330,6 +332,7 @@ export function bbcodeToHtml(bbcode: string): string {
   // Trim list items and list containers
   text = text.replace(/<li>([\s\S]*?)<\/li>/gi, (_, item: string) => `<li>${item.trim()}</li>`);
   text = text.replace(/<ul>\s*/gi, "<ul>").replace(/\s*<\/ul>/gi, "</ul>");
+  text = text.replace(/<ol>\s*/gi, "<ol>").replace(/\s*<\/ol>/gi, "</ol>");
 
   // Remove empty paragraphs
   text = text.replace(/<p>\s*<\/p>/gi, "");
@@ -376,7 +379,7 @@ export function bbcodeToPlainText(bbcode: string): string {
     .replace(/\[\/p\]/gi, "\n")
     .replace(/\[\/\*\]/gi, "\n")
     .replace(/\[\*\]/gi, "\n- ")
-    .replace(/\[\/?(?:img|url|b|i|u|strike|h[1-6]|list|\*|quote|code|previewyoutube|p|align|center|hr)(?:=[^\]]*)?\]/gi, "")
+    .replace(/\[\/?(?:img|url|b|i|u|strike|h[1-6]|list|olist|\*|quote|code|previewyoutube|p|align|center|hr)(?:=[^\]]*)?\]/gi, "")
     .replace(/\s+/g, " ")
     .trim();
 }

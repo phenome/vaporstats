@@ -167,6 +167,18 @@ describe("Steam Store BBCode and Event Extraction", () => {
     expect(html).not.toContain("* New Biome");
   });
 
+  test("converts Steam [olist] BBCode into ordered lists", () => {
+    const bbcode = "[olist][*]First step[/*][*]Second step[/*][/olist]";
+    const html = bbcodeToHtml(bbcode);
+
+    expect(html).toContain("<ol><li>First step</li><li>Second step</li></ol>");
+
+    const plain = bbcodeToPlainText(bbcode);
+    expect(plain).toContain("First step");
+    expect(plain).toContain("Second step");
+    expect(plain).not.toContain("[olist]");
+  });
+
 
   test("converts Steam [img src] attributes and clan image placeholders", () => {
     const bbcode = '[p][img src="{STEAM_CLAN_LOC_IMAGE}/3703047/test.png"][/img]Congratulations[/p]';
