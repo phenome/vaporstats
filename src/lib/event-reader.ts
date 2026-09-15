@@ -103,6 +103,64 @@ function removeImageStickyHeaders(root: HTMLElement): void {
     }
   }
 }
+function wrapTablesInScrollContainers(root: HTMLElement): void {
+  const tables = Array.from(root.querySelectorAll("table"));
+  for (const table of tables) {
+    table.classList.add("score-event-table");
+
+    const parent = table.parentElement;
+    if (!parent || !parent.classList.contains("score-event-table-wrap")) {
+      const wrap = root.ownerDocument.createElement("div") as HTMLElement;
+      wrap.className = "score-event-table-wrap scrollbar-thin";
+      table.parentNode?.insertBefore(wrap, table);
+      wrap.appendChild(table);
+    } else {
+      parent.classList.add("scrollbar-thin");
+    }
+
+    const colwidthAttr = table.getAttribute("data-colwidth");
+    let widths: number[] = [];
+    if (colwidthAttr) {
+      widths = colwidthAttr
+        .split(/[,;\s]+/)
+        .map((w) => parseFloat(w.trim()))
+        .filter((w) => Number.isFinite(w) && w > 0);
+      if (widths.length > 0) {
+        const sum = widths.reduce((acc, curr) => acc + curr, 0);
+        table.style.minWidth = `${sum}px`;
+      }
+    }
+
+    const firstRow = table.querySelector("tr");
+    if (firstRow) {
+      const cells = Array.from(firstRow.children) as HTMLElement[];
+      cells.forEach((cell, idx) => {
+        const cellColwidth = cell.getAttribute("data-colwidth");
+        if (cellColwidth) {
+          const val = parseFloat(cellColwidth);
+          if (Number.isFinite(val) && val > 0) {
+            cell.style.minWidth = `${val}px`;
+          }
+        } else if (widths[idx] != null && widths[idx] > 0) {
+          cell.style.minWidth = `${widths[idx]}px`;
+        }
+      });
+    }
+
+    const allCellsWithColwidth = Array.from(
+      table.querySelectorAll("th[data-colwidth], td[data-colwidth]"),
+    ) as HTMLElement[];
+    for (const cell of allCellsWithColwidth) {
+      if (!cell.style.minWidth) {
+        const val = parseFloat(cell.getAttribute("data-colwidth") || "");
+        if (Number.isFinite(val) && val > 0) {
+          cell.style.minWidth = `${val}px`;
+        }
+      }
+    }
+  }
+}
+
 
 /**
  * Sanitizes reader HTML to prevent XSS and style poisoning.
@@ -185,6 +243,7 @@ export function sanitizeReaderHtml(dirtyHtml: string, baseUrl?: string): string 
   }
 
   removeImageStickyHeaders(root);
+  wrapTablesInScrollContainers(root);
   wrapStickySections(root);
   return root.innerHTML;
 }
@@ -334,6 +393,41 @@ export function bbcodeToHtml(bbcode: string): string {
   text = text.replace(/<ul>\s*/gi, "<ul>").replace(/\s*<\/ul>/gi, "</ul>");
   text = text.replace(/<ol>\s*/gi, "<ol>").replace(/\s*<\/ol>/gi, "</ol>");
 
+  // Tables: Steam BBCode [table], [table colwidth="..."], [tr], [th], [td]
+  text = text.replace(/\[table([^\]]*)\]/gi, (_, attrs: string) => {
+    const match = attrs.match(/\bcolwidth=(?:"([^"]*)"|'([^']*)'|([^\s\]]+))/i);
+    const colwidth = match ? (match[1] ?? match[2] ?? match[3]) : undefined;
+    return `<table class="score-event-table"${colwidth ? ` data-colwidth="${colwidth}"` : ""}>`;
+  });
+  text = text.replace(/\[\/table\]/gi, "</table>");
+  text = text.replace(/\[tr[^\]]*\]/gi, "<tr>");
+  text = text.replace(/\[\/tr\]/gi, "</tr>");
+  text = text.replace(/\[(th|td)([^\]]*)\]/gi, (_, tag: string, attrs: string) => {
+    const match = attrs.match(/\bcolwidth=(?:"([^"]*)"|'([^']*)'|([^\s\]]+))/i);
+    const colwidth = match ? (match[1] ?? match[2] ?? match[3]) : undefined;
+    const lower = tag.toLowerCase();
+    return `<${lower}${colwidth ? ` data-colwidth="${colwidth}"` : ""}>`;
+  });
+  text = text.replace(/\[\/(th|td)\]/gi, (_, tag: string) => `</${tag.toLowerCase()}>`);
+
+  // Unwrap redundant <p> inside <th> and <td>
+  text = text.replace(/<(th|td)([^>]*)>\s*<p>([\s\S]*?)<\/p>\s*<\/\1>/gi, "<$1$2>$3</$1>");
+
+  // Clean cell content: trim leading/trailing newlines, convert remaining \n{2,} to <br />, and single \n to space
+  text = text.replace(/<(th|td)([^>]*)>([\s\S]*?)<\/\1>/gi, (_, tag, attrs, content: string) => {
+    const cleaned = content
+      .trim()
+      .replace(/\n{2,}/g, "<br />")
+      .replace(/\n/g, " ");
+    return `<${tag}${attrs}>${cleaned}</${tag}>`;
+  });
+
+  // Collapse newlines between table boundary tags and wrap each table block in a scroll container
+  text = text.replace(/<table\b([\s\S]*?)<\/table>/gi, (tableBlock) => {
+    const collapsed = tableBlock.replace(/>\s+(<\/?(?:table|thead|tbody|tfoot|tr|th|td)\b)/gi, ">$1");
+    return `<div class="score-event-table-wrap scrollbar-thin">${collapsed}</div>`;
+  });
+
   // Remove empty paragraphs
   text = text.replace(/<p>\s*<\/p>/gi, "");
 
@@ -355,7 +449,7 @@ export function bbcodeToHtml(bbcode: string): string {
     .map((chunk) => {
       const trimmed = chunk.trim();
       if (!trimmed) return "";
-      if (/^<(h[1-3]|ul|ol|blockquote|pre|p|div)/i.test(trimmed)) return trimmed;
+      if (/^<(h[1-3]|ul|ol|blockquote|pre|p|div|table)/i.test(trimmed)) return trimmed;
       return `<p>${trimmed.replace(/\n/g, "<br />")}</p>`;
     })
     .filter(Boolean)
@@ -379,7 +473,10 @@ export function bbcodeToPlainText(bbcode: string): string {
     .replace(/\[\/p\]/gi, "\n")
     .replace(/\[\/\*\]/gi, "\n")
     .replace(/\[\*\]/gi, "\n- ")
-    .replace(/\[\/?(?:img|url|b|i|u|strike|h[1-6]|list|olist|\*|quote|code|previewyoutube|p|align|center|hr)(?:=[^\]]*)?\]/gi, "")
+    .replace(/\[\/?table(?:\s+[^\]]*|=.*?)?\]/gi, "\n")
+    .replace(/\[\/?tr[^\]]*\]/gi, "\n")
+    .replace(/\[\/?(?:th|td)(?:\s+[^\]]*|=.*?)?\]/gi, " ")
+    .replace(/\[\/?(?:img|url|b|i|u|strike|h[1-6]|list|olist|\*|quote|code|previewyoutube|p|align|center|hr|table|tbody|thead|tfoot|tr|th|td)(?:=[^\]]*)?\]/gi, "")
     .replace(/\s+/g, " ")
     .trim();
 }

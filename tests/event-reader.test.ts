@@ -222,6 +222,95 @@ describe("Steam Store BBCode and Event Extraction", () => {
     expect(plain).toContain("Update Notes");
   });
 
+  test("converts Steam BBCode tables with colwidth into responsive scrollable tables", () => {
+    const bbcode = `[table colwidth="259,133"]
+[tr]
+[th]Release Target[/th]
+[th]Platform[/th]
+[/tr]
+[tr]
+[td]March 12, 2025[/td]
+[td]PC / Mac[/td]
+[/tr]
+[/table]`;
+
+    const html = bbcodeToHtml(bbcode);
+    expect(html).toContain('<div class="score-event-table-wrap scrollbar-thin">');
+    expect(html).toContain('<table class="score-event-table" data-colwidth="259,133">');
+    expect(html).toContain("<th>Release Target</th>");
+    expect(html).toContain("<td>March 12, 2025</td>");
+    expect(html).not.toContain("[table");
+    expect(html).not.toContain("[tr]");
+    expect(html).not.toContain("[th]");
+    expect(html).not.toContain("[td]");
+
+    // Sanitize reader html ensures scroll wrapper and computes min-widths
+    const sanitized = sanitizeReaderHtml(html);
+    expect(sanitized).toContain('class="score-event-table-wrap scrollbar-thin"');
+    expect(sanitized).toContain('style="min-width:392px"');
+    expect(sanitized).toContain('<th style="min-width:259px">Release Target</th>');
+    expect(sanitized).toContain('<th style="min-width:133px">Platform</th>');
+
+    // Plain text excerpt strips all table tags cleanly
+    const plain = bbcodeToPlainText(bbcode);
+    expect(plain).toBe("Release Target Platform March 12, 2025 PC / Mac");
+    expect(plain).not.toContain("[table");
+    expect(plain).not.toContain("[td]");
+  });
+
+  test("handles tables without colwidth and normalizes multiline cell content", () => {
+    const bbcode = `[table]
+[tr]
+[th]Feature[/th]
+[th]Details[/th]
+[/tr]
+[tr]
+[td]Combat[/td]
+[td]
+First paragraph
+
+Second paragraph
+with wrapped line
+[/td]
+[/tr]
+[/table]`;
+
+    const html = bbcodeToHtml(bbcode);
+    expect(html).toContain('<table class="score-event-table">');
+    expect(html).not.toContain("data-colwidth");
+    expect(html).toContain("First paragraph<br />Second paragraph with wrapped line");
+
+    const sanitized = sanitizeReaderHtml(html);
+    expect(sanitized).toContain('<div class="score-event-table-wrap scrollbar-thin">');
+    // Should not have a forced inline pixel min-width if no colwidth was specified
+    expect(sanitized).not.toContain('style="min-width:');
+
+    const plain = bbcodeToPlainText(bbcode);
+    expect(plain).toContain("Feature Details Combat First paragraph Second paragraph with wrapped line");
+    expect(plain).not.toContain("[table]");
+  });
+
+  test("applies min-width when individual cells specify colwidth", () => {
+    const bbcode = `[table]
+[tr]
+[th colwidth="180"]Name[/th]
+[th colwidth="220"]Role[/th]
+[/tr]
+[tr]
+[td]Gordon[/td]
+[td]Scientist[/td]
+[/tr]
+[/table]`;
+
+    const html = bbcodeToHtml(bbcode);
+    expect(html).toContain('<th data-colwidth="180">Name</th>');
+    expect(html).toContain('<th data-colwidth="220">Role</th>');
+
+    const sanitized = sanitizeReaderHtml(html);
+    expect(sanitized).toContain('<th style="min-width:180px" data-colwidth="180">Name</th>');
+    expect(sanitized).toContain('<th style="min-width:220px" data-colwidth="220">Role</th>');
+  });
+
   test("extracts Steam store event content from data-partnereventstore", () => {
     const storeHtml = `
       <!DOCTYPE html>

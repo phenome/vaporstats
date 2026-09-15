@@ -57,6 +57,57 @@ html:has(.morphing-game-hero-flow) {
 .score-event-section:has(> .score-event-youtube-embed) + .score-event-section {
   margin-top: 0;
 }
+
+.score-event-table-wrap {
+  width: 100%;
+  max-width: 100%;
+  overflow-x: auto;
+  margin: 0.75rem 0;
+  border: 1px solid rgba(39, 39, 42, 0.8);
+  border-radius: 0.25rem;
+  background-color: rgba(9, 9, 11, 0.6);
+  -webkit-overflow-scrolling: touch;
+}
+
+#score-event-reader [data-radix-scroll-area-viewport] > div {
+  display: block !important;
+  max-width: 100% !important;
+}
+
+.score-event-table {
+  width: 100%;
+  min-width: 100%;
+  border-collapse: collapse;
+  text-align: left;
+  font-size: 0.75rem;
+  line-height: 1.25rem;
+}
+
+.score-event-table th,
+.score-event-table td {
+  padding: 0.5rem 0.75rem;
+  border-bottom: 1px solid rgba(39, 39, 42, 0.6);
+  vertical-align: top;
+}
+
+.score-event-table th {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 0.6875rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: rgb(196, 181, 253);
+  background-color: rgba(24, 24, 27, 0.8);
+  white-space: nowrap;
+}
+
+.score-event-table tr:last-child td {
+  border-bottom: none;
+}
+
+.score-event-table tr:hover td {
+  background-color: rgba(39, 39, 42, 0.2);
+}
 @media (max-width: 767px) {
   html:has(.morphing-game-hero-flow) {
     scroll-padding-top: 152px;
