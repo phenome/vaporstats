@@ -299,6 +299,14 @@ export function bbcodeToHtml(bbcode: string): string {
   text = text.replace(/\[img\]\{STEAM_CLAN_IMAGE\}(.*?)\[\/img\]/gi, '<img src="https://clan.fastly.steamstatic.com/images$1" />');
   text = text.replace(/\[img\](.*?)\[\/img\]/gi, '<img src="$1" />');
 
+  // Carousels: [carousel] and [carousel ...] containing images
+  text = text.replace(/\[carousel(?:\s+[^\]]*)?\]/gi, '<div class="score-event-carousel scrollbar-thin">');
+  text = text.replace(/\[\/carousel\]/gi, "</div>");
+  text = text.replace(
+    /<div class="score-event-carousel scrollbar-thin">([\s\S]*?)<\/div>/gi,
+    (_, inner: string) => `<div class="score-event-carousel scrollbar-thin">${inner.replace(/>\s+</g, "><").trim()}</div>`,
+  );
+
   // Headings
   text = text.replace(/\[h1\]([\s\S]*?)\[\/h1\]/gi, "<h1>$1</h1>");
   text = text.replace(/\[h2\]([\s\S]*?)\[\/h2\]/gi, "<h2>$1</h2>");
@@ -466,6 +474,8 @@ export function bbcodeToPlainText(bbcode: string): string {
   return bbcode
     .replace(/\\\[/g, "[")
     .replace(/\\\]/g, "]")
+    .replace(/\[carousel(?:\s+[^\]]*)?\][\s\S]*?\[\/carousel\]/gi, "")
+    .replace(/\[\/?carousel(?:\s+[^\]]*|=.*?)?\]/gi, "")
     .replace(/\[img(?:\s+src\s*=\s*(?:"[^"]+"|'[^']+'|[^\]\s]+))?\s*\][\s\S]*?\[\/img\]/gi, "")
     .replace(/\[url=["']?([^"'\]]+)["']?\]([\s\S]*?)\[\/url\]/gi, "$2")
     .replace(/\[previewyoutube=[^\]]+\](?:\[\/previewyoutube\])?/gi, "")
@@ -476,7 +486,7 @@ export function bbcodeToPlainText(bbcode: string): string {
     .replace(/\[\/?table(?:\s+[^\]]*|=.*?)?\]/gi, "\n")
     .replace(/\[\/?tr[^\]]*\]/gi, "\n")
     .replace(/\[\/?(?:th|td)(?:\s+[^\]]*|=.*?)?\]/gi, " ")
-    .replace(/\[\/?(?:img|url|b|i|u|strike|h[1-6]|list|olist|\*|quote|code|previewyoutube|p|align|center|hr|table|tbody|thead|tfoot|tr|th|td)(?:=[^\]]*)?\]/gi, "")
+    .replace(/\[\/?(?:img|url|b|i|u|strike|h[1-6]|list|olist|\*|quote|code|previewyoutube|p|align|center|hr|table|tbody|thead|tfoot|tr|th|td|carousel)(?:=[^\]]*)?\]/gi, "")
     .replace(/\s+/g, " ")
     .trim();
 }

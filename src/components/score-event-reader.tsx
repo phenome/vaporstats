@@ -1,4 +1,4 @@
-import React, { useEffect, useRef } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { X, ExternalLink } from "lucide-react";
 import { ScrollArea } from "./ui/scroll-area";
@@ -35,6 +35,8 @@ function categoryLabel(cat: string | null | undefined): string {
 
 export function ScoreEventReader({ appid, eventId, onClose }: ScoreEventReaderProps) {
   const closeButtonRef = useRef<HTMLButtonElement>(null);
+  const modalCloseButtonRef = useRef<HTMLButtonElement>(null);
+  const [activeModalImage, setActiveModalImage] = useState<{ src: string; alt?: string } | null>(null);
   const { data, isLoading, isError } = useQuery(eventReaderQueryOptions(appid, eventId));
 
   useEffect(() => {
@@ -42,16 +44,39 @@ export function ScoreEventReader({ appid, eventId, onClose }: ScoreEventReaderPr
   }, []);
 
   useEffect(() => {
+    if (activeModalImage) {
+      modalCloseButtonRef.current?.focus({ preventScroll: true });
+    }
+  }, [activeModalImage]);
+
+  useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         event.preventDefault();
-        onClose();
+        if (activeModalImage) {
+          setActiveModalImage(null);
+        } else {
+          onClose();
+        }
       }
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [onClose]);
+  }, [onClose, activeModalImage]);
 
+  const handleContentClick = (e: React.MouseEvent<HTMLDivElement>) => {
+    const target = e.target as HTMLElement | null;
+    if (target && target.tagName === "IMG") {
+      const img = target as HTMLImageElement;
+      if (img.src) {
+        e.preventDefault();
+        setActiveModalImage({
+          src: img.src,
+          alt: img.alt || "Event image preview",
+        });
+      }
+    }
+  };
   const rawResult = data?.data;
   const payload = rawResult && rawResult.status !== "not_found" ? rawResult : null;
   const fallbackPayload = payload?.status === "fallback" ? payload : null;
@@ -154,6 +179,7 @@ export function ScoreEventReader({ appid, eventId, onClose }: ScoreEventReaderPr
                   </div>
                 )}
                 <div
+                  onClick={handleContentClick}
                   className="min-w-0 max-w-full space-y-3 text-xs leading-relaxed text-zinc-300 wrap-anywhere font-sans selection:bg-violet-500/30 selection:text-violet-100
                     [&_h1]:text-sm [&_h1]:font-bold [&_h1]:text-zinc-100 [&_h1]:mt-3
                     [&_h2]:text-xs [&_h2]:font-bold [&_h2]:text-zinc-100 [&_h2]:mt-2.5
@@ -166,7 +192,7 @@ export function ScoreEventReader({ appid, eventId, onClose }: ScoreEventReaderPr
                     [&_blockquote]:border-l-2 [&_blockquote]:border-violet-400/50 [&_blockquote]:pl-3 [&_blockquote]:italic [&_blockquote]:my-2
                     [&_code]:rounded [&_code]:bg-zinc-900 [&_code]:px-1 [&_code]:py-0.5 [&_code]:font-mono [&_code]:text-[11px] [&_code]:text-violet-200
                     [&_pre]:rounded [&_pre]:bg-zinc-900 [&_pre]:p-2.5 [&_pre]:font-mono [&_pre]:text-[11px] [&_pre]:overflow-x-auto
-                    [&_img]:max-w-full [&_img]:h-auto [&_img]:rounded [&_img]:my-2
+                    [&_img]:max-w-full [&_img]:h-auto [&_img]:rounded [&_img]:my-2 [&_img]:cursor-pointer hover:[&_img]:opacity-95 [&_img]:transition-opacity
                     [&_hr]:border-zinc-800 [&_hr]:my-3"
                   dangerouslySetInnerHTML={{ __html: successPayload.contentHtml }}
                 />
@@ -175,6 +201,35 @@ export function ScoreEventReader({ appid, eventId, onClose }: ScoreEventReaderPr
           </>
         )}
       </div>
+      {activeModalImage && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-label="Image preview"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/85 p-4 backdrop-blur-sm animate-in fade-in duration-150"
+          onClick={() => setActiveModalImage(null)}
+        >
+          <button
+            ref={modalCloseButtonRef}
+            type="button"
+            onClick={() => setActiveModalImage(null)}
+            aria-label="Close image preview"
+            className="absolute top-3 right-3 z-10 inline-flex min-h-[44px] min-w-[44px] items-center justify-center rounded-full border border-zinc-700 bg-zinc-900/90 text-zinc-200 shadow-lg backdrop-blur-sm transition-colors hover:border-zinc-500 hover:bg-zinc-800 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400"
+          >
+            <X className="h-5 w-5" aria-hidden="true" />
+          </button>
+          <div
+            className="relative flex max-h-full max-w-full items-center justify-center"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <img
+              src={activeModalImage.src}
+              alt={activeModalImage.alt}
+              className="max-h-[85vh] max-w-[95vw] sm:max-h-[90vh] sm:max-w-[90vw] rounded border border-zinc-800 object-contain shadow-2xl"
+            />
+          </div>
+        </div>
+      )}
     </article>
   );
 }

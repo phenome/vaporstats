@@ -311,6 +311,51 @@ with wrapped line
     expect(sanitized).toContain('<th style="min-width:220px" data-colwidth="220">Role</th>');
   });
 
+  test("converts Steam BBCode [carousel] into horizontal scroll gallery", () => {
+    const bbcode = `[carousel]
+  [img src="https://clan.fastly.steamstatic.com/images/123/slide1.png"][/img]
+  [img src="https://clan.fastly.steamstatic.com/images/123/slide2.png"][/img]
+  [img src="https://clan.fastly.steamstatic.com/images/123/slide3.png"][/img]
+[/carousel]`;
+
+    const html = bbcodeToHtml(bbcode);
+    expect(html).toContain('<div class="score-event-carousel scrollbar-thin">');
+    expect(html).toContain('<img src="https://clan.fastly.steamstatic.com/images/123/slide1.png" alt="" />');
+    expect(html).toContain('<img src="https://clan.fastly.steamstatic.com/images/123/slide2.png" alt="" />');
+    expect(html).toContain('<img src="https://clan.fastly.steamstatic.com/images/123/slide3.png" alt="" />');
+    expect(html).not.toContain("[carousel]");
+    expect(html).not.toContain("[/carousel]");
+
+    // Ensure inter-tag whitespace was collapsed so images are consecutive
+    expect(html).toContain(
+      '<div class="score-event-carousel scrollbar-thin"><img src="https://clan.fastly.steamstatic.com/images/123/slide1.png" alt="" /><img src="https://clan.fastly.steamstatic.com/images/123/slide2.png" alt="" /><img src="https://clan.fastly.steamstatic.com/images/123/slide3.png" alt="" /></div>',
+    );
+
+    // Sanitize reader html retains carousel wrapper and lazy loading
+    const sanitized = sanitizeReaderHtml(html);
+    expect(sanitized).toContain('class="score-event-carousel scrollbar-thin"');
+    expect(sanitized).toContain('loading="lazy"');
+
+    // Plain text excerpt strips carousel blocks entirely
+    const plain = bbcodeToPlainText(`Here is a new update!\n\n${bbcode}\n\nEnjoy the patch!`);
+    expect(plain).toBe("Here is a new update! Enjoy the patch!");
+    expect(plain).not.toContain("slide1");
+    expect(plain).not.toContain("[carousel");
+  });
+
+  test("handles carousel with attributes and fallback tag stripping", () => {
+    const bbcode = `[carousel autoplay="false"]
+[img]https://clan.fastly.steamstatic.com/images/456/map.png[/img]
+[/carousel]`;
+
+    const html = bbcodeToHtml(bbcode);
+    expect(html).toContain('<div class="score-event-carousel scrollbar-thin">');
+    expect(html).toContain('<img src="https://clan.fastly.steamstatic.com/images/456/map.png" />');
+
+    const plain = bbcodeToPlainText(bbcode);
+    expect(plain).toBe("");
+  });
+
   test("extracts Steam store event content from data-partnereventstore", () => {
     const storeHtml = `
       <!DOCTYPE html>
