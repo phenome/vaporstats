@@ -101,6 +101,38 @@
   color: #a1a1aa;
 }
 
+@property --hero-morph-progress {
+  syntax: "<number>";
+  inherits: true;
+  initial-value: 0;
+}
+
+@property --hero-visual-scale-y {
+  syntax: "<number>";
+  inherits: true;
+  initial-value: 1;
+}
+
+@keyframes hero-morph-keyframes {
+  from {
+    --hero-morph-progress: 0;
+    --hero-visual-scale-y: 1;
+  }
+  to {
+    --hero-morph-progress: 1;
+    --hero-visual-scale-y: var(--hero-compact-ratio, 1);
+  }
+}
+
+@keyframes hero-fade-only-inert {
+  0%, 99.9% {
+    pointer-events: auto;
+  }
+  100% {
+    pointer-events: none;
+  }
+}
+
 .morphing-game-hero-flow {
   position: sticky;
   top: 56px;
@@ -118,6 +150,15 @@
   padding: 1.5rem;
   overflow: hidden;
   pointer-events: none;
+}
+
+.morphing-game-hero[data-hero-morph-driver="css"] {
+  animation: hero-morph-keyframes 1s linear both;
+  animation-timeline: scroll(root block);
+  animation-range: var(--hero-morph-start, 0px) var(--hero-morph-end, 1px);
+  transform-origin: top left;
+  transform: scaleY(var(--hero-visual-scale-y, 1));
+  will-change: transform;
 }
 
 .morphing-game-hero [data-game-identity] {
@@ -150,9 +191,17 @@
   left: 0;
   right: 0;
   bottom: 0;
+  height: 1px;
   background: hsl(240 3.7% 18%);
   pointer-events: none;
 }
+
+.morphing-game-hero[data-hero-morph-driver="css"] .hero-bottom-edge {
+  opacity: var(--hero-morph-progress, 0);
+  transform-origin: bottom;
+  transform: scaleY(calc(1 / var(--hero-visual-scale-y, 1)));
+}
+
 .hero-main {
   display: flex;
   align-items: flex-start;
@@ -171,10 +220,26 @@
   inset: 0;
   width: 100%;
   height: 100%;
-  object-fit: cover;
-  object-position: center;
   background-size: cover;
   background-position: center;
+}
+
+.hero-art-header {
+  object-fit: cover;
+  object-position: center;
+}
+
+.hero-art-compact {
+  object-fit: fill;
+  object-position: center;
+}
+
+.morphing-game-hero[data-hero-morph-driver="css"] [data-hero-crossfade="header"] {
+  opacity: calc(1 - var(--hero-morph-progress, 0));
+}
+
+.morphing-game-hero[data-hero-morph-driver="css"] [data-hero-crossfade="compact"] {
+  opacity: var(--hero-morph-progress, 0);
 }
 
 .hero-copy {
@@ -184,16 +249,100 @@
 
 .hero-title {
   display: block;
-  font-size: clamp(1rem, calc(1.875rem - 0.875rem * var(--hero-morph-progress, 0)), 1.875rem);
-  line-height: clamp(1.25rem, calc(2.25rem - 1rem * var(--hero-morph-progress, 0)), 2.25rem);
+  font-size: 1.875rem;
+  line-height: 2.25rem;
   letter-spacing: -0.025em;
 }
 
 @media (max-width: 767px) {
   .hero-title {
-    font-size: clamp(0.9375rem, calc(1.5rem - 0.5625rem * var(--hero-morph-progress, 0)), 1.5rem);
-    line-height: clamp(1.2rem, calc(1.875rem - 0.675rem * var(--hero-morph-progress, 0)), 1.875rem);
+    font-size: 1.5rem;
+    line-height: 1.875rem;
   }
+}
+
+/* FLIP transforms under CSS driver */
+.morphing-game-hero[data-hero-morph-driver="css"] [data-game-identity="title"][data-hero-flip="true"] {
+  transform-origin: top left;
+  transform:
+    translate3d(
+      calc(var(--hero-title-delta-left, 0px) * var(--hero-morph-progress, 0)),
+      calc(((var(--hero-title-top, 0px) + var(--hero-title-delta-top, 0px) * var(--hero-morph-progress, 0)) / var(--hero-visual-scale-y, 1)) - var(--hero-title-top, 0px)),
+      0
+    )
+    scale(
+      calc(1 + var(--hero-title-scale-delta, 0) * var(--hero-morph-progress, 0)),
+      calc((1 + var(--hero-title-scale-delta, 0) * var(--hero-morph-progress, 0)) / var(--hero-visual-scale-y, 1))
+    );
+  will-change: transform;
+}
+
+.morphing-game-hero[data-hero-morph-driver="css"] [data-game-identity="status"][data-hero-flip="true"] {
+  transform-origin: top right;
+  transform:
+    translate3d(
+      calc(var(--hero-status-delta-left, 0px) * var(--hero-morph-progress, 0)),
+      calc(((var(--hero-status-top, 0px) + var(--hero-status-delta-top, 0px) * var(--hero-morph-progress, 0)) / var(--hero-visual-scale-y, 1)) - var(--hero-status-top, 0px)),
+      0
+    )
+    scaleY(calc(1 / var(--hero-visual-scale-y, 1)));
+  will-change: transform;
+}
+
+.morphing-game-hero[data-hero-morph-driver="css"] [data-game-identity="date"][data-hero-flip="true"] {
+  transform-origin: top right;
+  transform:
+    translate3d(
+      calc(var(--hero-date-delta-left, 0px) * var(--hero-morph-progress, 0)),
+      calc(((var(--hero-date-top, 0px) + var(--hero-date-delta-top, 0px) * var(--hero-morph-progress, 0)) / var(--hero-visual-scale-y, 1)) - var(--hero-date-top, 0px)),
+      0
+    )
+    scaleY(calc(1 / var(--hero-visual-scale-y, 1)));
+  will-change: transform;
+}
+
+.morphing-game-hero[data-hero-morph-driver="css"] [data-game-identity="store"][data-hero-flip="true"] {
+  transform-origin: top right;
+  transform:
+    translate3d(
+      calc(var(--hero-store-delta-left, 0px) * var(--hero-morph-progress, 0)),
+      calc(((var(--hero-store-top, 0px) + var(--hero-store-delta-top, 0px) * var(--hero-morph-progress, 0)) / var(--hero-visual-scale-y, 1)) - var(--hero-store-top, 0px)),
+      0
+    )
+    scaleY(calc(1 / var(--hero-visual-scale-y, 1)));
+  will-change: transform;
+}
+
+.morphing-game-hero[data-hero-morph-driver="css"] [data-game-identity="artwork"][data-hero-flip="true"] {
+  transform-origin: top left;
+  transform:
+    translate3d(
+      calc(var(--hero-artwork-delta-left, 0px) * var(--hero-morph-progress, 0)),
+      calc(((var(--hero-artwork-top, 0px) + var(--hero-artwork-delta-top, 0px) * var(--hero-morph-progress, 0)) / var(--hero-visual-scale-y, 1)) - var(--hero-artwork-top, 0px)),
+      0
+    )
+    scale(
+      calc(1 + var(--hero-artwork-scale-x-delta, 0) * var(--hero-morph-progress, 0)),
+      calc((1 + var(--hero-artwork-scale-y-delta, 0) * var(--hero-morph-progress, 0)) / var(--hero-visual-scale-y, 1))
+    );
+  will-change: transform;
+}
+
+/* Fade-only content under CSS driver */
+.morphing-game-hero[data-hero-morph-driver="css"] [data-game-fade-only] {
+  transform-origin: top left;
+  transform: scaleY(calc(1 / var(--hero-visual-scale-y, 1)));
+  animation: hero-fade-only-inert 1s linear both;
+  animation-timeline: scroll(root block);
+  animation-range: var(--hero-morph-start, 0px) var(--hero-morph-end, 1px);
+}
+
+.morphing-game-hero[data-hero-morph-driver="css"] [data-game-fade-only]:not([data-game-fade-only="publisher"]) {
+  opacity: calc(1 - var(--hero-morph-progress, 0));
+}
+
+.morphing-game-hero[data-hero-morph-driver="css"] [data-game-fade-only="publisher"] .hero-publisher-text {
+  opacity: calc(1 - var(--hero-morph-progress, 0));
 }
 
 /* Narrow screens: banner artwork gets its own full-width row so the title
@@ -278,11 +427,13 @@
     display: none;
   }
 
-  .morphing-game-hero [data-game-identity="status"],
-  .morphing-game-hero [data-game-identity="date"],
-  .morphing-game-hero [data-game-identity="store"] {
-    opacity: calc(1 - var(--hero-morph-progress));
-    pointer-events: none;
+  .morphing-game-hero[data-hero-morph-driver="css"] [data-game-identity]:not([data-hero-flip="true"]) {
+    opacity: calc(1 - var(--hero-morph-progress, 0));
+    transform-origin: top left;
+    transform: scaleY(calc(1 / var(--hero-visual-scale-y, 1)));
+    animation: hero-fade-only-inert 1s linear both;
+    animation-timeline: scroll(root block);
+    animation-range: var(--hero-morph-start, 0px) var(--hero-morph-end, 1px);
   }
 }
 

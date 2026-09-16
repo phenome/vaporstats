@@ -40,46 +40,6 @@ import {
 // touches the compact bar.
 const HERO_ROW_GAP = 24;
 
-function useHeroScrollProgress(
-  sentinelRef: React.RefObject<HTMLDivElement | null>,
-  morphRange: number | null,
-) {
-  const [progress, setProgress] = useState(0);
-
-  useEffect(() => {
-    let rafId = 0;
-    const media = window.matchMedia("(prefers-reduced-motion: reduce)");
-    const updateProgress = () => {
-      cancelAnimationFrame(rafId);
-      rafId = requestAnimationFrame(() => {
-        const el = sentinelRef.current;
-        if (!el || morphRange === null) return;
-        const rect = el.getBoundingClientRect();
-        const stickyTop = window.innerWidth < 768 ? 102 : 56;
-        // The morph starts exactly when the hero top (sentinel plus the row
-        // gap) reaches the sticky line, not 24px earlier.
-        const startTop = stickyTop - HERO_ROW_GAP;
-        const scrolledPastStart = startTop - rect.top;
-        const rawProgress = Math.min(Math.max(scrolledPastStart / morphRange, 0), 1);
-        setProgress(media.matches ? (scrolledPastStart > 0 ? 1 : 0) : rawProgress);
-      });
-    };
-
-    window.addEventListener("scroll", updateProgress, { passive: true });
-    window.addEventListener("resize", updateProgress);
-    media.addEventListener?.("change", updateProgress);
-    updateProgress();
-    return () => {
-      window.removeEventListener("scroll", updateProgress);
-      window.removeEventListener("resize", updateProgress);
-      media.removeEventListener?.("change", updateProgress);
-      cancelAnimationFrame(rafId);
-    };
-  }, [sentinelRef, morphRange]);
-
-  return progress;
-}
-
 type HeroIdentity = "title" | "status" | "date" | "store" | "artwork";
 type HeroIdentityElement =
   | HTMLHeadingElement
@@ -136,11 +96,11 @@ function useHeroGeometry(
     };
 
     const measure = () => {
+      const previousDriver = hero.dataset.heroMorphDriver;
+      // Temporarily disable the active driver so running transforms cannot contaminate either endpoint
+      hero.dataset.heroMorphDriver = "measuring";
       const previousHeight = hero.style.height;
       const previousOverflow = hero.style.overflow;
-      const previousProgress = hero.style.getPropertyValue("--hero-morph-progress");
-      // Capture the same expanded typography regardless of the current scroll position.
-      hero.style.setProperty("--hero-morph-progress", "0");
       const previousHeroTransform = hero.style.transform;
       const previousTransforms = nodes.map((nodeRef) => nodeRef.current?.style.transform ?? "");
       nodes.forEach((nodeRef) => {
@@ -154,10 +114,14 @@ function useHeroGeometry(
       hero.style.height = previousHeight;
       hero.style.overflow = previousOverflow;
       hero.style.transform = previousHeroTransform;
-      hero.style.setProperty("--hero-morph-progress", previousProgress);
       nodes.forEach((nodeRef, index) => {
         if (nodeRef.current) nodeRef.current.style.transform = previousTransforms[index];
       });
+      if (previousDriver) {
+        hero.dataset.heroMorphDriver = previousDriver;
+      } else {
+        delete hero.dataset.heroMorphDriver;
+      }
       // The observer compares its own content-box width, so border/padding differences do not retrigger measurement.
       geometryRef.current = {
         expanded: expanded.boxes,
@@ -194,76 +158,272 @@ function useHeroGeometry(
   return geometryRef.current;
 }
 
-function heroTransform(
+function checkCssScrollDrivenSupport(): boolean {
+  if (typeof window === "undefined" || typeof CSS === "undefined") return false;
+  if (typeof CSS.supports !== "function") return false;
+  if (typeof CSS.registerProperty !== "function") return false;
+  if (window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) return false;
+
+  try {
+    const supportsTimeline =
+      CSS.supports("(animation-timeline: view()) and (animation-range: entry)") &&
+      CSS.supports("animation-timeline: scroll(root block)") &&
+      CSS.supports("animation-range: 0px 1px");
+    if (!supportsTimeline) return false;
+
+    const supportsCalc =
+      CSS.supports("transform", "scaleY(calc(1 / var(--test, 1)))") &&
+      CSS.supports("transform", "translate3d(calc(10px * var(--test, 1)), 0px, 0)");
+    if (!supportsCalc) return false;
+
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function registerHeroProperties(): void {
+  if (typeof CSS === "undefined" || typeof CSS.registerProperty !== "function") return;
+  try {
+    CSS.registerProperty({
+      name: "--hero-morph-progress",
+      syntax: "<number>",
+      inherits: true,
+      initialValue: "0",
+    });
+  } catch {}
+  try {
+    CSS.registerProperty({
+      name: "--hero-visual-scale-y",
+      syntax: "<number>",
+      inherits: true,
+      initialValue: "1",
+    });
+  } catch {}
+}
+
+function useHeroScrollController(
+  sentinelRef: React.RefObject<HTMLDivElement | null>,
+  heroRef: React.RefObject<HTMLElement | null>,
+  identityRefs: HeroIdentityRefs,
   geometry: HeroGeometry | null,
-  identity: HeroIdentity,
-  progress: number,
-  visualScaleY = 1,
-): React.CSSProperties | undefined {
-  const first = geometry?.expanded[identity];
-  const last = geometry?.compact[identity];
-  // Identities that the compact layout hides on narrow screens measure as
-  // zero-size boxes there; leave them in place and let CSS fade them out
-  // rather than flying them toward a degenerate target.
-  if (!first || !last || first.width <= 0 || first.height <= 0 || last.width <= 0 || last.height <= 0) {
-    return undefined;
-  }
-  const left = first.left + (last.left - first.left) * progress;
-  const top = (first.top + (last.top - first.top) * progress) / visualScaleY;
+  morphRange: number | null,
+): void {
+  useEffect(() => {
+    registerHeroProperties();
+  }, []);
 
-  // The hero root applies scaleY(visualScaleY) to squash into compact height.
-  // Typography must counteract that squash with scaleY(1/visualScaleY) so glyphs
-  // render at natural aspect ratio while still moving with the FLIP morph.
-  if (identity === "title") {
-    return {
-      transformOrigin: "top left",
-      transform:
-        "translate3d(" + (left - first.left).toFixed(3) + "px, " +
-        (top - first.top).toFixed(3) + "px, 0) scaleY(" +
-        (1 / visualScaleY).toFixed(5) + ")",
-      willChange: "transform",
+  useEffect(() => {
+    const hero = heroRef.current;
+    const sentinel = sentinelRef.current;
+    if (!hero || !sentinel || !geometry || morphRange === null) return;
+
+    let rafId = 0;
+    const mediaReduced = window.matchMedia?.("(prefers-reduced-motion: reduce)");
+
+    const nodesCleanUp = () => {
+      (Object.keys(identityRefs) as HeroIdentity[]).forEach((identity) => {
+        const node = identityRefs[identity].current;
+        if (node) {
+          node.style.transform = "";
+          node.style.opacity = "";
+          node.style.pointerEvents = "";
+        }
+      });
+      const bottomEdge = hero.querySelector<HTMLElement>(".hero-bottom-edge");
+      if (bottomEdge) {
+        bottomEdge.style.opacity = "";
+        bottomEdge.style.transform = "";
+      }
+      const headerImg = hero.querySelector<HTMLImageElement>(".hero-art-header");
+      const compactImg = hero.querySelector<HTMLImageElement>(".hero-art-compact");
+      if (headerImg) headerImg.style.opacity = "";
+      if (compactImg) compactImg.style.opacity = "";
+      const fadeOnlyNodes = hero.querySelectorAll<HTMLElement>("[data-game-fade-only]");
+      fadeOnlyNodes.forEach((node) => {
+        node.style.transform = "";
+        node.style.opacity = "";
+        node.style.pointerEvents = "";
+      });
+      const pubTexts = hero.querySelectorAll<HTMLElement>(".hero-publishers .hero-publisher-text");
+      pubTexts.forEach((t) => {
+        t.style.opacity = "";
+      });
     };
-  }
 
-  if (identity === "status" || identity === "date" || identity === "store") {
-    return {
-      transformOrigin: "top right",
-      transform:
-        "translate3d(" + (left - first.left).toFixed(3) + "px, " +
-        (top - first.top).toFixed(3) + "px, 0) scaleY(" +
-        (1 / visualScaleY).toFixed(5) + ")",
-      willChange: "transform",
+    const setupAndApply = () => {
+      const isSupported = checkCssScrollDrivenSupport();
+      const driver = isSupported ? "css" : "fallback";
+
+      const stickyTop = window.innerWidth < 768 ? 102 : 56;
+      const startTop = stickyTop - HERO_ROW_GAP;
+      const sentinelDocTop = sentinel.getBoundingClientRect().top + window.scrollY;
+      const startScroll = Math.max(0, Math.round(sentinelDocTop - startTop));
+      const endScroll = startScroll + morphRange;
+      const compactRatio = geometry.expandedHeight > 0
+        ? geometry.compactHeight / geometry.expandedHeight
+        : 1;
+
+      hero.style.setProperty("--hero-morph-start", `${startScroll}px`);
+      hero.style.setProperty("--hero-morph-end", `${endScroll}px`);
+      hero.style.setProperty("--hero-compact-ratio", compactRatio.toFixed(5));
+
+      (Object.keys(identityRefs) as HeroIdentity[]).forEach((identity) => {
+        const node = identityRefs[identity].current;
+        const first = geometry.expanded[identity];
+        const last = geometry.compact[identity];
+        const isFlip = Boolean(
+          first && last && first.width > 0 && first.height > 0 && last.width > 0 && last.height > 0,
+        );
+
+        if (node) {
+          if (isFlip) {
+            node.dataset.heroFlip = "true";
+          } else {
+            delete node.dataset.heroFlip;
+          }
+        }
+
+        if (first && last && isFlip) {
+          hero.style.setProperty(`--hero-${identity}-top`, `${first.top.toFixed(3)}px`);
+          hero.style.setProperty(`--hero-${identity}-delta-left`, `${(last.left - first.left).toFixed(3)}px`);
+          hero.style.setProperty(`--hero-${identity}-delta-top`, `${(last.top - first.top).toFixed(3)}px`);
+          if (identity === "title") {
+            hero.style.setProperty(
+              `--hero-title-scale-delta`,
+              `${((last.height - first.height) / first.height).toFixed(5)}`,
+            );
+          } else if (identity === "artwork") {
+            hero.style.setProperty(
+              `--hero-artwork-scale-x-delta`,
+              `${((last.width - first.width) / first.width).toFixed(5)}`,
+            );
+            hero.style.setProperty(
+              `--hero-artwork-scale-y-delta`,
+              `${((last.height - first.height) / first.height).toFixed(5)}`,
+            );
+          }
+        }
+      });
+
+      hero.dataset.heroMorphDriver = driver;
+
+      if (driver === "fallback") {
+        const updateFallback = () => {
+          cancelAnimationFrame(rafId);
+          rafId = requestAnimationFrame(() => {
+            const rect = sentinel.getBoundingClientRect();
+            const currentStickyTop = window.innerWidth < 768 ? 102 : 56;
+            const currentStartTop = currentStickyTop - HERO_ROW_GAP;
+            const scrolledPastStart = currentStartTop - rect.top;
+            const rawProgress = Math.min(Math.max(scrolledPastStart / morphRange, 0), 1);
+            const isReduced = mediaReduced?.matches;
+            const progress = isReduced ? (scrolledPastStart > 0 ? 1 : 0) : rawProgress;
+            const visualScaleY = geometry.expandedHeight > 0
+              ? 1 + (geometry.compactHeight / geometry.expandedHeight - 1) * progress
+              : 1;
+
+            hero.style.transformOrigin = "top left";
+            hero.style.transform = `scaleY(${visualScaleY.toFixed(5)})`;
+            hero.style.setProperty("--hero-morph-progress", String(progress));
+            hero.style.setProperty("--hero-visual-scale-y", String(visualScaleY));
+
+            const bottomEdge = hero.querySelector<HTMLElement>(".hero-bottom-edge");
+            if (bottomEdge) {
+              bottomEdge.style.opacity = String(progress);
+              bottomEdge.style.transformOrigin = "bottom";
+              bottomEdge.style.transform = `scaleY(${(1 / visualScaleY).toFixed(5)})`;
+            }
+
+            (Object.keys(identityRefs) as HeroIdentity[]).forEach((identity) => {
+              const node = identityRefs[identity].current;
+              if (!node) return;
+              const first = geometry.expanded[identity];
+              const last = geometry.compact[identity];
+              const isFlip = Boolean(
+                first && last && first.width > 0 && first.height > 0 && last.width > 0 && last.height > 0,
+              );
+
+              if (isFlip && first && last) {
+                const left = first.left + (last.left - first.left) * progress;
+                const top = (first.top + (last.top - first.top) * progress) / visualScaleY;
+
+                if (identity === "title") {
+                  const scale = 1 + (last.height / first.height - 1) * progress;
+                  node.style.transformOrigin = "top left";
+                  node.style.transform = `translate3d(${(left - first.left).toFixed(3)}px, ${(top - first.top).toFixed(3)}px, 0) scale(${scale.toFixed(5)}, ${(scale / visualScaleY).toFixed(5)})`;
+                } else if (identity === "artwork") {
+                  const scaleX = 1 + ((last.width - first.width) / first.width) * progress;
+                  const scaleY = (1 + ((last.height - first.height) / first.height) * progress) / visualScaleY;
+                  node.style.transformOrigin = "top left";
+                  node.style.transform = `translate3d(${(left - first.left).toFixed(3)}px, ${(top - first.top).toFixed(3)}px, 0) scale(${scaleX.toFixed(5)}, ${scaleY.toFixed(5)})`;
+                } else {
+                  node.style.transformOrigin = "top right";
+                  node.style.transform = `translate3d(${(left - first.left).toFixed(3)}px, ${(top - first.top).toFixed(3)}px, 0) scaleY(${(1 / visualScaleY).toFixed(5)})`;
+                }
+              } else {
+                node.style.transformOrigin = "top left";
+                node.style.transform = `scaleY(${(1 / visualScaleY).toFixed(5)})`;
+                node.style.opacity = String(1 - progress);
+                node.style.pointerEvents = progress >= 1 ? "none" : (identity === "store" ? "auto" : "none");
+              }
+            });
+
+            const headerImg = hero.querySelector<HTMLImageElement>(".hero-art-header");
+            const compactImg = hero.querySelector<HTMLImageElement>(".hero-art-compact");
+            if (headerImg && compactImg) {
+              headerImg.style.opacity = String(1 - progress);
+              compactImg.style.opacity = String(progress);
+            } else if (headerImg) {
+              headerImg.style.opacity = "1";
+            }
+
+            const fadeOnlyNodes = hero.querySelectorAll<HTMLElement>("[data-game-fade-only]");
+            fadeOnlyNodes.forEach((node) => {
+              node.style.transformOrigin = "top left";
+              node.style.transform = `scaleY(${(1 / visualScaleY).toFixed(5)})`;
+              if (node.dataset.gameFadeOnly !== "publisher") {
+                node.style.opacity = String(1 - progress);
+              }
+              node.style.pointerEvents = progress >= 1 ? "none" : "auto";
+            });
+
+            const pubTexts = hero.querySelectorAll<HTMLElement>(".hero-publishers .hero-publisher-text");
+            pubTexts.forEach((t) => {
+              t.style.opacity = String(1 - progress);
+            });
+          });
+        };
+
+        window.addEventListener("scroll", updateFallback, { passive: true });
+        updateFallback();
+        return () => {
+          window.removeEventListener("scroll", updateFallback);
+        };
+      } else {
+        hero.style.transform = "";
+        nodesCleanUp();
+      }
     };
-  }
 
-  // Artwork shell retains scale transformation to morph its aspect ratio
-  const width = first.width + (last.width - first.width) * progress;
-  const height = (first.height + (last.height - first.height) * progress) / visualScaleY;
-  return {
-    transformOrigin: "top left",
-    transform:
-      "translate3d(" + (left - first.left).toFixed(3) + "px, " +
-      (top - first.top).toFixed(3) + "px, 0) scale(" +
-      (width / first.width).toFixed(5) + ", " + (height / first.height).toFixed(5) + ")",
-    willChange: "transform",
-  };
+    let cleanupScroll = setupAndApply();
+
+    const onResizeOrMediaChange = () => {
+      cleanupScroll?.();
+      cleanupScroll = setupAndApply();
+    };
+
+    window.addEventListener("resize", onResizeOrMediaChange);
+    mediaReduced?.addEventListener?.("change", onResizeOrMediaChange);
+
+    return () => {
+      cancelAnimationFrame(rafId);
+      cleanupScroll?.();
+      window.removeEventListener("resize", onResizeOrMediaChange);
+      mediaReduced?.removeEventListener?.("change", onResizeOrMediaChange);
+    };
+  }, [sentinelRef, heroRef, identityRefs, geometry, morphRange]);
 }
-
-// Fade-only content (and the identities the compact layout hides on narrow
-// screens) must keep natural proportions while the hero root squashes: each
-// block counter-scales about its own top so glyphs never flatten. The block
-// keeps riding up with the root squash; whatever extends past the rising hero
-// bottom edge is clipped by the root's overflow, so text never draws outside
-// the container. Later blocks (developer/publisher) paint above the earlier
-// description text that slides beneath them.
-function fadeContentStyle(visualScaleY: number): React.CSSProperties {
-  return {
-    transformOrigin: "top left",
-    transform: "scaleY(" + (1 / visualScaleY).toFixed(5) + ")",
-    willChange: "transform",
-  };
-}
-
 export interface GamePageProps {
   game: GameDetail;
   related?: GroupedRelatedApps;
@@ -396,36 +556,16 @@ export function GamePageView({
   const morphRange = geometry
     ? Math.max(1, geometry.expandedHeight - geometry.compactHeight + HERO_ROW_GAP)
     : null;
-  const scrollProgress = useHeroScrollProgress(sentinelRef, morphRange);
-  // One shared 0-to-1 progress drives every morph animation: fades, FLIP
-  // transforms, typography, and the artwork crossfade all start and finish
-  // together.
-  const progress = scrollProgress;
+  useHeroScrollController(sentinelRef, heroRef, identityRefs, geometry, morphRange);
   const communityIconUrl = game.icon_hash ? getCommunityIconUrl(game.appid, game.icon_hash) : null;
   const compactImage = communityIconUrl ?? game.icon_lqip ?? game.header_lqip ?? game.header_image ?? null;
   const headerImage = game.header_image ?? game.header_lqip ?? compactImage;
+  const hasCrossfade = Boolean(compactImage && compactImage !== headerImage);
   const dateLabel = mainReleaseDate
     ? formatReleaseDate(mainReleaseDate)
     : isUnreleased
       ? "TBA"
       : "—";
-  const visualScaleY = geometry && geometry.expandedHeight > 0
-    ? 1 + (geometry.compactHeight / geometry.expandedHeight - 1) * progress
-    : 1;
-  // The developer/publisher card chrome stays fully opaque while the
-  // description slides beneath it (a fading background would let the text
-  // ghost through); only its labels fade with the shared progress. The chrome
-  // itself fades during the final stretch, once the rising hero edge has
-  // eaten all but a small remnant of the cards.
-  const publisherChromeOpacity = Math.min(1, Math.max(0, (1 - progress) / 0.15));
-  const heroStyle = {
-    transformOrigin: "top left",
-    transform: geometry ? "scaleY(" + visualScaleY.toFixed(5) + ")" : undefined,
-    // Keep the FLIP source box stable while its title changes font size.
-    height: geometry ? `${geometry.expandedHeight}px` : undefined,
-    willChange: "transform",
-    ["--hero-morph-progress"]: progress,
-  } as React.CSSProperties & Record<string, string | number | undefined>;
 
   return (
     <div
@@ -444,25 +584,17 @@ export function GamePageView({
       <header
         ref={heroRef}
         className="morphing-game-hero relative border border-zinc-800 bg-zinc-950/95 backdrop-blur-md"
-        style={heroStyle}
+        style={{
+          height: geometry ? `${geometry.expandedHeight}px` : undefined,
+        }}
       >
         {/* Bottom edge of the compact sticky bar; counter-scaled so it renders 1px despite the root squash */}
-        <div
-          aria-hidden="true"
-          className="hero-bottom-edge"
-          style={{
-            height: "1px",
-            opacity: progress,
-            transform: "scaleY(" + (1 / visualScaleY).toFixed(5) + ")",
-            transformOrigin: "bottom",
-          }}
-        />
+        <div aria-hidden="true" className="hero-bottom-edge" />
         <div className="hero-stage">
           <div className="hero-topbar">
             <span
               className="hero-type px-2 py-0.5 bg-orange-500/10 text-orange-400 border border-orange-500/30 text-[10px] font-mono uppercase tracking-widest"
               data-game-fade-only="type"
-              style={{ ...fadeContentStyle(visualScaleY), opacity: 1 - progress }}
             >
               {game.type.toUpperCase()}
             </span>
@@ -470,10 +602,6 @@ export function GamePageView({
               ref={statusRef}
               data-game-identity="status"
               className="hero-status border border-zinc-700 bg-zinc-900 px-1.5 py-0.5 font-bold uppercase tracking-wider text-zinc-300 text-xs ml-auto"
-              style={
-                heroTransform(geometry, "status", progress, visualScaleY) ??
-                fadeContentStyle(visualScaleY)
-              }
             >
               {releaseStatusLabel}
             </span>
@@ -482,10 +610,6 @@ export function GamePageView({
               data-game-identity="date"
               dateTime={mainReleaseDate && isPreciseReleaseDate(mainReleaseDate) ? mainReleaseDate : undefined}
               className="hero-date text-zinc-200 text-xs font-mono"
-              style={
-                heroTransform(geometry, "date", progress, visualScaleY) ??
-                fadeContentStyle(visualScaleY)
-              }
             >
               {dateLabel}
             </time>
@@ -496,17 +620,6 @@ export function GamePageView({
               target="_blank"
               rel="noreferrer"
               className="hero-store text-orange-400 hover:text-orange-300 hover:underline inline-flex items-center gap-1 font-mono text-xs"
-              style={
-                // On narrow screens the compact layout hides the store (no FLIP
-                // target) and CSS fades it with the shared progress; the
-                // <=767px stylesheet rule pins pointer-events to none for the
-                // whole mobile state, so restore clickability while the link is
-                // visible and make it inert only once fully faded out.
-                heroTransform(geometry, "store", progress, visualScaleY) ?? {
-                  ...fadeContentStyle(visualScaleY),
-                  pointerEvents: progress >= 1 ? "none" : "auto",
-                }
-              }
             >
               Steam Store ↗
             </a>
@@ -517,25 +630,24 @@ export function GamePageView({
               ref={artworkRef}
               data-game-identity="artwork"
               className="hero-artwork border border-zinc-800 overflow-hidden bg-zinc-900 relative shrink-0"
-              style={heroTransform(geometry, "artwork", progress, visualScaleY)}
             >
               {headerImage && (
                 <img
                   src={headerImage}
                   alt={game.name}
                   className="hero-art-image hero-art-header"
+                  data-hero-crossfade={hasCrossfade ? "header" : undefined}
                   style={{
-                    opacity: compactImage === headerImage ? 1 : 1 - progress,
                     backgroundImage: game.header_lqip ? "url(" + game.header_lqip + ")" : undefined,
                   }}
                 />
               )}
-              {compactImage && compactImage !== headerImage && (
+              {hasCrossfade && compactImage && (
                 <img
                   src={compactImage}
                   alt=""
                   className="hero-art-image hero-art-compact"
-                  style={{ opacity: progress }}
+                  data-hero-crossfade="compact"
                 />
               )}
             </div>
@@ -545,7 +657,6 @@ export function GamePageView({
                 ref={titleRef}
                 data-game-identity="title"
                 className="hero-title font-mono font-bold text-zinc-100 tracking-tight"
-                style={heroTransform(geometry, "title", progress, visualScaleY)}
               >
                 {game.name}
               </h1>
@@ -554,11 +665,6 @@ export function GamePageView({
                 <div
                   data-game-fade-only="lifecycle"
                   className="hero-lifecycle"
-                  style={{
-                    ...fadeContentStyle(visualScaleY),
-                    opacity: 1 - progress,
-                    pointerEvents: progress >= 1 ? "none" : "auto",
-                  }}
                 >
                   <LifecycleTable events={overviewEvents} />
                 </div>
@@ -568,11 +674,6 @@ export function GamePageView({
                 <div
                   data-game-fade-only="description"
                   className="hero-description"
-                  style={{
-                    ...fadeContentStyle(visualScaleY),
-                    opacity: 1 - progress,
-                    pointerEvents: progress >= 1 ? "none" : "auto",
-                  }}
                 >
                   <p className="text-sm text-zinc-400 leading-relaxed font-sans">{game.description}</p>
                 </div>
@@ -581,17 +682,10 @@ export function GamePageView({
               <div
                 data-game-fade-only="publisher"
                 className="hero-publishers grid grid-cols-2 gap-3 pt-2 text-xs font-mono"
-                style={{
-                  ...fadeContentStyle(visualScaleY),
-                  pointerEvents: progress >= 1 ? "none" : "auto",
-                }}
               >
-                <div
-                  className="border border-zinc-800 bg-zinc-900 p-2.5"
-                  style={{ opacity: publisherChromeOpacity }}
-                >
-                  <div className="text-zinc-500 text-[10px] uppercase" style={{ opacity: 1 - progress }}>Developer</div>
-                  <div className="text-zinc-200 font-medium truncate" style={{ opacity: 1 - progress }}>
+                <div className="hero-publisher-card border border-zinc-800 bg-zinc-900 p-2.5">
+                  <div className="hero-publisher-text text-zinc-500 text-[10px] uppercase">Developer</div>
+                  <div className="hero-publisher-text text-zinc-200 font-medium truncate">
                     {game.developer ? (
                       <AppLink href={getCanonicalPublisherPath(game.developer)} className="hover:text-orange-400 hover:underline transition-colors">
                         {game.developer}
@@ -601,12 +695,9 @@ export function GamePageView({
                     )}
                   </div>
                 </div>
-                <div
-                  className="border border-zinc-800 bg-zinc-900 p-2.5"
-                  style={{ opacity: publisherChromeOpacity }}
-                >
-                  <div className="text-zinc-500 text-[10px] uppercase" style={{ opacity: 1 - progress }}>Publisher</div>
-                  <div className="text-zinc-200 font-medium truncate" style={{ opacity: 1 - progress }}>
+                <div className="hero-publisher-card border border-zinc-800 bg-zinc-900 p-2.5">
+                  <div className="hero-publisher-text text-zinc-500 text-[10px] uppercase">Publisher</div>
+                  <div className="hero-publisher-text text-zinc-200 font-medium truncate">
                     {game.publisher ? (
                       <AppLink href={getCanonicalPublisherPath(game.publisher)} className="hover:text-orange-400 hover:underline transition-colors">
                         {game.publisher}
