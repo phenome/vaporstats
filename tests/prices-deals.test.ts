@@ -14,7 +14,11 @@ import {
   formatPriceCents,
   type PriceHistoryRange,
 } from "../src/lib/prices";
-import { formatCurrentPrice, isPriceDiscounted } from "../src/lib/price-presentation";
+import {
+  formatCurrentPrice,
+  getDealPresentation,
+  isPriceDiscounted,
+} from "../src/lib/price-presentation";
 import { formatLocalDateTime } from "../src/lib/format";
 import { PriceSummary } from "../src/components/price-summary";
 import {
@@ -24,6 +28,8 @@ import {
 } from "../src/lib/price-chart";
 import {
   fetchSteamPriceDetails,
+  fetchSteamDealExpirations,
+  revalidateCurrentDeals,
   refreshIndicatedAppPrices,
   runHourlyPriceFeedTick,
   DEFAULT_PRICE_CHECKPOINT_KEY,
@@ -754,6 +760,9 @@ describe("VaporStats Steam Prices and Deals", () => {
           { status: 200, headers: { "Content-Type": "application/json" } }
         );
       }
+      if (!url.includes("api/appdetails")) {
+        return Response.json({});
+      }
 
       const appid = Number(new URL(url).searchParams.get("appids"));
       detailCalls.push(appid);
@@ -836,7 +845,7 @@ describe("VaporStats Steam Prices and Deals", () => {
       observed_at: observedAt,
     });
 
-    const gamePrice = await getCurrentPrice(appDb, 1086940);
+    const gamePrice = await getCurrentPrice(appDb, 1086940, new Date("2026-09-04T12:01:00.000Z"));
     expect(gamePrice).not.toBeNull();
     expect(gamePrice?.currency).toBe("USD");
     expect(gamePrice?.initial_price).toBe(5999);
@@ -885,6 +894,266 @@ describe("VaporStats Steam Prices and Deals", () => {
     expect(expansionPrice?.discount_percent).toBe(0);
 
     console.log("current price state");
+  });
+
+  test("deal freshness falls back without mutating sparse history or retained metadata", async () => {
+    const observedAt = "2026-09-17T12:00:00.000Z";
+    const expiresAt = "2026-09-17T13:00:00.000Z";
+    const deal = {
+      appid: 1086940,
+      initial_price: 5999,
+      final_price: 2999,
+      discount_percent: 50,
+      is_free: false,
+      is_available: true,
+      formatted_initial: "$59.99",
+      formatted_final: "$29.99",
+    };
+    await recordPriceObservation(appDb, {
+      ...deal,
+      deal_expires_at: expiresAt,
+      observed_at: observedAt,
+    });
+
+    expect((await getCurrentPrice(
+      appDb,
+      deal.appid,
+      new Date("2026-09-17T12:29:59.999Z")
+    ))?.discount_percent).toBe(50);
+    expect((await getCurrentPrice(
+      appDb,
+      deal.appid,
+      new Date("2026-09-17T12:30:00.000Z")
+    ))).toMatchObject({
+      final_price: 5999,
+      discount_percent: 0,
+      is_free: false,
+      formatted_final: "$59.99",
+    });
+    expect((await getCurrentPrice(
+      appDb,
+      deal.appid,
+      new Date(expiresAt)
+    ))?.discount_percent).toBe(0);
+    expect((await getDeals(appDb, {
+      now: new Date("2026-09-17T12:30:00.000Z"),
+    })).deals).toHaveLength(0);
+
+    await recordPriceObservation(appDb, {
+      ...deal,
+      observed_at: "2026-09-17T12:40:00.000Z",
+    });
+    const retained = sqliteDb.query(
+      "SELECT deal_expires_at, observed_at FROM app_prices WHERE appid = 1086940"
+    ).get() as { deal_expires_at: string | null; observed_at: string };
+    expect(retained).toEqual({
+      deal_expires_at: expiresAt,
+      observed_at: "2026-09-17T12:40:00.000Z",
+    });
+    expect((await getDeals(appDb, {
+      now: new Date("2026-09-17T12:41:00.000Z"),
+    })).deals[0]?.deal_expires_at).toBe(expiresAt);
+    expect((await getDeals(appDb, {
+      now: new Date(expiresAt),
+    })).deals).toHaveLength(0);
+    expect(sqliteDb.query(
+      "SELECT COUNT(*) AS count FROM price_history WHERE appid = 1086940"
+    ).get()).toEqual({ count: 1 });
+
+    await recordPriceObservation(appDb, {
+      ...deal,
+      final_price: 2399,
+      discount_percent: 60,
+      observed_at: "2026-09-17T12:45:00.000Z",
+    });
+    expect(sqliteDb.query(
+      "SELECT deal_expires_at FROM app_prices WHERE appid = 1086940"
+    ).get()).toEqual({ deal_expires_at: null });
+    expect(sqliteDb.query(
+      "SELECT COUNT(*) AS count FROM price_history WHERE appid = 1086940"
+    ).get()).toEqual({ count: 2 });
+
+    await recordPriceObservation(appDb, {
+      ...deal,
+      final_price: 1999,
+      discount_percent: 67,
+      deal_expires_at: "2026-09-17T14:00:00.000Z",
+      observed_at: "2026-09-17T12:50:00.000Z",
+    });
+    expect(sqliteDb.query(
+      "SELECT deal_expires_at FROM app_prices WHERE appid = 1086940"
+    ).get()).toEqual({ deal_expires_at: "2026-09-17T14:00:00.000Z" });
+    await recordPriceObservation(appDb, {
+      ...deal,
+      final_price: 1999,
+      discount_percent: 67,
+      observed_at: "2026-09-17T14:01:00.000Z",
+    });
+    expect(sqliteDb.query(
+      "SELECT deal_expires_at FROM app_prices WHERE appid = 1086940"
+    ).get()).toEqual({ deal_expires_at: null });
+    expect(sqliteDb.query(
+      "SELECT COUNT(*) AS count FROM price_history WHERE appid = 1086940"
+    ).get()).toEqual({ count: 3 });
+    expect((await getDeals(appDb, {
+      now: new Date("2026-09-17T14:02:00.000Z"),
+    })).deals.map(({ appid }) => appid)).toContain(1086940);
+  });
+
+  test("featured feeds dedupe future app expirations and exclude packages", async () => {
+    const responses = [
+      {
+        specials: {
+          items: [
+            { id: 10, type: 0, discount_expiration: 1_789_700_000 },
+            { id: 20, type: 1, discount_expiration: 1_789_700_100 },
+          ],
+        },
+      },
+      {
+        top_sellers: {
+          items: [
+            { id: 10, type: 0, discount_expiration: 1_789_700_000 },
+            { id: 30, type: 0, discount_expiration: 1_789_699_000 },
+          ],
+        },
+      },
+    ];
+    let request = 0;
+    const result = await fetchSteamDealExpirations({
+      now: new Date("2026-09-17T12:00:00.000Z"),
+      customFetch: (async () => Response.json(responses[request++])) as unknown as typeof fetch,
+    });
+    expect(result.successfulFeeds).toBe(2);
+    expect([...result.expirations.entries()]).toEqual([
+      [10, new Date(1_789_700_000_000).toISOString()],
+      [30, new Date(1_789_699_000_000).toISOString()],
+    ]);
+  });
+
+  test("optional expiration feed failures do not block price revalidation", async () => {
+    await recordPriceObservation(appDb, {
+      appid: 1086940,
+      initial_price: 5999,
+      final_price: 2999,
+      discount_percent: 50,
+      is_free: false,
+      is_available: true,
+      observed_at: "2026-09-17T10:00:00.000Z",
+    });
+    const anchorTime = new Date("2026-09-17T12:00:00.000Z");
+    const result = await runHourlyPriceFeedTick(appDb, {
+      apiKey: "test_key",
+      anchorTime,
+      customFetch: (async (input: RequestInfo | URL) => {
+        const url = new URL(String(input));
+        if (url.pathname === "/api/featured") {
+          return new Response("Too Many Requests", { status: 429 });
+        }
+        if (url.pathname === "/api/featuredcategories") {
+          return new Response("Unavailable", { status: 500 });
+        }
+        if (url.pathname === "/api/appdetails") {
+          const ids = url.searchParams.get("appids")!.split(",");
+          return Response.json(Object.fromEntries(ids.map((id) => [
+            id,
+            {
+              success: true,
+              data: {
+                price_overview: {
+                  currency: "USD",
+                  initial: 5999,
+                  final: 2999,
+                  discount_percent: 50,
+                },
+              },
+            },
+          ])));
+        }
+        if (url.pathname.includes("IStoreService/GetAppList")) {
+          return Response.json({ response: { apps: [], have_more_results: false } });
+        }
+        return new Response("Unexpected request", { status: 404 });
+      }) as typeof fetch,
+    });
+    expect(result).toMatchObject({
+      executed: true,
+      revalidationAttempted: 1,
+      revalidationSuccessful: 1,
+      revalidationFailed: 0,
+      rateLimited: false,
+      currentDeals: 1,
+    });
+    expect(sqliteDb.query(
+      "SELECT observed_at FROM app_prices WHERE appid = 1086940"
+    ).get()).toEqual({ observed_at: anchorTime.toISOString() });
+  });
+
+  test("current deal revalidation batches 50 IDs and stops on rate limiting", async () => {
+    const staleAt = "2026-09-17T10:00:00.000Z";
+    const anchorTime = new Date("2026-09-17T12:00:00.000Z");
+    const appids = Array.from({ length: 55 }, (_, index) => 800_000 + index);
+    for (const appid of appids) {
+      await recordPriceObservation(appDb, {
+        appid,
+        initial_price: 1999,
+        final_price: 999,
+        discount_percent: 50,
+        is_free: false,
+        is_available: true,
+        observed_at: staleAt,
+      });
+    }
+
+    const batches: number[][] = [];
+    const result = await revalidateCurrentDeals(appDb, {
+      anchorTime,
+      staleOnly: true,
+      expirations: new Map(),
+      customFetch: (async (input: RequestInfo | URL) => {
+        const ids = new URL(String(input)).searchParams.get("appids")!
+          .split(",")
+          .map(Number);
+        batches.push(ids);
+        if (batches.length === 2) {
+          return new Response("Too Many Requests", { status: 429 });
+        }
+        return Response.json(Object.fromEntries(ids.map((appid) => [
+          String(appid),
+          {
+            success: true,
+            data: {
+              price_overview: {
+                currency: "USD",
+                initial: 1999,
+                final: 999,
+                discount_percent: 50,
+              },
+            },
+          },
+        ])));
+      }) as typeof fetch,
+    });
+
+    expect(batches.map((batch) => batch.length)).toEqual([50, 5]);
+    expect(result).toMatchObject({
+      attempted: 55,
+      successful: 50,
+      failed: 5,
+      changed: 0,
+      rateLimited: true,
+      pending: 5,
+    });
+    expect(result.currentDeals).toBe(50);
+    expect(sqliteDb.query(
+      "SELECT observed_at FROM app_prices WHERE appid = ?"
+    ).get(appids[0])).toEqual({ observed_at: anchorTime.toISOString() });
+    expect(sqliteDb.query(
+      "SELECT observed_at FROM app_prices WHERE appid = ?"
+    ).get(appids[54])).toEqual({ observed_at: staleAt });
+    expect(sqliteDb.query(
+      "SELECT COUNT(*) AS count FROM price_history WHERE appid BETWEEN 800000 AND 800054"
+    ).get()).toEqual({ count: 55 });
   });
 
   // G3: price history adds only changed states and retains them indefinitely
@@ -948,12 +1217,12 @@ describe("VaporStats Steam Prices and Deals", () => {
     expect(history3.history[0].final_price).toBe(5999);
     expect(history3.history[1].final_price).toBe(3999);
     // Verify atomic batch execution: both tables updated together
-    const priceRow = await getCurrentPrice(appDb, 1245620);
+    const priceRow = await getCurrentPrice(appDb, 1245620, new Date("2026-08-10T10:01:00.000Z"));
     expect(priceRow?.final_price).toBe(3999);
     expect(history3.history[1].final_price).toBe(3999);
 
     // Supplying the already-read current state avoids a second app_prices read at the helper boundary.
-    const prefetchedCurrent = await getCurrentPrice(appDb, 1245620);
+    const prefetchedCurrent = await getCurrentPrice(appDb, 1245620, new Date("2026-08-10T10:01:00.000Z"));
     await appDb
       .prepare("UPDATE app_prices SET observed_at = ? WHERE appid = ?")
       .bind("2026-08-11T10:00:00.000Z", 1245620)
@@ -1164,6 +1433,7 @@ describe("VaporStats Steam Prices and Deals", () => {
         is_available: true,
         formatted_initial: "$59.99",
         formatted_final: "$29.99",
+        deal_expires_at: null,
         observed_at: "2026-08-31T12:00:00.000Z",
       },
       history: [
@@ -1246,7 +1516,8 @@ describe("VaporStats Steam Prices and Deals", () => {
       is_available: true,
       formatted_initial: "$59.99",
       formatted_final: "$59.99",
-      observed_at: "2026-09-04T12:00:00.000Z",
+      deal_expires_at: null,
+      observed_at: new Date().toISOString(),
     };
     expect(isPriceDiscounted(regular)).toBe(false);
     expect(formatCurrentPrice(regular)).toBe(formatPriceCents(5999, "USD"));
@@ -1255,7 +1526,7 @@ describe("VaporStats Steam Prices and Deals", () => {
     );
     expect(regularHtml).toContain(formatPriceCents(5999, "USD"));
     expect(regularHtml).toContain("text-right ml-auto");
-    expect(regularHtml).not.toContain("Current offer");
+    expect(regularHtml).not.toContain("Current deal");
     expect(regularHtml).not.toContain("Save ");
 
     const free = { ...regular, initial_price: 0, final_price: 0, discount_percent: 0, is_free: true, formatted_initial: "Free", formatted_final: "Free" };
@@ -1285,13 +1556,43 @@ describe("VaporStats Steam Prices and Deals", () => {
     expect(unavailableHtml).not.toContain("Save ");
     expect(formatCurrentPrice(null)).toBe("No data yet");
 
+    const timedDeal = {
+      ...regular,
+      final_price: 2999,
+      discount_percent: 50,
+      formatted_final: "$29.99",
+      deal_expires_at: "2026-09-17T12:20:00.000Z",
+      observed_at: "2026-09-17T12:00:00.000Z",
+    };
+    const timedPresentation = getDealPresentation(
+      timedDeal,
+      Date.parse("2026-09-17T12:05:00.000Z")
+    );
+    expect(timedPresentation.active).toBe(true);
+    expect(timedPresentation.endLabel?.startsWith("Ends in ")).toBe(true);
+    expect(timedPresentation.endTitle).not.toBeNull();
+    expect(timedPresentation.nextBoundary).toBeGreaterThan(
+      Date.parse("2026-09-17T12:05:00.000Z")
+    );
+    expect(getDealPresentation(
+      timedDeal,
+      Date.parse(timedDeal.deal_expires_at)
+    )).toMatchObject({
+      active: false,
+      effectiveFinalPrice: 5999,
+    });
+    expect(getDealPresentation(
+      { ...timedDeal, deal_expires_at: null },
+      Date.parse("2026-09-17T12:30:00.000Z")
+    ).active).toBe(false);
+
     const temporaryZero = { ...regular, final_price: 0, discount_percent: 100, formatted_final: "$0.00" };
     expect(isPriceDiscounted(temporaryZero)).toBe(true);
     expect(formatCurrentPrice(temporaryZero)).toBe(formatPriceCents(0, "USD"));
     const temporaryHtml = renderToString(
       React.createElement(PriceSummary, { price: temporaryZero, variant: "hero" })
     );
-    expect(temporaryHtml).toContain("Limited-time offer");
+    expect(temporaryHtml).toContain("Limited-time deal");
     expect(temporaryHtml).toContain(formatPriceCents(0, "USD"));
     expect(temporaryHtml).not.toContain("Free");
   });
@@ -1492,15 +1793,16 @@ describe("VaporStats Steam Prices and Deals", () => {
       observed_at: "2026-09-04T12:00:00.000Z",
     });
 
-    const dealsResult = await getDeals(appDb);
+    const dealNow = new Date("2026-09-04T12:15:00.000Z");
+    const dealsResult = await getDeals(appDb, { now: dealNow });
     const dealAppIds = dealsResult.deals.map((d) => d.appid);
 
     // Totals remain exact on both populated and empty pages.
     expect(dealsResult.total).toBe(2);
-    const secondDealPage = await getDeals(appDb, { limit: 1, offset: 1 });
+    const secondDealPage = await getDeals(appDb, { limit: 1, offset: 1, now: dealNow });
     expect(secondDealPage.total).toBe(2);
     expect(secondDealPage.deals).toHaveLength(1);
-    const emptyDealPage = await getDeals(appDb, { limit: 1, offset: 10 });
+    const emptyDealPage = await getDeals(appDb, { limit: 1, offset: 10, now: dealNow });
     expect(emptyDealPage.total).toBe(2);
     expect(emptyDealPage.deals).toHaveLength(0);
 
@@ -1515,7 +1817,10 @@ describe("VaporStats Steam Prices and Deals", () => {
     // Regression: Verify canonical URLs rendered by DealsList include numeric AppIDs
     const dealsHtml = renderToString(
       React.createElement(DealsList, {
-        deals: dealsResult.deals,
+        deals: dealsResult.deals.map((deal) => ({
+          ...deal,
+          observed_at: new Date().toISOString(),
+        })),
         total: dealsResult.total,
       })
     );
@@ -1529,6 +1834,7 @@ describe("VaporStats Steam Prices and Deals", () => {
   });
   // G9: price and deal responses expose source times and live caching
   test("price api contract - exposes source times and live caching policy", async () => {
+    const observedAt = new Date().toISOString();
     // Add test price
     await recordPriceObservation(appDb, {
       appid: 1086940,
@@ -1537,7 +1843,7 @@ describe("VaporStats Steam Prices and Deals", () => {
       discount_percent: 50,
       is_free: false,
       is_available: true,
-      observed_at: "2026-09-04T12:00:00.000Z",
+      observed_at: observedAt,
     });
 
     // 1. Price History API Request
@@ -1554,7 +1860,7 @@ describe("VaporStats Steam Prices and Deals", () => {
       data: { appid: number };
     };
     expect(priceJson.status).toBe("data");
-    expect(priceJson.source_timestamp).toBe("2026-09-04T12:00:00.000Z");
+    expect(priceJson.source_timestamp).toBe(observedAt);
     expect(priceJson.data.appid).toBe(1086940);
 
     // 2. Deals API Request
@@ -1585,6 +1891,7 @@ describe("VaporStats Steam Prices and Deals", () => {
 
   // E2E Integration: GamePage, ChildAppPageView, and HomeComponent with price core
   test("end-to-end integration: game page, child page, and home deals sections", async () => {
+    const observedAt = new Date().toISOString();
     // 1. Seed prices:
     // Game: Baldur's Gate 3 ($59.99 initial, $29.99 final, 50% discount)
     await recordPriceObservation(appDb, {
@@ -1594,7 +1901,7 @@ describe("VaporStats Steam Prices and Deals", () => {
       discount_percent: 50,
       is_free: false,
       is_available: true,
-      observed_at: "2026-09-04T12:00:00.000Z",
+      observed_at: observedAt,
     });
 
     // Expansion: Shadow of the Erdtree ($39.99 initial, $29.99 final, 25% discount)
@@ -1605,7 +1912,7 @@ describe("VaporStats Steam Prices and Deals", () => {
       discount_percent: 25,
       is_free: false,
       is_available: true,
-      observed_at: "2026-09-04T12:00:00.000Z",
+      observed_at: observedAt,
     });
 
     // 1. Game Route Integration: handleGameHttpRequest
@@ -1619,7 +1926,7 @@ describe("VaporStats Steam Prices and Deals", () => {
     // Verifies GamePage visibly displays current US/USD price, discount %, source time
     expect(gameHtml).toContain(formatPriceCents(2999, "USD"));
     expect(gameText).toContain("50%");
-    expect(gameHtml).toContain(formatLocalDateTime("2026-09-04T12:00:00.000Z"));
+    expect(gameHtml).toContain(formatLocalDateTime(observedAt));
     // Verifies player history + related apps preserved
     expect(gameHtml).toContain("Player Count History");
     expect(gameHtml).toContain("https://store.steampowered.com/app/1086940/");

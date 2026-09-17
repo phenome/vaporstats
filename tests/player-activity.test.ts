@@ -161,6 +161,10 @@ describe("Bun ingestion scheduling and player rollups", () => {
       status: "completed",
       submitted: 0,
     });
+    expect(result.prices).toMatchObject({
+      reason: "missing_credentials",
+      revalidationAttempted: 0,
+    });
     expect(polls).toBe(1);
     expect(job).toEqual({ status: "stale" });
   });

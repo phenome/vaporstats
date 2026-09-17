@@ -272,7 +272,11 @@ describe("Bun SQLite persistence", () => {
   });
 
   test("adopts the legacy ledger without replaying applied SQL or losing rows", async () => {
-    const legacy = createLegacyDatabase(migrationNames.length - 2);
+    const cleanupMigrationIndex = migrationJournal.entries.findIndex(
+      (entry) => entry.tag === "0014_stiff_longshot"
+    );
+    if (cleanupMigrationIndex < 1) throw new Error("Migration cleanup baseline is missing");
+    const legacy = createLegacyDatabase(cleanupMigrationIndex);
     legacy
       .query("INSERT INTO apps (appid, name, slug) VALUES (?, ?, ?)")
       .run(11, "Adopted Row", "adopted-row");

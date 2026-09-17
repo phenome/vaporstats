@@ -68,7 +68,10 @@ function verifyExistingRowsSurviveUpgrade(): void {
     legacy.exec(
       "CREATE TABLE schema_migrations (name TEXT PRIMARY KEY, applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)"
     );
-    const appliedCount = Math.max(1, journal.entries.length - 2);
+    const appliedCount = journal.entries.findIndex(
+      (entry) => entry.tag === "0014_stiff_longshot"
+    );
+    if (appliedCount < 1) throw new Error("Migration preservation baseline is missing");
     for (const entry of journal.entries.slice(0, appliedCount)) {
       const migrationName = entry.tag + ".sql";
       legacy.exec(readFileSync(join(migrationDirectory, migrationName), "utf8"));
@@ -317,6 +320,15 @@ try {
     if (!appColumns.has(column)) {
       throw new Error("Missing apps." + column + " column");
     }
+  }
+  const appPriceColumns = new Set(
+    database
+      .query<{ name: string }, []>("PRAGMA table_info(app_prices)")
+      .all()
+      .map((column) => column.name)
+  );
+  if (!appPriceColumns.has("deal_expires_at")) {
+    throw new Error("Missing app_prices.deal_expires_at column");
   }
   const releasePlanColumns = new Set(
     database

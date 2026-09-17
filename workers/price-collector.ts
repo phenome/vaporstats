@@ -2,10 +2,12 @@ import type { AppDatabase } from "../src/lib/db";
 import { getCheckpoint, setCheckpoint, upsertApp } from "../src/lib/catalog";
 import { enrichCatalogReleaseFields, hasLeftEarlyAccessAssertion, normalizeSteamReleaseDate } from "./catalog-seed";
 import { syncReleaseFactsFromApps } from "./release-facts";
-import { recordPriceObservation, type PriceState } from "../src/lib/prices";
+import { recordPriceObservation } from "../src/lib/prices";
 
 export const DEFAULT_PRICE_CHECKPOINT_KEY = "steam_catalog_feed";
 const INITIAL_CATALOG_LOOKBACK_SECONDS = 30 * 24 * 60 * 60;
+const DEAL_FRESHNESS_MS = 30 * 60 * 1000;
+const PRICE_BATCH_SIZE = 50;
 
 export interface CatalogFeedApp {
   appid: number;
@@ -134,6 +136,114 @@ function unavailablePriceDetails(
   };
 }
 
+function parsePriceDetails(
+  appid: number,
+  entry: SteamStoreAppDetails[string] | undefined,
+  catalogApp: Parameters<typeof upsertApp>[1] | null = null
+): PriceDetailsResult {
+  if (entry && !entry.success) return unavailablePriceDetails(appid, true);
+  if (!entry?.data) return unavailablePriceDetails(appid, false);
+
+  const details = entry.data;
+  if (details.is_free === true) {
+    return {
+      appid,
+      success: true,
+      rateLimited: false,
+      catalogApp,
+      currency: "USD",
+      initial_price: 0,
+      final_price: 0,
+      discount_percent: 0,
+      is_free: true,
+      is_available: true,
+      formatted_initial: "Free",
+      formatted_final: "Free",
+    };
+  }
+  if (details.price_overview) {
+    const price = details.price_overview;
+    return {
+      appid,
+      success: true,
+      rateLimited: false,
+      catalogApp,
+      currency: price.currency || "USD",
+      initial_price: price.initial,
+      final_price: price.final,
+      discount_percent: price.discount_percent ?? 0,
+      is_free: false,
+      is_available: true,
+      formatted_initial: price.initial_formatted ?? null,
+      formatted_final: price.final_formatted ?? null,
+    };
+  }
+  return { ...unavailablePriceDetails(appid, true), catalogApp };
+}
+
+function collectDealExpirations(
+  value: unknown,
+  nowSeconds: number,
+  expirations: Map<number, string>
+): void {
+  if (Array.isArray(value)) {
+    for (const item of value) collectDealExpirations(item, nowSeconds, expirations);
+    return;
+  }
+  if (!value || typeof value !== "object") return;
+
+  const record = value as Record<string, unknown>;
+  if (
+    record.type === 0 &&
+    typeof record.id === "number" &&
+    Number.isInteger(record.id) &&
+    record.id > 0 &&
+    typeof record.discount_expiration === "number" &&
+    Number.isInteger(record.discount_expiration) &&
+    record.discount_expiration > nowSeconds
+  ) {
+    const appid = record.id;
+    const expiresAt = new Date(record.discount_expiration * 1000).toISOString();
+    const prior = expirations.get(appid);
+    if (!prior || expiresAt < prior) expirations.set(appid, expiresAt);
+  }
+  for (const child of Object.values(record)) {
+    collectDealExpirations(child, nowSeconds, expirations);
+  }
+}
+
+/** Reads exact app deal expirations from Steam's two US-English JSON feeds. */
+export async function fetchSteamDealExpirations(
+  options: { customFetch?: typeof fetch; now?: Date } = {}
+): Promise<{ expirations: Map<number, string>; successfulFeeds: number; rateLimited: boolean }> {
+  const customFetch = options.customFetch ?? fetch;
+  const now = options.now ?? new Date();
+  const urls = [
+    "https://store.steampowered.com/api/featured?cc=us&l=english",
+    "https://store.steampowered.com/api/featuredcategories?cc=us&l=english",
+  ];
+  const responses = await Promise.all(urls.map(async (url) => {
+    try {
+      const response = await customFetch(url, { headers: { Accept: "application/json" } });
+      if (!response.ok) return { json: null, rateLimited: response.status === 429 };
+      return { json: await response.json() as unknown, rateLimited: false };
+    } catch {
+      return { json: null, rateLimited: false };
+    }
+  }));
+  const expirations = new Map<number, string>();
+  for (const response of responses) {
+    if (response.json !== null) {
+      collectDealExpirations(response.json, Math.floor(now.getTime() / 1000), expirations);
+    }
+  }
+  return {
+    expirations,
+    successfulFeeds: responses.filter(({ json }) => json !== null).length,
+    rateLimited: responses.some(({ rateLimited }) => rateLimited),
+  };
+}
+
 /**
  * Fetches incremental catalog updates from documented Steam IStoreService/GetAppList endpoint.
  * Requires valid Steam API key; returns empty/null if key is missing or request fails.
@@ -233,56 +343,164 @@ export async function fetchSteamPriceDetails(
 
     const json = (await res.json()) as SteamStoreAppDetails;
     const entry = json[String(appid)];
-
-    if (entry && !entry.success) {
-      return unavailablePriceDetails(appid, true);
-    }
-    if (!entry?.data) {
-      return unavailablePriceDetails(appid, false);
-    }
-
-    const details = entry.data;
-    const catalogApp = toCatalogApp(details);
-
-    if (details.is_free === true) {
-      return {
-        appid,
-        success: true,
-        rateLimited: false,
-        catalogApp,
-        currency: "USD",
-        initial_price: 0,
-        final_price: 0,
-        discount_percent: 0,
-        is_free: true,
-        is_available: true,
-        formatted_initial: "Free",
-        formatted_final: "Free",
-      };
-    }
-
-    if (details.price_overview) {
-      const po = details.price_overview;
-      return {
-        appid,
-        success: true,
-        rateLimited: false,
-        catalogApp,
-        currency: po.currency || "USD",
-        initial_price: po.initial,
-        final_price: po.final,
-        discount_percent: po.discount_percent ?? 0,
-        is_free: false,
-        is_available: true,
-        formatted_initial: po.initial_formatted ?? null,
-        formatted_final: po.final_formatted ?? null,
-      };
-    }
-
-    return { ...unavailablePriceDetails(appid, true), catalogApp };
+    return parsePriceDetails(
+      appid,
+      entry,
+      entry?.data ? toCatalogApp(entry.data) : null
+    );
   } catch {
     return unavailablePriceDetails(appid, false);
   }
+}
+
+/** Fetches price fields only for at most 50 AppIDs in one Storefront request. */
+export async function fetchSteamPriceDetailsBatch(
+  appids: number[],
+  options: { customFetch?: typeof fetch } = {}
+): Promise<{ results: PriceDetailsResult[]; rateLimited: boolean }> {
+  const ids = [...new Set(appids)].slice(0, PRICE_BATCH_SIZE);
+  if (ids.length === 0) return { results: [], rateLimited: false };
+  const customFetch = options.customFetch ?? fetch;
+  const url =
+    `https://store.steampowered.com/api/appdetails?appids=${ids.join(",")}&cc=us&l=english&filters=price_overview`;
+  try {
+    const response = await customFetch(url, { headers: { Accept: "application/json" } });
+    if (!response.ok) {
+      return {
+        results: ids.map((appid) =>
+          unavailablePriceDetails(appid, false, response.status === 429)
+        ),
+        rateLimited: response.status === 429,
+      };
+    }
+    const json = await response.json() as SteamStoreAppDetails;
+    return {
+      results: ids.map((appid) => parsePriceDetails(appid, json[String(appid)])),
+      rateLimited: false,
+    };
+  } catch {
+    return {
+      results: ids.map((appid) => unavailablePriceDetails(appid, false)),
+      rateLimited: false,
+    };
+  }
+}
+
+export interface DealRevalidationResult {
+  attempted: number;
+  successful: number;
+  failed: number;
+  changed: number;
+  rateLimited: boolean;
+  pending: number;
+  currentDeals: number;
+  dealsWithExactExpiry: number;
+}
+
+async function getDealExpiryCoverage(
+  db: AppDatabase,
+  now: Date
+): Promise<{ currentDeals: number; dealsWithExactExpiry: number }> {
+  const nowIso = now.toISOString();
+  const freshAfter = new Date(now.getTime() - DEAL_FRESHNESS_MS).toISOString();
+  const row = await db
+    .prepare(
+      `SELECT COUNT(*) AS current_deals,
+              SUM(CASE WHEN deal_expires_at > ? THEN 1 ELSE 0 END) AS exact_expiries
+       FROM app_prices
+       WHERE discount_percent > 0 AND is_available = 1
+         AND observed_at > ?
+         AND (deal_expires_at IS NULL OR deal_expires_at > ?)`
+    )
+    .bind(nowIso, freshAfter, nowIso)
+    .first<{ current_deals: number | string; exact_expiries: number | string | null }>();
+  return {
+    currentDeals: Number(row?.current_deals ?? 0),
+    dealsWithExactExpiry: Number(row?.exact_expiries ?? 0),
+  };
+}
+
+/**
+ * Revalidates only already-discounted persisted rows. Successful responses
+ * refresh observed_at; failures leave the source state untouched.
+ */
+export async function revalidateCurrentDeals(
+  db: AppDatabase,
+  options: {
+    customFetch?: typeof fetch;
+    anchorTime?: Date;
+    staleOnly?: boolean;
+    expirations?: ReadonlyMap<number, string>;
+  } = {}
+): Promise<DealRevalidationResult> {
+  const customFetch = options.customFetch ?? fetch;
+  const anchorTime = options.anchorTime ?? new Date();
+  const cutoff = new Date(anchorTime.getTime() - DEAL_FRESHNESS_MS).toISOString();
+  const query = options.staleOnly
+    ? `SELECT appid FROM app_prices
+       WHERE discount_percent > 0 AND is_available = 1
+         AND (observed_at <= ? OR (deal_expires_at IS NOT NULL AND deal_expires_at <= ?))
+       ORDER BY observed_at, appid`
+    : `SELECT appid FROM app_prices
+       WHERE discount_percent > 0 AND is_available = 1
+       ORDER BY appid`;
+  const rows = await db
+    .prepare(query)
+    .bind(...(options.staleOnly ? [cutoff, anchorTime.toISOString()] : []))
+    .all<{ appid: number }>();
+  const appids = (rows.results ?? []).map(({ appid }) => appid);
+  const expirations = options.expirations ??
+    (await fetchSteamDealExpirations({ customFetch, now: anchorTime })).expirations;
+  let attempted = 0;
+  let successful = 0;
+  let failed = 0;
+  let changed = 0;
+  let rateLimited = false;
+  let index = 0;
+
+  while (index < appids.length) {
+    const batchIds = appids.slice(index, index + PRICE_BATCH_SIZE);
+    const batch = await fetchSteamPriceDetailsBatch(batchIds, { customFetch });
+    attempted += batchIds.length;
+    for (const details of batch.results) {
+      if (!details.success) {
+        failed++;
+        continue;
+      }
+      successful++;
+      const result = await recordPriceObservation(db, {
+        appid: details.appid,
+        currency: details.currency,
+        initial_price: details.initial_price,
+        final_price: details.final_price,
+        discount_percent: details.discount_percent,
+        is_free: details.is_free,
+        is_available: details.is_available,
+        formatted_initial: details.formatted_initial,
+        formatted_final: details.formatted_final,
+        deal_expires_at: expirations.get(details.appid),
+        observed_at: anchorTime.toISOString(),
+      });
+      if (result.stateChanged) changed++;
+    }
+    if (batch.rateLimited) {
+      rateLimited = true;
+      break;
+    }
+    index += batchIds.length;
+  }
+
+  const coverage = await getDealExpiryCoverage(db, anchorTime);
+  return {
+    attempted,
+    successful,
+    failed,
+    changed,
+    rateLimited,
+    pending: appids.length - index,
+    currentDeals: coverage.currentDeals,
+    dealsWithExactExpiry: coverage.dealsWithExactExpiry,
+  };
 }
 
 /**
@@ -294,6 +512,7 @@ export async function refreshIndicatedAppPrices(
   db: AppDatabase,
   appids: number[],
   options: {
+    dealExpirations?: ReadonlyMap<number, string>;
     customFetch?: typeof fetch;
     anchorTime?: Date;
     successTarget?: number;
@@ -415,6 +634,7 @@ export async function refreshIndicatedAppPrices(
         initial_price: priceDetails.initial_price,
         final_price: priceDetails.final_price,
         discount_percent: priceDetails.discount_percent,
+        deal_expires_at: options.dealExpirations?.get(appid),
         is_free: priceDetails.is_free,
         is_available: priceDetails.is_available,
         formatted_initial: priceDetails.formatted_initial,
@@ -566,15 +786,23 @@ export interface HourlyPriceFeedTickResult {
   changedAppIds: number[];
   rateLimited: boolean;
   pending: number;
+  revalidationAttempted: number;
+  revalidationSuccessful: number;
+  revalidationFailed: number;
+  revalidationChanged: number;
+  revalidationPending: number;
+  currentDeals: number;
+  dealsWithExactExpiry: number;
   checkpointAdvanced: boolean;
   checkpointCursor: number | null;
 }
 
 /**
- * Ten-minute scheduled tick:
+ * Fifteen-minute scheduled tick:
+ * - Revalidates currently discounted rows with price-only batched requests
  * - Drains retained work before requesting more catalog changes
  * - Checks the incremental Steam catalog feed when credentials exist
- * - Refreshes details ONLY for indicated apps (no catalog-wide sweep)
+ * - Refreshes full details ONLY for indicated apps (no catalog-wide sweep)
  * - Advances the feed cursor while retaining failed/unprocessed app IDs
  */
 export async function runHourlyPriceFeedTick(
@@ -585,29 +813,47 @@ export async function runHourlyPriceFeedTick(
     anchorTime?: Date;
     checkpointKey?: string;
     maxAppsToProcess?: number;
+    staleDealsOnly?: boolean;
   } = {}
 ): Promise<HourlyPriceFeedTickResult> {
-  const apiKey = options.apiKey;
-  if (!apiKey) {
+  const apiKey = options.apiKey ?? process.env.STEAM_API_KEY;
+  const customFetch = options.customFetch ?? fetch;
+  const anchorTime = options.anchorTime ?? new Date();
+  const metadata = await fetchSteamDealExpirations({ customFetch, now: anchorTime });
+  const revalidation = await revalidateCurrentDeals(db, {
+    customFetch,
+    anchorTime,
+    staleOnly: options.staleDealsOnly,
+    expirations: metadata.expirations,
+  });
+  const revalidationFields = {
+    revalidationAttempted: revalidation.attempted,
+    revalidationSuccessful: revalidation.successful,
+    revalidationFailed: revalidation.failed,
+    revalidationChanged: revalidation.changed,
+    revalidationPending: revalidation.pending,
+    currentDeals: revalidation.currentDeals,
+    dealsWithExactExpiry: revalidation.dealsWithExactExpiry,
+  };
+  if (!apiKey || revalidation.rateLimited) {
     return {
-      executed: false,
-      reason: "missing_credentials",
+      executed: revalidation.attempted > 0,
+      reason: revalidation.rateLimited ? "deal_revalidation_rate_limited" : "missing_credentials",
       appsIndicated: 0,
       attempted: 0,
       successful: 0,
       failed: 0,
-      rateLimited: false,
+      rateLimited: revalidation.rateLimited,
       pending: 0,
       changed: 0,
       changedAppIds: [],
+      ...revalidationFields,
       checkpointAdvanced: false,
       checkpointCursor: null,
     };
   }
 
   const checkpointKey = options.checkpointKey ?? DEFAULT_PRICE_CHECKPOINT_KEY;
-  const customFetch = options.customFetch ?? fetch;
-  const anchorTime = options.anchorTime ?? new Date();
   const existingCheckpoint = await getCheckpoint(db, checkpointKey);
   const checkpointValue = readPriceFeedCheckpoint(existingCheckpoint);
   let pendingBeforeFeed = checkpointValue.pending;
@@ -669,6 +915,7 @@ export async function runHourlyPriceFeedTick(
       changed: 0,
       changedAppIds: [],
       checkpointAdvanced: false,
+      ...revalidationFields,
       checkpointCursor: existingCheckpoint?.cursor ?? null,
     };
   }
@@ -681,6 +928,7 @@ export async function runHourlyPriceFeedTick(
     anchorTime,
     successTarget: 100,
     attemptCap: 200,
+    dealExpirations: metadata.expirations,
   });
   const pending = refreshStats.pendingAppIds;
   const previousCursor = feedCursor;
@@ -727,6 +975,7 @@ export async function runHourlyPriceFeedTick(
     }),
     nextCursor
   );
+  const finalCoverage = await getDealExpiryCoverage(db, anchorTime);
 
   return {
     executed: true,
@@ -738,6 +987,9 @@ export async function runHourlyPriceFeedTick(
     changed: refreshStats.changed,
     changedAppIds: refreshStats.changedAppIds,
     pending: pending.length,
+    ...revalidationFields,
+    currentDeals: finalCoverage.currentDeals,
+    dealsWithExactExpiry: finalCoverage.dealsWithExactExpiry,
     checkpointCursor: nextCursor,
     checkpointAdvanced,
   };

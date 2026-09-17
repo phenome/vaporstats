@@ -1,0 +1,1 @@
+ALTER TABLE `app_prices` ADD `deal_expires_at` text;

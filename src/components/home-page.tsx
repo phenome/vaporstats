@@ -75,7 +75,7 @@ export function HomeComponent({
             href="/deals"
             className="min-h-[44px] inline-flex items-center text-xs font-mono text-emerald-400 hover:text-emerald-300 transition-colors uppercase tracking-wider focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
           >
-            Browse All Deals ({totalDeals ?? initialDeals?.length ?? 0}) &rarr;
+            Browse All Deals &rarr;
           </AppLink>
         </div>
 

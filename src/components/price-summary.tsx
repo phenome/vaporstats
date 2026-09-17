@@ -1,7 +1,8 @@
 import React from "react";
 import { formatLocalDateTime } from "../lib/format";
 import { formatPriceCents, type PriceState } from "../lib/prices";
-import { formatCurrentPrice, isPriceDiscounted } from "../lib/price-presentation";
+import { formatCurrentPrice, getDealPresentation } from "../lib/price-presentation";
+import { useDealClock } from "../lib/use-deal-clock";
 
 export type PriceSummaryVariant = "card" | "hero";
 export type PriceSummaryStatus = "loading" | "error" | "success";
@@ -19,19 +20,23 @@ export function PriceSummary({
   status = "success",
   className,
 }: PriceSummaryProps) {
-  const offer = status === "success" && isPriceDiscounted(price);
+  const now = useDealClock([price]);
+  const deal = getDealPresentation(price, now);
+  const offer = status === "success" && deal.active;
   const value =
     status === "loading"
       ? "Loading"
       : status === "error"
         ? "Live data unavailable"
-        : formatCurrentPrice(price);
+        : price && deal.effectiveFinalPrice !== price.final_price
+          ? price.formatted_initial ?? formatPriceCents(deal.effectiveFinalPrice, price.currency)
+          : formatCurrentPrice(price);
   const isNumeric = /\d/.test(value);
   const discount = price?.discount_percent ?? 0;
   const initialPrice = price?.initial_price ?? null;
   const finalPrice = price?.final_price ?? null;
   const currency = price?.currency ?? "USD";
-  const label = offer ? "Current offer" : "Current price";
+  const label = offer ? "Current deal" : "Current price";
   const observed = status === "success" && price && price.observed_at
     ? formatLocalDateTime(price.observed_at)
     : null;
@@ -69,6 +74,15 @@ export function PriceSummary({
             {observed && (
               <p className="mt-2 max-w-xl text-xs text-zinc-400" suppressHydrationWarning>{observed}</p>
             )}
+            {offer && deal.endLabel && (
+              <p
+                className="mt-1 text-xs text-zinc-400"
+                title={deal.endTitle ?? undefined}
+                suppressHydrationWarning
+              >
+                {deal.endLabel}
+              </p>
+            )}
           </div>
           {offer && base && savings && (
             <div className="text-right">
@@ -78,7 +92,7 @@ export function PriceSummary({
               <p className="text-xl font-mono text-zinc-100">{value}</p>
               <p className="text-xs text-emerald-300">Save {savings}</p>
               {zeroOffer && (
-                <p className="mt-1 text-xs text-zinc-400">Limited-time offer</p>
+                <p className="mt-1 text-xs text-zinc-400">Limited-time deal</p>
               )}
             </div>
           )}
@@ -121,7 +135,16 @@ export function PriceSummary({
           </p>
         )}
         {zeroOffer && (
-          <p className="mt-1 text-[11px] text-zinc-400">Limited-time offer</p>
+          <p className="mt-1 text-[11px] text-zinc-400">Limited-time deal</p>
+        )}
+        {offer && deal.endLabel && (
+          <p
+            className="mt-1 text-[11px] text-zinc-400"
+            title={deal.endTitle ?? undefined}
+            suppressHydrationWarning
+          >
+            {deal.endLabel}
+          </p>
         )}
         {observed && <p className="mt-1 text-[11px] font-mono text-zinc-500" suppressHydrationWarning>{observed}</p>}
       </div>

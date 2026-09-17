@@ -41,9 +41,6 @@ export function DealsPageView({
             </p>
           </div>
 
-          <div className="text-xs font-mono text-zinc-400 bg-zinc-900 border border-zinc-800 px-3 py-2">
-            ACTIVE DEALS: <span className="text-emerald-400 font-bold tabular-nums">{count}</span>
-          </div>
         </div>
       </div>
 

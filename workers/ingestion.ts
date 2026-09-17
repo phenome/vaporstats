@@ -53,6 +53,7 @@ export interface IngestionTickOptions {
   geminiApiKey?: string;
   geminiPricingVersion?: string;
   geminiCapabilityVersion?: string;
+  stalePriceDealsOnly?: boolean;
 }
 
 export interface IngestionTickResult {
@@ -158,6 +159,14 @@ function logCompletion(result: IngestionTickResult): void {
       failed: result.prices.failed,
       changed: result.prices.changed,
       pending: result.prices.pending,
+      rateLimited: result.prices.rateLimited,
+      revalidationAttempted: result.prices.revalidationAttempted,
+      revalidationSuccessful: result.prices.revalidationSuccessful,
+      revalidationFailed: result.prices.revalidationFailed,
+      revalidationChanged: result.prices.revalidationChanged,
+      revalidationPending: result.prices.revalidationPending,
+      currentDeals: result.prices.currentDeals,
+      dealsWithExactExpiry: result.prices.dealsWithExactExpiry,
     },
     tagDictionary: result.tagDictionary && {
       refreshed: result.tagDictionary.refreshed,
@@ -199,6 +208,15 @@ async function performIngestionTick(options: IngestionTickOptions): Promise<Inge
   const startedAt = Date.now();
   const anchorTime = options.anchorTime ?? new Date();
   const customFetch = options.customFetch ?? fetch;
+  const prices = await runHourlyPriceFeedTick(options.db, {
+    apiKey: options.steamApiKey,
+    customFetch,
+    anchorTime,
+    staleDealsOnly: options.stalePriceDealsOnly,
+  });
+  if (prices?.changedAppIds?.length) {
+    await syncReleaseFactsFromApps(options.db, { appIds: prices.changedAppIds });
+  }
   const tick = await runPlayerCollectionTick(options.db, { anchorTime, customFetch });
   const reviewCollection = await runReviewCollection(options.db, { anchorTime, customFetch });
   const criticCollection = await runCriticCollection(options.db, { now: anchorTime, fetch: customFetch });
@@ -259,17 +277,6 @@ async function performIngestionTick(options: IngestionTickOptions): Promise<Inge
   }
   const tagDictionary = await refreshSteamTagDictionary(options.db, { now: anchorTime, fetchFn: customFetch });
 
-  let prices: HourlyPriceFeedTickResult | undefined;
-  if (options.steamApiKey) {
-    prices = await runHourlyPriceFeedTick(options.db, {
-      apiKey: options.steamApiKey,
-      customFetch,
-      anchorTime,
-    });
-  }
-  if (prices?.changedAppIds?.length) {
-    await syncReleaseFactsFromApps(options.db, { appIds: prices.changedAppIds });
-  }
 
   const catalogRefreshResult = await refreshCatalogBatch(options.db, {
     checkpointKey: CATALOG_REFRESH_CHECKPOINT_KEY,
@@ -360,7 +367,7 @@ export function startIngestionScheduler(options: IngestionSchedulerOptions): unk
       } catch (err) {
         console.error("Startup re-rank error:", err);
       }
-      return runIngestionTick(options);
+      return runIngestionTick({ ...options, stalePriceDealsOnly: true });
     })();
   }
   return startupRun ?? cron;

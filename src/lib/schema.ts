@@ -207,6 +207,7 @@ export const appPrices = sqliteTable(
     isAvailable: integer("is_available").notNull().default(1),
     formattedInitial: text("formatted_initial"),
     formattedFinal: text("formatted_final"),
+    dealExpiresAt: text("deal_expires_at"),
     observedAt: text("observed_at").notNull(),
     createdAt: text("created_at").notNull().default(currentTimestamp),
     updatedAt: text("updated_at").notNull().default(currentTimestamp),

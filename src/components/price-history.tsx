@@ -439,7 +439,7 @@ export function PriceHistoryChart({
                 <span><i className="mr-1 inline-block h-2 w-2 bg-green-500" />Observed</span>
                 <span><i className="mr-1 inline-block h-2 w-2 border border-zinc-500" />Carried forward; not a new observation</span>
                 {geometry.savingsAreas.length > 0 && <span><i className="mr-1 inline-block h-2 w-2 bg-green-300/40" />Savings</span>}
-                {currentIsOffer && <span className="text-orange-300">Current offer savings shown above</span>}
+                {currentIsOffer && <span className="text-orange-300">Current deal savings shown above</span>}
               </div>
             </div>
           )

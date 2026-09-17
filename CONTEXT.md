@@ -12,6 +12,13 @@ _Avoid_: Public API, developer API
 
 **Observation**: One timestamped player/price measurement before aggregation.
 
+**Deal**:
+A Steam price currently discounted from its regular price. A known expiration bounds when the deal is current; an unknown expiration does not make the discount permanent.
+_Avoid_: Offer, current offer
+
+**Observed Deal Period**:
+A period bounded by the first observed discounted price and the first later observed non-discounted price. Its end remains unknown until a later price observation establishes it.
+
 **Rollup**: A durable aggregate derived from observations for a defined UTC period.
 
 **Release plan**: A sourced statement of an intended future lifecycle milestone and its expected date or window. It is not evidence that the event occurred.

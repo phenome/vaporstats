@@ -3,6 +3,8 @@ import { AppLink } from "./app-link";
 import { type DealItem, formatPriceUtc } from "../lib/prices";
 import { getCanonicalGamePath } from "../lib/slug";
 import { getCanonicalChildPath } from "../lib/related";
+import { getDealPresentation } from "../lib/price-presentation";
+import { useDealClock } from "../lib/use-deal-clock";
 
 export interface DealsListProps {
   deals: DealItem[];
@@ -23,7 +25,12 @@ export function DealsList({
   currentType = "all",
   currentSort = "discount",
 }: DealsListProps) {
-  const count = total ?? deals.length;
+  const now = useDealClock(deals);
+  const activeDeals = deals.flatMap((deal) => {
+    const presentation = getDealPresentation(deal, now);
+    return presentation.active ? [{ deal, presentation }] : [];
+  });
+  const count = Math.max(0, (total ?? deals.length) - (deals.length - activeDeals.length));
 
   return (
     <div className="space-y-4 w-full" data-testid="deals-container">
@@ -97,7 +104,7 @@ export function DealsList({
       </div>
 
       {/* Deals Table */}
-      {deals.length === 0 ? (
+      {activeDeals.length === 0 ? (
         <div
           className="border border-zinc-800 bg-zinc-950 p-12 text-center font-mono text-xs text-zinc-400"
           data-testid="deals-empty"
@@ -124,7 +131,7 @@ export function DealsList({
               </tr>
             </thead>
             <tbody className="divide-y divide-zinc-900 text-zinc-300">
-              {deals.map((deal) => {
+              {activeDeals.map(({ deal, presentation }) => {
                 const isChild = Boolean(deal.parent_appid);
                 const canonicalPath =
                   isChild && deal.parent_appid && deal.parent_name
@@ -210,8 +217,19 @@ export function DealsList({
                       {deal.formatted_initial}
                     </td>
 
-                    <td className="px-4 py-3 text-right whitespace-nowrap text-emerald-400 font-bold tabular-nums text-sm">
-                      {deal.formatted_final}
+                    <td className="px-4 py-3 text-right whitespace-nowrap tabular-nums">
+                      <span className="text-emerald-400 font-bold text-sm">
+                        {deal.formatted_final}
+                      </span>
+                      {presentation.endLabel && (
+                        <span
+                          className="mt-0.5 block text-[10px] font-normal text-zinc-500"
+                          title={presentation.endTitle ?? undefined}
+                          suppressHydrationWarning
+                        >
+                          {presentation.endLabel}
+                        </span>
+                      )}
                     </td>
 
                     <td className="px-4 py-3 text-right whitespace-nowrap text-zinc-500 tabular-nums text-[11px] hidden sm:table-cell">

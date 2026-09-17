@@ -678,6 +678,7 @@ describe("Releases Discovery and Calendar", () => {
             formatted_initial: "$29.99",
             formatted_final: "$14.99",
             header_image: "",
+            deal_expires_at: null,
             observed_at: "2026-09-04T12:00:00Z",
           },
         ],

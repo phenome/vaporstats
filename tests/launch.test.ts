@@ -151,7 +151,7 @@ describe("public API launch contract", () => {
     };
     expect(overviewData.appid).toBe(10);
     expect(overviewData.latest_players).toBe(15000);
-    expect(overviewData.current_price.final_price).toBe(499);
+    expect(overviewData.current_price.final_price).toBe(999);
     expect(overviewData.current_price.observed_at).toBe("2026-09-04T12:00:00.000Z");
 
     // 2. Player history API
@@ -375,7 +375,9 @@ describe("operating triggers", () => {
       anchorTime: new Date("2026-09-04T14:20:00.000Z"),
       customFetch: failingFetch,
     });
-    const orphanQueriesAfterFirst = queries.filter((query) => query.includes("FROM app_prices"));
+    const orphanQueriesAfterFirst = queries.filter((query) =>
+      query.includes("LEFT JOIN apps a")
+    );
     const second = await runHourlyPriceFeedTick(observedDb, {
       apiKey: "test-key",
       anchorTime: new Date("2026-09-04T14:30:00.000Z"),
@@ -384,7 +386,7 @@ describe("operating triggers", () => {
 
     expect(first.pending).toBe(1);
     expect(second.pending).toBe(1);
-    expect(queries.filter((query) => query.includes("FROM app_prices"))).toHaveLength(
+    expect(queries.filter((query) => query.includes("LEFT JOIN apps a"))).toHaveLength(
       orphanQueriesAfterFirst.length
     );
   });

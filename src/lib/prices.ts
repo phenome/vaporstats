@@ -32,6 +32,7 @@ export interface PriceState {
   is_available: boolean;
   formatted_initial: string | null;
   formatted_final: string | null;
+  deal_expires_at: string | null;
   observed_at: string;
   created_at?: string;
   updated_at?: string;
@@ -66,6 +67,7 @@ export interface DealItem {
   is_free: boolean;
   formatted_initial: string;
   formatted_final: string;
+  deal_expires_at: string | null;
   header_image: string;
   observed_at: string;
 }
@@ -187,6 +189,7 @@ export function isDealEligible(
 export function hasPriceStateChanged(
   existing: PriceState | null | undefined,
   incoming: {
+    currency: string;
     initial_price: number | null;
     final_price: number | null;
     discount_percent: number;
@@ -197,6 +200,7 @@ export function hasPriceStateChanged(
   if (!existing) return true;
 
   return (
+    existing.currency !== incoming.currency ||
     existing.initial_price !== incoming.initial_price ||
     existing.final_price !== incoming.final_price ||
     existing.discount_percent !== incoming.discount_percent ||
@@ -257,6 +261,7 @@ interface RawDealRow {
   is_free: number;
   formatted_initial: string | null;
   formatted_final: string | null;
+  deal_expires_at: string | null;
   observed_at: string;
   total_count: number;
   total_only: number;
@@ -271,6 +276,7 @@ interface RawPriceRow {
   is_available: number;
   formatted_initial: string | null;
   formatted_final: string | null;
+  deal_expires_at: string | null;
   observed_at: string;
   created_at?: string;
   updated_at?: string;
@@ -286,6 +292,7 @@ function mapRowToPriceState(row: RawPriceRow): PriceState {
     is_free: Boolean(row.is_free),
     is_available: Boolean(row.is_available),
     formatted_initial: row.formatted_initial,
+    deal_expires_at: row.deal_expires_at,
     formatted_final: row.formatted_final,
     observed_at: row.observed_at,
     created_at: row.created_at,
@@ -293,25 +300,55 @@ function mapRowToPriceState(row: RawPriceRow): PriceState {
   };
 }
 
-/**
- * Reads the current price state for an app.
- */
-export async function getCurrentPrice(
+const DEAL_FRESHNESS_MS = 30 * 60 * 1000;
+
+/** Reads the persisted provider state without applying consumer freshness rules. */
+export async function getPersistedPrice(
   db: AppDatabase,
   appid: number
 ): Promise<PriceState | null> {
-  const stmt = db
+  const row = await db
     .prepare(
       `SELECT appid, currency, initial_price, final_price, discount_percent,
               is_free, is_available, formatted_initial, formatted_final,
-              observed_at, created_at, updated_at
+              deal_expires_at, observed_at, created_at, updated_at
        FROM app_prices
        WHERE appid = ?`
     )
-    .bind(appid);
-
-  const row = await stmt.first<RawPriceRow>();
+    .bind(appid)
+    .first<RawPriceRow>();
   return row ? mapRowToPriceState(row) : null;
+}
+
+/**
+ * Reads the consumer-visible current price. Unconfirmed or expired discounts
+ * fall back to the stored regular price without changing persisted history.
+ */
+export async function getCurrentPrice(
+  db: AppDatabase,
+  appid: number,
+  now: Date = new Date()
+): Promise<PriceState | null> {
+  const state = await getPersistedPrice(db, appid);
+  if (!state || state.discount_percent <= 0) return state;
+
+  const observedAt = Date.parse(state.observed_at);
+  const expiresAt =
+    state.deal_expires_at === null ? null : Date.parse(state.deal_expires_at);
+  if (
+    !Number.isFinite(observedAt) ||
+    now.getTime() - observedAt >= DEAL_FRESHNESS_MS ||
+    (expiresAt !== null && (!Number.isFinite(expiresAt) || expiresAt <= now.getTime()))
+  ) {
+    return {
+      ...state,
+      final_price: state.initial_price,
+      discount_percent: 0,
+      is_free: false,
+      formatted_final: state.formatted_initial,
+    };
+  }
+  return state;
 }
 
 /**
@@ -332,19 +369,30 @@ export async function recordPriceObservation(
     is_available: boolean;
     formatted_initial?: string | null;
     formatted_final?: string | null;
+    deal_expires_at?: string | null;
     observed_at: string;
   }
 ): Promise<{ stateChanged: boolean }> {
   const currency = observation.currency || "USD";
-  const existing = await getCurrentPrice(db, observation.appid);
+  const existing = await getPersistedPrice(db, observation.appid);
 
   const changed = hasPriceStateChanged(existing, {
+    currency,
     initial_price: observation.initial_price,
     final_price: observation.final_price,
     discount_percent: observation.discount_percent,
     is_free: observation.is_free,
     is_available: observation.is_available,
   });
+  const existingExpiry = existing?.deal_expires_at ?? null;
+  const dealExpiresAt =
+    observation.deal_expires_at !== undefined
+      ? observation.deal_expires_at
+      : changed ||
+          (existingExpiry !== null &&
+            Date.parse(existingExpiry) <= Date.parse(observation.observed_at))
+        ? null
+        : existingExpiry;
 
   const formattedFinal =
     observation.formatted_final ??
@@ -363,8 +411,8 @@ export async function recordPriceObservation(
         `INSERT INTO app_prices (
           appid, currency, initial_price, final_price, discount_percent,
           is_free, is_available, formatted_initial, formatted_final,
-          observed_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          deal_expires_at, observed_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(appid) DO UPDATE SET
           currency = excluded.currency,
           initial_price = excluded.initial_price,
@@ -374,6 +422,7 @@ export async function recordPriceObservation(
           is_available = excluded.is_available,
           formatted_initial = excluded.formatted_initial,
           formatted_final = excluded.formatted_final,
+          deal_expires_at = excluded.deal_expires_at,
           observed_at = excluded.observed_at,
           updated_at = excluded.updated_at`
       )
@@ -387,6 +436,7 @@ export async function recordPriceObservation(
         observation.is_available ? 1 : 0,
         formattedInitial,
         formattedFinal,
+        dealExpiresAt,
         observation.observed_at,
         observation.observed_at
       );
@@ -420,10 +470,10 @@ export async function recordPriceObservation(
     await db
       .prepare(
         `UPDATE app_prices
-         SET observed_at = ?, updated_at = ?
+         SET deal_expires_at = ?, observed_at = ?, updated_at = ?
          WHERE appid = ?`
       )
-      .bind(observation.observed_at, observation.observed_at, observation.appid)
+      .bind(dealExpiresAt, observation.observed_at, observation.observed_at, observation.appid)
       .run();
 
     return { stateChanged: false };
@@ -443,7 +493,7 @@ export async function getPriceHistory(
   const anchorTime = options.anchorTime ?? new Date();
   const anchorIso = anchorTime.toISOString();
   const current = options.currentPrice === undefined
-    ? await getCurrentPrice(db, appid)
+    ? await getCurrentPrice(db, appid, anchorTime)
     : options.currentPrice;
 
   // Find earliest observation date bounded by anchorTime
@@ -607,6 +657,7 @@ export async function getDeals(
     limit?: number;
     offset?: number;
     type?: "game" | "dlc" | "expansion" | "all";
+    now?: Date;
     sort?: "discount" | "price" | "recent";
   } = {}
 ): Promise<DealsResult> {
@@ -614,6 +665,9 @@ export async function getDeals(
   const offset = Math.max(options.offset ?? 0, 0);
   const filterType = options.type ?? "all";
   const sort = options.sort ?? "discount";
+  const now = options.now ?? new Date();
+  const nowIso = now.toISOString();
+  const freshAfterIso = new Date(now.getTime() - DEAL_FRESHNESS_MS).toISOString();
 
   let typeCondition = `(
     (a.type = 'game' AND a.is_playable = 1 AND a.parent_appid IS NULL)
@@ -660,6 +714,7 @@ export async function getDeals(
         p.is_free,
         p.formatted_initial,
         p.formatted_final,
+        p.deal_expires_at,
         p.observed_at
       FROM app_prices p
       JOIN apps a ON p.appid = a.appid
@@ -668,6 +723,8 @@ export async function getDeals(
         AND p.is_available = 1
         AND p.final_price IS NOT NULL
         AND p.initial_price IS NOT NULL
+        AND p.observed_at > ?
+        AND (p.deal_expires_at IS NULL OR p.deal_expires_at > ?)
         AND ${typeCondition}
         AND ${accessoryExclusion}
     ),
@@ -687,12 +744,12 @@ export async function getDeals(
     SELECT
       NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
       NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
-      total.total_count, 1
+      NULL, total.total_count, 1
     FROM total
     WHERE NOT EXISTS (SELECT 1 FROM page)
   `;
 
-  const { results } = await db.prepare(dealsQuery).bind(limit, offset).all<RawDealRow>();
+  const { results } = await db.prepare(dealsQuery).bind(freshAfterIso, nowIso, limit, offset).all<RawDealRow>();
   const rows = results || [];
   const total = rows.find((row) => row.total_count !== undefined)?.total_count ?? 0;
   let maxObservedTime: string | null = null;
@@ -718,6 +775,7 @@ export async function getDeals(
       formatted_final:
         row.formatted_final || formatPriceCents(row.final_price, row.currency),
       header_image: row.header_image || "",
+      deal_expires_at: row.deal_expires_at,
       observed_at: row.observed_at,
     };
   });
@@ -725,6 +783,6 @@ export async function getDeals(
   return {
     deals,
     total,
-    source_timestamp: maxObservedTime ?? new Date().toISOString(),
+    source_timestamp: maxObservedTime ?? nowIso,
   };
 }
