@@ -245,10 +245,6 @@ function useHeroScrollController(
         node.style.opacity = "";
         node.style.pointerEvents = "";
       });
-      const pubTexts = hero.querySelectorAll<HTMLElement>(".hero-publishers .hero-publisher-text");
-      pubTexts.forEach((t) => {
-        t.style.opacity = "";
-      });
     };
 
     const setupAndApply = () => {
@@ -382,15 +378,8 @@ function useHeroScrollController(
             fadeOnlyNodes.forEach((node) => {
               node.style.transformOrigin = "top left";
               node.style.transform = `scaleY(${(1 / visualScaleY).toFixed(5)})`;
-              if (node.dataset.gameFadeOnly !== "publisher") {
-                node.style.opacity = String(1 - progress);
-              }
+              node.style.opacity = String(1 - progress);
               node.style.pointerEvents = progress >= 1 ? "none" : "auto";
-            });
-
-            const pubTexts = hero.querySelectorAll<HTMLElement>(".hero-publishers .hero-publisher-text");
-            pubTexts.forEach((t) => {
-              t.style.opacity = String(1 - progress);
             });
           });
         };

@@ -332,17 +332,10 @@
 .morphing-game-hero[data-hero-morph-driver="css"] [data-game-fade-only] {
   transform-origin: top left;
   transform: scaleY(calc(1 / var(--hero-visual-scale-y, 1)));
+  opacity: calc(1 - var(--hero-morph-progress, 0));
   animation: hero-fade-only-inert 1s linear both;
   animation-timeline: scroll(root block);
   animation-range: var(--hero-morph-start, 0px) var(--hero-morph-end, 1px);
-}
-
-.morphing-game-hero[data-hero-morph-driver="css"] [data-game-fade-only]:not([data-game-fade-only="publisher"]) {
-  opacity: calc(1 - var(--hero-morph-progress, 0));
-}
-
-.morphing-game-hero[data-hero-morph-driver="css"] [data-game-fade-only="publisher"] .hero-publisher-text {
-  opacity: calc(1 - var(--hero-morph-progress, 0));
 }
 
 /* Narrow screens: banner artwork gets its own full-width row so the title
