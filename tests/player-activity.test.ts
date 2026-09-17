@@ -221,7 +221,7 @@ describe("Bun ingestion scheduling and player rollups", () => {
       return successfulSteamResponse();
     }) as unknown as typeof fetch;
 
-    startIngestionScheduler({
+    const startupRun = startIngestionScheduler({
       db,
       anchorTime,
       customFetch,
@@ -234,7 +234,7 @@ describe("Bun ingestion scheduling and player rollups", () => {
     expect(second.reason).toBe("run_in_progress");
 
     release?.();
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await startupRun;
     const observation = await db
       .prepare("SELECT current_players FROM observations WHERE appid = ?")
       .bind(730)
@@ -325,7 +325,7 @@ describe("Bun ingestion scheduling and player rollups", () => {
     const anchorTime = new Date("2026-09-05T03:10:00.000Z");
     await setDailyCheckpoint(db, "2026-09-04");
     await db
-      .prepare("INSERT INTO apps (appid, name, slug, is_eligible, is_playable) VALUES (?, ?, ?, 0, 0)")
+      .prepare("INSERT INTO apps (appid, name, slug, is_eligible, is_playable) VALUES (?, ?, ?, 1, 1)")
       .bind(730, "Counter-Strike 2", "counter-strike-2")
       .run();
     await seedDueGame(db, 730, anchorTime.toISOString());
@@ -357,9 +357,9 @@ describe("Bun ingestion scheduling and player rollups", () => {
     expect(result.status).toBe("completed");
     expect(result.tick?.attempted).toBe(1);
     expect(result.reviewCollection?.attemptedGames).toBe(1);
-    expect(result.reviewCollection?.reviewRequests).toBe(2);
-    expect(result.reviewCollection?.newsHubRequests).toBe(1);
-    expect(result.criticCollection?.games).toBe(0);
+    expect(result.reviewCollection?.reviewRequests).toBe(1);
+    expect(result.reviewCollection?.newsHubRequests).toBe(0);
+    expect(result.criticCollection?.games).toBe(1);
     expect(await db.prepare("SELECT COUNT(*) AS count FROM review_summary_snapshots").first<number>("count")).toBe(1);
     expect(await db.prepare("SELECT next_due_at FROM tracked_games WHERE appid = 730").first<string>("next_due_at")).toBe(
       calculateNextDueAt(anchorTime, "fast", 730).toISOString(),

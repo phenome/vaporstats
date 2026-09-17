@@ -334,11 +334,11 @@ export function runIngestionTick(options: IngestionTickOptions): Promise<Ingesti
     }
   })();
 
-  activeIngestionTick = run;
-  void run.finally(() => {
-    if (activeIngestionTick === run) activeIngestionTick = null;
+  const guardedRun = run.finally(() => {
+    if (activeIngestionTick === guardedRun) activeIngestionTick = null;
   });
-  return run;
+  activeIngestionTick = guardedRun;
+  return guardedRun;
 }
 
 /** Registers the UTC fifteen-minute scheduler and optionally resumes work immediately. */
@@ -352,15 +352,16 @@ export function startIngestionScheduler(options: IngestionSchedulerOptions): unk
       error: boundedError(error),
     }));
   }
+  let startupRun: Promise<IngestionTickResult> | null = null;
   if (options.runImmediately) {
-    void (async () => {
+    startupRun = (async () => {
       try {
         await reRankTrackedTiers(options.db);
       } catch (err) {
         console.error("Startup re-rank error:", err);
       }
-      await runIngestionTick(options);
+      return runIngestionTick(options);
     })();
   }
-  return cron;
+  return startupRun ?? cron;
 }
