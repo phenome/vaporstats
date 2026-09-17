@@ -126,8 +126,11 @@ function logCompletion(result: IngestionTickResult): void {
       newsHubRequests: result.reviewCollection.newsHubRequests,
       persistedGames: result.reviewCollection.persistedGames,
       ordinaryFailures: result.reviewCollection.ordinaryFailures,
+      insufficientEvidence: result.reviewCollection.insufficientEvidence,
       rateLimited: result.reviewCollection.rateLimited,
       deferredGames: result.reviewCollection.deferredGames,
+      dueRemaining: result.reviewCollection.dueRemaining,
+      oldestDueAt: result.reviewCollection.oldestDueAt,
     },
     criticCollection: result.criticCollection && {
       requests: result.criticCollection.requests,

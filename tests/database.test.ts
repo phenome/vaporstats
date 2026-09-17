@@ -80,6 +80,7 @@ describe("Bun SQLite persistence", () => {
       "player_score_history",
       "player_score_state",
       "price_history",
+      "reception_collection_failures",
       "release_facts",
       "review_buckets",
       "review_sources",
@@ -271,7 +272,7 @@ describe("Bun SQLite persistence", () => {
   });
 
   test("adopts the legacy ledger without replaying applied SQL or losing rows", async () => {
-    const legacy = createLegacyDatabase(migrationNames.length - 1);
+    const legacy = createLegacyDatabase(migrationNames.length - 2);
     legacy
       .query("INSERT INTO apps (appid, name, slug) VALUES (?, ?, ?)")
       .run(11, "Adopted Row", "adopted-row");

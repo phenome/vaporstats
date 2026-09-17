@@ -22,6 +22,7 @@ const expectedTables = [
   "review_sources",
   "review_buckets",
   "review_summary_snapshots",
+  "reception_collection_failures",
   "app_facets",
   "app_facet_memberships",
   "player_score_history",
@@ -67,7 +68,7 @@ function verifyExistingRowsSurviveUpgrade(): void {
     legacy.exec(
       "CREATE TABLE schema_migrations (name TEXT PRIMARY KEY, applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)"
     );
-    const appliedCount = Math.max(1, journal.entries.length - 1);
+    const appliedCount = Math.max(1, journal.entries.length - 2);
     for (const entry of journal.entries.slice(0, appliedCount)) {
       const migrationName = entry.tag + ".sql";
       legacy.exec(readFileSync(join(migrationDirectory, migrationName), "utf8"));

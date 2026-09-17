@@ -81,6 +81,33 @@ export const checkpoints = sqliteTable("checkpoints", {
   updatedAt: text("updated_at").notNull().default(currentTimestamp),
 });
 
+export const receptionCollectionFailures = sqliteTable(
+  "reception_collection_failures",
+  {
+    appid: integer("appid")
+      .primaryKey()
+      .references(() => apps.appid, { onDelete: "cascade" }),
+    firstFailedAt: text("first_failed_at").notNull(),
+    lastFailedAt: text("last_failed_at").notNull(),
+    failureCount: integer("failure_count").notNull().default(1),
+    failureCategory: text("failure_category").notNull(),
+  },
+  (table) => [
+    check(
+      "reception_collection_failures_count_check",
+      sql`typeof(${table.failureCount}) = 'integer' AND ${table.failureCount} > 0`,
+    ),
+    check(
+      "reception_collection_failures_category_check",
+      sql`${table.failureCategory} IN ('steam_summary', 'steam_histogram', 'steam_events', 'score_calculation', 'persistence')`,
+    ),
+    index("idx_reception_collection_failures_order").on(
+      desc(table.failureCount),
+      table.firstFailedAt,
+    ),
+  ],
+);
+
 export const observations = sqliteTable(
   "observations",
   {

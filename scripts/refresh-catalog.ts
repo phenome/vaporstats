@@ -2,6 +2,7 @@ import { closeDb, getDb } from "../src/lib/db";
 import {
   queueCatalogRefresh,
   refreshCatalogBatch,
+  runBoundedCatalogImport,
 } from "../workers/catalog-seed";
 
 const USAGE = "Usage: bun scripts/refresh-catalog.ts (--all | --appid N [--appid N ...]) [--run-one-batch]";
@@ -62,15 +63,42 @@ async function main(): Promise<void> {
 
   const db = await getDb();
   try {
-    const queued = await queueCatalogRefresh(
-      db,
-      options.all ? {} : { appIds: options.appIds },
-    );
+    let admitted = 0;
+    let unresolved: number[] = [];
+    let refreshAppIds = options.appIds;
+    if (!options.all) {
+      const placeholders = options.appIds.map(() => "?").join(", ");
+      const existing = await db
+        .prepare(`SELECT appid FROM apps WHERE appid IN (${placeholders})`)
+        .bind(...options.appIds)
+        .all<{ appid: number }>();
+      const existingIds = new Set((existing.results ?? []).map((row) => row.appid));
+      const missingIds = options.appIds.filter((appid) => !existingIds.has(appid));
+      if (missingIds.length > 0) {
+        const admission = await runBoundedCatalogImport(db, {
+          appIds: missingIds,
+          limit: missingIds.length,
+          checkpointKey: "targeted_catalog_admission",
+        });
+        admitted = admission.importedAppIds.length;
+        const importedIds = new Set(admission.importedAppIds);
+        unresolved = missingIds.filter((appid) => !importedIds.has(appid));
+      }
+      refreshAppIds = options.appIds.filter((appid) => existingIds.has(appid));
+    }
+    const queued = !options.all && refreshAppIds.length === 0
+      ? { queued: 0, alreadyQueued: false }
+      : await queueCatalogRefresh(
+          db,
+          options.all ? {} : { appIds: refreshAppIds },
+        );
     const output: {
       selection: "all" | "appid";
       selectedCount: number | null;
       queued: number;
       alreadyQueued: boolean;
+      admitted: number;
+      unresolved: number[];
       batch?: {
         active: boolean;
         attempted: number;
@@ -84,6 +112,8 @@ async function main(): Promise<void> {
       selectedCount: options.all ? null : options.appIds.length,
       queued: queued.queued,
       alreadyQueued: queued.alreadyQueued,
+      admitted,
+      unresolved,
     };
 
     if (options.runOneBatch) {

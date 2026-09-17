@@ -20,6 +20,8 @@ _Avoid_: Public API, developer API
 
 **Steam listing**: A game has a public Steam store page. A listing is distinct from wishlist availability, Available on Steam, and any release milestone.
 
+**Catalog admission**: The creation of a durable Steam application identity in VaporStats. Admission makes an application eligible for relevant collection workflows; it does not assert that player, price, or reception observations are present or fresh.
+
 **Wishlist availability**: Steam permits users to add a game to their wishlist. This is distinct from a listing, Available on Steam, and any release milestone.
 
 **Available on Steam**: A sourced Steam availability event. Use original_steam_release_date when Steam supplies it; otherwise retain steam_release_date as a Steam-specific date without calling it first-ever. This is distinct from a listing, wishlist availability, and the Main Released date.
@@ -118,6 +120,24 @@ An estimate for an earlier period calculated later from subsequently available e
 
 **Review Population**:
 The set of Steam reviews represented by an aggregate, distinguished by source, language, purchase origin, and filtering. Unknown filtering does not establish compatibility with another population.
+
+**Reception collection eligibility**:
+Whether the next scheduled collection should consider a catalog entity, based on current activity signals and freshness. Several signals make one entity eligible; they do not create separate jobs.
+
+**Reception scoring eligibility**:
+Whether an entity's own compatible Steam review population supports calculating a Current Player Score. At least 50 lifetime reviews are required; this is independent of player tracking and ranking eligibility.
+
+**Unassessed reception**:
+No successful Steam review summary has been collected for the entity.
+
+**Insufficient reception evidence**:
+A compatible Steam review summary was collected, but fewer than 50 lifetime reviews exist. The Current Player Score is undefined; this is successful collection, not a provider failure.
+
+**Reception collection failure**:
+An attempted provider request, score calculation, or persistence operation failed before reception collection completed successfully.
+
+**Reception-active game**:
+A scoring-eligible game prioritized for fresher collection because of recent release, lifecycle, Major Update, most-played-chart, or Steam review activity.
 
 **Score Evidence Strength**:
 The support available for a Current Player Score, including its review sample and historical context. It is distinct from the score itself and from leaderboard eligibility; a score of 100 does not imply strong evidence or certainty.
