@@ -154,10 +154,14 @@ export async function getPublisherGames(
 }
 
 /**
- * Lists all distinct publishers and developers across eligible playable games.
- * Returns sorted summaries with game counts and links.
+ * Lists distinct publishers and developers across eligible playable games.
+ * Returns the requested page of sorted summaries and the total number of entities.
  */
-export async function listPublishers(db: AppDatabase): Promise<PublisherSummary[]> {
+export async function listPublishers(
+  db: AppDatabase,
+  page: number,
+  pageSize: number
+): Promise<{ publishers: PublisherSummary[]; total: number }> {
   const result = await db
     .prepare(
       "SELECT entity_name, MAX(is_publisher) AS is_publisher, MAX(is_developer) AS is_developer, " +
@@ -189,7 +193,11 @@ export async function listPublishers(db: AppDatabase): Promise<PublisherSummary[
     });
   }
 
-  return Array.from(map.values()).sort(
+  const sorted = Array.from(map.values()).sort(
     (a, b) => b.gameCount - a.gameCount || a.name.localeCompare(b.name)
   );
+  return {
+    publishers: sorted.slice((page - 1) * pageSize, page * pageSize),
+    total: sorted.length,
+  };
 }

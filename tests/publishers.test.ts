@@ -179,10 +179,47 @@ describe("catalog publisher queries", () => {
     const unknown = await getPublisherGames(db, "nonexistent-studio");
     expect(unknown).toBeNull();
 
-    const all = await listPublishers(db);
-    expect(all.length).toBe(4);
-    expect(all[0].name).toBe("Valve");
-    expect(all[0].gameCount).toBe(2);
+    const { publishers, total } = await listPublishers(db, 1, 2);
+    expect(total).toBe(4);
+    expect(publishers.map(({ name, gameCount, path }) => ({ name, gameCount, path }))).toEqual([
+      { name: "Valve", gameCount: 2, path: "/publisher/valve" },
+      { name: "Bandai Namco Entertainment", gameCount: 1, path: "/publisher/bandai-namco-entertainment" },
+    ]);
+    const secondPage = await listPublishers(db, 2, 2);
+    expect(secondPage.total).toBe(4);
+    expect(secondPage.publishers.map(({ name }) => name)).toEqual(["CD PROJEKT RED", "FromSoftware Inc."]);
+  });
+
+  test("merges slug collisions before counting and paging", async () => {
+    const sqlite = new Database(":memory:");
+    applyMigrations(sqlite);
+    const collisionDb = createSqliteAppAdapter(sqlite);
+    for (const [appid, publisher] of [[1, "Valve"], [2, "Valve!"], [3, "Other"]] as const) {
+      await upsertApp(collisionDb, {
+        appid,
+        name: `Game ${appid}`,
+        developer: publisher,
+        publisher,
+        is_eligible: true,
+        is_playable: true,
+      });
+    }
+
+    const first = await listPublishers(collisionDb, 1, 1);
+    expect(first.total).toBe(2);
+    expect(first.publishers).toEqual([{
+      name: "Valve",
+      slug: "valve",
+      path: "/publisher/valve",
+      isPublisher: true,
+      isDeveloper: true,
+      gameCount: 2,
+    }]);
+    const second = await listPublishers(collisionDb, 2, 1);
+    expect(second.total).toBe(2);
+    expect(second.publishers.map(({ name, gameCount, path }) => ({ name, gameCount, path }))).toEqual([
+      { name: "Other", gameCount: 1, path: "/publisher/other" },
+    ]);
   });
 });
 

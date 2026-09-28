@@ -1,7 +1,10 @@
 import React from "react";
+import { Link } from "@tanstack/react-router";
 import type { PublisherDetail, PublisherSummary, PublisherGameItem } from "../lib/publishers";
 import { getCanonicalGamePath } from "../lib/slug";
 import { AppLink } from "./app-link";
+import { buttonVariants } from "./ui/button";
+import { Pagination, PaginationContent, PaginationItem } from "./ui/pagination";
 
 export function PublisherPageView({ publisher }: { publisher: PublisherDetail }) {
   const roleBadges = [];
@@ -101,7 +104,10 @@ export function PublisherPageView({ publisher }: { publisher: PublisherDetail })
   );
 }
 
-export function PublishersIndexView({ publishers }: { publishers: PublisherSummary[] }) {
+export function PublishersIndexView({ publishers, total, page }: { publishers: PublisherSummary[]; total: number; page: number }) {
+  const totalPages = Math.ceil(total / 50);
+  const firstPage = Math.max(1, Math.min(page - 2, totalPages - 4));
+  const pages = Array.from({ length: Math.min(5, totalPages) }, (_, index) => firstPage + index);
   return (
     <div className="max-w-7xl mx-auto px-4 py-8 space-y-6">
       <div className="border border-zinc-800 bg-zinc-950 p-6 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
@@ -122,16 +128,22 @@ export function PublishersIndexView({ publishers }: { publishers: PublisherSumma
 
         <div className="text-xs font-mono text-zinc-400 bg-zinc-900 border border-zinc-800 px-3 py-2 flex items-center gap-2">
           <span>ENTITIES:</span>
-          <span className="text-orange-400 font-bold tabular-nums">{publishers.length}</span>
+          <span className="text-orange-400 font-bold tabular-nums">{total}</span>
         </div>
       </div>
 
       {publishers.length === 0 ? (
         <div className="border border-zinc-800 bg-zinc-950 p-12 text-center space-y-3">
-          <div className="text-sm font-mono text-zinc-400">No publishers or developers indexed yet.</div>
-          <p className="text-xs text-zinc-600 font-mono">
-            Entities populate as catalog games are imported.
-          </p>
+          <div className="text-sm font-mono text-zinc-400">
+            {total === 0 ? "No publishers or developers indexed yet." : `No publishers or developers on page ${page}.`}
+          </div>
+          {total === 0 ? (
+            <p className="text-xs text-zinc-600 font-mono">Entities populate as catalog games are imported.</p>
+          ) : (
+            <Link to="/publishers" search={{ page: 1 }} preload="intent" className={buttonVariants({ variant: "outline", size: "sm" })}>
+              Go to first page
+            </Link>
+          )}
         </div>
       ) : (
         <div className="border border-zinc-800 bg-zinc-950 overflow-x-auto">
@@ -186,6 +198,40 @@ export function PublishersIndexView({ publishers }: { publishers: PublisherSumma
             </tbody>
           </table>
         </div>
+      )}
+      {totalPages > 1 && page <= totalPages && (
+        <Pagination>
+          <PaginationContent>
+            {page > 1 && (
+              <PaginationItem>
+                <Link to="/publishers" search={{ page: page - 1 }} preload="intent" aria-label="Go to previous page" className={buttonVariants({ variant: "ghost", size: "sm" })}>
+                  Previous
+                </Link>
+              </PaginationItem>
+            )}
+            {pages.map((pageNumber) => (
+              <PaginationItem key={pageNumber}>
+                <Link
+                  to="/publishers"
+                  search={{ page: pageNumber }}
+                  preload="intent"
+                  aria-label={`Go to page ${pageNumber}`}
+                  aria-current={pageNumber === page ? "page" : undefined}
+                  className={buttonVariants({ variant: pageNumber === page ? "outline" : "ghost", size: "icon" })}
+                >
+                  {pageNumber}
+                </Link>
+              </PaginationItem>
+            ))}
+            {page < totalPages && (
+              <PaginationItem>
+                <Link to="/publishers" search={{ page: page + 1 }} preload="intent" aria-label="Go to next page" className={buttonVariants({ variant: "ghost", size: "sm" })}>
+                  Next
+                </Link>
+              </PaginationItem>
+            )}
+          </PaginationContent>
+        </Pagination>
       )}
     </div>
   );
