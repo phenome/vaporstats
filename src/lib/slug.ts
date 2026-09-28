@@ -32,32 +32,45 @@ export function getCanonicalGamePath(appid: number, name: string): string {
 }
 
 /**
- * Slug generation and URL canonicalization for publishers and developers.
- * Format: /publisher/{id-slug} or /publisher/{slug}
+ * The ASCII slug is retained solely to resolve old publisher URLs. It is
+ * lossy, so a matching slug must never establish a creator identity.
  */
 export function toPublisherSlug(name: string): string {
   const normalized = toSlug(name);
   return normalized === "game" ? "publisher" : normalized;
 }
 
-export function parsePublisherSlug(param: string): { id?: number; slug: string } | null {
+export function parsePublisherSlug(param: string): { id?: number; slug: string; exactName?: string } | null {
   if (!param) return null;
-  const trimmed = param.trim();
-  if (!trimmed) return null;
-
-  const match = trimmed.match(/^(\d+)(?:-(.*))?$/);
-  if (match) {
-    const id = parseInt(match[1], 10);
-    const slug = match[2] ?? "";
-    return { id, slug };
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(param).trim();
+  } catch {
+    return null;
   }
-  return { slug: trimmed };
+  if (!decoded) return null;
+
+  if (decoded.startsWith("~")) {
+    const exactName = decoded.slice(1);
+    return exactName ? { slug: "", exactName } : null;
+  }
+  const match = decoded.match(/^(\d+)(?:-(.*))?$/);
+  if (match) {
+    const id = Number(match[1]);
+    return Number.isSafeInteger(id) && id > 0 ? { id, slug: match[2] ?? "" } : null;
+  }
+  return { slug: decoded };
+}
+
+export function toPublisherUnicodeSlug(name: string): string {
+  return name.normalize("NFKC").toLowerCase()
+    .replace(/[^\p{L}\p{M}\p{N}]+/gu, "-")
+    .replace(/^-+|-+$/g, "") || "publisher";
 }
 
 export function getCanonicalPublisherPath(name: string, id?: number): string {
-  const slug = toPublisherSlug(name);
-  if (typeof id === "number" && Number.isFinite(id) && id > 0) {
-    return `/publisher/${id}-${slug}`;
+  if (typeof id === "number" && Number.isSafeInteger(id) && id > 0) {
+    return `/publisher/${id}-${encodeURIComponent(toPublisherUnicodeSlug(name))}`;
   }
-  return `/publisher/${slug}`;
+  return `/publisher/~${encodeURIComponent(name.trim())}`;
 }

@@ -163,7 +163,7 @@ export function PublishersIndexView({ publishers, total, page }: { publishers: P
                 if (pub.isPublisher) roles.push("Publisher");
 
                 return (
-                  <tr key={pub.slug} className="hover:bg-zinc-900/40 transition-colors group">
+                  <tr key={pub.id} className="hover:bg-zinc-900/40 transition-colors group">
                     <td className="py-3 px-4 font-medium text-zinc-200 group-hover:text-orange-400 transition-colors">
                       <AppLink href={pub.path} className="hover:underline">
                         {pub.name}

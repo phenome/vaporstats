@@ -3,7 +3,7 @@ import { createFileRoute, redirect } from "@tanstack/react-router";
 export const Route = createFileRoute("/developer/$developer")({
   loader: ({ params }) => {
     throw redirect({
-      href: `/publisher/${params.developer}`,
+      href: `/publisher/~${encodeURIComponent(params.developer)}`,
       statusCode: 301,
     });
   },

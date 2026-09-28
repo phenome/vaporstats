@@ -1,47 +1,58 @@
 import React from "react";
 import { renderToString } from "react-dom/server";
-import { createFileRoute, notFound } from "@tanstack/react-router";
+import { createFileRoute, notFound, redirect, useLocation } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
 import { createServerFn } from "@tanstack/react-start";
-import { getPublisherGames } from "../lib/publishers";
+import { getPublisherGames, type PublisherDetail } from "../lib/publishers";
 import { getDb } from "../lib/db-access";
 import type { AppDatabase } from "../lib/db";
-import { parsePublisherSlug, getCanonicalPublisherPath } from "../lib/slug";
 import { CACHE_POLICIES, getEntityCacheHeaders } from "../lib/cache";
 import { PublisherPageView } from "../components/publisher-page";
 import { AppLink } from "../components/app-link";
 import { RouteDataError, RouteLoading } from "../components/route-state";
 const getPublisher = createServerFn({ method: "GET" })
-  .validator((data: { slug: string }) => {
-    if (!data || typeof data.slug !== "string") {
-      throw new Error("Invalid publisher slug");
+  .validator((data: { param: string }) => {
+    if (!data || typeof data.param !== "string") {
+      throw new Error("Invalid publisher path");
     }
     return data;
   })
   .handler(async ({ data }) => {
     const db = await getDb();
-    return getPublisherGames(db, data.slug);
+    return getPublisherGames(db, data.param);
   });
 
-export function publisherQueryOptions(slug: string) {
+export function publisherQueryOptions(param: string) {
   return {
-    queryKey: ["publisher", slug],
-    queryFn: () => getPublisher({ data: { slug } }),
+    queryKey: ["publisher", param],
+    queryFn: () => getPublisher({ data: { param } }),
   };
 }
 
-export const Route = createFileRoute("/publisher/$publisher")({
-  headers: () => getEntityCacheHeaders(),
-  loader: ({ params, context }) => {
-    const parsed = parsePublisherSlug(params.publisher);
-    if (!parsed || !parsed.slug) {
-      throw notFound();
-    }
+const publisherPathPattern = /^\/publisher\/([^/]+)\/?$/;
 
-    void context.queryClient.prefetchQuery(publisherQueryOptions(parsed.slug));
+export const Route = createFileRoute("/publisher/$publisher")({
+  headers: ({ match }) => match.status === "notFound"
+    ? { "Cache-Control": CACHE_POLICIES.noStore }
+    : getEntityCacheHeaders(),
+  loader: async ({ location, context, preload }) => {
+    const requestPath = location.pathname;
+    const param = requestPath.match(publisherPathPattern)?.[1];
+    if (!param) throw notFound();
+    const query = publisherQueryOptions(param);
+    if (preload) {
+      void context.queryClient.prefetchQuery(query);
+      return;
+    }
+    const publisher = await context.queryClient.ensureQueryData(query);
+    if (!publisher) throw notFound();
+    if (new URL(requestPath, "http://localhost").pathname !== publisher.canonicalPath) {
+      throw redirect({ href: publisher.canonicalPath, statusCode: 301 });
+    }
     return {
-      slug: parsed.slug,
-      requestPath: "/publisher/" + params.publisher,
+      param,
+      publisher,
+      updatedAt: context.queryClient.getQueryState(query.queryKey)?.dataUpdatedAt,
     };
   },
   component: PublisherRouteComponent,
@@ -49,17 +60,26 @@ export const Route = createFileRoute("/publisher/$publisher")({
 });
 
 function PublisherRouteComponent() {
-  const { slug, requestPath } = Route.useLoaderData();
-  const { data: publisher, isLoading, isError } = useQuery(publisherQueryOptions(slug));
+  const loaded = Route.useLoaderData() as {
+    param: string;
+    publisher: PublisherDetail;
+    updatedAt: number | undefined;
+  } | undefined;
+  const requestPath = useLocation({ select: (location) => location.pathname });
+  const encodedRequestPath = new URL(requestPath, "http://localhost").pathname;
+  const param = requestPath.match(publisherPathPattern)?.[1] ?? "";
+  const { data: publisher, isLoading, isError } = useQuery({
+    ...publisherQueryOptions(param),
+    initialData: loaded?.param === param ? loaded.publisher : undefined,
+    initialDataUpdatedAt: loaded?.param === param ? loaded.updatedAt : undefined,
+  });
   const navigate = Route.useNavigate();
 
   React.useEffect(() => {
-    if (!publisher) return;
-    const canonicalPath = getCanonicalPublisherPath(publisher.name);
-    if (requestPath !== canonicalPath) {
-      void navigate({ to: canonicalPath, replace: true });
+    if (publisher && encodedRequestPath !== publisher.canonicalPath) {
+      void navigate({ to: publisher.canonicalPath, replace: true });
     }
-  }, [navigate, publisher, requestPath]);
+  }, [navigate, publisher, encodedRequestPath]);
 
   if (isLoading) {
     return <RouteLoading label="Loading publisher data..." />;
@@ -71,8 +91,7 @@ function PublisherRouteComponent() {
     return <PublisherNotFoundComponent />;
   }
 
-  const canonicalPath = getCanonicalPublisherPath(publisher.name);
-  if (requestPath !== canonicalPath) {
+  if (encodedRequestPath !== publisher.canonicalPath) {
     return <RouteLoading label="Redirecting to the canonical publisher page..." />;
   }
 
@@ -132,17 +151,7 @@ export async function handlePublisherHttpRequest(
   }
 
   const rawParam = match[1];
-  const parsed = parsePublisherSlug(rawParam);
-
-  if (!parsed || !parsed.slug) {
-    const notFoundHtml = renderToString(<PublisherNotFoundComponent />);
-    return new Response(wrapHtml("Publisher Not Found", notFoundHtml), {
-      status: 404,
-      headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": CACHE_POLICIES.noStore },
-    });
-  }
-
-  const publisher = await getPublisherGames(db, parsed.slug);
+  const publisher = await getPublisherGames(db, rawParam);
   if (!publisher) {
     const notFoundHtml = renderToString(<PublisherNotFoundComponent />);
     return new Response(wrapHtml("Publisher Not Found", notFoundHtml), {
@@ -151,7 +160,7 @@ export async function handlePublisherHttpRequest(
     });
   }
 
-  const canonicalPath = getCanonicalPublisherPath(publisher.name);
+  const canonicalPath = publisher.canonicalPath;
   if (url.pathname !== canonicalPath) {
     return new Response(null, {
       status: 301,

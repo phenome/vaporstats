@@ -1,7 +1,7 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
 import { createServerFn } from "@tanstack/react-start";
-import { listPublishers } from "../lib/publishers";
+import { listPublishers, type PublisherSummary } from "../lib/publishers";
 import { getDb } from "../lib/db-access";
 import { getPageCacheHeaders } from "../lib/cache";
 import { PublishersIndexView } from "../components/publisher-page";
@@ -37,15 +37,28 @@ export const Route = createFileRoute("/publishers/")({
   headers: () => getPageCacheHeaders(),
   validateSearch: (search: Record<string, unknown>) => ({ page: validPage(search.page) }),
   loaderDeps: ({ search: { page } }) => ({ page }),
-  loader: ({ deps: { page }, context }) => {
-    void context.queryClient.prefetchQuery(publishersQueryOptions(page));
+  loader: async ({ deps: { page }, context, preload }) => {
+    const query = publishersQueryOptions(page);
+    if (preload) {
+      void context.queryClient.prefetchQuery(query);
+      return;
+    }
+    const data = await context.queryClient.ensureQueryData(query);
+    return { page, data, updatedAt: context.queryClient.getQueryState(query.queryKey)?.dataUpdatedAt };
   },
   component: PublishersRouteComponent,
 });
 
 function PublishersRouteComponent() {
   const { page } = Route.useSearch();
-  const { data, isLoading, isError } = useQuery(publishersQueryOptions(page));
+  const loaded = Route.useLoaderData() as
+    | { page: number; data: { publishers: PublisherSummary[]; total: number }; updatedAt?: number }
+    | undefined;
+  const { data, isLoading, isError } = useQuery({
+    ...publishersQueryOptions(page),
+    initialData: loaded?.page === page ? loaded.data : undefined,
+    initialDataUpdatedAt: loaded?.page === page ? loaded.updatedAt : undefined,
+  });
 
   if (isLoading) {
     return <RouteLoading label="Loading publishers..." />;
