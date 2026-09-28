@@ -55,6 +55,7 @@ describe("Bun SQLite persistence", () => {
 
     expect(tables.results.map((row) => row.name)).toEqual([
       DRIZZLE_MIGRATION_TABLE,
+      "app_creators",
       "app_facet_memberships",
       "app_facets",
       "app_prices",
@@ -63,6 +64,8 @@ describe("Bun SQLite persistence", () => {
       "app_release_plans",
       "apps",
       "checkpoints",
+      "creator_aliases",
+      "creators",
       "critic_records",
       "media_article_extractions",
       "media_discovery_attempts",
@@ -88,6 +91,10 @@ describe("Bun SQLite persistence", () => {
       "steam_events",
       "tracked_games",
     ]);
+    const emptyIdentities = await db.prepare(
+      "SELECT (SELECT COUNT(*) FROM creators) AS creators, (SELECT COUNT(*) FROM creator_aliases) AS aliases, (SELECT COUNT(*) FROM app_creators) AS links",
+    ).first<{ creators: number; aliases: number; links: number }>();
+    expect(emptyIdentities).toEqual({ creators: 0, aliases: 0, links: 0 });
     const appColumns = await db.prepare("PRAGMA table_info(apps)").all<{ name: string }>();
     expect(appColumns.results.map((column) => column.name)).toEqual(
       expect.arrayContaining([
@@ -131,6 +138,78 @@ describe("Bun SQLite persistence", () => {
     expect(billingConfirmationColumn?.notnull).toBe(0);
     expect(migrations.results).toHaveLength(migrationNames.length);
   });
+
+  test("backfills creator identities from retained app names without rewriting apps", async () => {
+    const identityMigrationIndex = migrationJournal.entries.findIndex(
+      (entry) => entry.tag === "0017_dry_gamma_corps",
+    );
+    if (identityMigrationIndex < 1) throw new Error("Creator identity migration baseline is missing");
+    const legacy = createLegacyDatabase(identityMigrationIndex);
+    const insert = legacy.query(
+      "INSERT INTO apps (appid, name, slug, developer, publisher, is_eligible, is_playable, parent_appid, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    );
+    const apps = [
+      [10, "Street Fighter 6", "\u00a0CAPCOM Co., Ltd.\u00a0", "CAPCOM Co., Ltd.", 1, 1, null],
+      [11, "Mega Man Legacy Collection 2", "CAPCOM CO., LTD", " CAPCOM CO., LTD ", 1, 1, null],
+      [12, "Mega Man 11", "CAPCOM CO., LTD.", "CAPCOM CO., LTD.", 1, 1, null],
+      [13, "Weebles vs Grebals", "GD Studio", "GD Studio", 1, 1, null],
+      [14, "Whisper of the House", "元气弹工作室(GD Studio)", "元气弹工作室(GD Studio)", 1, 1, null],
+      [15, "Unlisted DLC", "  未知出版  ", "元气弹工作室(GD Studio)", 0, 0, 14],
+      [16, "No creator", " \t\n\u00a0 ", null, 1, 1, null],
+      [17, "First spelling", "A B", null, 1, 1, null],
+      [18, "Second spelling", "A-B", null, 1, 1, null],
+    ] as const;
+    for (const [appid, name, developer, publisher, eligible, playable, parent] of apps) {
+      insert.run(appid, name, `identity-${appid}`, developer, publisher, eligible, playable, parent, "2025-01-01", "2025-02-01");
+    }
+    const originals = legacy.query("SELECT * FROM apps WHERE appid BETWEEN 10 AND 18 ORDER BY appid").all();
+    legacy.close(true);
+
+    const db = await getDb();
+    const retained = await db.prepare("SELECT * FROM apps WHERE appid BETWEEN 10 AND 18 ORDER BY appid").all();
+    expect(retained.results).toEqual(originals);
+
+    const aliases = await db.prepare(
+      "SELECT a.name, a.creator_id AS id, c.display_name, c.steam_group_id FROM creator_aliases a JOIN creators c ON c.id = a.creator_id ORDER BY a.name",
+    ).all<{ name: string; id: number; display_name: string; steam_group_id: number | null }>();
+    const capcom = aliases.results.filter((row) => row.steam_group_id === 33273264);
+    expect(capcom.map((row) => row.name)).toEqual([
+      "CAPCOM CO., LTD", "CAPCOM CO., LTD.", "CAPCOM Co., Ltd.",
+    ]);
+    expect(new Set(capcom.map((row) => row.id)).size).toBe(1);
+    expect(capcom.map((row) => row.display_name)).toEqual(Array(3).fill("CAPCOM Co., Ltd."));
+    const distinct = aliases.results.filter((row) => row.steam_group_id === null);
+    expect(distinct.map((row) => [row.name, row.display_name])).toEqual([
+      ["A B", "A B"],
+      ["A-B", "A-B"],
+      ["GD Studio", "GD Studio"],
+      ["元气弹工作室(GD Studio)", "元气弹工作室(GD Studio)"],
+      ["未知出版", "未知出版"],
+    ]);
+    expect(new Set(distinct.map((row) => row.id)).size).toBe(5);
+    expect(await db.prepare("SELECT COUNT(*) AS count FROM creators").first<{ count: number }>()).toEqual({ count: 6 });
+
+    const links = await db.prepare(
+      "SELECT ac.appid, ac.role, ac.sort_order, c.display_name FROM app_creators ac JOIN creators c ON c.id = ac.creator_id ORDER BY ac.appid, ac.role",
+    ).all<{ appid: number; role: string; sort_order: number; display_name: string }>();
+    expect(links.results.map((row) => [row.appid, row.role, row.sort_order, row.display_name])).toEqual([
+      [10, "developer", 0, "CAPCOM Co., Ltd."],
+      [10, "publisher", 0, "CAPCOM Co., Ltd."],
+      [11, "developer", 0, "CAPCOM Co., Ltd."],
+      [11, "publisher", 0, "CAPCOM Co., Ltd."],
+      [12, "developer", 0, "CAPCOM Co., Ltd."],
+      [12, "publisher", 0, "CAPCOM Co., Ltd."],
+      [13, "developer", 0, "GD Studio"],
+      [13, "publisher", 0, "GD Studio"],
+      [14, "developer", 0, "元气弹工作室(GD Studio)"],
+      [14, "publisher", 0, "元气弹工作室(GD Studio)"],
+      [15, "developer", 0, "未知出版"],
+      [15, "publisher", 0, "元气弹工作室(GD Studio)"],
+      [17, "developer", 0, "A B"],
+      [18, "developer", 0, "A-B"],
+    ]);
+  });
+
   test("enforces game embedding identity, vector, and foreign-key constraints", async () => {
     const db = await getDb();
     await db

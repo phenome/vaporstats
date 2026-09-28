@@ -1,6 +1,7 @@
-import { Database } from "bun:sqlite";
+import { Database, type Statement } from "bun:sqlite";
 import { readFileSync, existsSync } from "node:fs";
 import { resolve } from "node:path";
+import { creatorSyncWrites } from "../src/lib/creator-identity";
 
 export interface BackfillOptions {
   d1SqlPath?: string;
@@ -165,6 +166,7 @@ export async function runD1Backfill(options: BackfillOptions = {}): Promise<Back
     // 1. Merge missing apps only (NEVER overwrite existing apps, preserving title info, dates, release facts)
     console.log("[Backfill] Checking apps...");
     const checkApp = targetDb.prepare("SELECT appid FROM apps WHERE appid = ?");
+    const creatorStatements = new Map<string, Statement>();
     const insertApp = targetDb.prepare(`
       INSERT INTO apps (
         appid, name, slug, type, is_eligible, is_playable, parent_appid,
@@ -200,6 +202,18 @@ export async function runD1Backfill(options: BackfillOptions = {}): Promise<Back
           app.updated_at
         );
         stats.appsInserted++;
+        for (const { sql, params } of creatorSyncWrites(
+          app.appid,
+          [app.developer ?? ""],
+          [app.publisher ?? ""],
+        )) {
+          let statement = creatorStatements.get(sql);
+          if (!statement) {
+            statement = targetDb.prepare(sql);
+            creatorStatements.set(sql, statement);
+          }
+          statement.run(...params);
+        }
       }
     }
 

@@ -74,6 +74,36 @@ export const apps = sqliteTable(
   ],
 );
 
+export const creators = sqliteTable("creators", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  displayName: text("display_name").notNull(),
+  steamGroupId: integer("steam_group_id").unique(),
+});
+
+export const creatorAliases = sqliteTable(
+  "creator_aliases",
+  {
+    name: text("name").primaryKey(),
+    creatorId: integer("creator_id").notNull().references(() => creators.id),
+  },
+  (table) => [index("idx_creator_aliases_creator").on(table.creatorId)],
+);
+
+export const appCreators = sqliteTable(
+  "app_creators",
+  {
+    appid: integer("appid").notNull().references(() => apps.appid, { onDelete: "cascade" }),
+    creatorId: integer("creator_id").notNull().references(() => creators.id),
+    role: text("role").notNull(),
+    sortOrder: integer("sort_order").notNull(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.appid, table.creatorId, table.role] }),
+    check("app_creators_role_check", sql`${table.role} IN ('developer', 'publisher')`),
+    index("idx_app_creators_creator_app").on(table.creatorId, table.appid),
+  ],
+);
+
 export const checkpoints = sqliteTable("checkpoints", {
   key: text("key").primaryKey(),
   value: text("value").notNull(),

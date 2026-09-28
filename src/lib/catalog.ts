@@ -2,6 +2,7 @@ import type { AppDatabase } from "./db";
 import { toSlug } from "./slug";
 import { normalizeMediaTag } from "./media-overview";
 import { getChildApp, type RelatedAppEntity } from "./related";
+import { creatorSyncWrites } from "./creator-identity";
 
 export type ReleaseDateSource =
   | "original_release_date"
@@ -316,7 +317,9 @@ export async function upsertApp(
     icon_hash?: string | null;
     icon_lqip?: string | null;
     developer?: string;
+    developers?: string[];
     publisher?: string;
+    publishers?: string[];
     metacritic_score?: number | null;
     metacritic_url?: string | null;
     metacritic_observed_at?: string | null;
@@ -349,8 +352,8 @@ export async function upsertApp(
   const headerLqip = app.header_lqip ?? null;
   const iconHash = app.icon_hash ?? null;
   const iconLqip = app.icon_lqip ?? null;
-  const developer = app.developer ?? "";
-  const publisher = app.publisher ?? "";
+  const developer = app.developer ?? app.developers?.[0] ?? "";
+  const publisher = app.publisher ?? app.publishers?.[0] ?? "";
   const score =
     typeof app.metacritic_score === "number" && Number.isInteger(app.metacritic_score) &&
     app.metacritic_score >= 0 && app.metacritic_score <= 100
@@ -449,29 +452,26 @@ export async function upsertApp(
       metacriticObservedAt
     );
 
-  await stmt.run();
-
+  const statements = [stmt];
+  for (const { sql, params } of creatorSyncWrites(
+    app.appid,
+    Array.isArray(app.developers) ? app.developers : [developer],
+    Array.isArray(app.publishers) ? app.publishers : [publisher],
+  )) {
+    statements.push(db.prepare(sql).bind(...params));
+  }
   if (releaseStatus === "upcoming" && releaseDate?.trim()) {
     const expectedDate = releaseDate.trim();
-    const previousPlan = await db
-      .prepare(
-        `SELECT expected_date FROM app_release_plans
-         WHERE appid = ?
-         ORDER BY id DESC
-         LIMIT 1`
-      )
-      .bind(app.appid)
-      .first<{ expected_date: string }>();
-    if (previousPlan?.expected_date !== expectedDate) {
-      await db
-        .prepare(
-          `INSERT INTO app_release_plans (appid, expected_date, observed_at)
-           VALUES (?, ?, CURRENT_TIMESTAMP)`
-        )
-        .bind(app.appid, expectedDate)
-        .run();
-    }
+    statements.push(
+      db.prepare(
+        `INSERT INTO app_release_plans (appid, expected_date, observed_at)
+         SELECT ?, ?, CURRENT_TIMESTAMP
+         WHERE (SELECT expected_date FROM app_release_plans
+                WHERE appid = ? ORDER BY id DESC LIMIT 1) IS NOT ?`
+      ).bind(app.appid, expectedDate, app.appid, expectedDate)
+    );
   }
+  await db.batch(statements);
 }
 
 /**

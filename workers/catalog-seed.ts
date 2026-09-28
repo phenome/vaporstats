@@ -29,7 +29,9 @@ export interface SeedAppInput {
   icon_hash?: string | null;
   icon_lqip?: string | null;
   developer?: string;
+  developers?: string[];
   publisher?: string;
+  publishers?: string[];
   has_left_early_access?: boolean | null;
   original_release_date?: string | null;
   steam_release_date?: string | null;
@@ -362,7 +364,9 @@ export async function fetchSteamAppDetails(
     description: details.short_description ?? "",
     header_image: details.header_image ?? "",
     developer: details.developers?.[0] ?? "",
+    developers: details.developers,
     publisher: details.publishers?.[0] ?? "",
+    publishers: details.publishers,
     ...(Object.keys(facets).length > 0 ? { facets } : {}),
     ...(metacriticScore !== null ? { metacritic_score: metacriticScore } : {}),
     ...(metacriticUrl ? { metacritic_url: metacriticUrl } : {}),

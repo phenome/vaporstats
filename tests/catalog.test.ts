@@ -177,6 +177,113 @@ describe("Catalog Foundation", () => {
     console.log("fresh catalog migration");
   });
 
+  test("persists every creator role without merging unrelated names or double-counting aliases", async () => {
+    const freshDb = createFreshDb();
+    await upsertApp(freshDb, {
+      appid: 9301,
+      name: "Creator Game",
+      developer: "Displayed developer",
+      publisher: "Displayed publisher",
+      developers: ["CAPCOM Co., Ltd.", "CAPCOM CO., LTD", "GD Studio", "GD Studio", "元气弹工作室(GD Studio)"],
+      publishers: ["CAPCOM CO., LTD.", "CAPCOM Co., Ltd.", "元气弹工作室(GD Studio)", "Other Publisher"],
+    });
+    await upsertApp(freshDb, {
+      appid: 9302,
+      name: "Other Creator Game",
+      developers: ["CAPCOM CO., LTD."],
+      publishers: ["GD Studio"],
+    });
+
+    expect(await getGameByAppId(freshDb, 9301)).toMatchObject({
+      developer: "Displayed developer",
+      publisher: "Displayed publisher",
+    });
+    const links = await freshDb.prepare(
+      `SELECT ac.appid, ac.role, ac.sort_order, c.id AS creator_id, c.display_name, c.steam_group_id
+       FROM app_creators ac JOIN creators c ON c.id = ac.creator_id
+       WHERE ac.appid IN (9301, 9302) ORDER BY ac.appid, ac.role, ac.sort_order`,
+    ).all<{
+      appid: number; role: string; sort_order: number;
+      creator_id: number; display_name: string; steam_group_id: number | null;
+    }>();
+    expect(links.results.filter((row) => row.appid === 9301).map(
+      ({ role, sort_order, display_name }) => [role, sort_order, display_name],
+    )).toEqual([
+      ["developer", 0, "CAPCOM Co., Ltd."],
+      ["developer", 2, "GD Studio"],
+      ["developer", 4, "元气弹工作室(GD Studio)"],
+      ["publisher", 0, "CAPCOM Co., Ltd."],
+      ["publisher", 2, "元气弹工作室(GD Studio)"],
+      ["publisher", 3, "Other Publisher"],
+    ]);
+    const capcomLinks = links.results.filter((row) => row.steam_group_id === 33273264);
+    expect(capcomLinks).toHaveLength(3);
+    expect(new Set(capcomLinks.map((row) => row.creator_id)).size).toBe(1);
+    const gd = links.results.filter((row) => row.display_name === "GD Studio");
+    const chineseGd = links.results.filter((row) => row.display_name === "元气弹工作室(GD Studio)");
+    expect(gd.map((row) => row.creator_id)).toEqual([gd[0].creator_id, gd[0].creator_id]);
+    expect(chineseGd.map((row) => row.creator_id)).toEqual([chineseGd[0].creator_id, chineseGd[0].creator_id]);
+    expect(gd[0].creator_id).not.toBe(chineseGd[0].creator_id);
+  });
+
+  test("replacing or clearing creator arrays removes stale app links but preserves scalar display", async () => {
+    const freshDb = createFreshDb();
+    const links = async () => (await freshDb.prepare(
+      `SELECT ac.role, c.display_name FROM app_creators ac
+       JOIN creators c ON c.id = ac.creator_id WHERE ac.appid = 9303
+       ORDER BY ac.role, ac.sort_order`,
+    ).all<{ role: string; display_name: string }>()).results;
+    await upsertApp(freshDb, {
+      appid: 9303, name: "Changing Creator Game",
+      developers: ["Old Developer", "GD Studio"],
+      publishers: ["Old Publisher", "CAPCOM Co., Ltd."],
+    });
+    await upsertApp(freshDb, {
+      appid: 9303, name: "Changing Creator Game",
+      developer: "Display Developer", publisher: "Display Publisher",
+      developers: ["New Developer"], publishers: ["New Publisher"],
+    });
+    expect(await links()).toEqual([
+      { role: "developer", display_name: "New Developer" },
+      { role: "publisher", display_name: "New Publisher" },
+    ]);
+    await upsertApp(freshDb, {
+      appid: 9303, name: "Changing Creator Game",
+      developer: "Display Developer", publisher: "Display Publisher",
+      developers: [], publishers: [],
+    });
+    expect(await links()).toEqual([]);
+    expect(await getGameByAppId(freshDb, 9303)).toMatchObject({
+      developer: "Display Developer", publisher: "Display Publisher",
+    });
+  });
+
+  test("failed creator sync rolls back both the app update and its links", async () => {
+    const freshDb = createFreshDb();
+    await upsertApp(freshDb, {
+      appid: 9304, name: "Original Name",
+      developers: ["Original Developer"], publishers: ["Original Publisher"],
+    });
+    await freshDb.exec(
+      `CREATE TRIGGER reject_creator_link BEFORE INSERT ON app_creators
+       WHEN NEW.appid = 9304 AND NEW.role = 'publisher'
+       BEGIN SELECT RAISE(ABORT, 'creator insert failed'); END`,
+    );
+    await expect(upsertApp(freshDb, {
+      appid: 9304, name: "Updated Name",
+      developers: ["New Developer"], publishers: ["New Publisher"],
+    })).rejects.toThrow("creator insert failed");
+    expect((await getGameByAppId(freshDb, 9304))?.name).toBe("Original Name");
+    const links = await freshDb.prepare(
+      `SELECT ac.role, c.display_name FROM app_creators ac JOIN creators c ON c.id = ac.creator_id
+       WHERE ac.appid = 9304 ORDER BY ac.role`,
+    ).all<{ role: string; display_name: string }>();
+    expect(links.results).toEqual([
+      { role: "developer", display_name: "Original Developer" },
+      { role: "publisher", display_name: "Original Publisher" },
+    ]);
+  });
+
   test("filters catalog games by supported active media-tag evidence", async () => {
     const freshDb = createFreshDb();
     const previous = process.env.MEDIA_OVERVIEW_PUBLIC;

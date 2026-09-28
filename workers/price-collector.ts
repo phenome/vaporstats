@@ -108,7 +108,9 @@ function toCatalogApp(details: SteamStoreAppData): Parameters<typeof upsertApp>[
       details.header_image ||
       `https://shared.fastly.steamstatic.com/store_item_assets/steam/apps/${appid}/header.jpg`,
     developer: details.developers?.[0] ?? "",
+    developers: details.developers,
     publisher: details.publishers?.[0] ?? "",
+    publishers: details.publishers,
     ...(hasLeftEarlyAccessAssertion(details.detailed_description)
       ? { has_left_early_access: true }
       : {}),
