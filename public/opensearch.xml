@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<OpenSearchDescription xmlns="http://a9.com/-/spec/opensearch/1.1/">
+  <ShortName>VaporStats</ShortName>
+  <Description>Search games on VaporStats</Description>
+  <Url type="text/html" method="get" template="https://vaporstats.com/search?q={searchTerms}"/>
+  <InputEncoding>UTF-8</InputEncoding>
+</OpenSearchDescription>

@@ -148,6 +148,7 @@ function getStaticAsset(pathname: string): StaticAsset | null {
   const isPublicStaticFile =
     decodedPath === "/favicon.ico" ||
     decodedPath === "/site.webmanifest" ||
+    pathname === "/opensearch.xml" ||
     /\.(?:ico|png|svg|webp|webmanifest)$/i.test(decodedPath);
   if (!immutable && !isPublicStaticFile) return null;
 
@@ -194,7 +195,11 @@ async function serveStaticAsset(url: URL): Promise<Response | null> {
     const headers = new Headers({
       "Cache-Control": asset.immutable ? CACHE_POLICIES.immutableAsset : "public, max-age=86400",
     });
-    if (file.type) headers.set("Content-Type", file.type);
+    if (url.pathname === "/opensearch.xml") {
+      headers.set("Content-Type", "application/opensearchdescription+xml; charset=utf-8");
+    } else if (file.type) {
+      headers.set("Content-Type", file.type);
+    }
     return new Response(file, { headers });
   } catch {
     return null;

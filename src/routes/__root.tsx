@@ -23,6 +23,12 @@ export const Route = createRootRouteWithContext<RootRouterContext>()({
       { rel: "icon", href: "/favicon.png", type: "image/png" },
       { rel: "apple-touch-icon", href: "/apple-touch-icon.png" },
       { rel: "manifest", href: "/site.webmanifest" },
+      {
+        rel: "search",
+        type: "application/opensearchdescription+xml",
+        title: "VaporStats",
+        href: "/opensearch.xml",
+      },
     ],
   }),
   notFoundComponent: RootNotFoundComponent,
