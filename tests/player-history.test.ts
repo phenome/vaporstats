@@ -862,7 +862,7 @@ describe("Player History and Rankings", () => {
   // G9: history and ranking responses expose source times and live caching
   test("history api contract", async () => {
     const db = await createFreshDb();
-    const now = new Date("2026-09-04T12:00:00.000Z");
+    const now = new Date();
 
     await db.prepare("INSERT INTO apps (appid, name, slug) VALUES (10, 'Game 10', 'game-10')").run();
     await db.prepare("INSERT INTO observations (appid, current_players, observed_at) VALUES (10, 500, ?)").bind(now.toISOString()).run();
