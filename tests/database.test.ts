@@ -1,4 +1,4 @@
-import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { Database } from "bun:sqlite";
@@ -7,6 +7,7 @@ import { closeDb, createDailySnapshot, getDb } from "../src/lib/db";
 import { applyMigrations, DRIZZLE_MIGRATION_TABLE, MIGRATION_TABLE } from "../src/lib/migrations";
 
 const originalDatabasePath = process.env.DATABASE_PATH;
+const originalSnapshotDirectory = process.env.DATABASE_SNAPSHOT_DIR;
 const migrationDirectory = resolve(import.meta.dir, "../migrations");
 const migrationJournal = JSON.parse(
   readFileSync(join(migrationDirectory, "meta", "_journal.json"), "utf8")
@@ -35,12 +36,15 @@ describe("Bun SQLite persistence", () => {
     await closeDb();
     temporaryDirectory = mkdtempSync(join(tmpdir(), "vaporstats-db-test-"));
     process.env.DATABASE_PATH = join(temporaryDirectory, "nested", "vaporstats.sqlite");
+    process.env.DATABASE_SNAPSHOT_DIR = join(temporaryDirectory, "snapshots");
   });
 
   afterEach(async () => {
     await closeDb();
     if (originalDatabasePath === undefined) delete process.env.DATABASE_PATH;
     else process.env.DATABASE_PATH = originalDatabasePath;
+    if (originalSnapshotDirectory === undefined) delete process.env.DATABASE_SNAPSHOT_DIR;
+    else process.env.DATABASE_SNAPSHOT_DIR = originalSnapshotDirectory;
     rmSync(temporaryDirectory, { recursive: true, force: true });
   });
 
@@ -718,5 +722,99 @@ describe("Bun SQLite persistence", () => {
 
     expect(row).toEqual({ name: "Snapshot Test" });
     snapshot.close(true);
+  });
+
+  test("publishes committed WAL data before pruning managed daily snapshots", async () => {
+    const db = await getDb();
+    await db.exec("PRAGMA wal_autocheckpoint = 0");
+    await db.prepare("INSERT INTO apps (appid, name, slug) VALUES (?, ?, ?)")
+      .bind(21, "Committed WAL", "committed-wal").run();
+    expect(statSync(process.env.DATABASE_PATH! + "-wal").size).toBeGreaterThan(0);
+    const directory = process.env.DATABASE_SNAPSHOT_DIR!;
+    mkdirSync(directory);
+    for (let day = 1; day <= 30; day++) {
+      writeFileSync(join(directory, `vaporstats-2025-01-${String(day).padStart(2, "0")}.sqlite`), "old snapshot");
+    }
+    const writtenPath = await createDailySnapshot(db, "2025-01-31");
+    expect(writtenPath).toBe(join(directory, "vaporstats-2025-01-31.sqlite"));
+    const snapshot = new Database(writtenPath, { readonly: true });
+    try {
+      expect(snapshot.prepare("SELECT name FROM apps WHERE appid = ?").get(21)).toEqual({ name: "Committed WAL" });
+      expect(snapshot.prepare("PRAGMA integrity_check").get()).toEqual({ integrity_check: "ok" });
+    } finally {
+      snapshot.close(true);
+    }
+    expect(existsSync(join(directory, "vaporstats-2025-01-02.sqlite"))).toBe(false);
+    expect(existsSync(process.env.DATABASE_PATH!)).toBe(true);
+    expect(readdirSync(directory).some((name) => name.endsWith(".tmp"))).toBe(false);
+  });
+
+  test("failed serialization preserves the previous good snapshot and does not prune", async () => {
+    const db = await getDb();
+    const output = await createDailySnapshot(db, "2025-01-31");
+    const previous = readFileSync(output);
+    const directory = process.env.DATABASE_SNAPSHOT_DIR!;
+    const old = join(directory, "vaporstats-2025-01-02.sqlite");
+    for (let day = 1; day <= 30; day++) {
+      writeFileSync(join(directory, `vaporstats-2025-01-${String(day).padStart(2, "0")}.sqlite`), "must survive failure");
+    }
+    await closeDb();
+    await expect(createDailySnapshot(db, "2025-01-31")).rejects.toThrow();
+    expect(readFileSync(output)).toEqual(previous);
+    expect(readFileSync(old, "utf8")).toBe("must survive failure");
+    expect(readdirSync(directory).some((name) => name.endsWith(".tmp"))).toBe(false);
+  });
+
+  test("failed atomic publication removes its temporary file without pruning", async () => {
+    const db = await getDb();
+    const previousPath = await createDailySnapshot(db, "2025-01-30");
+    const previous = readFileSync(previousPath);
+    const directory = process.env.DATABASE_SNAPSHOT_DIR!;
+    const blockedOutput = join(directory, "vaporstats-2025-01-31.sqlite");
+    mkdirSync(blockedOutput);
+    const old = join(directory, "vaporstats-2025-01-02.sqlite");
+    for (let day = 1; day <= 29; day++) {
+      writeFileSync(join(directory, `vaporstats-2025-01-${String(day).padStart(2, "0")}.sqlite`), "must survive publication failure");
+    }
+    await expect(createDailySnapshot(db, "2025-01-31")).rejects.toThrow();
+    expect(readFileSync(previousPath)).toEqual(previous);
+    expect(readFileSync(old, "utf8")).toBe("must survive publication failure");
+    expect(statSync(blockedOutput).isDirectory()).toBe(true);
+    expect(readdirSync(directory).some((name) => name.endsWith(".tmp"))).toBe(false);
+    // A failed request does not poison serialization of subsequent requests.
+    await createDailySnapshot(db, "2025-02-01");
+  });
+
+  test("custom destinations never prune neighboring managed files", async () => {
+    const db = await getDb();
+    const directory = process.env.DATABASE_SNAPSHOT_DIR!;
+    mkdirSync(directory);
+    for (let day = 1; day <= 31; day++) {
+      writeFileSync(join(directory, `vaporstats-2025-01-${String(day).padStart(2, "0")}.sqlite`), "old snapshot");
+    }
+    const output = join(directory, "pre-deploy.sqlite");
+    await createDailySnapshot(db, output, "2025-01-31");
+    expect(readdirSync(directory)).toHaveLength(32);
+    expect(readFileSync(join(directory, "vaporstats-2025-01-02.sqlite"), "utf8")).toBe("old snapshot");
+    await expect(createDailySnapshot(db, process.env.DATABASE_PATH!)).rejects.toThrow("source database");
+    expect(await db.prepare("PRAGMA integrity_check").first<{ integrity_check: string }>()).toEqual({ integrity_check: "ok" });
+  });
+
+  test("serializes overlapping publications without deleting the newest published path", async () => {
+    const db = await getDb();
+    const paths = await Promise.all([
+      createDailySnapshot(db, "2025-01-30"),
+      createDailySnapshot(db, "2025-01-31"),
+      createDailySnapshot(db, "2025-01-31"),
+    ]);
+    for (const path of new Set(paths)) {
+      const snapshot = new Database(path, { readonly: true });
+      try {
+        expect(snapshot.prepare("PRAGMA integrity_check").get()).toEqual({ integrity_check: "ok" });
+      } finally {
+        snapshot.close(true);
+      }
+    }
+    expect(readdirSync(process.env.DATABASE_SNAPSHOT_DIR!).some((name) => name.endsWith(".tmp"))).toBe(false);
   });
 });

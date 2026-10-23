@@ -1,7 +1,10 @@
-import { mkdirSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { mkdirSync, realpathSync, renameSync, statSync, unlinkSync } from "node:fs";
+import { open } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { basename, dirname, join, resolve } from "node:path";
 import { Database, type SQLQueryBindings, type Statement } from "bun:sqlite";
 import { applyMigrations } from "./migrations";
+import { runSnapshotRetention } from "./snapshot-storage";
 
 export interface AppPreparedStatement {
   bind(...values: unknown[]): AppPreparedStatement;
@@ -174,23 +177,63 @@ function utcDateKey(value: Date | string): string {
   if (typeof value === "string") return value.slice(0, 10);
   return value.toISOString().slice(0, 10);
 }
+let snapshotQueue: Promise<unknown> = Promise.resolve();
 
 export async function createDailySnapshot(
   db: AppDatabase,
   destinationOrDate?: string,
   snapshotDate: Date | string = new Date()
 ): Promise<string> {
-  const date = /^\d{4}-\d{2}-\d{2}$/.test(destinationOrDate ?? "")
-    ? destinationOrDate!
-    : utcDateKey(snapshotDate);
-  const destination =
-    destinationOrDate && !/^\d{4}-\d{2}-\d{2}$/.test(destinationOrDate)
-      ? destinationOrDate
-      : join(process.env.DATABASE_SNAPSHOT_DIR ?? join("data", "snapshots"), "vaporstats-" + date + ".sqlite");
-  const outputPath = resolve(destination);
-  const sqlite = db instanceof SqliteAppDatabase ? db.native : null;
-  if (!sqlite) throw new Error("Daily snapshots require the Bun SQLite AppDatabase");
-  mkdirSync(dirname(outputPath), { recursive: true });
-  await Bun.write(outputPath, sqlite.serialize());
-  return outputPath;
+  const operation = snapshotQueue.then(async () => {
+    const managed = !destinationOrDate || /^\d{4}-\d{2}-\d{2}$/.test(destinationOrDate);
+    const date = destinationOrDate && managed ? destinationOrDate : utcDateKey(snapshotDate);
+    const destination = managed
+      ? join(process.env.DATABASE_SNAPSHOT_DIR ?? join("data", "snapshots"), "vaporstats-" + date + ".sqlite")
+      : destinationOrDate!;
+    const outputPath = resolve(destination);
+    if (!(db instanceof SqliteAppDatabase)) {
+      throw new Error("Daily snapshots require the Bun SQLite AppDatabase");
+    }
+    mkdirSync(dirname(outputPath), { recursive: true });
+    const sourceIdentity = statSync(db.path);
+    const resolvedOutput = join(realpathSync(dirname(outputPath)), basename(outputPath));
+    let outputIdentity;
+    try {
+      outputIdentity = statSync(outputPath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    if (resolvedOutput === realpathSync(db.path) ||
+      (outputIdentity && sourceIdentity.dev === outputIdentity.dev && sourceIdentity.ino === outputIdentity.ino)) {
+      throw new Error("A snapshot cannot replace its source database");
+    }
+    const temporaryPath = outputPath + "." + randomUUID() + ".tmp";
+    let temporaryCreated = false;
+    try {
+      const serialized = db.native.serialize();
+      const temporaryFile = await open(temporaryPath, "wx");
+      temporaryCreated = true;
+      try {
+        await temporaryFile.writeFile(serialized);
+      } finally {
+        await temporaryFile.close();
+      }
+      renameSync(temporaryPath, outputPath);
+      temporaryCreated = false;
+    } finally {
+      if (temporaryCreated) unlinkSync(temporaryPath);
+    }
+    if (managed) {
+      await runSnapshotRetention({
+        directory: dirname(outputPath),
+        activeDatabasePath: db.path,
+        referenceDate: new Date(date + "T23:59:59.999Z"),
+        mode: "apply",
+        preservePaths: [outputPath],
+      });
+    }
+    return outputPath;
+  });
+  snapshotQueue = operation.catch(() => undefined);
+  return operation;
 }
