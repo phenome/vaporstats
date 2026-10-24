@@ -21,6 +21,8 @@ A period bounded by the first observed discounted price and the first later obse
 
 **Rollup**: A durable aggregate derived from observations for a defined UTC period.
 
+**Database snapshot**: A local, complete SQLite recovery copy, distinct from collected observations and rollups. Managed daily snapshots use `vaporstats-YYYY-MM-DD.sqlite`; calendar-period retention keeps recovery points without creating separate weekly, monthly, or yearly copies. See [ADR 0013](docs/adr/0013-local-database-snapshot-retention.md).
+
 **Release plan**: A sourced statement of an intended future lifecycle milestone and its expected date or window. It is not evidence that the event occurred.
 
 **Announced**: A game has been publicly revealed. This does not by itself establish a Steam listing, wishlist availability, or a scheduled release date.

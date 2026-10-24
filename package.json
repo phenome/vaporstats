@@ -11,6 +11,7 @@
     "start": "bun dist/server/server.js",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "bun scripts/migrate.ts",
+    "snapshots:retention": "bun scripts/snapshot-retention.ts",
     "test": "bun test",
     "check:types": "tsc --noEmit && echo TYPECHECK OK",
     "check:output": "bun scripts/check-output.ts",
