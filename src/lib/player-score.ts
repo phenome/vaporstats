@@ -4,7 +4,7 @@ import type {
   WholeBucketSelection,
 } from "./review-evidence";
 
-export const PLAYER_SCORE_FORMULA_VERSION = "steam-player-v1";
+export const PLAYER_SCORE_FORMULA_VERSION = "steam-player-v2";
 export const SCORE_WINDOW_DAYS = 90;
 export const HISTORICAL_SUPPORT_CAP = 20;
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -53,7 +53,6 @@ export interface PlayerScoreCalculationInput {
   observedAt?: string | null;
   scoreWindow?: ReviewEvidenceWindow;
   anchor?: ScoreAnchor | null;
-  formulaVersion?: string;
 }
 
 export interface PlayerScoreCandidate {
@@ -93,7 +92,7 @@ function copyInterval(interval: ReviewInterval): ReviewInterval | null {
   const start = parseUtc(interval.start);
   const end = parseUtc(interval.end);
   if (start === null || end === null || start >= end) return null;
-  if (interval.granularity !== "day" && interval.granularity !== "month") return null;
+  if (interval.granularity !== "day" && interval.granularity !== "week" && interval.granularity !== "month") return null;
   return { start: iso(start), end: iso(end), granularity: interval.granularity };
 }
 
@@ -161,7 +160,7 @@ function overlaps(a: NormalizedEvidence, b: NormalizedEvidence): boolean {
 
 function compatibleHistorical(current: NormalizedEvidence, historical: NormalizedEvidence): boolean {
   if (current.sourceId === null || historical.sourceId === null || current.sourceId !== historical.sourceId) return false;
-  return !overlaps(current, historical);
+  return current.intervalsWithTimes.length > 0 && historical.intervalsWithTimes.length > 0 && !overlaps(current, historical);
 }
 
 function activeAnchor(anchor: ScoreAnchor | null | undefined, evaluatedAtMs: number): ScoreAnchor | null {
@@ -204,7 +203,7 @@ function scoreFor(current: NormalizedEvidence, historical: NormalizedEvidence | 
     };
   }
   if (total === 0) return null;
-  return { score: 100 * (positive + 0.5) / (total + 1), effectiveHistorical: 0 };
+  return { score: 100 * positive / total, effectiveHistorical: 0 };
 }
 
 function freezeDeep<T>(value: T): T {
@@ -235,7 +234,7 @@ export function calculatePlayerScoreCandidate(input: PlayerScoreCalculationInput
   let historical: NormalizedEvidence | null = null;
   for (const item of historicalInputs) {
     const candidate = normalizeEvidence(item);
-    if (!candidate || candidate.totalReviews === null || candidate.totalReviews === 0) continue;
+    if (!candidate || candidate.positiveReviews === null || candidate.totalReviews === null || candidate.totalReviews === 0) continue;
     if (!compatibleHistorical(current, candidate)) continue;
     historical = candidate;
     break;
@@ -260,7 +259,7 @@ export function calculatePlayerScoreCandidate(input: PlayerScoreCalculationInput
   if (scoreObservedAt !== null && observedAtMs === null) throw new RangeError("Invalid score observation time");
   const candidate: PlayerScoreCandidate = {
     score: result.score,
-    formulaVersion: input.formulaVersion ?? PLAYER_SCORE_FORMULA_VERSION,
+    formulaVersion: PLAYER_SCORE_FORMULA_VERSION,
     observedAt: observedAtMs === null ? null : iso(observedAtMs),
     anchor,
     scoreWindow,

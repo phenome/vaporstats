@@ -15,6 +15,7 @@ import type {
 import type { HistoryRange } from "../lib/player-history";
 import { formatLocalDateTime, formatNumber } from "../lib/format";
 import { wilson95 } from "../lib/recent-reception";
+import { PLAYER_SCORE_FORMULA_VERSION } from "../lib/player-score";
 import { gameScoreHistoryQueryOptions, gameScoreSummaryQueryOptions } from "../lib/score-query";
 import { SCORE_MILESTONE_LABEL_GAP, SCORE_MILESTONE_LABEL_WIDTH, selectScoreMilestones } from "../lib/score-milestone-density";
 import { ChartContainer, ChartTooltip, ChartTooltipContent, type ChartConfig } from "./ui/chart";
@@ -100,11 +101,16 @@ type ChartPoint = {
   timestamp: number;
   score: number;
   reviews: number;
-  provenance: "recorded" | "reconstructed";
-  details: RecordedScore | ReconstructedScore;
-};
+  isolated?: boolean;
+} & (
+  | { provenance: "recorded"; details: RecordedScore }
+  | { provenance: "reconstructed"; details: ReconstructedScore }
+);
 
-function displayHistoryPoints(history: GameScoreHistory | null | undefined): ChartPoint[] {
+type ChartDatum = ChartPoint | { timestamp: number; score: null };
+
+/** Recorded observations win timestamp collisions; different formula runs never share a line. */
+export function buildScoreHistoryChartData(history: GameScoreHistory | null | undefined): ChartDatum[] {
   if (!history) return [];
   const rangeStart = history.range_start ? Date.parse(history.range_start) : NaN;
   const rangeEnd = history.range_end ? Date.parse(history.range_end) : NaN;
@@ -122,7 +128,19 @@ function displayHistoryPoints(history: GameScoreHistory | null | undefined): Cha
     if (!Number.isFinite(timestamp)) continue;
     byTimestamp.set(timestamp, { timestamp, score: entry.value, reviews: entry.current_reviews, provenance: "recorded", details: entry });
   }
-  return [...byTimestamp.values()].sort((a, b) => a.timestamp - b.timestamp);
+  const data: ChartDatum[] = [];
+  const points = [...byTimestamp.values()].sort((a, b) => a.timestamp - b.timestamp);
+  for (let index = 0; index < points.length; index += 1) {
+    const point = points[index]!;
+    const previous = points[index - 1];
+    const next = points[index + 1];
+    const startsVersion = !previous || previous.details.formula_version !== point.details.formula_version;
+    const endsVersion = !next || next.details.formula_version !== point.details.formula_version;
+    if (previous && startsVersion) data.push({ timestamp: previous.timestamp + (point.timestamp - previous.timestamp) / 2, score: null });
+    point.isolated = startsVersion && endsVersion;
+    data.push(point);
+  }
+  return data;
 }
 
 function chartPayloadValue(value: unknown): number | null {
@@ -135,7 +153,7 @@ function historyMilestones(history: GameScoreHistory | null | undefined): ScoreM
   return history?.milestones.filter((milestone) => Number.isFinite(Date.parse(milestone.event_time))) ?? [];
 }
 
-function historyDomain(history: GameScoreHistory | null | undefined, points: readonly ChartPoint[]): [number, number] {
+function historyDomain(history: GameScoreHistory | null | undefined, points: readonly ChartDatum[]): [number, number] {
   const start = history?.range_start ? Date.parse(history.range_start) : NaN;
   const end = history?.range_end ? Date.parse(history.range_end) : NaN;
   const first = points[0]?.timestamp ?? 0;
@@ -238,7 +256,7 @@ function ScoreChart({
   activeEventId?: string | null;
   onSelectEvent?: (eventId: string | null) => void;
 }) {
-  const chartData = useMemo(() => displayHistoryPoints(history), [history]);
+  const chartData = useMemo(() => buildScoreHistoryChartData(history), [history]);
   const milestones = useMemo(() => historyMilestones(history), [history]);
   const domain = useMemo(() => historyDomain(history, chartData), [history, chartData]);
   const domainMidpoint = (domain[0] + domain[1]) / 2;
@@ -412,7 +430,14 @@ function ScoreChart({
           <CartesianGrid strokeDasharray="3 3" stroke="#27272a" vertical={false} />
           <XAxis dataKey="timestamp" type="number" domain={domain} allowDataOverflow tickLine={false} axisLine={false} stroke="#71717a" fontSize={10} minTickGap={40} tickFormatter={(value) => formatDateOnly(new Date(Number(value)).toISOString())} />
           <YAxis domain={[0, 100]} ticks={[0, 50, 100]} width={SCORE_CHART_Y_AXIS_WIDTH} tickLine={false} axisLine={false} stroke="#71717a" fontSize={10} />
-          <Area data={chartData} dataKey="score" name="Player score" type="monotone" stroke="var(--color-score)" strokeWidth={1.8} fill={"url(#score-area-" + appid + ")"} dot={chartData.length === 1 ? { r: 3 } : false} activeDot={false} isAnimationActive={false} connectNulls={false} />
+          <Area dataKey="score" name="Player score" type="monotone" stroke="var(--color-score)" strokeWidth={1.8} fill={"url(#score-area-" + appid + ")"}
+            dot={(props) => {
+              const point: ChartDatum | undefined = props.payload;
+              if (point?.score === null || !point?.isolated) return <g />;
+              return <circle key={point.timestamp} cx={props.cx} cy={props.cy} r={3} fill="var(--color-score)" />;
+            }}
+            activeDot={false} isAnimationActive={false} connectNulls={false}
+          />
           {selectedMilestones.map((milestone) => {
             const timestamp = Date.parse(milestone.event_time);
             const isSelected = activeEventId === milestone.event_id;
@@ -464,6 +489,9 @@ function ScoreChart({
                         <span className="font-mono font-medium text-violet-200">{formatNumber(Number(value), { maximumFractionDigits: 1 })}</span>
                       </div>
                       <p className="text-zinc-400">{row ? "Current scoring-window evidence: " + formatNumber(row.reviews) + " reviews" : "Current scoring-window evidence unavailable"}</p>
+                      {row && <p className="text-zinc-400">{row.provenance === "recorded" ? row.details.recalculation ? "Formula recalculation (not new reviews)" : "Recorded observation" : "Reconstructed estimate"} · {row.details.formula_version}</p>}
+                      {row && <p className="text-zinc-400">Review evidence observed at: {formatBoundary(row.details.current_evidence_observed_at)}</p>}
+                      {row?.provenance === "recorded" && row.details.recalculation && <p className="text-zinc-400">{row.details.recalculation.previous_formula_version} → {row.details.formula_version} · calculated {formatBoundary(row.details.recalculation.calculated_at)}</p>}
                     </div>
                   );
                 }}
@@ -517,12 +545,16 @@ function ScoreDetails({ summary, history }: { summary: GameScoreSummary | null |
     <details className="mt-3 border-t border-zinc-900 pt-3 text-xs text-zinc-400">
       <summary className="cursor-pointer font-mono text-violet-300 underline decoration-violet-500/50 underline-offset-4 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400">Score details</summary>
       <div className="mt-3 space-y-2 leading-relaxed">
-        <p>Current Player Score is a player-evidence estimate. The chart combines recorded and reconstructed history for display; recorded observations take precedence at matching timestamps. Historical observations remain separate from monthly approval buckets and do not imply that a milestone caused a change.</p>
+        <p>Current Player Score is a player-evidence estimate. The chart combines recorded and reconstructed history for display; recorded observations keep their original formula version and take precedence at matching timestamps. Reconstructions use {PLAYER_SCORE_FORMULA_VERSION} and retain the source observation dates. Lines do not connect different formula versions: a calculation change alone is not improving or worsening reception. History is separate from raw approval buckets and does not imply that a milestone caused a change.</p>
         {score && <>
-          <p>Observed at: <span className="text-zinc-300">{formatLocalDateTime(score.observed_at)}</span>; formula version: <span className="text-zinc-300">{score.formula_version}</span></p>
+          <p>Score recorded at: <span className="text-zinc-300">{formatLocalDateTime(score.observed_at)}</span>; formula version: <span className="text-zinc-300">{score.formula_version}</span></p>
+          {score.recalculation && <p>Formula recalculation (not new reviews): {score.recalculation.previous_formula_version} → {score.formula_version}, calculated {formatLocalDateTime(score.recalculation.calculated_at)} from observation {formatNumber(score.recalculation.previous_observation_id)}. Review evidence is unchanged.</p>}
+          <p>Review evidence observed at: <span className="text-zinc-300">{formatBoundary(score.current_evidence_observed_at)}</span>; historical evidence observed at: <span className="text-zinc-300">{formatBoundary(score.historical_evidence_observed_at)}</span></p>
           <p>Current scoring-window evidence: <span className="text-zinc-300">{formatNumber(score.current_reviews)} reviews</span>; historical support: <span className="text-zinc-300">{formatNumber(score.historical_support.actual_reviews)} actual / {formatNumber(score.historical_support.effective_reviews)} effective</span></p>
-          <p>Sampling uncertainty: <span className="text-zinc-300">{uncertainty ? `${formatPercent(uncertainty.lower)}–${formatPercent(uncertainty.upper)}` : "Unavailable"}</span> (95% Wilson interval for current raw approval). This excludes historical support and does not measure selection bias.</p>
-          <p>Current reviews have full weight. Historical approval contributes at most 20 effective reviews, capped by its actual sample. Without usable history, one neutral effective review stabilizes small samples. Critic scores do not affect this estimate.</p>
+          <p>Sampling uncertainty: <span className="text-zinc-300">{uncertainty ? `${formatPercent(uncertainty.lower)}–${formatPercent(uncertainty.upper)}` : "Unavailable"}</span> (95% Wilson interval for current raw approval). This excludes historical support and does not measure selection bias or game quality.</p>
+          <p>New calculations use {PLAYER_SCORE_FORMULA_VERSION}: current reviews have full weight. Compatible, nonoverlapping historical approval contributes at most 20 effective reviews, capped by its actual sample. Without usable history, the estimate is the positive share of actual current reviews; no synthetic reviews are added. Critic scores do not affect this estimate.</p>
+          {score.formula_version !== PLAYER_SCORE_FORMULA_VERSION && <p>This recorded estimate uses {score.formula_version}; it has not been recalculated under {PLAYER_SCORE_FORMULA_VERSION}.</p>}
+          <p>Small samples can change sharply with the next review. A 100% estimate means all included reviews are positive, not certainty about all players. When evidence stops, the last supported estimate remains; missing periods are not new reviews.</p>
           <p>Evidence window: <span className="text-zinc-300">{formatBoundary(score.evidence_start)}–{formatBoundary(score.evidence_end)}</span>; score window: <span className="text-zinc-300">{formatBoundary(score.score_window.start)}–{formatBoundary(score.score_window.end)}</span></p>
           {populationDetails("Current population", score.population_ref)}
           {populationDetails("Historical population", score.historical_population_ref)}

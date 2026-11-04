@@ -8,6 +8,7 @@ import {
   type ReceptionRankingType,
 } from "./reception-filters";
 import type { FacetDictionaryEntry } from "./taxonomy";
+import { RECEPTION_DATA_VERSION } from "./cache";
 
 export interface RankingListQuery {
   type: ReceptionRankingType;
@@ -34,7 +35,7 @@ export function normalizeRankingFilters(filters?: Partial<ReceptionFilters> | nu
 
 export function rankingQueryKey(query: RankingListQuery) {
   const normalized = normalizeRankingFilters(query.filters);
-  return ["rankings", query.type, {
+  return ["rankings", RECEPTION_DATA_VERSION, query.type, {
     genres: normalized.genres,
     features: normalized.features,
     tags: normalized.tags,
@@ -45,7 +46,7 @@ export function rankingQueryKey(query: RankingListQuery) {
 
 export function rankingComparisonQueryKey(query: RankingComparisonQuery) {
   const normalized = normalizeRankingFilters(query.filters);
-  return ["ranking-comparison", query.type, {
+  return ["ranking-comparison", RECEPTION_DATA_VERSION, query.type, {
     genres: normalized.genres,
     features: normalized.features,
     tags: normalized.tags,
@@ -78,6 +79,7 @@ export async function fetchRankings(query: RankingListQuery): Promise<ReceptionR
   const normalized = normalizeRankingFilters(query.filters);
   const params = new URLSearchParams({
     type: query.type,
+    version: RECEPTION_DATA_VERSION,
     view: "list",
     limit: String(query.limit),
     offset: String(query.offset),
@@ -93,6 +95,7 @@ export async function fetchRankingComparison(query: RankingComparisonQuery): Pro
   const normalized = normalizeRankingFilters(query.filters);
   const params = new URLSearchParams({
     type: query.type,
+    version: RECEPTION_DATA_VERSION,
     view: "comparison",
     appid: String(query.appid),
   });

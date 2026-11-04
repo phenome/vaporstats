@@ -107,6 +107,41 @@ describe("Steam aggregate review sources", () => {
     expect(result.value.buckets[0]?.sourceId).toBe(result.value.provenance.identityKey);
   });
 
+  it("keeps Steam week starts on their observed weekday and separates open and malformed weeks", async () => {
+    const result = await fetchSteamReviewHistogram(440, {
+      observedAt,
+      customFetch: (async () => response({
+        success: 1,
+        count_all_reviews: true,
+        results: {
+          rollup_type: "week",
+          recent: [{ date: epoch("2026-09-06T00:00:00Z"), recommendations_up: 4, recommendations_down: 1 }],
+          weeks: [{ date: epoch("2026-08-12T00:00:00Z"), recommendations_up: 2, recommendations_down: 3 }],
+          rollups: [
+            { date: epoch("2026-08-26T00:00:00Z"), recommendations_up: 40, recommendations_down: 10 },
+            { date: epoch("2026-09-02T00:00:00Z"), recommendations_up: 7, recommendations_down: 2 },
+            { date: epoch("2026-08-19T12:00:00Z"), recommendations_up: 80, recommendations_down: 20 },
+          ],
+        },
+      })) as unknown as typeof fetch,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.buckets.map((bucket) => [
+      bucket.granularity, bucket.periodStart, bucket.periodEnd, bucket.positiveCount, bucket.negativeCount,
+    ])).toEqual([
+      ["day", "2026-09-06T00:00:00.000Z", "2026-09-07T00:00:00.000Z", 4, 1],
+      ["week", "2026-08-12T00:00:00.000Z", "2026-08-19T00:00:00.000Z", 2, 3],
+      ["week", "2026-08-26T00:00:00.000Z", "2026-09-02T00:00:00.000Z", 40, 10],
+    ]);
+    expect(result.value.openBuckets.map((bucket) => [bucket.periodStart, bucket.periodEnd])).toEqual([
+      ["2026-09-02T00:00:00.000Z", "2026-09-09T00:00:00.000Z"],
+    ]);
+    expect(result.value.unknownBuckets).toEqual([
+      { date: epoch("2026-08-19T12:00:00Z"), recommendations_up: 80, recommendations_down: 20 },
+    ]);
+  });
+
   it("keeps histogram identities stable across field order but changes semantic populations", async () => {
     const firstBody = histogramBody() as Record<string, unknown>;
     const reorderedBody = {

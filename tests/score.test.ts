@@ -88,6 +88,8 @@ function addScore(
   anchorEventId: string | null = null,
   anchorAt: string | null = null,
   provenance = "{}",
+  formulaVersion = "test",
+  evidenceObservedAt = observedAt,
 ): void {
   native.query(`INSERT INTO player_score_history
     (appid, observed_at, score, formula_version, current_positive_count, current_total_count,
@@ -95,12 +97,12 @@ function addScore(
      historical_window_start, historical_window_end, current_evidence_intervals, historical_evidence_intervals,
      current_source_id, historical_source_id, current_evidence_observed_at, historical_evidence_observed_at,
      anchor_event_id, anchor_at, provenance)
-    VALUES (10, ?, ?, 'test', 8, 10, 60, 100, '2026-06-10T00:00:00.000Z', ?,
+    VALUES (10, ?, ?, ?, 8, 10, 60, 100, '2026-06-10T00:00:00.000Z', ?,
       '2026-01-01T00:00:00.000Z', '2026-06-10T00:00:00.000Z',
       '[{"start":"2026-06-10T00:00:00.000Z","end":"2026-06-11T00:00:00.000Z","granularity":"day"}]',
       '[{"start":"2026-01-01T00:00:00.000Z","end":"2026-01-02T00:00:00.000Z","granularity":"day"}]',
       ?, ?, ?, ?, ?, ?, ?)`)
-    .run(observedAt, value, observedAt, HIST, SUMMARY, observedAt, observedAt, anchorEventId, anchorAt, provenance);
+    .run(observedAt, value, formulaVersion, evidenceObservedAt, HIST, SUMMARY, evidenceObservedAt, evidenceObservedAt, anchorEventId, anchorAt, provenance);
 }
 
 describe("game score payload", () => {
@@ -206,6 +208,128 @@ describe("game score payload", () => {
     native.close(true);
   });
 
+  test("keeps weekly evidence whole across ALL bounds, metrics, summary, and reconstruction", async () => {
+    const { db, native } = freshDb();
+    native.query(`INSERT INTO review_buckets
+      (appid, source_id, granularity, period_start, period_end, positive_count, negative_count, observed_at, provenance)
+      VALUES (10, ?, 'weekly', '2026-08-31T00:00:00.000Z', '2026-09-07T00:00:00.000Z', 9, 1, ?, 'test')`).run(HIST, AT);
+    addDay(native, "2026-09-01T00:00:00Z", 0, 100);
+
+    const result = await getGameScoreHistory(db, 10, "all", { now: new Date(AT) });
+    expect(result.data?.range_start).toBe("2026-08-31T00:00:00.000Z");
+    expect(result.data?.range_end).toBe("2026-09-07T00:00:00.000Z");
+    expect(result.data?.metrics.latest_approval).toMatchObject({
+      value: 90,
+      total_reviews: 10,
+      included_start: "2026-08-31T00:00:00.000Z",
+      included_end: "2026-09-07T00:00:00.000Z",
+    });
+    expect(result.data?.metrics.reviews_in_period?.value).toBe(10);
+    expect(result.data?.approval_buckets.find((bucket) => bucket.granularity === "weekly")?.total_reviews).toBe(10);
+    expect(result.data?.reconstructed_scores.at(-1)).toMatchObject({
+      value: 90,
+      formula_version: "steam-player-v2",
+      current_total_reviews: 10,
+      current_evidence_intervals: [{
+        start: "2026-08-31T00:00:00.000Z",
+        end: "2026-09-07T00:00:00.000Z",
+        granularity: "week",
+      }],
+    });
+    const summary = await getGameScoreSummary(db, 10, { now: new Date(AT) });
+    expect(summary.data?.recent_reception.recent.total_reviews).toBe(10);
+    expect(summary.data?.recent_reception.recent.covered_intervals).toEqual([{
+      start: "2026-08-31T00:00:00.000Z",
+      end: "2026-09-07T00:00:00.000Z",
+      granularity: "week",
+    }]);
+    native.close(true);
+  });
+
+  test("retains weekly intervals and bounds in immutable recorded score JSON", async () => {
+    const { db, native } = freshDb();
+    addScore(native);
+    const currentIntervals = [{ start: "2026-09-01T00:00:00.000Z", end: "2026-09-08T00:00:00.000Z", granularity: "week" as const }];
+    const historicalIntervals = [{ start: "2026-05-25T00:00:00.000Z", end: "2026-06-01T00:00:00.000Z", granularity: "week" as const }];
+    native.query("UPDATE player_score_history SET current_evidence_intervals = ?, historical_evidence_intervals = ?")
+      .run(JSON.stringify(currentIntervals), JSON.stringify(historicalIntervals));
+
+    const summary = await getGameScoreSummary(db, 10, { now: new Date(AT) });
+    const history = await getGameScoreHistory(db, 10, "7d", { now: new Date(AT) });
+    expect(summary.data?.score).toMatchObject({
+      evidence_start: currentIntervals[0].start,
+      evidence_end: currentIntervals[0].end,
+      current_evidence_intervals: currentIntervals,
+      historical_evidence_intervals: historicalIntervals,
+    });
+    expect(history.data?.recorded_scores[0]?.current_evidence_intervals).toEqual(currentIntervals);
+    expect(history.data?.recorded_scores[0]?.historical_evidence_intervals).toEqual(historicalIntervals);
+    native.close(true);
+  });
+
+  test("preserves a recorded v1 estimate while v2 reconstructions follow corrected source evidence", async () => {
+    const { db, native } = freshDb();
+    addScore(native, 100 * 20 / 30, "2026-09-08T00:00:00.000Z", null, null, "{}", "steam-player-v1");
+    addDay(native, "2026-09-07T00:00:00Z", 1, 0);
+    const before = await getGameScoreHistory(db, 10, "7d", { now: new Date(AT) });
+    expect(before.data?.recorded_scores[0]).toMatchObject({
+      value: 100 * 20 / 30,
+      formula_version: "steam-player-v1",
+      observed_at: "2026-09-08T00:00:00.000Z",
+    });
+    expect(before.data?.reconstructed_scores[0]).toMatchObject({
+      value: 100,
+      formula_version: "steam-player-v2",
+      score_at: "2026-09-08T00:00:00.000Z",
+      observed_at: AT,
+      provenance: { kind: "reconstructed", formula_version: "steam-player-v2", source_id: HIST },
+    });
+
+    native.query("UPDATE review_buckets SET positive_count = 0, negative_count = 1 WHERE appid = 10 AND source_id = ?").run(HIST);
+    const after = await getGameScoreHistory(db, 10, "7d", { now: new Date(AT) });
+    const summary = await getGameScoreSummary(db, 10, { now: new Date(AT) });
+    expect(after.data?.recorded_scores).toEqual(before.data?.recorded_scores);
+    expect(after.data?.reconstructed_scores[0]?.value).toBe(0);
+    expect(summary.data?.score?.formula_version).toBe("steam-player-v1");
+    expect(summary.data?.score?.value).toBe(100 * 20 / 30);
+    native.close(true);
+  });
+
+  test("keeps formula recalculation time distinct from retained evidence freshness", async () => {
+    const { db, native } = freshDb();
+    const evidenceAt = "2026-06-12T00:00:00.000Z";
+    addScore(native, 100 * 20 / 30, evidenceAt, null, null, "{}", "steam-player-v1");
+    const original = native.query<{ id: number }, []>("SELECT * FROM player_score_history").get();
+    if (!original) throw new Error("Missing original score fixture");
+    const previousId = original.id;
+    const recalculation = {
+      previous_observation_id: previousId,
+      previous_formula_version: "steam-player-v1",
+      calculated_at: AT,
+    };
+    addScore(native, 100 * 20 / 30, AT, null, null, JSON.stringify({ recalculation }), "steam-player-v2", evidenceAt);
+
+    const summary = await getGameScoreSummary(db, 10, { now: new Date(AT) });
+    const history = await getGameScoreHistory(db, 10, "all", { now: new Date(AT) });
+    expect(summary.data?.score).toMatchObject({
+      observed_at: AT,
+      formula_version: "steam-player-v2",
+      recalculation,
+      current_evidence_observed_at: evidenceAt,
+      score_window: { start: "2026-06-10T00:00:00.000Z", end: evidenceAt },
+    });
+    expect(history.data?.recorded_scores.map((score) => [score.formula_version, score.observed_at])).toEqual([
+      ["steam-player-v1", evidenceAt],
+      ["steam-player-v2", AT],
+    ]);
+    expect(history.data?.recorded_scores[1]?.recalculation).toEqual(recalculation);
+    expect(history.data?.range_end).toBe(AT);
+    expect(summary.sourceTimestamp).toBe(evidenceAt);
+    expect(history.sourceTimestamp).toBe(evidenceAt);
+    expect(native.query("SELECT * FROM player_score_history WHERE id = ?").get(previousId)).toEqual(original);
+    native.close(true);
+  });
+
   test("evaluates now and lifetime eligibility independently of a retained score", async () => {
     const { db, native } = freshDb();
     addScore(native);
@@ -294,6 +418,8 @@ describe("game score payload", () => {
       score_at: "2026-09-02T00:00:00.000Z",
       evaluated_at: "2026-09-02T00:00:00.000Z",
       observed_at: AT,
+      value: 80,
+      formula_version: "steam-player-v2",
       score_window: { start: "2026-08-01T00:00:00.000Z", end: "2026-09-02T00:00:00.000Z" },
       anchor: { category: 14, start: "2026-08-01T00:00:00.000Z", event_id: "major-before-range" },
       current_evidence_intervals: [

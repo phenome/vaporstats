@@ -58,10 +58,21 @@ function dailyBuckets(
 }
 
 describe("player score domain", () => {
-  test("uses symmetric cold-start smoothing and returns no score without evidence", () => {
-    expect(calculatePlayerScore({ current: { positiveReviews: 1, totalReviews: 1 } })).toBe(75);
-    expect(calculatePlayerScore({ current: { positiveReviews: 0, totalReviews: 1 } })).toBe(25);
+  test("keeps all-positive cold starts at 100 as actual reviews accumulate", () => {
+    const scores = [1, 2, 10, 100].map((totalReviews) =>
+      calculatePlayerScore({ current: { positiveReviews: totalReviews, totalReviews } }));
+    expect(scores).toEqual([100, 100, 100, 100]);
+  });
+
+  test("keeps all-negative cold starts at zero and mixed samples at actual approval", () => {
+    expect(calculatePlayerScore({ current: { positiveReviews: 0, totalReviews: 1 } })).toBe(0);
+    expect(calculatePlayerScore({ current: { positiveReviews: 3, totalReviews: 4 } })).toBe(75);
+  });
+
+  test("does not invent a score without real evidence", () => {
     expect(calculatePlayerScore({ current: null })).toBeNull();
+    expect(calculatePlayerScore({ current: { positiveReviews: 0, totalReviews: 0 } })).toBeNull();
+    expect(calculatePlayerScore({ current: { positiveReviews: null, totalReviews: 10 } })).toBeNull();
   });
 
   test("caps historical support at 20 actual reviews and keeps positive and negative evidence symmetric", () => {
@@ -81,6 +92,34 @@ describe("player score domain", () => {
     expect(falling).toBeCloseTo(40, 12);
   });
 
+  test("does not increase a small historical sample to the support cap", () => {
+    const candidate = calculatePlayerScoreCandidate({
+      current: evidence(1, 1, "2025-03-31T00:00:00.000Z", "2025-04-01T00:00:00.000Z"),
+      historical: evidence(1, 4, "2025-03-01T00:00:00.000Z", "2025-03-02T00:00:00.000Z"),
+    });
+    expect(candidate?.score).toBe(40);
+    expect(candidate?.historicalEffectiveReviews).toBe(4);
+  });
+
+  test("rejects historical support without known nonoverlapping intervals", () => {
+    const current = evidence(3, 4, "2025-03-20T00:00:00.000Z", "2025-03-21T00:00:00.000Z");
+    const unknown = calculatePlayerScoreCandidate({
+      current,
+      historical: { sourceId: SOURCE, positiveReviews: 0, totalReviews: 100 },
+    });
+    expect(unknown?.score).toBe(75);
+    expect(unknown?.historicalReviews).toBe(0);
+    const overlapping = calculatePlayerScoreCandidate({
+      current,
+      historical: {
+        ...evidence(0, 100, "2025-03-17T00:00:00.000Z", "2025-03-24T00:00:00.000Z"),
+        selectedIntervals: [{ start: "2025-03-17T00:00:00.000Z", end: "2025-03-24T00:00:00.000Z", granularity: "week" }],
+      },
+    });
+    expect(overlapping?.score).toBe(75);
+    expect(overlapping?.historicalReviews).toBe(0);
+  });
+
   test("rejects incompatible or overlapping retained evidence instead of blending it", () => {
     const candidate = calculatePlayerScoreCandidate({
       current: evidence(80, 100, "2025-03-20T00:00:00.000Z", "2025-03-21T00:00:00.000Z"),
@@ -98,6 +137,26 @@ describe("player score domain", () => {
       historical: evidence(60, 100, "2025-01-01T00:00:00.000Z", "2025-03-01T00:00:00.000Z"),
     });
     expect(score).toBe(60);
+  });
+
+  test("versions new candidates as v2 and preserves weekly evidence provenance", () => {
+    const selectedInterval: ReviewInterval = {
+      start: "2025-03-24T00:00:00.000Z",
+      end: "2025-03-31T00:00:00.000Z",
+      granularity: "week",
+    };
+    const candidate = calculatePlayerScoreCandidate({
+      current: {
+        ...evidence(1, 1, selectedInterval.start, selectedInterval.end),
+        selectedIntervals: [selectedInterval],
+      },
+      evaluatedAt: "2025-04-01T00:00:00.000Z",
+    });
+    expect(candidate?.score).toBe(100);
+    expect(candidate?.formulaVersion).toBe("steam-player-v2");
+    expect(candidate?.inputs.current.selectedIntervals).toEqual([selectedInterval]);
+    selectedInterval.start = "2025-03-23T00:00:00.000Z";
+    expect(candidate?.inputs.current.selectedIntervals[0]?.start).toBe("2025-03-24T00:00:00.000Z");
   });
 
   test("anchors only on active category-14 events and captures immutable inputs", () => {

@@ -97,11 +97,14 @@ The baseline catalog sampling tier, tracking games ranked 251–1,000 once every
 _Avoid_: Low tier, cold tier, background tier
 
 **Current Player Score**:
-A 0–100 estimate of current Steam reviewer approval, informed by current and historical player evidence. It is distinct from lifetime approval, a critic quality grade, and catalog rank.
+A 0–100 estimate of current Steam reviewer approval, informed by actual current and compatible historical player evidence. A small sample changes its evidence strength, not its observed approval. It is distinct from lifetime approval, a critic quality grade, and catalog rank.
 _Avoid_: Living Game Score, meta score, composite rating
 
 **Lifetime Approval**:
 The proportion of positive Steam reviews in the compatible filtered lifetime review population. It describes lifetime reception, not the current post-update estimate.
+
+**Confidence score**:
+The conservative lifetime-approval measure used to order Top Rated All Time: the lower endpoint of a 95% Wilson interval. It is distinct from observed Lifetime Approval, Current Player Score, and a probability that a game is good.
 
 **Reception Alignment**:
 A direct comparison of a game's Current Player Score against published public critic aggregates (Metacritic score or OpenCritic tier). Disagreement describes reception differences and does not establish reviewer bias.
@@ -158,7 +161,7 @@ An ordinal rank assigned to an eligible playable game on global or category lead
 Standings of full-release games ordered by Current Player Score, with eligibility based on actual reviews in a rolling 90-day window independent of the patch-sensitive scoring window. A Score Anchor does not reset eligibility, and historical-support weighting does not add qualifying reviews.
 
 **Top Rated All Time**:
-Standings of full-release games ordered by filtered lifetime Steam approval. It is distinct from Current Player Score and uses lifetime review volume for eligibility.
+Standings of full-release games ordered by Confidence score, with raw Lifetime Approval presented separately. It is distinct from Current Player Score and uses actual lifetime review volume for eligibility. See [ADR 0014](docs/adr/0014-observed-evidence-and-lifetime-confidence.md).
 
 **Catalog Facet**:
 A source-identified genre, Steam feature, or community tag. The three classifications remain distinct even when their labels are identical.

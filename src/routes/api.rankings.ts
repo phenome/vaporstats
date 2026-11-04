@@ -12,10 +12,11 @@ import {
   getReceptionRankings,
 } from "../lib/rankings";
 import type { ReceptionFilters, ReceptionRankingType } from "../lib/reception-filters";
-import { CACHE_POLICIES, getLiveApiCacheHeaders } from "../lib/cache";
+import { CACHE_POLICIES, getLiveApiCacheHeaders, RECEPTION_DATA_VERSION } from "../lib/cache";
 
 const RECEPTION_QUERY_PARAMETERS: Record<string, true> = {
   type: true,
+  version: true,
   view: true,
   genre: true,
   feature: true,
@@ -24,7 +25,7 @@ const RECEPTION_QUERY_PARAMETERS: Record<string, true> = {
   offset: true,
   appid: true,
 };
-const RECEPTION_SINGLETON_PARAMETERS = ["type", "view", "limit", "offset", "appid"] as const;
+const RECEPTION_SINGLETON_PARAMETERS = ["type", "version", "view", "limit", "offset", "appid"] as const;
 
 export type ParsedReceptionRequest =
   | {
@@ -89,6 +90,9 @@ export function parseReceptionRequest(url: URL): ParsedReceptionRequest {
 
   for (const key of RECEPTION_SINGLETON_PARAMETERS) {
     if (params.getAll(key).length > 1) return { error: `Parameter may only be provided once: ${key}` };
+  }
+  if (params.has("version") && params.get("version") !== RECEPTION_DATA_VERSION) {
+    return { error: "Unsupported reception data version" };
   }
 
   const typeValue = params.get("type");

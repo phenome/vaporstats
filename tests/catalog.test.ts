@@ -133,6 +133,7 @@ describe("Catalog Foundation", () => {
     const previousDatabasePath = process.env.DATABASE_PATH;
     const tempDatabaseDir = mkdtempSync(join(tmpdir(), "vaporstats-catalog-"));
     const tempDatabasePath = join(tempDatabaseDir, "catalog.sqlite");
+    await closeDb();
     process.env.DATABASE_PATH = tempDatabasePath;
     try {
       const openedDb = await getDb();

@@ -12,7 +12,13 @@ import {
   type GameReceptionEligibility,
   type ReceptionPopulationReference,
 } from "./rankings";
-import type { StoredReviewBucket, StoredScoreHistory, StoredSteamEvent } from "./reception-store";
+import {
+  parseScoreRecalculation,
+  type ScoreFormulaRecalculation,
+  type StoredReviewBucket,
+  type StoredScoreHistory,
+  type StoredSteamEvent,
+} from "./reception-store";
 import {
   evaluateRecentReception,
   type RecentReceptionResult,
@@ -45,11 +51,13 @@ export interface ScoreEvidenceWindow {
   end: string | null;
 }
 
+
 export interface GameScoreValue {
   value: number;
   observation_id: number;
   observed_at: string;
   formula_version: string;
+  recalculation?: ScoreFormulaRecalculation;
   anchor: ScoreAnchorPayload | null;
   score_window: ScoreEvidenceWindow;
   evidence_start: string | null;
@@ -174,6 +182,7 @@ export interface RecordedScore {
   observed_at: string;
   value: number;
   formula_version: string;
+  recalculation?: ScoreFormulaRecalculation;
   anchor: ScoreAnchorPayload | null;
   score_window: ScoreEvidenceWindow;
   evidence_start: string | null;
@@ -228,7 +237,7 @@ export interface ReconstructedScore {
 
 export interface ApprovalBucket {
   source_id: string;
-  granularity: "daily" | "monthly";
+  granularity: "daily" | "weekly" | "monthly";
   period_start: string;
   period_end: string;
   positive_reviews: number;
@@ -352,6 +361,12 @@ function safeJson(value: unknown): unknown {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+
+function scoreSourceTimestamp(score: GameScoreValue | RecordedScore): string | null {
+  if (!score.recalculation) return score.observed_at;
+  return maxTimestamp([score.current_evidence_observed_at, score.historical_evidence_observed_at]);
 }
 
 function sourceRef(source: SourceRow | null | undefined): ScorePopulationReference | null {
@@ -511,7 +526,7 @@ function intervalBounds(intervals: readonly ReviewInterval[]): ScoreEvidenceWind
 }
 function isReviewInterval(value: unknown): value is ReviewInterval {
   if (!isRecord(value)) return false;
-  return typeof value.start === "string" && typeof value.end === "string" && (value.granularity === "day" || value.granularity === "month");
+  return typeof value.start === "string" && typeof value.end === "string" && (value.granularity === "day" || value.granularity === "week" || value.granularity === "month");
 }
 
 function intervals(value: string): ReviewInterval[] {
@@ -535,11 +550,14 @@ function scorePayload(row: RawScore, sources: ReadonlyMap<string, SourceRow>): G
   const currentIntervals = intervals(row.current_evidence_intervals);
   const historicalIntervals = intervals(row.historical_evidence_intervals);
   const currentEvidence = intervalBounds(currentIntervals);
+  const provenance = safeJson(row.provenance);
+  const recalculation = parseScoreRecalculation(isRecord(provenance) ? provenance.recalculation : undefined);
   return {
     value: row.score,
     observation_id: row.id,
     observed_at: row.observed_at,
     formula_version: row.formula_version,
+    ...(recalculation ? { recalculation } : {}),
     anchor: scoreAnchor(row),
     score_window: { start: row.current_window_start, end: row.current_window_end },
     evidence_start: currentEvidence.start,
@@ -560,7 +578,7 @@ function scorePayload(row: RawScore, sources: ReadonlyMap<string, SourceRow>): G
     },
     population_ref: sourceRef(sources.get(row.current_source_id ?? "")),
     historical_population_ref: sourceRef(sources.get(row.historical_source_id ?? "")),
-    provenance: safeJson(row.provenance),
+    provenance,
   };
 }
 function anchorPayload(anchor: ScoreAnchor | null): ScoreAnchorPayload | null {
@@ -643,7 +661,7 @@ function reconstructedPayload(
 function domainBucket(row: StoredReviewBucket): ReviewBucket {
   return {
     sourceId: row.source_id,
-    granularity: row.granularity === "monthly" ? "month" : "day",
+    granularity: row.granularity === "monthly" ? "month" : row.granularity === "weekly" ? "week" : "day",
     start: row.period_start,
     end: row.period_end,
     positiveReviews: row.positive_count,
@@ -941,6 +959,7 @@ export async function getGameScoreSummary(
   const allBucketsForRecent = await loadBucketsInRange(db, appid, recentStart, at, at);
   const sources = await loadPopulationSources(db, scoreRow ? [scoreRow] : [], [...bucketRows, ...allBucketsForRecent]);
   const eligibility = await getGameReceptionEligibility(db, appid, at);
+  const score = scoreRow ? scorePayload(scoreRow, sources) : null;
   if (!eligibility) return { data: null, sourceTimestamp: null };
   const recentDomain = evaluateRecentReception({
     evaluatedAt: at,
@@ -966,7 +985,7 @@ export async function getGameScoreSummary(
     asOf: at,
   }));
   const sourceTimestamp = maxTimestamp([
-    scoreRow?.observed_at,
+    score ? scoreSourceTimestamp(score) : null,
     ...bucketRows.map((row) => row.observed_at),
     ...allBucketsForRecent.map((row) => row.observed_at),
     ...summaryRows.map((row) => row.observed_at),
@@ -989,7 +1008,7 @@ export async function getGameScoreSummary(
     data: {
       game,
       lifetime_approval: lifetimeApproval,
-      score: scoreRow ? scorePayload(scoreRow, sources) : null,
+      score,
       eligibility,
       critics: validCritics.map(criticPayload),
       alignment: alignments.map(alignmentPayload),
@@ -1048,7 +1067,7 @@ export async function getGameScoreHistory(
       ? approval.find((bucket) => bucket.source_id === selection.sourceId
         && bucket.period_start === latestInterval.start
         && bucket.period_end === latestInterval.end
-        && (latestInterval.granularity === "day" ? bucket.granularity === "daily" : bucket.granularity === "monthly"))
+        && (latestInterval.granularity === "day" ? bucket.granularity === "daily" : latestInterval.granularity === "week" ? bucket.granularity === "weekly" : bucket.granularity === "monthly"))
       : undefined;
     latestApproval = latestBucket ? {
       value: latestBucket.approval,
@@ -1087,12 +1106,13 @@ export async function getGameScoreHistory(
   }
   const populations = [...sourceIds].map((id) => sourceRef(sources.get(id))).filter((value): value is ScorePopulationReference => value !== null);
   populations.sort((a, b) => a.source_id.localeCompare(b.source_id));
+  const recordedScores = scoreRows.map((row) => scorePayload(row, sources));
   const data: GameScoreHistory = {
     appid,
     range,
     range_start: rangeStart,
     range_end: rangeEnd,
-    recorded_scores: scoreRows.map((row) => scorePayload(row, sources)),
+    recorded_scores: recordedScores,
     reconstructed_scores: reconstructedScores,
     approval_buckets: approval,
     milestones,
@@ -1102,7 +1122,7 @@ export async function getGameScoreHistory(
   return {
     data,
     sourceTimestamp: maxTimestamp([
-      ...scoreRows.map((row) => row.observed_at),
+      ...recordedScores.map(scoreSourceTimestamp),
       ...bucketRows.map((row) => row.observed_at),
       ...events.map((row) => row.observed_at),
     ]),

@@ -8,6 +8,7 @@ import {
   getReceptionRankings,
 } from "../src/lib/rankings";
 import { normalizeReceptionFilters } from "../src/lib/reception-filters";
+import { buildReceptionComparisonChartData } from "../src/components/rankings-page";
 
 const EVALUATED_AT = "2026-09-08T00:00:00.000Z";
 const HISTOGRAM_SOURCE = "histogram-filtered";
@@ -99,6 +100,18 @@ function addScore(
     VALUES (?, ?, ?, 'test', 1, 1, 0, 0, ?, ?,
             '2026-01-01T00:00:00.000Z', '2026-06-10T00:00:00.000Z', ?, '[]', ?, NULL, ?, NULL, ?, ?, '{}')
   `).run(appid, observedAt, value, currentWindowStart, observedAt, currentEvidenceIntervals, HISTOGRAM_SOURCE, observedAt, anchorEventId, anchorAt);
+}
+
+function addSummary(
+  native: Database,
+  appid: number,
+  positive: number,
+  total: number,
+  observedAt = "2026-09-07T00:00:00.000Z",
+): void {
+  native.query(
+    "INSERT INTO review_summary_snapshots (appid, source_id, observed_at, lifetime_positive_count, lifetime_total_count) VALUES (?, ?, ?, ?, ?)",
+  ).run(appid, SUMMARY_SOURCE, observedAt, positive, total);
 }
 
 
@@ -249,11 +262,100 @@ describe("reception ranking query domain", () => {
     native.query("INSERT INTO review_summary_snapshots (appid, source_id, observed_at, lifetime_positive_count, lifetime_total_count) VALUES (?, ?, ?, ?, ?)").run(20, SUMMARY_SOURCE, "2026-08-01T00:00:00.000Z", 40, 100);
     native.query("INSERT INTO review_summary_snapshots (appid, source_id, observed_at, lifetime_positive_count, lifetime_total_count) VALUES (?, ?, ?, ?, ?)").run(20, SUMMARY_SOURCE, "2026-09-07T00:00:00.000Z", 60, 100);
     const ranking = await getReceptionRankings(db, { type: "top_rated_all_time", filters: { genres: [8], features: [], tags: [] }, evaluatedAt: EVALUATED_AT });
-    expect(ranking.data.items[0]?.metric).toMatchObject({ kind: "lifetime_approval", value: 60 });
+    expect(ranking.data.items[0]?.metric).toMatchObject({ kind: "lifetime_confidence", lifetime_approval: 60 });
+    expect(ranking.data.items[0]?.metric.value).toBeCloseTo(50.2, 2);
     expect(ranking.data.items[0]?.eligibility.qualifying_reviews).toBe(100);
     const comparison = await getReceptionComparison(db, { type: "top_rated_all_time", appid: 20, filters: { genres: [8], features: [], tags: [] }, evaluatedAt: EVALUATED_AT });
     const august = comparison.data?.points.find((point) => point.cutoff === "2026-09-01T00:00:00.000Z");
-    expect(august?.value).toBe(40);
+    expect(august).toMatchObject({ metric_kind: "lifetime_confidence", lifetime_approval: 40, lifetime_reviews: 100 });
+    expect(august?.value).toBeCloseTo(30.94, 2);
+    native.close(true);
+  });
+
+  test("ranks lifetime confidence rather than raw approval with deterministic current and historical ties", async () => {
+    const { db, native } = freshDb();
+    for (const [appid, positive, total, nowScore] of [
+      [63, 9900, 10000, 41],
+      [62, 252, 252, 100],
+      [61, 9900, 10000, 40],
+    ]) {
+      addApp(native, appid);
+      addSummary(native, appid, positive, total, "2026-08-31T00:00:00.000Z");
+      addBuckets(native, appid, 250);
+      addScore(native, appid, nowScore);
+    }
+
+    const ranking = await getReceptionRankings(db, { type: "top_rated_all_time", evaluatedAt: EVALUATED_AT });
+    expect(ranking.data.items.map((item) => item.game.appid)).toEqual([61, 63, 62]);
+    expect(ranking.data.items.map((item) => item.metric.lifetime_approval)).toEqual([99, 99, 100]);
+    expect(ranking.data.items[0]?.metric.value).toBeCloseTo(98.785, 3);
+    expect(ranking.data.items[2]?.metric.value).toBeCloseTo(98.50, 2);
+    for (const item of ranking.data.items) {
+      const comparison = await getReceptionComparison(db, { type: "top_rated_all_time", appid: item.game.appid, evaluatedAt: EVALUATED_AT });
+      const point = comparison.data?.points.find((value) => value.cutoff === "2026-09-01T00:00:00.000Z");
+      expect(point).toMatchObject({
+        metric_kind: "lifetime_confidence",
+        lifetime_approval: item.metric.lifetime_approval,
+        lifetime_reviews: item.eligibility.qualifying_reviews,
+        comparison_rank: item.rank,
+        compared_count: 3,
+      });
+      expect(point?.value).toBe(item.metric.value);
+    }
+
+    const now = await getReceptionRankings(db, { type: "top_rated_now", evaluatedAt: EVALUATED_AT });
+    expect(now.data.items.map((item) => [item.game.appid, item.metric.value])).toEqual([[62, 100], [63, 41], [61, 40]]);
+    native.close(true);
+  });
+
+  test("keeps lifetime volume boundaries, facet scope, and full-release eligibility", async () => {
+    const { db, native } = freshDb();
+    for (const [appid, total] of [[70, 250], [71, 249], [72, 50], [73, 49], [74, 1000], [75, 1000], [76, 1000]]) {
+      addApp(native, appid);
+      addSummary(native, appid, total, total);
+      addGenre(native, appid, appid === 76 ? 8 : 7);
+    }
+    addApp(native, 77);
+    addGenre(native, 77, 7);
+    native.query("UPDATE apps SET is_early_access = 1 WHERE appid = 74").run();
+    native.query("UPDATE apps SET release_status = 'upcoming' WHERE appid = 75").run();
+
+    const global = await getReceptionRankings(db, { type: "top_rated_all_time", evaluatedAt: EVALUATED_AT });
+    expect(global.data.minimum_reviews).toBe(250);
+    expect(global.data.items.map((item) => item.game.appid)).toEqual([76, 70]);
+    const filtered = await getReceptionRankings(db, { type: "top_rated_all_time", evaluatedAt: EVALUATED_AT, filters: { genres: [7] } });
+    expect(filtered.data.minimum_reviews).toBe(50);
+    expect(filtered.data.items.map((item) => item.game.appid)).toEqual([70, 71, 72]);
+    const eitherGenre = await getReceptionRankings(db, { type: "top_rated_all_time", evaluatedAt: EVALUATED_AT, filters: { genres: [7, 8] } });
+    expect(eitherGenre.data.items.map((item) => item.game.appid)).toEqual([76, 70, 71, 72]);
+
+    const belowGlobal = await getGameReceptionEligibility(db, 71, EVALUATED_AT);
+    expect(belowGlobal?.all_time.global.reasons).toEqual(["below_review_threshold"]);
+    expect(belowGlobal?.all_time.filtered.eligible).toBe(true);
+    const earlyAccess = await getGameReceptionEligibility(db, 74, EVALUATED_AT);
+    expect(earlyAccess?.all_time.global.reasons).toEqual(["early_access"]);
+    const upcoming = await getGameReceptionEligibility(db, 75, EVALUATED_AT);
+    expect(upcoming?.all_time.global.reasons).toEqual(["not_full_release"]);
+    native.close(true);
+  });
+
+  test("counts weekly evidence as whole weeks and excludes a week crossing the rolling boundary", async () => {
+    const { db, native } = freshDb();
+    addApp(native, 80);
+    addScore(native, 80, 88);
+    native.query(`
+      INSERT INTO review_buckets
+        (appid, source_id, granularity, period_start, period_end, positive_count, negative_count, observed_at, provenance)
+      VALUES (?, ?, 'weekly', '2026-08-25T00:00:00.000Z', '2026-09-01T00:00:00.000Z', 250, 0, '2026-09-07T00:00:00.000Z', 'test')
+    `).run(80, HISTOGRAM_SOURCE);
+
+    const ranking = await getReceptionRankings(db, { type: "top_rated_now", evaluatedAt: EVALUATED_AT });
+    expect(ranking.data.items.map((item) => item.game.appid)).toEqual([80]);
+    expect(ranking.data.items[0]?.eligibility.qualifying_reviews).toBe(250);
+    expect(ranking.data.items[0]?.metric.value).toBe(88);
+    const crossingBoundary = await getGameReceptionEligibility(db, 80, "2026-11-25T00:00:00.000Z");
+    expect(crossingBoundary?.now.qualifying_reviews).toBeNull();
+    expect(crossingBoundary?.now.global.eligible).toBe(false);
     native.close(true);
   });
 
@@ -325,6 +427,69 @@ describe("reception ranking query domain", () => {
     expect(allTimeAfterReviewsAgeOut.data.items[0]?.eligibility.qualifying_reviews).toBe(500);
     native.close(true);
   });
+  test("keeps recalculation time out of ranking freshness and preserves monthly formula provenance", async () => {
+    const { db, native } = freshDb();
+    try {
+      addApp(native, 90, "Formula Cutover Game");
+      addBucketsForDays(native, 90, 300, 30, "2026-08-01T00:00:00.000Z");
+      addScore(native, 90, (100 * 250.5) / 251, "2026-08-31T00:00:00.000Z");
+      native.query("UPDATE player_score_history SET formula_version = 'steam-player-v1' WHERE appid = 90").run();
+      const previous = native.query<{ id: number }, []>("SELECT id FROM player_score_history WHERE appid = 90").get()!;
+      addScore(native, 90, 100, "2026-09-15T00:00:00.000Z");
+      native.query(`UPDATE player_score_history
+        SET current_positive_count = 250, current_total_count = 250,
+            current_window_start = '2026-08-01T00:00:00.000Z',
+            current_window_end = '2026-08-31T00:00:00.000Z',
+            current_evidence_observed_at = '2026-08-31T00:00:00.000Z'
+        WHERE appid = 90`).run();
+      const recalculation = {
+        previous_observation_id: previous.id,
+        previous_formula_version: "steam-player-v1",
+        calculated_at: "2026-09-15T00:00:00.000Z",
+      };
+      native.query(`UPDATE player_score_history
+        SET formula_version = 'steam-player-v2',
+            current_window_end = '2026-08-31T00:00:00.000Z',
+            current_evidence_observed_at = '2026-08-31T00:00:00.000Z',
+            provenance = ?
+        WHERE appid = 90 AND observed_at = '2026-09-15T00:00:00.000Z'`).run(JSON.stringify({ recalculation }));
+
+      const evaluatedAt = "2026-10-02T00:00:00.000Z";
+      const ranking = await getReceptionRankings(db, { type: "top_rated_now", evaluatedAt });
+      expect(ranking.data.items[0]?.metric.value).toBe(100);
+      expect(ranking.sourceTimestamp).toBe("2026-09-07T00:00:00.000Z");
+      expect(ranking.data.items[0]?.metric).toMatchObject({
+        observed_at: recalculation.calculated_at,
+        source_observed_at: "2026-08-31T00:00:00.000Z",
+        formula_version: "steam-player-v2",
+        recalculation,
+      });
+      const comparison = await getReceptionComparison(db, { type: "top_rated_now", appid: 90, evaluatedAt });
+      expect(comparison.sourceTimestamp).toBe("2026-09-07T00:00:00.000Z");
+      expect(comparison.data?.points.find((point) => point.cutoff === "2026-09-01T00:00:00.000Z")).toMatchObject({
+        formula_version: "steam-player-v1",
+        value: (100 * 250.5) / 251,
+      });
+      expect(comparison.data?.points.find((point) => point.cutoff === "2026-10-01T00:00:00.000Z")).toMatchObject({
+        formula_version: "steam-player-v2",
+        value: 100,
+        source_observed_at: "2026-08-31T00:00:00.000Z",
+        recalculation,
+      });
+      const chart = buildReceptionComparisonChartData(comparison.data!);
+      const before = chart.points.find((point) => point.cutoff === "2026-09-01T00:00:00.000Z")!;
+      const after = chart.points.find((point) => point.cutoff === "2026-10-01T00:00:00.000Z")!;
+      expect(before.series_values.filter((value) => value !== null)).toEqual([(100 * 250.5) / 251]);
+      expect(after.series_values.filter((value) => value !== null)).toEqual([100]);
+      expect(before.series_values.some((value, index) => value !== null && after.series_values[index] !== null)).toBe(false);
+      expect(before.isolated).toBe(true);
+      expect(after.isolated).toBe(true);
+      expect(chart.points.filter((point) => point.value === null).every((point) => point.series_values.every((value) => value === null))).toBe(true);
+    } finally {
+      native.close(true);
+    }
+  });
+
   test("reconstructs missing Now cutoffs without mixing All Time evidence", async () => {
     const { db, native } = freshDb();
     addApp(native, 40, "Reconstructed Game");

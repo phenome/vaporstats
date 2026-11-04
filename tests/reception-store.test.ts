@@ -4,11 +4,12 @@ import type { AppDatabase, AppPreparedStatement } from "../src/lib/db";
 import {
   compactReviewEvidence,
   getPlayerScoreHistory,
+  getPlayerScoreState,
   getReviewBuckets,
   getReviewSummarySnapshots,
   persistReceptionObservation,
 } from "../src/lib/reception-store";
-import type { ReviewSourceProvenance, SteamReviewHistogram, SteamReviewSummary } from "../workers/review-source";
+import { fetchSteamReviewHistogram, type ReviewSourceProvenance, type SteamReviewHistogram, type SteamReviewSummary } from "../workers/review-source";
 import type { SteamEventRecord } from "../workers/steam-events";
 
 const HIST_SOURCE = "histogram|population=all_reviews|flags=%7B%22count_all_reviews%22%3Atrue%7D|interpretation=steam-review-source-v1";
@@ -145,11 +146,103 @@ describe("reception persistence", () => {
   beforeEach(() => { db = new MemoryDb(); db.native.query("INSERT INTO apps (appid, name, slug) VALUES (?, ?, ?)").run(1, "Test", "test"); });
   afterEach(() => db.close());
 
+  test("persists parsed weekly rollups and reads non-overlapping eligibility without filling absent weeks", async () => {
+    const observedAt = "2026-09-09T00:00:00.000Z";
+    const epoch = (value: string) => Date.parse(value) / 1000;
+    const parsed = await fetchSteamReviewHistogram(1, {
+      observedAt,
+      customFetch: (async () => new Response(JSON.stringify({
+        success: 1,
+        count_all_reviews: true,
+        results: {
+          rollup_type: "week",
+          recent: [{ date: epoch("2026-09-08T00:00:00Z"), recommendations_up: 100, recommendations_down: 0 }],
+          rollups: [
+            { date: epoch("2026-08-19T00:00:00Z"), recommendations_up: 0, recommendations_down: 0 },
+            { date: epoch("2026-09-02T00:00:00Z"), recommendations_up: 15, recommendations_down: 5 },
+            { date: epoch("2026-09-09T00:00:00Z"), recommendations_up: 999, recommendations_down: 1 },
+          ],
+        },
+      }))) as unknown as typeof fetch,
+    });
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    await persistReceptionObservation(db, { appid: 1, histogram: parsed.value, observedAt });
+
+    const stored = await getReviewBuckets(db, 1, parsed.value.sourceId);
+    expect(stored.map((row) => [
+      row.granularity, row.period_start, row.period_end, row.positive_count, row.negative_count, row.observed_at,
+    ])).toEqual([
+      ["weekly", "2026-08-19T00:00:00.000Z", "2026-08-26T00:00:00.000Z", 0, 0, observedAt],
+      ["weekly", "2026-09-02T00:00:00.000Z", "2026-09-09T00:00:00.000Z", 15, 5, observedAt],
+      ["daily", "2026-09-08T00:00:00.000Z", "2026-09-09T00:00:00.000Z", 100, 0, observedAt],
+    ]);
+    const state = await getPlayerScoreState(db, 1);
+    expect(state?.eligibility_review_count).toBe(20);
+    expect(state?.eligibility_source_id).toBe(parsed.value.sourceId);
+    expect(JSON.parse(state!.eligibility_evidence_intervals)).toEqual([
+      { start: "2026-08-19T00:00:00.000Z", end: "2026-08-26T00:00:00.000Z", granularity: "week" },
+      { start: "2026-09-02T00:00:00.000Z", end: "2026-09-09T00:00:00.000Z", granularity: "week" },
+    ]);
+  });
+
+  test("rejects malformed, open, and incompatible-source weekly intervals before persistence", async () => {
+    const observedAt = "2026-09-09T00:00:00.000Z";
+    const incoming = histogram(1, observedAt, 10, 2);
+    const valid = {
+      ...incoming.buckets[0]!,
+      granularity: "week" as const,
+      periodStart: "2026-08-26T00:00:00.000Z",
+      periodEnd: "2026-09-02T00:00:00.000Z",
+    };
+    const invalidIntervals = [
+      ["2026-09-02T00:00:00.000Z", "2026-09-08T00:00:00.000Z"],
+      ["2026-09-01T00:00:00.000Z", "2026-09-09T00:00:00.000Z"],
+      ["2026-08-26T12:00:00.000Z", "2026-09-02T12:00:00.000Z"],
+      ["2026-08-26T00:00:00.001Z", "2026-09-02T00:00:00.001Z"],
+      ["2026-09-09T00:00:00.000Z", "2026-09-16T00:00:00.000Z"],
+    ];
+    incoming.buckets = [
+      valid,
+      ...invalidIntervals.map(([periodStart, periodEnd]) => ({ ...valid, periodStart, periodEnd, positiveCount: 999 })),
+      { ...valid, sourceId: "incompatible-population", positiveCount: 999 },
+    ];
+    const result = await persistReceptionObservation(db, { appid: 1, histogram: incoming, observedAt });
+
+    expect(result.persistedBuckets).toBe(1);
+    const stored = await getReviewBuckets(db, 1);
+    expect(stored.map((row) => [row.granularity, row.period_start, row.period_end, row.positive_count, row.negative_count])).toEqual([
+      ["weekly", "2026-08-26T00:00:00.000Z", "2026-09-02T00:00:00.000Z", 10, 2],
+    ]);
+  });
+
   test("keeps unchanged, clock-only, and anchor-only observations out of immutable score history", async () => {
     await persistReceptionObservation(db, { appid: 1, histogram: histogram(1, OBSERVED, 10, 2), observedAt: OBSERVED });
     await persistReceptionObservation(db, { appid: 1, histogram: histogram(1, "2026-09-02T00:00:00.000Z", 10, 2), observedAt: "2026-09-02T00:00:00.000Z" });
     await persistReceptionObservation(db, { appid: 1, histogram: histogram(1, "2026-09-03T00:00:00.000Z", 10, 2), events: [majorEvent("2026-09-03T00:00:00.000Z")], observedAt: "2026-09-03T00:00:00.000Z" });
     expect((await getPlayerScoreHistory(db, 1))).toHaveLength(1);
+  });
+
+  test("appends the new formula once even when recollected aggregate evidence is unchanged", async () => {
+    await persistReceptionObservation(db, { appid: 1, histogram: histogram(1, OBSERVED, 3, 0), observedAt: OBSERVED });
+    // Represent the retained v1 observation produced before the formula cutover.
+    db.native.query("UPDATE player_score_history SET formula_version = 'steam-player-v1', score = 87.5 WHERE appid = 1").run();
+    const [original] = await getPlayerScoreHistory(db, 1);
+    const nextTime = "2026-09-02T00:00:00.000Z";
+    const upgraded = await persistReceptionObservation(db, {
+      appid: 1, histogram: histogram(1, nextTime, 3, 0), observedAt: nextTime,
+    });
+    expect(upgraded.scoreAppended).toBe(true);
+    const history = await getPlayerScoreHistory(db, 1);
+    expect(history[0]).toEqual(original);
+    expect(history.at(-1)).toMatchObject({
+      score: 100, formula_version: "steam-player-v2", current_positive_count: 3, current_total_count: 3,
+    });
+    const repeated = await persistReceptionObservation(db, {
+      appid: 1, histogram: histogram(1, "2026-09-03T00:00:00.000Z", 3, 0), observedAt: "2026-09-03T00:00:00.000Z",
+    });
+    expect(repeated.scoreAppended).toBe(false);
+    expect(await getPlayerScoreHistory(db, 1)).toEqual(history);
   });
 
   test("uses resolved major-event metadata in the same supported score observation", async () => {
@@ -212,6 +305,9 @@ describe("reception persistence", () => {
       const end = new Date(Date.UTC(2025, 6, day + 2)).toISOString();
       statements.push(db.prepare("INSERT INTO review_buckets (appid, source_id, granularity, period_start, period_end, positive_count, negative_count, observed_at, provenance) VALUES (?, ?, 'daily', ?, ?, 1, 2, ?, 'test')").bind(1, source, start, end, "2025-08-01T00:00:00.000Z"));
     }
+    const crossingWeek = ["2025-08-27T00:00:00.000Z", "2025-09-03T00:00:00.000Z"];
+    statements.push(db.prepare("INSERT INTO review_buckets (appid, source_id, granularity, period_start, period_end, positive_count, negative_count, observed_at, provenance) VALUES (?, ?, 'weekly', ?, ?, 7, 3, ?, 'steam.appreviewhistogram')").bind(1, source, ...crossingWeek, "2025-09-03T00:00:00.000Z"));
+    statements.push(db.prepare("INSERT INTO review_buckets (appid, source_id, granularity, period_start, period_end, positive_count, negative_count, observed_at, provenance) VALUES (?, ?, 'daily', ?, ?, 4, 1, ?, 'test')").bind(1, source, "2026-08-31T00:00:00.000Z", OBSERVED, OBSERVED));
     await db.batch(statements);
     db.failAt = 1;
     await expect(compactReviewEvidence(db, "2026-09-01T00:00:00.000Z")).rejects.toThrow("test transaction failure");
@@ -222,5 +318,19 @@ describe("reception persistence", () => {
     expect((await getReviewBuckets(db, 1, source)).filter((row) => row.granularity === "monthly")).toHaveLength(1);
     expect((await getReviewBuckets(db, 1, source)).filter((row) => row.period_start.startsWith("2025-07"))).toHaveLength(3);
     expect((await getReviewBuckets(db, 1, source)).find((row) => row.granularity === "monthly")?.observed_at).toBe("2025-09-01T00:00:00.000Z");
+    const retained = await getReviewBuckets(db, 1, source);
+    expect(retained.filter((row) => row.granularity === "daily" && row.period_start.startsWith("2025-08"))).toEqual([]);
+    expect(retained.find((row) => row.granularity === "weekly")).toMatchObject({
+      period_start: crossingWeek[0],
+      period_end: crossingWeek[1],
+      positive_count: 7,
+      negative_count: 3,
+      observed_at: "2025-09-03T00:00:00.000Z",
+    });
+    expect(retained.find((row) => row.period_start === "2026-08-31T00:00:00.000Z")).toMatchObject({
+      granularity: "daily",
+      positive_count: 4,
+      negative_count: 1,
+    });
   });
 });

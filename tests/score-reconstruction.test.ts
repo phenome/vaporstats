@@ -31,6 +31,9 @@ describe("retrospective player score", () => {
       day("2026-09-08T00:00:00.000Z", 100, 0),
     ], [], "2026-09-08T12:00:00.000Z", SOURCE);
 
+    expect(candidate?.score).toBe(80);
+    expect(candidate?.formulaVersion).toBe("steam-player-v2");
+
     expect(candidate?.inputs.current.selectedIntervals).toEqual([{
       start: "2026-09-07T00:00:00.000Z",
       end: "2026-09-08T00:00:00.000Z",
@@ -50,6 +53,49 @@ describe("retrospective player score", () => {
     expect(candidate?.inputs.current.positiveReviews).toBe(8);
   });
 
+  test("all-positive history does not rise just because more positive reviews arrive", () => {
+    const buckets = [
+      day("2026-09-06T00:00:00.000Z", 1, 0),
+      day("2026-09-07T00:00:00.000Z", 9, 0),
+    ];
+    const initial = reconstructPlayerScoreAt(buckets, [], "2026-09-07T00:00:00.000Z", SOURCE);
+    const later = reconstructPlayerScoreAt(buckets, [], "2026-09-08T00:00:00.000Z", SOURCE);
+    expect(initial?.score).toBe(100);
+    expect(later?.score).toBe(100);
+    expect(initial?.currentReviews).toBe(1);
+    expect(later?.currentReviews).toBe(10);
+  });
+
+  test("applies capped real historical support across a major-update boundary", () => {
+    const candidate = reconstructPlayerScoreAt([
+      day("2026-08-31T00:00:00.000Z", 0, 100),
+      day("2026-09-01T00:00:00.000Z", 10, 0),
+    ], [{ category: 14, start: "2026-09-01T00:00:00.000Z", eventId: "major" }], "2026-09-02T00:00:00.000Z", SOURCE);
+    expect(candidate?.score).toBeCloseTo(100 / 3, 12);
+    expect(candidate?.currentReviews).toBe(10);
+    expect(candidate?.historicalReviews).toBe(100);
+    expect(candidate?.historicalEffectiveReviews).toBe(20);
+    expect(candidate?.anchor?.eventId).toBe("major");
+  });
+
+  test("keeps a whole week without double-counting overlapping daily evidence", () => {
+    const candidate = reconstructPlayerScoreAt([
+      {
+        ...day("2026-08-31T00:00:00.000Z", 9, 1),
+        granularity: "week",
+        end: "2026-09-07T00:00:00.000Z",
+      },
+      day("2026-09-01T00:00:00.000Z", 0, 100),
+    ], [], "2026-09-07T00:00:00.000Z", SOURCE);
+    expect(candidate?.score).toBe(90);
+    expect(candidate?.currentReviews).toBe(10);
+    expect(candidate?.inputs.current.selectedIntervals).toEqual([{
+      start: "2026-08-31T00:00:00.000Z",
+      end: "2026-09-07T00:00:00.000Z",
+      granularity: "week",
+    }]);
+  });
+
   test("falls back to an earlier supported endpoint when the current window runs out", () => {
     const candidate = reconstructPlayerScoreAt([
       day("2026-05-01T00:00:00.000Z", 8, 2, "2026-05-02T00:00:00.000Z"),
@@ -65,7 +111,7 @@ describe("retrospective player score", () => {
       day("2026-04-01T00:00:00.000Z", 0, 0),
     ], [], "2026-04-02T00:00:00.000Z", SOURCE);
 
-    expect(candidate?.score).toBeCloseTo(77.2727272727);
+    expect(candidate?.score).toBe(80);
     expect(candidate?.scoreWindow?.end).toBe("2026-01-02T00:00:00.000Z");
   });
 

@@ -2,6 +2,7 @@ import type { AppDatabase, AppPreparedStatement } from "./db";
 import {
   calculatePlayerScoreCandidate,
   getPlayerScoreWindow,
+  PLAYER_SCORE_FORMULA_VERSION,
   type PlayerScoreCandidate,
   type ScoreAnchor,
   type ScoreEvidenceInput,
@@ -34,7 +35,7 @@ export interface PersistReceptionObservationInput {
 export interface StoredReviewBucket {
   appid: number;
   source_id: string;
-  granularity: "daily" | "monthly";
+  granularity: "daily" | "weekly" | "monthly";
   period_start: string;
   period_end: string;
   positive_count: number;
@@ -50,6 +51,12 @@ export interface StoredSummarySnapshot {
   lifetime_positive_count: number;
   lifetime_total_count: number;
   created_at?: string;
+}
+
+export interface ScoreFormulaRecalculation {
+  previous_observation_id: number;
+  previous_formula_version: string;
+  calculated_at: string;
 }
 
 export interface StoredScoreHistory {
@@ -179,6 +186,27 @@ function safeJson(value: unknown, fallback = "{}"): string {
   }
 }
 
+export function parseScoreRecalculation(value: unknown): ScoreFormulaRecalculation | undefined {
+  if (typeof value === "string") {
+    try {
+      value = JSON.parse(value);
+    } catch {
+      return undefined;
+    }
+  }
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+  if (!("previous_observation_id" in value) || !safeCount(value.previous_observation_id) || value.previous_observation_id <= 0) return undefined;
+  if (!("previous_formula_version" in value) || typeof value.previous_formula_version !== "string" || value.previous_formula_version.length === 0) return undefined;
+  const calculatedAt = "calculated_at" in value ? parsedIso(value.calculated_at) : null;
+  if (calculatedAt === null) return undefined;
+  return {
+    previous_observation_id: value.previous_observation_id,
+    previous_formula_version: value.previous_formula_version,
+    calculated_at: calculatedAt,
+  };
+}
+
+
 function canonicalSource(
   source: SteamReviewSummary["provenance"] | SteamReviewHistogram["provenance"],
   expectedEndpoint: "appreviews" | "appreviewhistogram",
@@ -231,22 +259,25 @@ function normalizeBucket(
   bucket: SteamReviewBucket,
   sourceId: string,
 ): NormalizedIncomingBucket | null {
-  if (bucket.sourceId !== sourceId || (bucket.granularity !== "day" && bucket.granularity !== "month")) return null;
+  if (bucket.sourceId !== sourceId || (bucket.granularity !== "day" && bucket.granularity !== "week" && bucket.granularity !== "month")) return null;
   const start = parsedIso(bucket.periodStart);
   const end = parsedIso(bucket.periodEnd);
   const observedAt = parsedIso(bucket.observedAt);
   if (!start || !end || !observedAt || start >= end || end > observedAt || !safeCount(bucket.positiveCount) || !safeCount(bucket.negativeCount)) return null;
   const startDate = new Date(start);
   const endDate = new Date(end);
+  if (startDate.getTime() % DAY_MS !== 0) return null;
   if (bucket.granularity === "day") {
-    if (endDate.getTime() - startDate.getTime() !== DAY_MS || startDate.getUTCHours() !== 0 || startDate.getUTCMinutes() !== 0 || startDate.getUTCSeconds() !== 0) return null;
-  } else if (startDate.getUTCDate() !== 1 || startDate.getUTCHours() !== 0 || startDate.getUTCMinutes() !== 0 || startDate.getUTCSeconds() !== 0) {
+    if (endDate.getTime() - startDate.getTime() !== DAY_MS) return null;
+  } else if (bucket.granularity === "week") {
+    if (endDate.getTime() - startDate.getTime() !== 7 * DAY_MS) return null;
+  } else if (startDate.getUTCDate() !== 1 || endDate.getTime() !== Date.UTC(startDate.getUTCFullYear(), startDate.getUTCMonth() + 1, 1)) {
     return null;
   }
   return {
     appid: bucket.appid,
     source_id: sourceId,
-    granularity: bucket.granularity === "day" ? "daily" : "monthly",
+    granularity: bucket.granularity === "day" ? "daily" : bucket.granularity === "week" ? "weekly" : "monthly",
     period_start: start,
     period_end: end,
     positive_count: bucket.positiveCount,
@@ -259,7 +290,7 @@ function normalizeBucket(
 function asDomainBucket(row: StoredReviewBucket): ReviewBucket {
   return {
     sourceId: row.source_id,
-    granularity: row.granularity === "daily" ? "day" : "month",
+    granularity: row.granularity === "daily" ? "day" : row.granularity === "weekly" ? "week" : "month",
     start: row.period_start,
     end: row.period_end,
     positiveReviews: row.positive_count,
@@ -474,12 +505,17 @@ export async function persistReceptionObservation(
     : [];
   const incomingEvents = (input.events ?? []).filter((event) => event && event.appid === input.appid && eventIdentity(event) !== null);
 
-  const [existingBuckets, existingSummaries, priorState, existingEvents, sourceRows] = await Promise.all([
+  const [existingBuckets, existingSummaries, priorState, existingEvents, sourceRows, priorScore] = await Promise.all([
     getReviewBuckets(db, input.appid),
     validSummary && summarySource ? getReviewSummarySnapshots(db, input.appid, summarySource.sourceId) : Promise.resolve([] as StoredSummarySnapshot[]),
     getPlayerScoreState(db, input.appid),
     getSteamEvents(db, input.appid),
     rows<SourceRow>(db, `SELECT id, endpoint, request_filter, language, purchase_type, day_range, filter_offtopic_activity, population, population_flags, interpretation_version, identity_key FROM review_sources`),
+    validHistogram ? db.prepare(
+      `SELECT h.formula_version FROM player_score_history h
+       JOIN player_score_state s ON s.latest_score_history_id = h.id AND s.appid = h.appid
+       WHERE s.appid = ?`,
+    ).bind(input.appid).first<{ formula_version: string }>() : Promise.resolve(null),
   ]);
   
   const existingByKey = new Map(existingBuckets.map((bucket) => [bucketKey(bucket), bucket]));
@@ -553,7 +589,8 @@ export async function persistReceptionObservation(
   );
   const historicalInput = afterHistorical?.countsComplete && afterHistorical.selectedIntervals.length > 0 ? afterHistorical : null;
   const retained = rawBaseline(priorState);
-  const candidate = validHistogram && afterCurrent.selection?.countsComplete && afterCurrent.selection.selectedIntervals.length > 0 && changedRelevant
+  const candidate = validHistogram && afterCurrent.selection?.countsComplete && afterCurrent.selection.selectedIntervals.length > 0
+    && (changedRelevant || priorScore?.formula_version !== PLAYER_SCORE_FORMULA_VERSION)
     ? calculatePlayerScoreCandidate({
         current: afterCurrent.selection,
         historical: historicalInput,

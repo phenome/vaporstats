@@ -26,6 +26,15 @@ function bucket(
   };
 }
 
+function week(start: string, positive: number, negative: number, options: Partial<ReviewBucket> = {}): ReviewBucket {
+  return bucket(start, positive, negative, {
+    granularity: "week",
+    end: new Date(Date.parse(start) + 7 * DAY).toISOString(),
+    observedAt: "2025-04-01T00:00:00.000Z",
+    ...options,
+  });
+}
+
 describe("whole review-bucket selection", () => {
   test("prefers complete daily coverage and returns counts and provenance", () => {
     const buckets: ReviewBucket[] = [
@@ -139,5 +148,120 @@ describe("whole review-bucket selection", () => {
     expect(selected.negativeReviews).toBe(30);
     expect(selected.totalReviews).toBe(100);
     expect(selected.observationTimes).toEqual(["2025-01-03T00:00:00.000Z"]);
+  });
+
+  test("keeps cross-month weeks rather than losing coverage to a month or isolated days", () => {
+    const weeks = Array.from({ length: 5 }, (_, index) =>
+      week(new Date(Date.UTC(2025, 0, 29 + index * 7)).toISOString(), 7, 3));
+    const selected = selectWholeBuckets([
+      bucket("2025-01-30T00:00:00Z", 1_000, 0),
+      bucket("2025-02-01T00:00:00Z", 900, 100, {
+        granularity: "month",
+        end: "2025-03-01T00:00:00.000Z",
+        observedAt: "2025-04-01T00:00:00.000Z",
+      }),
+      ...weeks,
+    ], { start: "2025-01-29T00:00:00Z", end: "2025-03-05T00:00:00Z" });
+
+    expect(selected.selectedIntervals).toEqual(weeks.map(({ start, end }) => ({ start, end, granularity: "week" })));
+    expect(selected.positiveReviews).toBe(35);
+    expect(selected.negativeReviews).toBe(15);
+    expect(selected.totalReviews).toBe(50);
+    expect(selected.covered).toBe(true);
+    expect(selected.gaps).toEqual([]);
+  });
+
+  test("does not trade a hole inside a complete month for weekly coverage outside it", () => {
+    const month = bucket("2025-02-01T00:00:00Z", 900, 100, {
+      granularity: "month",
+      end: "2025-03-01T00:00:00.000Z",
+      observedAt: "2025-04-01T00:00:00.000Z",
+    });
+    const incompleteWeeks = [29, 36, 50, 57].map((date) =>
+      week(new Date(Date.UTC(2025, 0, date)).toISOString(), 7, 3));
+    const requested = { start: "2025-01-29T00:00:00Z", end: "2025-03-05T00:00:00Z" };
+    const selected = selectWholeBuckets([month, ...incompleteWeeks], requested);
+    expect(selected.selectedIntervals).toEqual([{ start: month.start, end: month.end, granularity: "month" }]);
+    expect(selected.positiveReviews).toBe(900);
+    expect(selected.negativeReviews).toBe(100);
+    expect(selected.gaps).toEqual([
+      { start: "2025-01-29T00:00:00.000Z", end: "2025-02-01T00:00:00.000Z", granularity: "day" },
+      { start: "2025-03-01T00:00:00.000Z", end: "2025-03-05T00:00:00.000Z", granularity: "day" },
+    ]);
+
+    const alignedWeeks = [1, 8, 15, 22].map((date) =>
+      week(new Date(Date.UTC(2025, 1, date)).toISOString(), 7, 3));
+    const replaced = selectWholeBuckets([month, ...incompleteWeeks, ...alignedWeeks], requested);
+    expect(replaced.selectedIntervals).toEqual(alignedWeeks.map(({ start, end }) => ({ start, end, granularity: "week" })));
+    expect(replaced.totalReviews).toBe(40);
+    expect(replaced.gaps).toEqual(selected.gaps);
+  });
+
+  test("prefers exact daily replacement of a week and exact weekly replacement of a month", () => {
+    const weeks = Array.from({ length: 4 }, (_, index) =>
+      week(new Date(Date.UTC(2025, 1, 1 + index * 7)).toISOString(), 7, 3));
+    const days = Array.from({ length: 7 }, (_, index) =>
+      bucket(new Date(Date.UTC(2025, 1, 8 + index)).toISOString(), 2, 1, { observedAt: "2025-04-01T00:00:00.000Z" }));
+    const selected = selectWholeBuckets([
+      ...weeks,
+      ...days,
+      bucket("2025-02-01T00:00:00Z", 900, 100, {
+        granularity: "month",
+        end: "2025-03-01T00:00:00.000Z",
+        observedAt: "2025-04-01T00:00:00.000Z",
+      }),
+    ], { start: "2025-02-01T00:00:00Z", end: "2025-03-01T00:00:00Z" });
+
+    expect(selected.selectedIntervals.map((interval) => interval.granularity)).toEqual([
+      "week", ...Array(7).fill("day"), "week", "week",
+    ]);
+    expect(selected.positiveReviews).toBe(35);
+    expect(selected.negativeReviews).toBe(16);
+    expect(selected.totalReviews).toBe(51);
+    expect(selected.covered).toBe(true);
+  });
+
+  test("preserves absent weeks as gaps and never prorates weeks across a window boundary", () => {
+    const selected = selectWholeBuckets([
+      week("2025-01-29T00:00:00Z", 70, 30),
+      week("2025-02-05T00:00:00Z", 0, 0),
+      week("2025-02-19T00:00:00Z", 7, 3),
+    ], { start: "2025-02-01T00:00:00Z", end: "2025-02-23T00:00:00Z" });
+
+    expect(selected.selectedIntervals).toEqual([
+      { start: "2025-02-05T00:00:00.000Z", end: "2025-02-12T00:00:00.000Z", granularity: "week" },
+    ]);
+    expect(selected.totalReviews).toBe(0);
+    expect(selected.covered).toBe(false);
+    expect(selected.gaps).toEqual([
+      { start: "2025-02-01T00:00:00.000Z", end: "2025-02-05T00:00:00.000Z", granularity: "day" },
+      { start: "2025-02-12T00:00:00.000Z", end: "2025-02-23T00:00:00.000Z", granularity: "day" },
+    ]);
+  });
+
+  test("rejects malformed weekly intervals and respects observation, completion, and population boundaries", () => {
+    const valid = week("2025-01-29T00:00:00Z", 7, 3, { observedAt: "2025-02-05T00:00:00.000Z" });
+    const selected = selectWholeBuckets([
+      valid,
+      week("2025-02-05T00:00:00Z", 70, 30, { end: "2025-02-11T00:00:00.000Z", observedAt: "2025-03-01T00:00:00.000Z" }),
+      week("2025-02-05T12:00:00Z", 70, 30, { observedAt: "2025-03-01T00:00:00.000Z" }),
+      week("2025-02-05T00:00:00.001Z", 70, 30, { observedAt: "2025-03-01T00:00:00.000Z" }),
+      week("2025-02-12T00:00:00Z", 70, 30, { complete: false, observedAt: "2025-03-01T00:00:00.000Z" }),
+      week("2025-02-19T00:00:00Z", 70, 30, { observedAt: "2025-04-01T00:00:00.000Z" }),
+      week("2025-02-26T00:00:00Z", 70, 30, { observedAt: "2025-03-01T00:00:00.000Z" }),
+      week("2025-02-05T00:00:00Z", 700, 300, { sourceId: "other-population", observedAt: "2025-02-12T00:00:00.000Z" }),
+    ], { start: "2025-01-29T00:00:00Z", end: "2025-03-12T00:00:00Z" }, {
+      sourceId: valid.sourceId,
+      asOf: "2025-03-01T00:00:00Z",
+    });
+
+    expect(selected.selectedIntervals).toEqual([
+      { start: valid.start, end: valid.end, granularity: "week" },
+    ]);
+    expect(selected.totalReviews).toBe(10);
+    expect(selected.observationTimes).toEqual(["2025-02-05T00:00:00.000Z"]);
+    expect(selected.gaps).toEqual([
+      { start: "2025-02-05T00:00:00.000Z", end: "2025-03-12T00:00:00.000Z", granularity: "day" },
+    ]);
   });
 });

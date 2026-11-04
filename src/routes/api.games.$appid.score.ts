@@ -12,9 +12,9 @@ import {
   VALID_HISTORY_RANGES,
   type HistoryRange,
 } from "../lib/player-history";
-import { CACHE_POLICIES, getLiveApiCacheHeaders } from "../lib/cache";
+import { CACHE_POLICIES, getLiveApiCacheHeaders, RECEPTION_DATA_VERSION } from "../lib/cache";
 
-const SCORE_QUERY_PARAMETERS: Record<string, true> = { view: true, range: true };
+const SCORE_QUERY_PARAMETERS: Record<string, true> = { view: true, range: true, version: true };
 
 function errorResponse(message: string, status = 400): Response {
   return Response.json(
@@ -63,8 +63,11 @@ export async function handleGameScoreRequest(
       return errorResponse(`Parameter is not valid for score: ${key}`);
     }
   }
-  for (const key of ["view", "range"]) {
+  for (const key of ["view", "range", "version"]) {
     if (params.getAll(key).length > 1) return errorResponse(`Parameter may only be provided once: ${key}`);
+  }
+  if (params.has("version") && params.get("version") !== RECEPTION_DATA_VERSION) {
+    return errorResponse("Unsupported reception data version");
   }
 
   const view = params.get("view") ?? "summary";

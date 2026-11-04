@@ -423,7 +423,7 @@ export const reviewBuckets = sqliteTable(
     }),
     check(
       "review_buckets_granularity_check",
-      sql`${table.granularity} IN ('daily', 'monthly')`,
+      sql`${table.granularity} IN ('daily', 'weekly', 'monthly')`,
     ),
     check(
       "review_buckets_interval_check",

@@ -41,6 +41,9 @@
 .facet-group { border: 0; margin: 0; min-width: 0; padding: 0; }
 .facet-group legend { margin-bottom: .4rem; }
 .rankings-status { color: var(--rank-dim); font: .7rem ui-monospace, monospace; margin: 1rem auto 0; max-width: 1136px; text-align: right; }
+.ranking-methodology { border: 1px solid var(--rank-border); color: var(--rank-muted); font-size: .75rem; line-height: 1.5; margin: .75rem auto 0; max-width: 1136px; padding: .65rem 1rem; }
+.ranking-methodology > summary { color: var(--rank-violet-strong); cursor: pointer; }
+.ranking-methodology p { margin: .5rem 0 0; }
 .rankings-muted { color: var(--rank-muted); font-size: .75rem; line-height: 1.45; }
 .rankings-empty { border: 1px dashed var(--rank-border-bright); margin: 1rem auto; max-width: 1136px; padding: 2.5rem 1.5rem; text-align: center; }
 .rankings-empty strong { display: block; font-size: 1rem; }
@@ -77,6 +80,7 @@
 .ranking-score strong::after { border-width: 0 1px 1px 0; bottom: -1px; right: -1px; }
 .ranking-score.is-prominent strong { background: linear-gradient(135deg, #7c3aed38, #4c1d9518); border-color: #a78bfa70; font-size: 2rem; min-height: 5rem; width: 5rem; }
 .ranking-score span { color: var(--rank-muted); font-size: .62rem; line-height: 1.2; }
+.ranking-score .ranking-metric-label { color: var(--rank-violet-strong); font-weight: 700; }
 .podium-card:not(.podium-card-1) .podium-content { padding: .65rem; }
 .podium-card:not(.podium-card-1) .podium-content h2 { font-size: 1.15rem; }
 .podium-card:not(.podium-card-1) .ranking-score strong { font-size: 1.15rem; min-height: 3.5rem; width: 3.5rem; }
@@ -115,6 +119,9 @@
 .history-comparison { border-top: 1px solid var(--rank-border); padding-top: .7rem; }
 .history-comparison > summary { cursor: pointer; }
 .comparison-chart { min-width: 0; outline: none; }
+.comparison-title { color: var(--rank-violet-strong); font-size: .75rem; font-weight: 600; margin: 0 0 .5rem; }
+.comparison-sample { color: var(--rank-muted); font-size: .65rem; line-height: 1.4; margin: 0 0 .5rem; }
+.comparison-tooltip-values { display: grid; gap: .35rem; }
 .comparison-chart-inner { background: #101012; border: 1px solid var(--rank-border); height: 240px; width: 100%; }
 .comparison-chart:focus-visible .comparison-chart-inner { border-color: var(--rank-violet); }
 .comparison-note { color: var(--rank-dim); font-size: .62rem; margin: .45rem 0 0; }

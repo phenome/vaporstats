@@ -1,5 +1,7 @@
 # Separate reception ranking eligibility from the scoring window
 
+**Ordering update:** [ADR 0014](0014-observed-evidence-and-lifetime-confidence.md) replaces All Time's raw-approval ordering with Confidence score. The eligibility rules and separation of score magnitude from evidence strength below remain in effect.
+
 VaporStats keeps Current Player Score distinct from Lifetime Approval. Top Rated Now orders eligible full-release games by Current Player Score and requires 250 actual reviews in the rolling 90-day window for global rankings, or 50 for filtered rankings. Top Rated All Time orders eligible full-release games by compatible filtered lifetime Steam approval and applies the same thresholds to lifetime review volume.
 
 The Now eligibility window is independent of the patch-sensitive scoring window. A qualifying update does not reset eligibility, and the first post-update review does not trigger a new admission threshold. Post-update evidence can influence the current estimate while pre-update reviews still count toward eligibility when they fall within the rolling 90-day window. Historical-support weighting does not create additional qualifying reviews.

@@ -34,19 +34,37 @@ export interface RankingsPageViewProps {
   onNavigate?: (next: RankingsPageNavigation) => void;
 }
 
-type MetricLabel = "Current Player Score" | "Lifetime Approval";
-type ComparisonPayload = { value?: unknown; cutoff?: unknown };
+type MetricLabel = "Current Player Score" | "Confidence score";
+type ComparisonPayload = { value?: unknown; cutoff?: unknown; lifetime_approval?: unknown; lifetime_reviews?: unknown; observed_at?: unknown; source_observed_at?: unknown; recalculation?: unknown; isolated?: unknown };
+
+/** Each formula has its own nullable series, without adding artificial monthly cutoffs. */
+export function buildReceptionComparisonChartData(data: ReceptionComparisonData) {
+  const formulaVersions = [...new Set(data.points.map((point) => point.formula_version))];
+  const byCutoff = new Map(data.points.map((point) => [point.cutoff, point]));
+  const points = data.cutoffs.map((cutoff) => ({ ...byCutoff.get(cutoff), cutoff, value: byCutoff.get(cutoff)?.value ?? null }));
+  return {
+    formulaVersions,
+    points: points.map((point, index) => ({
+      ...point,
+      series_values: formulaVersions.map((version) => point.formula_version === version ? point.value : null),
+      isolated: point.value !== null &&
+        (points[index - 1]?.value == null || points[index - 1]?.formula_version !== point.formula_version) &&
+        (points[index + 1]?.value == null || points[index + 1]?.formula_version !== point.formula_version),
+    })),
+  };
+}
 
 const scoreFormat = new Intl.NumberFormat(undefined, { minimumFractionDigits: 1, maximumFractionDigits: 1 });
 const dateFormat = new Intl.DateTimeFormat(undefined, { month: "short", year: "numeric" });
 const monthFormat = new Intl.DateTimeFormat(undefined, { month: "short", year: "numeric" });
+const lifetimeMethodology = "Confidence score is the lower bound of the two-sided 95% Wilson interval for the positive share of compatible Steam lifetime reviews. It accounts for uncertainty in that review proportion, not the probability of game quality. Lifetime Approval is the unadjusted positive percentage; the review count is the observed sample.";
 
 function isComparisonPayload(value: unknown): value is ComparisonPayload {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function metricLabel(kind: ReceptionMetricKind): MetricLabel {
-  return kind === "current_player_score" ? "Current Player Score" : "Lifetime Approval";
+  return kind === "current_player_score" ? "Current Player Score" : "Confidence score";
 }
 
 function parseUtcDate(value: string): Date | null {
@@ -86,7 +104,9 @@ function ScoreCell({ item, prominent = false }: { item: ReceptionRankingItem; pr
   const context = `${qualifyingText}; ${formatNumber(item.eligibility.minimum_reviews)} reviews required for this ranking.`;
   return (
     <div className={`ranking-score ${prominent ? "is-prominent" : ""}`}>
+      {item.metric.kind === "lifetime_confidence" && <span className="ranking-metric-label">{label}</span>}
       <strong title={`${label}: ${scoreFormat.format(item.metric.value)}`} aria-label={`${label}: ${scoreFormat.format(item.metric.value)}`}>{scoreFormat.format(item.metric.value)}</strong>
+      {item.metric.lifetime_approval !== null && <span>Lifetime Approval: {scoreFormat.format(item.metric.lifetime_approval)}%</span>}
       <span title={context} tabIndex={0} aria-label={context}>{qualifyingText}</span>
     </div>
   );
@@ -121,19 +141,19 @@ function PodiumCard({ item, rank }: { item: ReceptionRankingItem; rank: number }
 function HistoryChart({ data }: { data: ReceptionComparisonData }) {
   const [hovered, setHovered] = useState<number | null>(null);
   const [tooltipVisible, setTooltipVisible] = useState(false);
-  const points = useMemo(() => {
-    const byCutoff = new Map(data.points.map((point) => [point.cutoff, point]));
-    return data.cutoffs.map((cutoff) => ({ cutoff, value: byCutoff.get(cutoff)?.value ?? null }));
-  }, [data]);
-  const label = metricLabel(data.points[0]?.metric_kind ?? (data.type === "top_rated_now" ? "current_player_score" : "lifetime_approval"));
+  const { points, formulaVersions } = useMemo(() => buildReceptionComparisonChartData(data), [data]);
+  const label = metricLabel(data.points[0]?.metric_kind ?? (data.type === "top_rated_now" ? "current_player_score" : "lifetime_confidence"));
+  const latestPoint = data.points.at(-1);
   const methodology = data.type === "top_rated_now"
     ? data.reconstructed_members > 0
       ? `Recorded scores are preferred; ${data.reconstructed_members} member${data.reconstructed_members === 1 ? "" : "s"} include reconstructed historical estimates from retained review evidence.`
       : "Recorded scores are used when available; missing historical months remain unfilled."
-    : "All Time uses compatible lifetime-summary snapshots only; histogram evidence is not mixed in.";
+    : `All Time uses compatible lifetime-summary snapshots only; histogram evidence is not mixed in. ${lifetimeMethodology}`;
   if (!data.cutoffs.length) return <p className="ranking-muted">No monthly comparison data yet.</p>;
   return (
     <div className="comparison-chart" tabIndex={0} aria-label={`${label} monthly comparison`} onKeyDown={(event) => { if (event.key === "Escape") { event.preventDefault(); setHovered(null); setTooltipVisible(false); } }}>
+      <h4 className="comparison-title">{label} monthly history</h4>
+      {latestPoint?.lifetime_approval != null && latestPoint.lifetime_reviews !== null && <p className="comparison-sample">{formatCutoff(latestPoint.cutoff)} · Lifetime Approval: {scoreFormat.format(latestPoint.lifetime_approval)}% · {formatNumber(latestPoint.lifetime_reviews)} reviews</p>}
       <ChartContainer config={{ value: { label, color: "#a78bfa" } }} className="comparison-chart-inner">
         <LineChart
           data={points}
@@ -152,12 +172,25 @@ function HistoryChart({ data }: { data: ReceptionComparisonData }) {
           <ChartTooltip
             active={tooltipVisible}
             cursor={{ stroke: "#71717a", strokeDasharray: "3 3" }}
-            content={<ChartTooltipContent className="!bg-zinc-950 !opacity-100 border-zinc-700 shadow-2xl text-zinc-100" labelFormatter={(value) => formatCutoff(String(value))} formatter={(value) => [typeof value === "number" ? scoreFormat.format(value) : "No data", label]} />}
+            content={<ChartTooltipContent className="!bg-zinc-950 !opacity-100 border-zinc-700 shadow-2xl text-zinc-100" labelFormatter={(value) => formatCutoff(String(value))} formatter={(value, _name, item) => {
+              const point: unknown = item.payload;
+              return <div className="comparison-tooltip-values">
+                <span>{label}: {typeof value === "number" ? scoreFormat.format(value) : "No data"}</span>
+                {isComparisonPayload(point) && typeof point.lifetime_approval === "number" && typeof point.lifetime_reviews === "number" && <span>Lifetime Approval: {scoreFormat.format(point.lifetime_approval)}% · {formatNumber(point.lifetime_reviews)} reviews</span>}
+                {isComparisonPayload(point) && typeof point.recalculation === "object" && point.recalculation !== null && <span>Formula recalculation (not new reviews)</span>}
+                {isComparisonPayload(point) && typeof point.recalculation === "object" && point.recalculation !== null && typeof point.observed_at === "string" && <span title={point.observed_at}>Calculated: {new Date(point.observed_at).toLocaleString()}</span>}
+                {isComparisonPayload(point) && typeof point.source_observed_at === "string" && <span title={point.source_observed_at}>Review evidence: {new Date(point.source_observed_at).toLocaleString()}</span>}
+              </div>;
+            }} />}
           />
-          <Line dataKey="value" type="monotone" stroke="#a78bfa" strokeWidth={2} dot={false} activeDot={{ r: 3 }} connectNulls={false} isAnimationActive={false} />
+          {formulaVersions.map((version, index) => <Line key={version ?? "lifetime"} dataKey={`series_values.${index}`} name={label} type="monotone" stroke="#a78bfa" strokeWidth={2} dot={({ cx, cy, payload }) => {
+            const point: unknown = payload;
+            if (typeof cx !== "number" || typeof cy !== "number") return <g />;
+            return <circle cx={cx} cy={cy} r={isComparisonPayload(point) && point.isolated === true ? 3 : 0} fill="#a78bfa" />;
+          }} activeDot={{ r: 3 }} connectNulls={false} isAnimationActive={false} />)}
         </LineChart>
       </ChartContainer>
-      <p className="comparison-note" title={methodology}>Monthly comparison uses completed UTC month-end observations. Missing months remain unfilled. {methodology}</p>
+      <p className="comparison-note" title={methodology}>Monthly comparison uses completed UTC month-end observations. Missing months remain unfilled. {methodology}{data.type === "top_rated_now" && " Different formula versions are separated; recalculations do not represent new reviews."}</p>
     </div>
   );
 }
@@ -225,10 +258,11 @@ export function RankingsPageView({ data, facets = [], activeType, activeFilters,
         <button type="button" className="reset-filters" onClick={reset}>Reset filters</button>
       </section>
       <div className="rankings-status" aria-live="polite">{isFetching ? "Updating rankings…" : `${formatNumber(data.total)} titles in scope · ${formatNumber(data.minimum_reviews)} reviews required`}</div>
+      {data.type === "top_rated_all_time" && <details className="ranking-methodology"><summary>All Time methodology</summary><p>{lifetimeMethodology}</p></details>}
       {data.items.length === 0 ? <section className="rankings-empty"><strong>No games match these filters.</strong><p>Try another facet or return to the full catalog.</p><button type="button" onClick={reset}>Reset filters</button></section> : <>
         {topThree.length > 0 && <section className="podium-grid" aria-label={`${type === "top_rated_now" ? "Top Rated Now" : "Top Rated All Time"} top three`}>{topThree.map((item, index) => <PodiumCard item={item} rank={index + 1} key={item.game.appid} />)}</section>}
         {topThree.length > 0 && <PodiumHistory items={topThree} type={type} filters={filters} />}
-        <section className="ranking-table" aria-label="Remaining ranked games"><div className="ranking-table-head"><span>Rank</span><span>Game</span><span>Score</span><span className="sr-only">History</span></div>{remaining.map((item) => <RankingRow key={item.game.appid} item={item} query={comparisonQuery(item)} />)}</section>
+        <section className="ranking-table" aria-label="Remaining ranked games"><div className="ranking-table-head"><span>Rank</span><span>Game</span><span>{data.type === "top_rated_all_time" ? "Confidence score" : "Score"}</span><span className="sr-only">History</span></div>{remaining.map((item) => <RankingRow key={item.game.appid} item={item} query={comparisonQuery(item)} />)}</section>
         <nav className="ranking-pagination" aria-label="Rankings pages"><button type="button" disabled={offset <= 0} onClick={() => onNavigate?.({ offset: previousOffset })}>Previous</button><span>{formatNumber(offset + 1)}–{formatNumber(Math.min(offset + data.items.length, data.eligible_total))} of {formatNumber(data.eligible_total)}</span><button type="button" disabled={!data.has_more} onClick={() => onNavigate?.({ offset: nextOffset })}>Next</button></nav>
       </>}
     </div>

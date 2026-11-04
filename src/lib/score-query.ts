@@ -1,6 +1,7 @@
 import { keepPreviousData } from "@tanstack/react-query";
 import type { GameScoreHistory, GameScoreSummary } from "./score";
 import type { HistoryRange } from "./player-history";
+import { RECEPTION_DATA_VERSION } from "./cache";
 export const SCORE_STALE_TIME = 5 * 60 * 1000;
 
 type ScoreResponse<T> = {
@@ -25,7 +26,7 @@ export async function fetchGameScoreSummary(
   customFetch?: typeof fetch,
 ): Promise<GameScoreSummary | null> {
   const fetchFn = customFetch ?? fetch;
-  const response = await fetchFn(`/api/games/${appid}/score`);
+  const response = await fetchFn(`/api/games/${appid}/score?version=${RECEPTION_DATA_VERSION}`);
   return readScoreResponse(response, `Failed to load game score for ${appid}`);
 }
 
@@ -35,7 +36,7 @@ export async function fetchGameScoreHistory(
   customFetch?: typeof fetch,
 ): Promise<GameScoreHistory | null> {
   const fetchFn = customFetch ?? fetch;
-  const response = await fetchFn(`/api/games/${appid}/score?view=history&range=${range}`);
+  const response = await fetchFn(`/api/games/${appid}/score?view=history&range=${range}&version=${RECEPTION_DATA_VERSION}`);
   return readScoreResponse(response, `Failed to load game score history for ${appid}`);
 }
 
@@ -44,7 +45,7 @@ export function gameScoreSummaryQueryOptions(
   options?: { customFetch?: typeof fetch },
 ) {
   return {
-    queryKey: ["game-score", appid] as const,
+    queryKey: ["game-score", RECEPTION_DATA_VERSION, appid] as const,
     queryFn: () => fetchGameScoreSummary(appid, options?.customFetch),
     staleTime: SCORE_STALE_TIME,
   };
@@ -56,7 +57,7 @@ export function gameScoreHistoryQueryOptions(
   options?: { customFetch?: typeof fetch },
 ) {
   return {
-    queryKey: ["game-score-history", appid, range] as const,
+    queryKey: ["game-score-history", RECEPTION_DATA_VERSION, appid, range] as const,
     queryFn: () => fetchGameScoreHistory(appid, range, options?.customFetch),
     placeholderData: keepPreviousData,
     staleTime: SCORE_STALE_TIME,

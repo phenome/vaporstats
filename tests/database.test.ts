@@ -5,6 +5,9 @@ import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { closeDb, createDailySnapshot, getDb } from "../src/lib/db";
 import { applyMigrations, DRIZZLE_MIGRATION_TABLE, MIGRATION_TABLE } from "../src/lib/migrations";
+import type { AppDatabase } from "../src/lib/db";
+import { getPlayerScoreHistory, getReviewBuckets, type StoredReviewBucket, type StoredScoreHistory, type StoredScoreState } from "../src/lib/reception-store";
+import { upgradeRetainedPlayerScores } from "../src/lib/player-score-upgrade";
 
 const originalDatabasePath = process.env.DATABASE_PATH;
 const originalSnapshotDirectory = process.env.DATABASE_SNAPSHOT_DIR;
@@ -27,6 +30,33 @@ function createLegacyDatabase(appliedCount: number): Database {
     database.query("INSERT INTO schema_migrations (name) VALUES (?)").run(migrationName);
   }
   return database;
+}
+
+async function addRetainedScore(
+  db: AppDatabase,
+  appid: number,
+  positive: number,
+  total: number,
+  score: number,
+  formulaVersion = "steam-player-v1",
+): Promise<void> {
+  await db.prepare("INSERT INTO apps (appid, name, slug) VALUES (?, ?, ?)").bind(appid, `Game ${appid}`, `game-${appid}`).run();
+  await db.prepare(
+    `INSERT INTO player_score_history
+     (appid, observed_at, score, formula_version, current_positive_count, current_total_count,
+      historical_positive_count, historical_total_count, current_window_start, current_window_end,
+      historical_window_start, historical_window_end, current_evidence_intervals, historical_evidence_intervals,
+      current_evidence_observed_at, provenance)
+     VALUES (?, '2026-09-29T10:45:00.003Z', ?, ?, ?, ?, 0, 0,
+      '2026-07-01T10:45:00.003Z', '2026-09-29T10:45:00.003Z',
+      '2026-04-02T10:45:00.003Z', '2026-07-01T10:45:00.003Z', ?, '[]',
+      '2026-09-29T10:45:00.003Z', '{"legacy":"retained"}')`,
+  ).bind(appid, score, formulaVersion, positive, total, JSON.stringify([
+    { start: "2026-09-26T00:00:00.000Z", end: "2026-09-27T00:00:00.000Z", granularity: "day" },
+  ])).run();
+  await db.prepare(
+    "INSERT INTO player_score_state (appid, latest_score_history_id) SELECT appid, id FROM player_score_history WHERE appid = ?",
+  ).bind(appid).run();
 }
 
 describe("Bun SQLite persistence", () => {
@@ -816,5 +846,116 @@ describe("Bun SQLite persistence", () => {
       }
     }
     expect(readdirSync(process.env.DATABASE_SNAPSHOT_DIR!).some((name) => name.endsWith(".tmp"))).toBe(false);
+  });
+
+  test("weekly evidence migration preserves retained buckets, source links, and immutable score history", async () => {
+    const weeklyMigration = migrationNames.indexOf("0017_flawless_speed.sql");
+    if (weeklyMigration < 0) throw new Error("Weekly review migration is missing");
+    const legacy = createLegacyDatabase(weeklyMigration);
+    let retainedBuckets: StoredReviewBucket[];
+    let retainedHistory: StoredScoreHistory[];
+    let retainedState: StoredScoreState | null;
+    try {
+      legacy.query("INSERT INTO apps (appid, name, slug) VALUES (3214530, 'Retention fixture', 'retention-fixture')").run();
+      legacy.query(
+        `INSERT INTO review_sources (id, endpoint, request_filter, population, interpretation_version, identity_key)
+         VALUES ('histogram', 'appreviewhistogram', 'none', 'filtered_reviews', 'steam-review-source-v1', 'histogram')`,
+      ).run();
+      legacy.query(
+        `INSERT INTO review_buckets
+         (appid, source_id, granularity, period_start, period_end, positive_count, negative_count, observed_at, provenance)
+         VALUES (3214530, 'histogram', 'daily', '2026-09-26T00:00:00.000Z', '2026-09-27T00:00:00.000Z', 3, 0, '2026-09-29T10:45:00.003Z', 'kept-daily'),
+                (3214530, 'histogram', 'monthly', '2026-08-01T00:00:00.000Z', '2026-09-01T00:00:00.000Z', 250, 2, '2026-09-29T10:45:00.003Z', 'kept-monthly')`,
+      ).run();
+      legacy.query(
+        `INSERT INTO player_score_history
+         (appid, observed_at, score, formula_version, current_positive_count, current_total_count,
+          historical_positive_count, historical_total_count, current_window_start, current_window_end,
+          historical_window_start, historical_window_end, current_evidence_intervals, historical_evidence_intervals,
+          current_source_id, current_evidence_observed_at, provenance)
+         VALUES (3214530, '2026-09-29T10:45:00.003Z', 87.5, 'steam-player-v1', 3, 3, 0, 0,
+          '2026-07-01T10:45:00.003Z', '2026-09-29T10:45:00.003Z',
+          '2026-04-02T10:45:00.003Z', '2026-07-01T10:45:00.003Z', '[]', '[]',
+          'histogram', '2026-09-29T10:45:00.003Z', '{"original":true}')`,
+      ).run();
+      legacy.query("INSERT INTO player_score_state (appid, latest_score_history_id) SELECT appid, id FROM player_score_history WHERE appid = 3214530").run();
+      retainedBuckets = legacy.query<StoredReviewBucket, []>("SELECT * FROM review_buckets ORDER BY period_start, period_end").all();
+      retainedHistory = legacy.query<StoredScoreHistory, []>("SELECT * FROM player_score_history ORDER BY id").all();
+      retainedState = legacy.query<StoredScoreState, []>("SELECT * FROM player_score_state WHERE appid = 3214530").get();
+    } finally {
+      legacy.close(true);
+    }
+
+    const db = await getDb();
+    expect(await getReviewBuckets(db, 3214530)).toEqual(retainedBuckets);
+    expect(await getPlayerScoreHistory(db, 3214530)).toEqual(retainedHistory);
+    expect(await db.prepare("SELECT * FROM player_score_state WHERE appid = 3214530").first<StoredScoreState>()).toEqual(retainedState);
+    await db.prepare(
+      `INSERT INTO review_buckets
+       (appid, source_id, granularity, period_start, period_end, positive_count, negative_count, observed_at, provenance)
+       VALUES (3214530, 'histogram', 'weekly', '2026-10-01T00:00:00.000Z', '2026-10-08T00:00:00.000Z', 7, 1, '2026-10-09T00:00:00.000Z', 'new-weekly')`,
+    ).run();
+    expect((await getReviewBuckets(db, 3214530)).find((bucket) => bucket.granularity === "weekly")).toMatchObject({
+      positive_count: 7, negative_count: 1, source_id: "histogram",
+      period_start: "2026-10-01T00:00:00.000Z", period_end: "2026-10-08T00:00:00.000Z",
+    });
+    expect((await db.prepare("PRAGMA foreign_key_check").all()).results).toEqual([]);
+    expect(await db.prepare("PRAGMA integrity_check").first<{ integrity_check: string }>()).toEqual({ integrity_check: "ok" });
+    await expect(db.prepare("DELETE FROM review_sources WHERE id = 'histogram'").run()).rejects.toThrow();
+  });
+
+  test("formula cutover appends a supported score without rewriting its observation or evidence age", async () => {
+    const db = await getDb();
+    await addRetainedScore(db, 3214530, 3, 3, 87.5);
+    const [original] = await getPlayerScoreHistory(db, 3214530);
+    const now = new Date("2026-11-04T19:00:00.000Z");
+    expect(await upgradeRetainedPlayerScores(db, { now })).toEqual({ inspected: 1, upgraded: 1, skipped: 0, pending: 0 });
+    const history = await getPlayerScoreHistory(db, 3214530);
+    expect(history[0]).toEqual(original);
+    expect(history[1]).toMatchObject({
+      score: 100,
+      formula_version: "steam-player-v2",
+      observed_at: "2026-11-04T19:00:00.000Z",
+      current_evidence_observed_at: "2026-09-29T10:45:00.003Z",
+      current_positive_count: 3,
+      current_total_count: 3,
+      current_window_start: "2026-07-01T10:45:00.003Z",
+      current_window_end: "2026-09-29T10:45:00.003Z",
+    });
+    expect(JSON.parse(history[1].provenance).recalculation).toEqual({
+      previous_observation_id: original.id,
+      previous_formula_version: "steam-player-v1",
+      calculated_at: "2026-11-04T19:00:00.000Z",
+    });
+    expect(await db.prepare("SELECT latest_score_history_id AS id FROM player_score_state WHERE appid = 3214530").first<{ id: number }>()).toEqual({ id: history[1].id });
+    expect(await upgradeRetainedPlayerScores(db, { now })).toEqual({ inspected: 0, upgraded: 0, skipped: 0, pending: 0 });
+    expect(await getPlayerScoreHistory(db, 3214530)).toEqual(history);
+  });
+
+  test("formula cutover resumes bounded work and never downgrades an unknown newer formula", async () => {
+    const db = await getDb();
+    await addRetainedScore(db, 1, 1, 1, 75);
+    await addRetainedScore(db, 2, 0, 1, 25);
+    await addRetainedScore(db, 3, 1, 2, 50, "steam-player-v3");
+    const newer = await getPlayerScoreHistory(db, 3);
+    const now = new Date("2026-11-04T19:00:00.000Z");
+    expect(await upgradeRetainedPlayerScores(db, { now, limit: 1 })).toEqual({ inspected: 1, upgraded: 1, skipped: 0, pending: 1 });
+    expect((await getPlayerScoreHistory(db, 1)).at(-1)?.score).toBe(100);
+    expect((await getPlayerScoreHistory(db, 2)).at(-1)?.score).toBe(25);
+    expect(await upgradeRetainedPlayerScores(db, { now, limit: 1 })).toEqual({ inspected: 1, upgraded: 1, skipped: 0, pending: 0 });
+    expect((await getPlayerScoreHistory(db, 2)).at(-1)?.score).toBe(0);
+    expect(await getPlayerScoreHistory(db, 3)).toEqual(newer);
+  });
+
+  test("unsupported retained inputs preserve the last score instead of publishing a replacement", async () => {
+    const db = await getDb();
+    await addRetainedScore(db, 1, 3, 3, 87.5);
+    await db.prepare("UPDATE player_score_history SET current_evidence_intervals = 'not-json' WHERE appid = 1").run();
+    const before = await getPlayerScoreHistory(db, 1);
+    expect(await upgradeRetainedPlayerScores(db, { now: new Date("2026-11-04T19:00:00.000Z") })).toEqual({
+      inspected: 1, upgraded: 0, skipped: 1, pending: 1,
+    });
+    expect(await getPlayerScoreHistory(db, 1)).toEqual(before);
+    expect(await db.prepare("SELECT latest_score_history_id AS id FROM player_score_state WHERE appid = 1").first<{ id: number }>()).toEqual({ id: before[0].id });
   });
 });

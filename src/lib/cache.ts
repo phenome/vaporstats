@@ -6,6 +6,9 @@
  * Live APIs: 5-minute shared cache, 1-minute stale-while-revalidate.
  */
 
+/** Reception payload identity shared by CDN URLs and TanStack Query keys. */
+export const RECEPTION_DATA_VERSION = "2";
+
 export const CACHE_POLICIES = {
   /** Parameterized entity pages (SSR): 1 hour s-maxage, 24 hours SWR */
   entity: "public, max-age=0, s-maxage=3600, stale-while-revalidate=86400",

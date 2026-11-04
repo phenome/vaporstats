@@ -39,6 +39,7 @@ import {
   type CompactReviewEvidenceResult,
 } from "../src/lib/reception-store";
 import { syncReleaseFactsFromApps } from "./release-facts";
+import { upgradeRetainedPlayerScores, type PlayerScoreUpgradeResult } from "../src/lib/player-score-upgrade";
 
 const INGESTION_DAILY_CHECKPOINT_KEY = "ingestion:last-daily-cycle";
 const INGESTION_CRON = "*/15 * * * *";
@@ -71,6 +72,7 @@ export interface IngestionTickResult {
   mediaDiscovery?: MediaRunSummary;
   mediaProcessing?: MediaProcessingSummary;
   reviewCompaction?: CompactReviewEvidenceResult;
+  scoreUpgrade?: PlayerScoreUpgradeResult;
   catalogRefresh?: {
     active: boolean;
     attempted: number;
@@ -114,6 +116,7 @@ function logCompletion(result: IngestionTickResult): void {
     anchorTime: result.anchorTime,
     durationMs: result.durationMs,
     reason: result.reason,
+    scoreUpgrade: result.scoreUpgrade,
     tick: result.tick && {
       attempted: result.tick.attempted,
       succeeded: result.tick.succeeded,
@@ -208,6 +211,10 @@ async function performIngestionTick(options: IngestionTickOptions): Promise<Inge
   const startedAt = Date.now();
   const anchorTime = options.anchorTime ?? new Date();
   const customFetch = options.customFetch ?? fetch;
+  const scoreUpgrade = await upgradeRetainedPlayerScores(options.db, { now: anchorTime });
+  if (scoreUpgrade.inspected > 0) {
+    console.log(JSON.stringify({ event: "player_score_formula_upgrade", at: anchorTime.toISOString(), ...scoreUpgrade }));
+  }
   const prices = await runHourlyPriceFeedTick(options.db, {
     apiKey: options.steamApiKey,
     customFetch,
@@ -298,6 +305,7 @@ async function performIngestionTick(options: IngestionTickOptions): Promise<Inge
     mediaDiscovery,
     mediaProcessing,
     reviewCompaction,
+    scoreUpgrade,
     catalogRefresh,
   };
 }

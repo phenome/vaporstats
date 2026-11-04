@@ -1,4 +1,4 @@
-export type ReviewGranularity = "day" | "month";
+export type ReviewGranularity = "day" | "week" | "month";
 
 export interface ReviewBucket {
   sourceId: string;
@@ -85,10 +85,18 @@ function isSafeCount(value: unknown): value is number {
 
 function normalizeBucket(bucket: ReviewBucket): NormalizedBucket | null {
   if (!bucket || typeof bucket.sourceId !== "string" || bucket.sourceId.length === 0) return null;
-  if (bucket.granularity !== "day" && bucket.granularity !== "month") return null;
+  if (bucket.granularity !== "day" && bucket.granularity !== "week" && bucket.granularity !== "month") return null;
   const startMs = parseUtc(bucket.start);
   const endMs = parseUtc(bucket.end);
   if (startMs === null || endMs === null || startMs >= endMs) return null;
+  if (startMs % DAY_MS !== 0) return null;
+  const duration = endMs - startMs;
+  if (bucket.granularity === "day" && duration !== DAY_MS) return null;
+  if (bucket.granularity === "week" && duration !== 7 * DAY_MS) return null;
+  if (bucket.granularity === "month") {
+    const start = new Date(startMs);
+    if (start.getUTCDate() !== 1 || endMs !== Date.UTC(start.getUTCFullYear(), start.getUTCMonth() + 1, 1)) return null;
+  }
   const positive = bucket.positiveReviews === null || bucket.positiveReviews === undefined ? null : isSafeCount(bucket.positiveReviews) ? bucket.positiveReviews : null;
   const negative = bucket.negativeReviews === null || bucket.negativeReviews === undefined ? null : isSafeCount(bucket.negativeReviews) ? bucket.negativeReviews : null;
   const total = positive !== null && negative !== null ? positive + negative : null;
@@ -114,25 +122,6 @@ function normalizeBucket(bucket: ReviewBucket): NormalizedBucket | null {
   };
 }
 
-function monthStart(time: number): number {
-  const value = new Date(time);
-  return Date.UTC(value.getUTCFullYear(), value.getUTCMonth(), 1);
-}
-
-function nextMonth(time: number): number {
-  const value = new Date(time);
-  return Date.UTC(value.getUTCFullYear(), value.getUTCMonth() + 1, 1);
-}
-
-function dayStart(time: number): number {
-  const value = new Date(time);
-  return Date.UTC(value.getUTCFullYear(), value.getUTCMonth(), value.getUTCDate());
-}
-
-function firstWholeDay(time: number): number {
-  const start = dayStart(time);
-  return time === start ? start : start + DAY_MS;
-}
 
 function intervalKey(bucket: NormalizedBucket): string {
   return `${bucket.granularity}|${bucket.startMs}|${bucket.endMs}`;
@@ -140,6 +129,59 @@ function intervalKey(bucket: NormalizedBucket): string {
 
 function chooseNewest(a: NormalizedBucket, b: NormalizedBucket): NormalizedBucket {
   return (b.observedAtMs ?? -Infinity) >= (a.observedAtMs ?? -Infinity) ? b : a;
+}
+
+interface BucketPath {
+  monthlyCoveredMs: number;
+  coveredMs: number;
+  dailyMs: number;
+  weeklyMs: number;
+  bucket: NormalizedBucket | null;
+  previous: BucketPath | null;
+}
+
+/** Preserves available monthly coverage before maximizing total coverage and preferring finer evidence. */
+function selectNonOverlapping(buckets: NormalizedBucket[]): NormalizedBucket[] {
+  const sorted = buckets.sort((a, b) => a.endMs - b.endMs || a.startMs - b.startMs);
+  const months = sorted.filter((bucket) => bucket.granularity === "month");
+  const best: BucketPath[] = [{ monthlyCoveredMs: 0, coveredMs: 0, dailyMs: 0, weeklyMs: 0, bucket: null, previous: null }];
+  for (let index = 0; index < sorted.length; index++) {
+    const bucket = sorted[index];
+    let low = 0;
+    let high = index;
+    while (low < high) {
+      const middle = (low + high) >>> 1;
+      if (sorted[middle].endMs <= bucket.startMs) low = middle + 1;
+      else high = middle;
+    }
+    const previous = best[low];
+    const duration = bucket.endMs - bucket.startMs;
+    // Calendar months never overlap. Coverage outside one cannot compensate for a hole inside it.
+    let monthLow = 0;
+    let monthHigh = months.length;
+    while (monthLow < monthHigh) {
+      const middle = (monthLow + monthHigh) >>> 1;
+      if (months[middle].endMs <= bucket.startMs) monthLow = middle + 1;
+      else monthHigh = middle;
+    }
+    let monthlyCoveredMs = previous.monthlyCoveredMs;
+    for (let monthIndex = monthLow; monthIndex < months.length && months[monthIndex].startMs < bucket.endMs; monthIndex++) {
+      const month = months[monthIndex];
+      monthlyCoveredMs += Math.min(bucket.endMs, month.endMs) - Math.max(bucket.startMs, month.startMs);
+    }
+    const coveredMs = previous.coveredMs + duration;
+    const dailyMs = previous.dailyMs + (bucket.granularity === "day" ? duration : 0);
+    const weeklyMs = previous.weeklyMs + (bucket.granularity === "week" ? duration : 0);
+    const skipped = best[index];
+    const preferred = monthlyCoveredMs > skipped.monthlyCoveredMs ||
+      (monthlyCoveredMs === skipped.monthlyCoveredMs && (coveredMs > skipped.coveredMs ||
+        (coveredMs === skipped.coveredMs && (dailyMs > skipped.dailyMs ||
+          (dailyMs === skipped.dailyMs && weeklyMs > skipped.weeklyMs)))));
+    best.push(preferred ? { monthlyCoveredMs, coveredMs, dailyMs, weeklyMs, bucket, previous } : skipped);
+  }
+  const selected: NormalizedBucket[] = [];
+  for (let path = best[sorted.length]; path.bucket; path = path.previous!) selected.push(path.bucket);
+  return selected.reverse();
 }
 
 function intervalOf(bucket: NormalizedBucket): ReviewInterval {
@@ -233,56 +275,7 @@ export function selectWholeBuckets(
     const prior = deduped.get(key);
     deduped.set(key, prior ? chooseNewest(prior, bucket) : bucket);
   }
-  const byDay = new Map<string, NormalizedBucket>();
-  const byMonth = new Map<string, NormalizedBucket>();
-  for (const bucket of deduped.values()) {
-    const key = `${bucket.startMs}|${bucket.endMs}`;
-    const target = bucket.granularity === "day" ? byDay : byMonth;
-    const prior = target.get(key);
-    target.set(key, prior ? chooseNewest(prior, bucket) : bucket);
-  }
-
-  const selected: NormalizedBucket[] = [];
-  for (let cursor = monthStart(startMs); cursor < endMs; cursor = nextMonth(cursor)) {
-    const segmentStart = Math.max(startMs, cursor);
-    const segmentEnd = Math.min(endMs, nextMonth(cursor));
-    if (segmentStart >= segmentEnd) continue;
-    const firstDay = firstWholeDay(segmentStart);
-    const daily: NormalizedBucket[] = [];
-    for (let day = firstDay; day + DAY_MS <= segmentEnd; day += DAY_MS) {
-      const bucket = byDay.get(`${day}|${day + DAY_MS}`);
-      if (bucket) daily.push(bucket);
-    }
-    const expectedDays = firstDay < segmentEnd ? Math.floor((segmentEnd - firstDay) / DAY_MS) : 0;
-    if (expectedDays > 0 && daily.length === expectedDays) {
-      selected.push(...daily);
-      continue;
-    }
-    const monthly = [...byMonth.values()]
-      .filter((bucket) => bucket.startMs === cursor && bucket.endMs === nextMonth(cursor))
-      .filter((bucket) => bucket.startMs >= segmentStart && bucket.endMs <= segmentEnd)
-      .sort((a, b) => (b.observedAtMs ?? -Infinity) - (a.observedAtMs ?? -Infinity));
-    if (monthly.length > 0) {
-      selected.push(monthly[0]);
-      continue;
-    }
-    selected.push(...daily);
-  }
-
-  selected.sort((a, b) => a.startMs - b.startMs || a.endMs - b.endMs);
-  const nonOverlapping: NormalizedBucket[] = [];
-  for (const bucket of selected) {
-    const previous = nonOverlapping.at(-1);
-    if (previous && bucket.startMs < previous.endMs) {
-      if (bucket.granularity === "month" && previous.granularity === "day") {
-        nonOverlapping.pop();
-        while (nonOverlapping.at(-1) && nonOverlapping.at(-1)!.endMs > bucket.startMs) nonOverlapping.pop();
-        nonOverlapping.push(bucket);
-      }
-      continue;
-    }
-    nonOverlapping.push(bucket);
-  }
+  const nonOverlapping = selectNonOverlapping([...deduped.values()]);
   const selectedIntervals = nonOverlapping.map(intervalOf);
   const gaps = findGaps(normalizedRequested, selectedIntervals);
   const provenance = nonOverlapping.map((bucket) => ({ ...intervalOf(bucket), sourceId: bucket.sourceId, observedAt: bucket.observedAt }));

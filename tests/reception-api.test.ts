@@ -65,7 +65,7 @@ class FacetDb implements AppDatabase {
 describe("reception rankings HTTP contract", () => {
   test("normalizes repeated facet IDs without dropping unknown IDs", () => {
     const parsed = parseReceptionRequest(new URL(
-      "https://vaporstats.test/api/rankings?type=top_rated_now&genre=99999999&genre=3&genre=3&feature=8&tag=1&tag=99999998",
+      "https://vaporstats.test/api/rankings?type=top_rated_now&version=2&genre=99999999&genre=3&genre=3&feature=8&tag=1&tag=99999998",
     ));
     expect(parsed).toEqual({
       type: "top_rated_now",
@@ -82,6 +82,8 @@ describe("reception rankings HTTP contract", () => {
       "https://vaporstats.test/api/rankings?type=top_rated_now&type=top_rated_now",
       "https://vaporstats.test/api/rankings?type=top_rated_now&view=unknown",
       "https://vaporstats.test/api/rankings?type=top_rated_now&view=comparison&appid=1&limit=1",
+      "https://vaporstats.test/api/rankings?type=top_rated_all_time&version=1",
+      "https://vaporstats.test/api/rankings?type=top_rated_all_time&version=2&version=2",
     ]) {
       const response = await handleRankingsRequest(new Request(url), failingDb);
       expect(response.status).toBe(400);
@@ -107,6 +109,8 @@ describe("score and facets HTTP contracts", () => {
       "https://vaporstats.test/api/games/1091500/score?view=history&range=bad",
       "https://vaporstats.test/api/games/1091500/score?view=summary&view=history",
       "https://vaporstats.test/api/games/not-an-id/score",
+      "https://vaporstats.test/api/games/1091500/score?version=1",
+      "https://vaporstats.test/api/games/1091500/score?version=2&version=2",
     ]) {
       const response = await handleGameScoreRequest(new Request(url), failingDb);
       expect(response.status).toBe(400);
