@@ -217,7 +217,7 @@ function isPreciseLifecycleDate(value: string): boolean {
 function formatLifecycleDate(value: string): string {
   const parsed = parseLifecycleDate(value);
   if (!parsed) return value;
-  return new Intl.DateTimeFormat("en-US", {
+  return new Intl.DateTimeFormat(undefined, {
     month: "short",
     day: "numeric",
     year: "numeric",

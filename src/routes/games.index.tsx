@@ -8,6 +8,7 @@ import { getPageCacheHeaders } from "../lib/cache";
 import { RouteDataError } from "../components/route-state";
 import { CatalogSkeleton } from "../components/route-skeletons";
 import { AppLink } from "../components/app-link";
+import { ReleaseDate } from "../components/release-date";
 
 export async function fetchCatalogGames(mediaTag?: string | null): Promise<CatalogEntity[]> {
   const params = new URLSearchParams({ limit: "500" });
@@ -154,7 +155,7 @@ function GamesIndexComponent({ games: propGames }: { games?: CatalogEntity[] }) 
                       )}
                     </td>
                     <td className="py-3 px-4 text-zinc-500 whitespace-nowrap hidden md:table-cell">
-                      {game.release_date || "—"}
+                      <ReleaseDate value={game.release_date} />
                     </td>
                     <td className="py-3 px-4 text-right whitespace-nowrap">
                       <AppLink

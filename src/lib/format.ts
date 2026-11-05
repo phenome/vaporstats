@@ -69,18 +69,21 @@ export function formatLocalDateTime(
 }
 
 /**
- * Formats a date only (year, month, day) in the visitor's locale.
+ * Formats a date in the visitor's locale. ISO calendar dates retain their day;
+ * timestamps and Date objects use the visitor's time zone.
  */
 export function formatDateOnly(
   value: string | Date | null | undefined,
   fallback = "Unknown",
 ): string {
   if (!value) return fallback;
+  const isDateOnly = typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value);
   const date = typeof value === "string"
-    ? (value.length === 10 ? new Date(`${value}T00:00:00Z`) : parseStoredTimestamp(value))
+    ? (isDateOnly ? new Date(`${value}T00:00:00Z`) : parseStoredTimestamp(value))
     : value;
   if (Number.isNaN(date.getTime())) return fallback;
   return new Intl.DateTimeFormat(undefined, {
     dateStyle: "medium",
+    timeZone: isDateOnly ? "UTC" : undefined,
   }).format(date);
 }

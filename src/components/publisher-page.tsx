@@ -3,6 +3,7 @@ import { Link } from "@tanstack/react-router";
 import type { PublisherDetail, PublisherSummary, PublisherGameItem } from "../lib/publishers";
 import { getCanonicalGamePath } from "../lib/slug";
 import { AppLink } from "./app-link";
+import { ReleaseDate } from "./release-date";
 import { buttonVariants } from "./ui/button";
 import { Pagination, PaginationContent, PaginationItem } from "./ui/pagination";
 
@@ -83,7 +84,7 @@ export function PublisherPageView({ publisher }: { publisher: PublisherDetail })
                       </span>
                     </td>
                     <td className="py-3 px-4 text-zinc-500 whitespace-nowrap hidden md:table-cell">
-                      {game.release_date || "—"}
+                      <ReleaseDate value={game.release_date} />
                     </td>
                     <td className="py-3 px-4 text-right whitespace-nowrap">
                       <AppLink
