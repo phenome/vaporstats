@@ -6,6 +6,8 @@ VaporStats uses Drizzle ORM with its native `bun:sqlite` (BunSQLite) adapter as 
 
 Deployment applies only the committed migration artifacts with `bun run db:migrate`; it does not run `db:generate` or `drizzle-kit push`. The existing `schema_migrations` ledger is adopted once as the baseline for the already-applied schema: existing migrations are recorded as applied without replay, and existing rows are preserved. Subsequent migrations extend that history normally.
 
+Deployment compares migration artifacts in the running image with the successfully built candidate, not the deployment checkout revision. A failed build may advance that checkout without activating an image; retrying must still take the snapshot-and-migration path when the images differ. Artifact inspection runs without database mounts and must succeed before the serving process is stopped.
+
 The database has one writable process. Migrations are atomic: a failed migration leaves its schema, data, and migration history unchanged. A verified SQLite snapshot is taken before deployment. Rollback restores the application image and its matching database snapshot together; down-migrations are not promised.
 
 CI verifies changes before a merge to `main`; a successful merge triggers deployment. Deployment authentication uses a dedicated, restricted SSH key stored in GitHub secrets, never a personal key.

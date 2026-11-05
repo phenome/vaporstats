@@ -48,12 +48,6 @@ if ! git diff-index --quiet HEAD --; then
   fail "deployment checkout has tracked changes"
 fi
 
-current_commit=$(git rev-parse HEAD)
-migrations_changed=0
-if ! git diff --quiet "$current_commit" "$requested_commit" -- migrations/; then
-  migrations_changed=1
-fi
-
 previous_image_id=$(docker inspect --format '{{.Image}}' "$CONTAINER_NAME" 2>/dev/null || true)
 [[ -n "$previous_image_id" ]] || fail "missing running container: $CONTAINER_NAME"
 docker image tag "$previous_image_id" "$ROLLBACK_IMAGE"
@@ -67,7 +61,25 @@ compose() {
 
 # Build while the old container still serves traffic.
 compose build vaporstats
-docker image inspect "$IMAGE_REPOSITORY:$requested_commit" >/dev/null
+candidate_image_id=$(docker image inspect "$IMAGE_REPOSITORY:$requested_commit" --format '{{.Id}}')
+[[ -n "$candidate_image_id" ]] || fail 'missing built candidate image'
+
+fingerprint_migrations() {
+  docker run --rm --network none --read-only \
+    --mount "type=bind,src=$REPO_DIR/scripts/migration-fingerprint.ts,dst=/migration-fingerprint.ts,readonly" \
+    --entrypoint bun "$1" /migration-fingerprint.ts /app/migrations
+}
+
+# Compare actual image artifacts, not the checkout left behind by an earlier build.
+# Any read failure exits before the serving container is stopped or recreated.
+previous_migrations=$(fingerprint_migrations "$previous_image_id")
+candidate_migrations=$(fingerprint_migrations "$candidate_image_id")
+[[ "$previous_migrations" =~ ^[0-9a-f]{64}$ ]] || fail 'invalid running-image migration fingerprint'
+[[ "$candidate_migrations" =~ ^[0-9a-f]{64}$ ]] || fail 'invalid candidate-image migration fingerprint'
+migrations_changed=0
+if [[ "$previous_migrations" != "$candidate_migrations" ]]; then
+  migrations_changed=1
+fi
 
 snapshot_dir=
 rollback_required=0
