@@ -28,7 +28,8 @@ services:
       interval: 5s
       timeout: 5s
       retries: 3
-      start_period: 10s
+      # Source-only publication completes before the HTTP listener opens.
+      start_period: 60s
 
 networks:
   caddy:

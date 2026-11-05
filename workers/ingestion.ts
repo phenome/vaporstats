@@ -40,6 +40,10 @@ import {
 } from "../src/lib/reception-store";
 import { syncReleaseFactsFromApps } from "./release-facts";
 import { upgradeRetainedPlayerScores, type PlayerScoreUpgradeResult } from "../src/lib/player-score-upgrade";
+import {
+  publishReceptionProjection,
+  type ReceptionPublicationProgress,
+} from "../src/lib/reception-publication";
 
 const INGESTION_DAILY_CHECKPOINT_KEY = "ingestion:last-daily-cycle";
 const INGESTION_CRON = "*/15 * * * *";
@@ -73,6 +77,7 @@ export interface IngestionTickResult {
   mediaProcessing?: MediaProcessingSummary;
   reviewCompaction?: CompactReviewEvidenceResult;
   scoreUpgrade?: PlayerScoreUpgradeResult;
+  receptionPublication?: ReceptionPublicationProgress;
   catalogRefresh?: {
     active: boolean;
     attempted: number;
@@ -203,6 +208,7 @@ function logCompletion(result: IngestionTickResult): void {
       monthlyBucketsWritten: result.reviewCompaction.monthlyBucketsWritten,
     },
     catalogRefresh: result.catalogRefresh,
+    receptionPublication: result.receptionPublication,
     error: result.error,
   }));
 }
@@ -291,6 +297,11 @@ async function performIngestionTick(options: IngestionTickOptions): Promise<Inge
   });
 
   const { records: _records, ...catalogRefresh } = catalogRefreshResult;
+  // Reevaluate elapsed-time eligibility even when every source request was skipped or failed.
+  // Without an explicit test anchor, use completion time rather than the tick's start time.
+  const receptionPublication = await publishReceptionProjection(options.db, {
+    evaluatedAt: options.anchorTime,
+  });
   return {
     status: "completed",
     anchorTime: anchorTime.toISOString(),
@@ -307,6 +318,7 @@ async function performIngestionTick(options: IngestionTickOptions): Promise<Inge
     reviewCompaction,
     scoreUpgrade,
     catalogRefresh,
+    receptionPublication,
   };
 }
 

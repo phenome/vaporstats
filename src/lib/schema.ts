@@ -683,6 +683,116 @@ export const playerScoreState = sqliteTable(
   ],
 );
 
+export const receptionPublicationBuilds = sqliteTable(
+  "reception_publication_builds",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    status: text("status").notNull().default("building"),
+    projectionVersion: integer("projection_version").notNull(),
+    historyKey: text("history_key").notNull(),
+    evaluatedAt: text("evaluated_at").notNull(),
+    sourceRevision: integer("source_revision").notNull(),
+    cursorAppid: integer("cursor_appid").notNull().default(0),
+    maxAppid: integer("max_appid").notNull(),
+    startedAt: text("started_at").notNull().default(currentTimestamp),
+    updatedAt: text("updated_at").notNull().default(currentTimestamp),
+    completedAt: text("completed_at"),
+  },
+  (table) => [
+    check("reception_publication_builds_status_check", sql`${table.status} IN ('building', 'published', 'superseded')`),
+    check("reception_publication_builds_revision_check", sql`${table.sourceRevision} >= 0 AND ${table.projectionVersion} > 0 AND ${table.cursorAppid} >= 0 AND ${table.maxAppid} >= ${table.cursorAppid}`),
+    index("idx_reception_publication_builds_status").on(table.status, table.id),
+  ],
+);
+
+export const receptionPublicationState = sqliteTable(
+  "reception_publication_state",
+  {
+    id: integer("id").primaryKey(),
+    publishedBuildId: integer("published_build_id").references(() => receptionPublicationBuilds.id, { onDelete: "restrict" }),
+    sourceRevision: integer("source_revision").notNull().default(0),
+  },
+  (table) => [
+    check("reception_publication_state_singleton_check", sql`${table.id} = 1`),
+    check("reception_publication_state_revision_check", sql`${table.sourceRevision} >= 0`),
+  ],
+);
+
+// App deletion leaves a revision tombstone for any in-progress publication.
+export const receptionPublicationRevisions = sqliteTable(
+  "reception_publication_revisions",
+  {
+    appid: integer("appid").primaryKey(),
+    revision: integer("revision").notNull(),
+  },
+  (table) => [
+    check("reception_publication_revisions_revision_check", sql`${table.revision} >= 0`),
+    index("idx_reception_publication_revisions_revision").on(table.revision, table.appid),
+  ],
+);
+
+export const receptionPublicationCurrent = sqliteTable(
+  "reception_publication_current",
+  {
+    buildId: integer("build_id").notNull().references(() => receptionPublicationBuilds.id, { onDelete: "cascade" }),
+    appid: integer("appid").notNull().references(() => apps.appid, { onDelete: "cascade" }),
+    type: text("type").notNull(),
+    inputRevision: integer("input_revision").notNull(),
+    historyKey: text("history_key").notNull(),
+    metricValue: real("metric_value"),
+    qualifyingReviews: integer("qualifying_reviews"),
+    scoreHistoryId: integer("score_history_id").references(() => playerScoreHistory.id, { onDelete: "set null" }),
+    metricJson: text("metric_json"),
+    populationJson: text("population_json"),
+    sourceTimestamp: text("source_timestamp"),
+    nextEvaluationAt: text("next_evaluation_at"),
+  },
+  (table) => [
+    primaryKey({ columns: [table.buildId, table.appid, table.type] }),
+    check("reception_publication_current_type_check", sql`${table.type} IN ('top_rated_now', 'top_rated_all_time')`),
+    check("reception_publication_current_revision_check", sql`${table.inputRevision} >= 0`),
+    check("reception_publication_current_metric_check", sql`${table.metricValue} IS NULL OR ${table.metricValue} BETWEEN 0 AND 100`),
+    check("reception_publication_current_counts_check", sql`${table.qualifyingReviews} IS NULL OR ${table.qualifyingReviews} >= 0`),
+    index("idx_reception_publication_current_order").on(table.buildId, table.type, desc(table.metricValue), desc(table.qualifyingReviews), table.appid),
+    index("idx_reception_publication_current_due").on(table.buildId, table.nextEvaluationAt, table.appid),
+    index("idx_reception_publication_current_appid").on(table.appid, table.buildId),
+    index("idx_reception_publication_current_history").on(table.historyKey, table.appid, table.type),
+  ],
+);
+
+// History identities include input revision, algorithm version and cutoff set;
+// unchanged identities can be shared by successive published generations.
+export const receptionPublicationMonths = sqliteTable(
+  "reception_publication_months",
+  {
+    historyKey: text("history_key").notNull(),
+    appid: integer("appid").notNull().references(() => apps.appid, { onDelete: "cascade" }),
+    type: text("type").notNull(),
+    cutoff: text("cutoff").notNull(),
+    metricKind: text("metric_kind").notNull(),
+    value: real("value").notNull(),
+    lifetimeApproval: real("lifetime_approval"),
+    lifetimeReviews: integer("lifetime_reviews"),
+    observedAt: text("observed_at").notNull(),
+    sourceObservedAt: text("source_observed_at"),
+    formulaVersion: text("formula_version"),
+    recalculationJson: text("recalculation_json"),
+    scoreWindowEnd: text("score_window_end"),
+    provenance: text("provenance").notNull(),
+    scoreHistoryId: integer("score_history_id").references(() => playerScoreHistory.id, { onDelete: "set null" }),
+  },
+  (table) => [
+    primaryKey({ columns: [table.historyKey, table.appid, table.type, table.cutoff] }),
+    check("reception_publication_months_type_check", sql`${table.type} IN ('top_rated_now', 'top_rated_all_time')`),
+    check("reception_publication_months_kind_check", sql`${table.metricKind} IN ('current_player_score', 'lifetime_confidence')`),
+    check("reception_publication_months_value_check", sql`${table.value} BETWEEN 0 AND 100 AND (${table.lifetimeApproval} IS NULL OR ${table.lifetimeApproval} BETWEEN 0 AND 100)`),
+    check("reception_publication_months_count_check", sql`${table.lifetimeReviews} IS NULL OR ${table.lifetimeReviews} >= 0`),
+    check("reception_publication_months_provenance_check", sql`${table.provenance} IN ('recorded', 'reconstructed', 'lifetime_summary')`),
+    index("idx_reception_publication_months_order").on(table.type, table.cutoff, desc(table.value), desc(table.lifetimeReviews), table.appid),
+    index("idx_reception_publication_months_appid").on(table.appid, table.historyKey),
+  ],
+);
+
 export const criticRecords = sqliteTable(
   "critic_records",
   {

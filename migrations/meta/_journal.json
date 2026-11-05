@@ -127,6 +127,13 @@
       "when": 1793815646003,
       "tag": "0017_flawless_speed",
       "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "6",
+      "when": 1793886921967,
+      "tag": "0018_reception_publication",
+      "breakpoints": true
     }
   ]
 }

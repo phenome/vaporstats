@@ -10,6 +10,7 @@ import {
 import {
   getReceptionComparison,
   getReceptionRankings,
+  ReceptionPublicationUnavailableError,
 } from "../lib/rankings";
 import type { ReceptionFilters, ReceptionRankingType } from "../lib/reception-filters";
 import { CACHE_POLICIES, getLiveApiCacheHeaders, RECEPTION_DATA_VERSION } from "../lib/cache";
@@ -148,7 +149,6 @@ async function handleReceptionRankingsRequest(
   parsedRequest: ParsedReceptionRequest,
 ): Promise<Response> {
   if ("error" in parsedRequest) return jsonError(parsedRequest.error);
-  const evaluatedAt = new Date();
   try {
     if (parsedRequest.view === "comparison") {
       const appid = parsedRequest.appid;
@@ -157,7 +157,6 @@ async function handleReceptionRankingsRequest(
         type: parsedRequest.type,
         filters: parsedRequest.filters,
         appid,
-        evaluatedAt,
       });
       if (result.data === null) return jsonError("Game not found", 404);
       return jsonReception(result.data, result.sourceTimestamp, !result.data.in_current_group || result.data.points.length === 0);
@@ -168,10 +167,12 @@ async function handleReceptionRankingsRequest(
       filters: parsedRequest.filters,
       limit: parsedRequest.limit,
       offset: parsedRequest.offset,
-      evaluatedAt,
     });
     return jsonReception(result.data, result.sourceTimestamp, result.data.items.length === 0);
   } catch (error) {
+    if (error instanceof ReceptionPublicationUnavailableError) {
+      return jsonError("Reception data unavailable", 503);
+    }
     console.error("Reception rankings API failure:", error);
     return jsonError("Live data unavailable", 500);
   }

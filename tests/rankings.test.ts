@@ -1,31 +1,42 @@
 import { Database, type SQLQueryBindings } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { applyMigrations } from "../src/lib/migrations";
 import type { AppDatabase, AppPreparedStatement } from "../src/lib/db";
 import {
   getGameReceptionEligibility,
   getReceptionComparison,
   getReceptionRankings,
+  ReceptionPublicationUnavailableError,
 } from "../src/lib/rankings";
 import { normalizeReceptionFilters } from "../src/lib/reception-filters";
 import { buildReceptionComparisonChartData } from "../src/components/rankings-page";
+import { publishReceptionProjection } from "../src/lib/reception-publication";
 
 const EVALUATED_AT = "2026-09-08T00:00:00.000Z";
 const HISTOGRAM_SOURCE = "histogram-filtered";
 const SUMMARY_SOURCE = "summary-filtered";
 const DAY = 24 * 60 * 60 * 1000;
 
-function appDatabase(native: Database): AppDatabase {
+function appDatabase(native: Database, onRead?: (query: string, rows: unknown[]) => void): AppDatabase {
+  const executions = new WeakMap<AppPreparedStatement, () => { success: boolean; results?: unknown[] }>();
   return {
     prepare(query: string): AppPreparedStatement {
       let values: unknown[] = [];
+      const read = () => {
+        const rows = native.prepare(query).all(...(values as SQLQueryBindings[]));
+        onRead?.(query, rows);
+        return rows;
+      };
       const statement: AppPreparedStatement = {
         bind(...next: unknown[]) {
           values = next;
           return statement;
         },
         async first<T = unknown>(column?: string) {
-          const row = native.prepare(query).get(...(values as SQLQueryBindings[])) as Record<string, unknown> | null;
+          const row = read()[0] as Record<string, unknown> | undefined;
           return row ? (column ? ((row[column] as T) ?? null) : (row as T)) : null;
         },
         async run() {
@@ -33,25 +44,27 @@ function appDatabase(native: Database): AppDatabase {
           return { success: true, meta: { changes: Number(result.changes), duration: 0 } };
         },
         async all<T = unknown>() {
-          return { success: true, results: native.prepare(query).all(...(values as SQLQueryBindings[])) as T[], meta: { changes: 0, duration: 0 } };
+          return { success: true, results: read() as T[], meta: { changes: 0, duration: 0 } };
         },
         async raw<T = unknown>() {
           return native.prepare(query).values(...(values as SQLQueryBindings[])) as T[];
         },
       };
+      executions.set(statement, () => {
+        if (/^(SELECT|WITH|PRAGMA|EXPLAIN)\b/i.test(query.trim())) {
+          return { success: true, results: read() };
+        }
+        native.prepare(query).run(...(values as SQLQueryBindings[]));
+        return { success: true };
+      });
       return statement;
     },
-    async batch(statements) {
-      native.run("BEGIN");
-      try {
-        const result = [];
-        for (const statement of statements) result.push({ success: (await statement.run()).success });
-        native.run("COMMIT");
-        return result;
-      } catch (error) {
-        native.run("ROLLBACK");
-        throw error;
-      }
+    async batch<T = unknown>(statements: AppPreparedStatement[]) {
+      return native.transaction(() => statements.map((statement) => {
+        const execute = executions.get(statement);
+        if (!execute) throw new Error("Statement belongs to a different database");
+        return execute() as { success: boolean; results?: T[] };
+      }))();
     },
     async exec(query) {
       native.exec(query);
@@ -60,8 +73,8 @@ function appDatabase(native: Database): AppDatabase {
   };
 }
 
-function freshDb(): { db: AppDatabase; native: Database } {
-  const native = new Database(":memory:");
+function freshDb(path = ":memory:"): { db: AppDatabase; native: Database } {
+  const native = new Database(path);
   applyMigrations(native);
   const db = appDatabase(native);
   native.query(
@@ -173,6 +186,7 @@ describe("reception ranking query domain", () => {
     addBuckets(native, 1, 260); addBuckets(native, 2, 250); addBuckets(native, 3, 50);
     addGenre(native, 3, 7);
 
+    await publishReceptionProjection(db, { evaluatedAt: EVALUATED_AT });
     const global = await getReceptionRankings(db, { evaluatedAt: EVALUATED_AT, limit: 10 });
     expect(global.data.items.map((item) => [item.rank, item.game.appid])).toEqual([[1, 1], [2, 2]]);
     expect(global.data.eligible_total).toBe(2);
@@ -198,6 +212,7 @@ describe("reception ranking query domain", () => {
     expect(atEvaluation?.now.qualifying_reviews).toBe(250);
     expect(atEvaluation?.now.global.eligible).toBe(true);
 
+    await publishReceptionProjection(db, { evaluatedAt: EVALUATED_AT });
     const comparison = await getReceptionComparison(db, {
       appid: 10,
       evaluatedAt: EVALUATED_AT,
@@ -216,6 +231,7 @@ describe("reception ranking query domain", () => {
     addApp(laterFixture.native, 11);
     addScore(laterFixture.native, 11, 75, "2026-09-01T00:00:00.000Z");
     addBuckets(laterFixture.native, 11, 250, "2026-07-10T00:00:00.000Z");
+    await publishReceptionProjection(laterFixture.db, { evaluatedAt: "2026-10-08T00:00:00.000Z" });
     const later = await getReceptionComparison(laterFixture.db, {
       appid: 11,
       evaluatedAt: "2026-10-08T00:00:00.000Z",
@@ -232,6 +248,7 @@ describe("reception ranking query domain", () => {
       addScore(native, appid, 100 - appid / 1000);
       addBuckets(native, appid, 250);
     }
+    await publishReceptionProjection(db, { evaluatedAt: EVALUATED_AT });
     const list = await getReceptionRankings(db, { evaluatedAt: EVALUATED_AT, limit: 100 });
     expect(list.data.total).toBe(100);
     expect(list.data.eligible_total).toBe(101);
@@ -261,6 +278,7 @@ describe("reception ranking query domain", () => {
     native.query("INSERT INTO review_summary_snapshots (appid, source_id, observed_at, lifetime_positive_count, lifetime_total_count) VALUES (?, ?, ?, ?, ?)").run(20, "summary-incompatible", "2026-09-07T00:00:00.000Z", 100, 100);
     native.query("INSERT INTO review_summary_snapshots (appid, source_id, observed_at, lifetime_positive_count, lifetime_total_count) VALUES (?, ?, ?, ?, ?)").run(20, SUMMARY_SOURCE, "2026-08-01T00:00:00.000Z", 40, 100);
     native.query("INSERT INTO review_summary_snapshots (appid, source_id, observed_at, lifetime_positive_count, lifetime_total_count) VALUES (?, ?, ?, ?, ?)").run(20, SUMMARY_SOURCE, "2026-09-07T00:00:00.000Z", 60, 100);
+    await publishReceptionProjection(db, { evaluatedAt: EVALUATED_AT });
     const ranking = await getReceptionRankings(db, { type: "top_rated_all_time", filters: { genres: [8], features: [], tags: [] }, evaluatedAt: EVALUATED_AT });
     expect(ranking.data.items[0]?.metric).toMatchObject({ kind: "lifetime_confidence", lifetime_approval: 60 });
     expect(ranking.data.items[0]?.metric.value).toBeCloseTo(50.2, 2);
@@ -285,6 +303,7 @@ describe("reception ranking query domain", () => {
       addScore(native, appid, nowScore);
     }
 
+    await publishReceptionProjection(db, { evaluatedAt: EVALUATED_AT });
     const ranking = await getReceptionRankings(db, { type: "top_rated_all_time", evaluatedAt: EVALUATED_AT });
     expect(ranking.data.items.map((item) => item.game.appid)).toEqual([61, 63, 62]);
     expect(ranking.data.items.map((item) => item.metric.lifetime_approval)).toEqual([99, 99, 100]);
@@ -320,6 +339,7 @@ describe("reception ranking query domain", () => {
     native.query("UPDATE apps SET is_early_access = 1 WHERE appid = 74").run();
     native.query("UPDATE apps SET release_status = 'upcoming' WHERE appid = 75").run();
 
+    await publishReceptionProjection(db, { evaluatedAt: EVALUATED_AT });
     const global = await getReceptionRankings(db, { type: "top_rated_all_time", evaluatedAt: EVALUATED_AT });
     expect(global.data.minimum_reviews).toBe(250);
     expect(global.data.items.map((item) => item.game.appid)).toEqual([76, 70]);
@@ -348,6 +368,7 @@ describe("reception ranking query domain", () => {
         (appid, source_id, granularity, period_start, period_end, positive_count, negative_count, observed_at, provenance)
       VALUES (?, ?, 'weekly', '2026-08-25T00:00:00.000Z', '2026-09-01T00:00:00.000Z', 250, 0, '2026-09-07T00:00:00.000Z', 'test')
     `).run(80, HISTOGRAM_SOURCE);
+    await publishReceptionProjection(db, { evaluatedAt: EVALUATED_AT });
 
     const ranking = await getReceptionRankings(db, { type: "top_rated_now", evaluatedAt: EVALUATED_AT });
     expect(ranking.data.items.map((item) => item.game.appid)).toEqual([80]);
@@ -371,6 +392,7 @@ describe("reception ranking query domain", () => {
       21,
     );
     addBuckets(native, 21, 250);
+    await publishReceptionProjection(db, { evaluatedAt: EVALUATED_AT });
     const ranking = await getReceptionRankings(db, { evaluatedAt: EVALUATED_AT });
     expect(ranking.data.items[0]?.metric).toMatchObject({
       evidence_start: "2026-07-01T00:00:00.000Z",
@@ -404,6 +426,7 @@ describe("reception ranking query domain", () => {
     expect(afterPostpatchReview?.all_time.global).toEqual({ minimum_reviews: 250, eligible: true, reasons: [] });
     expect(afterPostpatchReview?.all_time.filtered).toEqual({ minimum_reviews: 50, eligible: true, reasons: [] });
 
+    await publishReceptionProjection(db, { evaluatedAt: EVALUATED_AT });
     const now = await getReceptionRankings(db, { type: "top_rated_now", evaluatedAt: EVALUATED_AT });
     expect(now.data.minimum_reviews).toBe(250);
     expect(now.data.items.map((item) => item.game.appid)).toEqual([appid]);
@@ -418,6 +441,7 @@ describe("reception ranking query domain", () => {
     expect(afterReviewsAgeOut?.all_time.global).toEqual({ minimum_reviews: 250, eligible: true, reasons: [] });
     expect(afterReviewsAgeOut?.all_time.filtered).toEqual({ minimum_reviews: 50, eligible: true, reasons: [] });
 
+    await publishReceptionProjection(db, { evaluatedAt: agedAt });
     const nowAfterReviewsAgeOut = await getReceptionRankings(db, { type: "top_rated_now", evaluatedAt: agedAt });
     expect(nowAfterReviewsAgeOut.data.minimum_reviews).toBe(250);
     expect(nowAfterReviewsAgeOut.data.items).toEqual([]);
@@ -455,6 +479,7 @@ describe("reception ranking query domain", () => {
         WHERE appid = 90 AND observed_at = '2026-09-15T00:00:00.000Z'`).run(JSON.stringify({ recalculation }));
 
       const evaluatedAt = "2026-10-02T00:00:00.000Z";
+      await publishReceptionProjection(db, { evaluatedAt });
       const ranking = await getReceptionRankings(db, { type: "top_rated_now", evaluatedAt });
       expect(ranking.data.items[0]?.metric.value).toBe(100);
       expect(ranking.sourceTimestamp).toBe("2026-09-07T00:00:00.000Z");
@@ -508,6 +533,7 @@ describe("reception ranking query domain", () => {
       "INSERT INTO steam_events (event_id, appid, category, start_at, observed_at, source, provenance) VALUES (?, ?, 'major_update', ?, ?, ?, '{}')",
     ).run("major-40", 40, "2026-08-01T00:00:00.000Z", "2026-09-07T00:00:00.000Z", "steam_news_hub");
 
+    await publishReceptionProjection(db, { evaluatedAt: EVALUATED_AT });
     const now = await getReceptionComparison(db, { type: "top_rated_now", appid: 40, evaluatedAt: EVALUATED_AT });
     const september = now.data?.points.find((point) => point.cutoff === "2026-09-01T00:00:00.000Z");
     expect(september?.provenance).toBe("reconstructed");
@@ -525,5 +551,187 @@ describe("reception ranking query domain", () => {
     expect(allTime.data?.in_current_group).toBe(false);
     expect(allTime.data?.points).toEqual([]);
     native.close(true);
+  });
+
+  test("requires a compatible publication and reports its evaluation rather than the request clock", async () => {
+    const { db, native } = freshDb();
+    try {
+      addApp(native, 1);
+      addScore(native, 1, 88);
+      addBuckets(native, 1, 250);
+      await expect(getReceptionRankings(db)).rejects.toBeInstanceOf(ReceptionPublicationUnavailableError);
+      await expect(getReceptionComparison(db, { appid: 1 })).rejects.toBeInstanceOf(ReceptionPublicationUnavailableError);
+      await publishReceptionProjection(db, { evaluatedAt: EVALUATED_AT });
+      const list = await getReceptionRankings(db, { evaluatedAt: "2027-01-01T00:00:00.000Z" });
+      const comparison = await getReceptionComparison(db, { appid: 1 });
+      expect(list.data.evaluated_at).toBe(EVALUATED_AT);
+      expect(list.data.items).toHaveLength(1);
+      expect(comparison.data?.evaluated_at).toBe(EVALUATED_AT);
+      native.query("UPDATE reception_publication_builds SET projection_version = projection_version + 1").run();
+      await expect(getReceptionRankings(db)).rejects.toBeInstanceOf(ReceptionPublicationUnavailableError);
+    } finally {
+      native.close(true);
+    }
+  });
+
+  test("hydrates only the selected cards and twelve target months with no raw evidence reads", async () => {
+    const { db, native } = freshDb();
+    try {
+      for (let appid = 1; appid <= 125; appid += 1) {
+        addApp(native, appid);
+        addGenre(native, appid, 7);
+        addScore(native, appid, 100 - appid / 1000, "2026-08-15T00:00:00.000Z");
+        addBuckets(native, appid, 250);
+        addSummary(native, appid, 250, 250, "2026-08-15T00:00:00.000Z");
+      }
+      // A nonqualifying source-bearing game is still part of scope freshness.
+      addApp(native, 126);
+      addGenre(native, 126, 7);
+      addScore(native, 126, 1, "2026-09-07T23:00:00.000Z");
+      await publishReceptionProjection(db, { evaluatedAt: EVALUATED_AT });
+      const reads: { query: string; rows: unknown[] }[] = [];
+      const reader = appDatabase(native, (query, rows) => reads.push({ query, rows }));
+      const list = await getReceptionRankings(reader, {
+        limit: 3, offset: 100, filters: { genres: [7] },
+      });
+      expect(list.data.items.map((item) => [item.rank, item.game.appid])).toEqual([[101, 101], [102, 102], [103, 103]]);
+      expect(list.data.total).toBe(125);
+      expect(list.sourceTimestamp).toBe("2026-09-07T23:00:00.000Z");
+      const global = await getReceptionRankings(reader, { limit: 3, offset: 100 });
+      expect(global.data.items).toEqual([]);
+      expect(global.data.total).toBe(100);
+      expect(global.data.eligible_total).toBe(125);
+      const comparison = await getReceptionComparison(reader, { appid: 125 });
+      expect(comparison.data?.points.length).toBeGreaterThan(0);
+      expect(comparison.data?.points.every((point) => point.compared_count === 125)).toBe(true);
+      expect(comparison.sourceTimestamp).toBe(list.sourceTimestamp);
+      const returned = reads.flatMap((read) => read.rows) as Record<string, unknown>[];
+      expect(returned.filter((row) => "description" in row)).toHaveLength(3);
+      expect(returned.filter((row) => "comparison_rank" in row).length).toBeLessThanOrEqual(12);
+      expect(returned.length).toBeLessThanOrEqual(21);
+      // These are executed real SQLite statements, not implementation source.
+      expect(reads.filter(({ query }) => /\b(?:review_buckets|steam_events|player_score_history|review_summary_snapshots)\b/i.test(query))).toEqual([]);
+    } finally {
+      native.close(true);
+    }
+  });
+
+  test.each(["list", "comparison"] as const)("keeps the %s response in one SQLite snapshot during publication swap and cleanup", async (view) => {
+    const directory = mkdtempSync(join(tmpdir(), "reception-read-snapshot-"));
+    const path = join(directory, "catalog.sqlite");
+    const { db, native } = freshDb(path);
+    native.exec("PRAGMA journal_mode = WAL");
+    const writer = new Database(path);
+    writer.exec("PRAGMA foreign_keys = ON");
+    try {
+      addApp(native, 1);
+      addScore(native, 1, 88);
+      addBuckets(native, 1, 250);
+      await publishReceptionProjection(db, { evaluatedAt: EVALUATED_AT });
+      const expected = view === "list"
+        ? await getReceptionRankings(db)
+        : await getReceptionComparison(db, { appid: 1 });
+      const previous = native.query<{ published_build_id: number }, []>(
+        "SELECT published_build_id FROM reception_publication_state WHERE id = 1",
+      ).get()!.published_build_id;
+      const nextAt = "2026-09-09T00:00:00.000Z";
+      const candidate = Number(native.query(`INSERT INTO reception_publication_builds
+        (status, projection_version, history_key, evaluated_at, source_revision, cursor_appid, max_appid, completed_at)
+        SELECT 'published', projection_version, history_key, ?, source_revision, cursor_appid, max_appid, completed_at
+        FROM reception_publication_builds WHERE id = ?`).run(nextAt, previous).lastInsertRowid);
+      native.query(`INSERT INTO reception_publication_current
+        (build_id, appid, type, input_revision, history_key, metric_value, qualifying_reviews,
+         score_history_id, metric_json, population_json, source_timestamp, next_evaluation_at)
+        SELECT ?, appid, type, input_revision, history_key, 1, 0,
+          score_history_id, json_set(metric_json, '$.value', 1), population_json, source_timestamp, next_evaluation_at
+        FROM reception_publication_current WHERE build_id = ?`).run(candidate, previous);
+      let swapped = false;
+      const reader = appDatabase(native, () => {
+        if (swapped) return;
+        swapped = true;
+        writer.transaction(() => {
+          writer.query("UPDATE reception_publication_state SET published_build_id = ? WHERE id = 1").run(candidate);
+          writer.query("DELETE FROM reception_publication_builds WHERE id = ?").run(previous);
+        })();
+      });
+      const before = view === "list"
+        ? await getReceptionRankings(reader)
+        : await getReceptionComparison(reader, { appid: 1 });
+      expect(swapped).toBe(true);
+      expect(before).toEqual(expected);
+      const after = view === "list"
+        ? await getReceptionRankings(db)
+        : await getReceptionComparison(db, { appid: 1 });
+      expect(after.data?.evaluated_at).toBe(nextAt);
+      expect(after.data?.eligible_total).toBe(0);
+    } finally {
+      writer.close(true);
+      native.close(true);
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  test("uses current qualifying counts for Now ties but historical sample counts for All Time ties", async () => {
+    const { db, native } = freshDb();
+    try {
+      for (const appid of [1, 2]) {
+        addApp(native, appid);
+        addScore(native, appid, 88, "2026-08-15T00:00:00.000Z");
+        addBuckets(native, appid, appid === 1 ? 250 : 300);
+        addSummary(native, appid, 0, appid === 1 ? 2048 : 128, "2026-08-15T00:00:00.000Z");
+        addSummary(native, appid, 0, appid === 1 ? 256 : 512);
+      }
+      await publishReceptionProjection(db, { evaluatedAt: EVALUATED_AT });
+      const now = await getReceptionComparison(db, { appid: 1 });
+      const allTime = await getReceptionComparison(db, { appid: 1, type: "top_rated_all_time" });
+      const september = "2026-09-01T00:00:00.000Z";
+      expect(now.data?.points.find((point) => point.cutoff === september)).toMatchObject({
+        provenance: "recorded", comparison_rank: 2, compared_count: 2,
+      });
+      expect(allTime.data?.points.find((point) => point.cutoff === september)).toMatchObject({
+        comparison_rank: 1, compared_count: 2, lifetime_reviews: 2048,
+      });
+      expect((await getReceptionRankings(db, { type: "top_rated_all_time" })).data.items.map((item) => item.game.appid)).toEqual([2, 1]);
+    } finally {
+      native.close(true);
+    }
+  });
+
+  test("applies cross-group facet intersections before paging and keeps losing source freshness", async () => {
+    const { db, native } = freshDb();
+    try {
+      for (const appid of [1, 2, 3, 4]) {
+        addApp(native, appid);
+        addGenre(native, appid, appid === 4 ? 8 : 7);
+        addSummary(native, appid, 500, 500, "2026-09-06T00:00:00.000Z");
+      }
+      native.exec(`INSERT INTO app_facets (facet_group, source_id, name)
+        VALUES ('feature', '7', 'Feature 7'), ('community_tag', '7', 'Tag 7');
+        INSERT INTO app_facet_memberships (appid, facet_group, source_id, source_order)
+        VALUES (1, 'feature', '7', 0), (1, 'community_tag', '7', 0),
+               (2, 'feature', '7', 0), (3, 'community_tag', '7', 0),
+               (4, 'feature', '7', 0), (4, 'community_tag', '7', 0);`);
+      addApp(native, 5);
+      addGenre(native, 5, 7);
+      addSummary(native, 5, 1, 1, "2026-09-07T23:00:00.000Z");
+      native.exec(`INSERT INTO app_facet_memberships (appid, facet_group, source_id, source_order)
+        VALUES (5, 'feature', '7', 0), (5, 'community_tag', '7', 0);`);
+      await publishReceptionProjection(db, { evaluatedAt: EVALUATED_AT });
+      const filters = { genres: [7], features: [7], tags: [7] };
+      const list = await getReceptionRankings(db, { type: "top_rated_all_time", filters, limit: 1 });
+      expect(list.data.items.map((item) => item.game.appid)).toEqual([1]);
+      expect(list.data.eligible_total).toBe(1);
+      expect(list.sourceTimestamp).toBe("2026-09-07T23:00:00.000Z");
+      const comparison = await getReceptionComparison(db, { type: "top_rated_all_time", filters, appid: 1 });
+      expect(comparison.data?.eligible_total).toBe(1);
+      expect(comparison.sourceTimestamp).toBe(list.sourceTimestamp);
+      const eitherGenre = await getReceptionRankings(db, {
+        type: "top_rated_all_time", filters: { ...filters, genres: [7, 8] }, offset: 1, limit: 1,
+      });
+      expect(eitherGenre.data.items.map((item) => [item.rank, item.game.appid])).toEqual([[2, 4]]);
+      expect(eitherGenre.data.eligible_total).toBe(2);
+    } finally {
+      native.close(true);
+    }
   });
 });

@@ -15,6 +15,7 @@ import {
 } from "./lib/media-processing";
 import { CACHE_POLICIES } from "./lib/cache";
 import { getDb } from "./lib/db";
+import { ensureReceptionPublicationReady } from "./lib/reception-publication";
 export const API_RATE_LIMIT_MAX_REQUESTS = 30;
 export const API_RATE_LIMIT_WINDOW_MS = 10_000;
 export const API_RATE_LIMIT_MAX_ENTRIES = 10_000;
@@ -342,6 +343,7 @@ export async function handleRequest(request: Request, peerAddress?: string): Pro
 export interface StartServerOptions {
   port?: number;
   hostname?: string;
+  ingestion?: boolean;
 }
 
 interface StartedServer {
@@ -363,21 +365,24 @@ function getPort(): number {
 export function startServer(options: StartServerOptions = {}) {
   serverPromise ??= (async () => {
     const db = await getDb();
-    startIngestionScheduler({
-      db,
-      steamApiKey: process.env.STEAM_API_KEY,
-      tavilyApiKey: process.env.TAVILY_API_KEY,
-      geminiApiKey: process.env.GEMINI_API_KEY,
-      geminiPricingVersion: process.env.GEMINI_BATCH_PRICING_VERSION,
-      geminiCapabilityVersion: process.env.GEMINI_BATCH_CAPABILITY_VERSION,
-      runImmediately: true,
-    });
-
-    return Bun.serve({
+    await ensureReceptionPublicationReady(db);
+    const server = Bun.serve({
       hostname: options.hostname ?? process.env.HOST ?? "0.0.0.0",
       port: options.port ?? getPort(),
       fetch: (request, server) => handleRequest(request, server.requestIP(request)?.address),
     });
+    if (options.ingestion !== false) {
+      startIngestionScheduler({
+        db,
+        steamApiKey: process.env.STEAM_API_KEY,
+        tavilyApiKey: process.env.TAVILY_API_KEY,
+        geminiApiKey: process.env.GEMINI_API_KEY,
+        geminiPricingVersion: process.env.GEMINI_BATCH_PRICING_VERSION,
+        geminiCapabilityVersion: process.env.GEMINI_BATCH_CAPABILITY_VERSION,
+        runImmediately: true,
+      });
+    }
+    return server;
   })();
   return serverPromise;
 }

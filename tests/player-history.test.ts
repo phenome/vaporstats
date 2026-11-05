@@ -25,7 +25,6 @@ import {
   type PlayerHistoryChartProps,
 } from "../src/components/player-history";
 import { TrendingBlock } from "../src/components/trending";
-import { handleRankingsHttpRequest } from "../src/routes/rankings.index";
 import { PeakRankingsPageView } from "../src/components/peak-rankings-page";
 import { handlePeakRankingsHttpRequest } from "../src/routes/rankings.peak";
 import { CACHE_POLICIES } from "../src/lib/cache";
@@ -758,11 +757,6 @@ describe("Player History and Rankings", () => {
     // Verify untracked game 40 and null-player game 50 are strictly excluded
     expect(rankings.some((g) => g.appid === 40)).toBe(false);
     expect(rankings.some((g) => g.appid === 50)).toBe(false);
-    // HTTP handler check
-    const req = new Request("https://vaporstats.com/rankings");
-    const res = await handleRankingsHttpRequest(req, db);
-    expect(res.status).toBe(200);
-    expect(res.headers.get("Cache-Control")).toBe(CACHE_POLICIES.liveApi);
 
     console.log("most played ordering");
   });

@@ -10,6 +10,7 @@ readonly LOCK_FILE=/run/lock/vaporstats-deploy.lock
 readonly CONTAINER_NAME=vaporstats
 readonly IMAGE_REPOSITORY=vaporstats
 readonly ROLLBACK_IMAGE="$IMAGE_REPOSITORY:previous"
+# Allow bounded source-only publication before the candidate opens its listener.
 readonly HEALTH_TIMEOUT_SECONDS="${DEPLOY_HEALTH_TIMEOUT_SECONDS:-90}"
 
 fail() {
@@ -155,8 +156,8 @@ import("./dist/migrate.js");
 '
 else
   # Fast path: no schema changes.
-  # Direct in-place container recreation with zero database mutation risk.
-  # Caddy reverse_proxy retries buffer incoming requests during the ~500ms recreate window.
+  # Source-only publication may still refresh projections before the listener opens.
+  # Caddy reverse_proxy retries buffer requests during the clean cutover.
   printf 'deploy: no migration changes detected; executing fast in-place recreate\n'
 fi
 

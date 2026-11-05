@@ -27,6 +27,11 @@ const expectedTables = [
   "app_facet_memberships",
   "player_score_history",
   "player_score_state",
+  "reception_publication_builds",
+  "reception_publication_current",
+  "reception_publication_months",
+  "reception_publication_revisions",
+  "reception_publication_state",
   "critic_records",
   "media_game_embeddings",
   "media_article_extractions",
@@ -285,6 +290,67 @@ function verifyExistingRowsSurviveUpgrade(): void {
   }
 }
 
+function verifyReceptionRowsSurvivePublicationUpgrade(): void {
+  const retained = new Database(join(temporaryDirectory, "retained-reception.sqlite"));
+  retained.exec("PRAGMA foreign_keys = ON");
+  try {
+    const publicationIndex = journal.entries.findIndex((entry) => entry.tag === "0018_reception_publication");
+    if (publicationIndex < 1) throw new Error("Reception publication baseline is missing");
+    retained.exec("CREATE TABLE schema_migrations (name TEXT PRIMARY KEY, applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)");
+    for (const entry of journal.entries.slice(0, publicationIndex)) {
+      retained.exec(readFileSync(join(migrationDirectory, entry.tag + ".sql"), "utf8"));
+      retained.query("INSERT INTO schema_migrations (name) VALUES (?)").run(entry.tag + ".sql");
+    }
+    retained.exec(`
+      INSERT INTO apps (appid, name, slug) VALUES (900002, 'Reception preservation', 'reception-preservation');
+      INSERT INTO review_sources (id, endpoint, request_filter, population, interpretation_version, identity_key)
+        VALUES ('retained-histogram', 'appreviewhistogram', 'none', 'filtered_reviews', 'steam-review-source-v1', 'retained-histogram');
+      INSERT INTO review_sources (id, endpoint, request_filter, language, purchase_type, filter_offtopic_activity, population, interpretation_version, identity_key)
+        VALUES ('retained-summary', 'appreviews', 'filter=all', 'all', 'all', 1, 'filtered_reviews', 'steam-review-source-v1', 'retained-summary');
+      INSERT INTO review_buckets (appid, source_id, granularity, period_start, period_end, positive_count, negative_count, observed_at, provenance)
+        VALUES (900002, 'retained-histogram', 'weekly', '2026-10-01T00:00:00.000Z', '2026-10-08T00:00:00.000Z', 280, 20, '2026-10-09T12:00:00.000Z', '{"retained":"bucket"}');
+      INSERT INTO review_summary_snapshots (appid, source_id, observed_at, lifetime_positive_count, lifetime_total_count)
+        VALUES (900002, 'retained-summary', '2026-10-09T12:00:00.000Z', 900, 1000);
+      INSERT INTO player_score_history
+        (appid, observed_at, score, formula_version, current_positive_count, current_total_count,
+         historical_positive_count, historical_total_count, current_window_start, current_window_end,
+         historical_window_start, historical_window_end, current_evidence_intervals, historical_evidence_intervals,
+         current_source_id, historical_source_id, current_evidence_observed_at, historical_evidence_observed_at, provenance)
+        VALUES (900002, '2026-10-09T12:05:00.000Z', 93.33333333333333, 'steam-player-v2', 280, 300,
+         0, 0, '2026-07-11T12:00:00.000Z', '2026-10-09T12:00:00.000Z',
+         '2026-04-12T12:00:00.000Z', '2026-07-11T12:00:00.000Z',
+         '[{"start":"2026-10-01T00:00:00.000Z","end":"2026-10-08T00:00:00.000Z","granularity":"week"}]', '[]',
+         'retained-histogram', 'retained-histogram', '2026-10-09T12:00:00.000Z', NULL, '{"retained":"score"}');
+      INSERT INTO player_score_state
+        (appid, latest_score_history_id, eligibility_review_count, eligibility_source_id, eligibility_observed_at, eligibility_provenance)
+        SELECT appid, id, 300, 'retained-histogram', '2026-10-09T12:00:00.000Z', '{"retained":"state"}'
+        FROM player_score_history WHERE appid = 900002;
+    `);
+    const tables = ["apps", "review_sources", "review_buckets", "review_summary_snapshots", "player_score_history", "player_score_state"];
+    const before = tables.map((table) => retained.query(`SELECT * FROM ${table} ORDER BY rowid`).all());
+    const foreignKeys = tables.map((table) => retained.query(`PRAGMA foreign_key_list(${table})`).all());
+    applyMigrations(retained, migrationDirectory);
+    for (const [index, table] of tables.entries()) {
+      if (JSON.stringify(retained.query(`SELECT * FROM ${table} ORDER BY rowid`).all()) !== JSON.stringify(before[index])) {
+        throw new Error("Reception publication migration changed retained " + table + " rows");
+      }
+      if (JSON.stringify(retained.query(`PRAGMA foreign_key_list(${table})`).all()) !== JSON.stringify(foreignKeys[index])) {
+        throw new Error("Reception publication migration changed " + table + " foreign keys");
+      }
+    }
+    for (const table of expectedTables.filter((name) => name.startsWith("reception_publication_"))) {
+      if (retained.query(`SELECT 1 FROM ${table} LIMIT 1`).get()) {
+        throw new Error("Reception publication migration seeded " + table);
+      }
+    }
+    if (retained.query("PRAGMA foreign_key_check").all().length !== 0) {
+      throw new Error("Reception publication upgrade broke foreign keys");
+    }
+  } finally {
+    retained.close(true);
+  }
+}
+
 let database: Database | undefined;
 
 try {
@@ -453,6 +519,7 @@ try {
   }
 
   verifyExistingRowsSurviveUpgrade();
+  verifyReceptionRowsSurvivePublicationUpgrade();
   if (!existsSync(databasePath)) throw new Error("SQLite database file was not created");
   console.log("SQLite migrations OK (" + appliedMigrations.length + " migrations; existing rows preserved)");
 } finally {

@@ -4,9 +4,9 @@ import { createFileRoute, stripSearchParams } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
 import { getDb } from "../lib/db-access";
 import type { AppDatabase } from "../lib/db";
-import { getReceptionRankings } from "../lib/rankings";
+import { getReceptionRankings, ReceptionPublicationUnavailableError, type ReceptionQueryResult, type ReceptionRankingData } from "../lib/rankings";
 import { normalizeReceptionFilters, type ReceptionFilters, type ReceptionRankingType } from "../lib/reception-filters";
-import { listFacetDictionary } from "../lib/taxonomy";
+import { listFacetDictionary, type FacetDictionaryEntry } from "../lib/taxonomy";
 import { getLiveApiCacheHeaders, getPageCacheHeaders } from "../lib/cache";
 import { RouteDataError } from "../components/route-state";
 import { RankingsSkeleton } from "../components/route-skeletons";
@@ -134,10 +134,20 @@ export async function handleRankingsHttpRequest(request: Request, explicitDb?: A
   const db = await getDb(explicitDb);
   const search = requestState(request);
   const filters = filtersFromSearch(search);
-  const [ranking, facets] = await Promise.all([
-    getReceptionRankings(db, { type: search.type, filters, limit: search.limit, offset: search.offset }),
-    listFacetDictionary(db),
-  ]);
+  let ranking: ReceptionQueryResult<ReceptionRankingData>;
+  let facets: FacetDictionaryEntry[];
+  try {
+    [ranking, facets] = await Promise.all([
+      getReceptionRankings(db, { type: search.type, filters, limit: search.limit, offset: search.offset }),
+      listFacetDictionary(db),
+    ]);
+  } catch (error) {
+    if (!(error instanceof ReceptionPublicationUnavailableError)) throw error;
+    return new Response("Reception data unavailable", {
+      status: 503,
+      headers: { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store, no-cache, must-revalidate" },
+    });
+  }
   if (!ranking.data) throw new Error("Rankings request failed");
   const appHtml = renderToString(<RankingsPageView data={ranking.data} facets={facets} />);
   const fullHtml = `<!DOCTYPE html>

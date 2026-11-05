@@ -175,6 +175,9 @@ A shared, normalized label for a coverage-supported game characteristic, used to
 **Monthly Score Comparison**:
 An earlier score comparison for the games eligible in a selected catalog group now. It may use a Reconstructed Player Score when no Recorded Player Score exists; missing historical evidence remains missing, and the comparison does not assert that the same games were eligible then.
 
+**Published Reception**:
+A disposable, complete set of derived reception values evaluated together for catalog standings and Monthly Score Comparisons. Its evaluation time describes eligibility assessment, not a new review response or a Recorded Player Score. Source observations and evidence timestamps remain authoritative. See [ADR 0015](docs/adr/0015-published-reception-read-model.md), alongside the eligibility rules in [ADR 0008](docs/adr/0008-independent-reception-ranking-eligibility.md), historical preference in [ADR 0009](docs/adr/0009-retrospective-player-score-history.md), and formula/provenance rules in [ADR 0014](docs/adr/0014-observed-evidence-and-lifetime-confidence.md).
+
 **Score Event Reader**:
 A temporary in-card view docked within the game reception container that renders an extracted readable representation of a selected Steam event or patch announcement, with a close control that restores the primary reception view.
 _Avoid_: News modal, news popup, article sheet, milestone drawer
