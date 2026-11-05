@@ -268,7 +268,12 @@ export async function publishReceptionProjection(db: AppDatabase, options: Recep
     evaluated += result.evaluated;
     reused += result.reused;
     restarted ||= result.restarted;
-    if (result.status !== "building") return { ...result, inspected, evaluated, reused, restarted };
+    if (result.status !== "building") {
+      // SQLite bounds this analysis and decides when statistics need refreshing.
+      // Include unchanged startup: newly installed indices may have no statistics yet.
+      await exclusive(db, () => db.exec("PRAGMA optimize"));
+      return { ...result, inspected, evaluated, reused, restarted };
+    }
     const { promise, resolve } = Promise.withResolvers<void>();
     setTimeout(resolve, 0);
     await promise;

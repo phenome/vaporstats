@@ -323,7 +323,8 @@ function scopeQuery(filters: ReceptionFilters, type: ReceptionRankingType) {
     values: [type, ...where.values, minimum],
     sql: `WITH ${ACTIVE_PUBLICATION},
       scoped AS (
-        SELECT c.*
+        SELECT c.build_id, c.type, c.appid, c.metric_value,
+          c.qualifying_reviews, c.source_timestamp
         FROM active b
         JOIN reception_publication_current c ON c.build_id = b.id
         JOIN apps a ON a.appid = c.appid
@@ -332,6 +333,11 @@ function scopeQuery(filters: ReceptionFilters, type: ReceptionRankingType) {
       eligible AS (
         SELECT * FROM scoped
         WHERE metric_value IS NOT NULL AND qualifying_reviews >= ?
+      ),
+      scope_stats AS (
+        SELECT COUNT(CASE WHEN metric_value IS NOT NULL AND qualifying_reviews >= ${minimum} THEN 1 END) AS eligible_total,
+          MAX(source_timestamp) AS source_timestamp
+        FROM scoped
       )`,
   } as const;
 }
@@ -360,18 +366,20 @@ export async function getReceptionRankings(
   const [metadata, statistics, page] = await db.batch([
     db.prepare(PUBLICATION_METADATA),
     db.prepare(`${query.sql}
-      SELECT (SELECT COUNT(*) FROM eligible) AS eligible_total,
-             (SELECT MAX(source_timestamp) FROM scoped) AS source_timestamp`)
+      SELECT eligible_total, source_timestamp FROM scope_stats`)
       .bind(...query.values),
     db.prepare(`${query.sql},
       page AS (
-        SELECT appid, metric_json, population_json, qualifying_reviews, metric_value
+        SELECT build_id, type, appid, qualifying_reviews, metric_value
         FROM eligible
         ORDER BY metric_value DESC, qualifying_reviews DESC, appid ASC
         LIMIT ? OFFSET ?
       )
-      SELECT a.*, p.metric_json, p.population_json, p.qualifying_reviews
-      FROM page p JOIN apps a ON a.appid = p.appid
+      SELECT a.*, c.metric_json, c.population_json, p.qualifying_reviews
+      FROM page p
+      JOIN reception_publication_current c
+        ON c.build_id = p.build_id AND c.type = p.type AND c.appid = p.appid
+      JOIN apps a ON a.appid = p.appid
       ORDER BY p.metric_value DESC, p.qualifying_reviews DESC, p.appid ASC`)
       .bind(...query.values, pageLimit, offset),
   ]);
@@ -416,10 +424,13 @@ export async function getReceptionComparison(
   const query = scopeQuery(filters, type);
   const history = `${query.sql},
     history AS (
-      SELECT m.*, e.qualifying_reviews
+      SELECT m.history_key, m.type, m.appid, m.cutoff, m.value,
+        m.lifetime_reviews, m.provenance, m.source_observed_at, e.qualifying_reviews
       FROM eligible e
+      JOIN reception_publication_current c
+        ON c.build_id = e.build_id AND c.type = e.type AND c.appid = e.appid
       JOIN reception_publication_months m
-        ON m.history_key = e.history_key AND m.appid = e.appid AND m.type = e.type
+        ON m.history_key = c.history_key AND m.appid = e.appid AND m.type = e.type
       CROSS JOIN active b
       WHERE EXISTS (SELECT 1 FROM eligible WHERE appid = ?)
         AND m.cutoff >= strftime('%Y-%m-01T00:00:00.000Z', b.evaluated_at, 'start of month', '-11 months')
@@ -432,10 +443,10 @@ export async function getReceptionComparison(
       SELECT
         EXISTS (SELECT 1 FROM apps WHERE appid = ?) AS target_exists,
         EXISTS (SELECT 1 FROM eligible WHERE appid = ?) AS in_current_group,
-        (SELECT COUNT(*) FROM eligible) AS eligible_total,
+        (SELECT eligible_total FROM scope_stats) AS eligible_total,
         (SELECT COUNT(DISTINCT appid) FROM history WHERE provenance = 'reconstructed') AS reconstructed_members,
         (SELECT MAX(timestamp) FROM (
-          SELECT source_timestamp AS timestamp FROM scoped
+          SELECT source_timestamp AS timestamp FROM scope_stats
           UNION ALL SELECT source_observed_at AS timestamp FROM history
         )) AS source_timestamp`)
       .bind(...query.values, options.appid, options.appid, options.appid),
@@ -447,10 +458,13 @@ export async function getReceptionComparison(
           SUM(CASE WHEN provenance = 'reconstructed' THEN 1 ELSE 0 END) OVER (PARTITION BY cutoff) AS reconstructed_count
         FROM history
       )
-      SELECT cutoff, metric_kind, value, lifetime_approval, lifetime_reviews,
-        observed_at, source_observed_at, formula_version, recalculation_json,
-        score_window_end, provenance, comparison_rank, compared_count, reconstructed_count
-      FROM standings WHERE appid = ? ORDER BY cutoff ASC`)
+      SELECT m.cutoff, m.metric_kind, m.value, m.lifetime_approval, m.lifetime_reviews,
+        m.observed_at, m.source_observed_at, m.formula_version, m.recalculation_json,
+        m.score_window_end, m.provenance, s.comparison_rank, s.compared_count, s.reconstructed_count
+      FROM standings s
+      JOIN reception_publication_months m
+        ON m.history_key = s.history_key AND m.appid = s.appid AND m.type = s.type AND m.cutoff = s.cutoff
+      WHERE s.appid = ? ORDER BY s.cutoff ASC`)
       .bind(...query.values, options.appid, options.appid),
   ]);
   const evaluatedAt = publishedAt(metadata!);

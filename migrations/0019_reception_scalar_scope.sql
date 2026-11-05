@@ -1,0 +1,2 @@
+CREATE INDEX `idx_apps_reception_scope` ON `apps` (`is_eligible`,`is_playable`,`parent_appid`,`release_status`,`appid`,`is_early_access`);--> statement-breakpoint
+CREATE INDEX `idx_reception_publication_current_scope` ON `reception_publication_current` (`build_id`,`type`,`appid`,`metric_value`,`qualifying_reviews`,`source_timestamp`);

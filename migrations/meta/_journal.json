@@ -134,6 +134,13 @@
       "when": 1793886921967,
       "tag": "0018_reception_publication",
       "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "6",
+      "when": 1793898212115,
+      "tag": "0019_reception_scalar_scope",
+      "breakpoints": true
     }
   ]
 }

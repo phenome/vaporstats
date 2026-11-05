@@ -170,6 +170,39 @@ describe("Bun SQLite persistence", () => {
     expect(billingConfirmationColumn?.notnull).toBe(0);
     expect(migrations.results).toHaveLength(migrationNames.length);
   });
+  test("keeps reception scope predicates and numeric aggregates covered without payload columns", async () => {
+    const db = await getDb();
+    const indexColumns = async (table: string): Promise<string[][]> => {
+      const rows = await db.prepare(`
+        SELECT indexes.name AS index_name, columns.name AS column_name
+        FROM pragma_index_list(?) AS indexes
+        JOIN pragma_index_info(indexes.name) AS columns
+        ORDER BY indexes.name, columns.seqno
+      `).bind(table).all<{ index_name: string; column_name: string }>();
+      const indexes = new Map<string, string[]>();
+      for (const row of rows.results) {
+        const columns = indexes.get(row.index_name) ?? [];
+        columns.push(row.column_name);
+        indexes.set(row.index_name, columns);
+      }
+      return [...indexes.values()];
+    };
+    const appIndexes = await indexColumns("apps");
+    expect(appIndexes.some((columns) =>
+      ["is_eligible", "is_playable", "parent_appid", "release_status", "appid", "is_early_access"]
+        .every((column) => columns.includes(column))
+      && !columns.some((column) => ["description", "header_lqip", "icon_lqip"].includes(column)),
+    )).toBe(true);
+    const currentIndexes = await indexColumns("reception_publication_current");
+    expect(currentIndexes.some((columns) =>
+      columns.slice(0, 3).join(",") === "build_id,type,appid"
+      && ["metric_value", "qualifying_reviews", "source_timestamp"].every((column) => columns.includes(column))
+      && !columns.some((column) => ["metric_json", "population_json", "history_key"].includes(column)),
+    )).toBe(true);
+    expect(currentIndexes.some((columns) =>
+      columns.slice(0, 5).join(",") === "build_id,type,metric_value,qualifying_reviews,appid",
+    )).toBe(true);
+  });
   test("enforces game embedding identity, vector, and foreign-key constraints", async () => {
     const db = await getDb();
     await db

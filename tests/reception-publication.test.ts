@@ -72,6 +72,32 @@ function fixture() {
   return { native, db, app, rows, sources };
 }
 
+// Assert useful prefix cardinalities, not index names or merely the presence of stats.
+// These are the two covering shapes used by the scalar reception cohort reader.
+function expectScalarStatistics(native: Database, apps: number) {
+  const shapes = [
+    { table: "apps", columns: ["is_eligible", "is_playable", "parent_appid", "release_status", "appid", "is_early_access"],
+      prefix: [apps, apps, apps, apps, apps, 1] },
+    { table: "reception_publication_current",
+      columns: ["build_id", "type", "appid", "metric_value", "qualifying_reviews", "source_timestamp"],
+      prefix: [apps * 2, apps * 2, apps, 1] },
+  ];
+  for (const shape of shapes) {
+    const indices = native.query<{ name: string }, [string]>("SELECT name FROM pragma_index_list(?)").all(shape.table);
+    const index = indices.find(({ name }) => {
+      const columns = native.query<{ name: string }, [string]>(
+        "SELECT name FROM pragma_index_info(?) ORDER BY seqno",
+      ).all(name).map((column) => column.name);
+      return JSON.stringify(columns) === JSON.stringify(shape.columns);
+    });
+    expect(index).toBeDefined();
+    const statistics = native.query<{ stat: string }, [string]>(
+      "SELECT stat FROM sqlite_stat1 WHERE idx = ?",
+    ).get(index!.name);
+    expect(statistics?.stat.split(" ").slice(0, shape.prefix.length).map(Number)).toEqual(shape.prefix);
+  }
+}
+
 describe("durable reception publication", () => {
   test("publishes an empty initial source-only generation, and metadata reads never build", async () => {
     const f = fixture();
@@ -139,6 +165,49 @@ describe("durable reception publication", () => {
       expect(f.sources()).toBe(before);
     } finally { f.native.close(); }
   });
+
+  for (const alreadyReady of [false, true]) {
+    test(`${alreadyReady ? "already-current startup" : "initial publication"} prepares scalar planner statistics without changing evidence`, async () => {
+      const f = fixture();
+      try {
+        for (let id = 1; id <= 64; id++) f.app(id);
+        f.native.query(`INSERT INTO player_score_history
+          (appid, observed_at, score, formula_version, current_positive_count, current_total_count,
+           historical_positive_count, historical_total_count, current_window_start, current_window_end,
+           historical_window_start, historical_window_end, current_evidence_intervals, historical_evidence_intervals,
+           current_source_id, current_evidence_observed_at, provenance)
+          VALUES (1, '2026-08-31T00:00:00.000Z', 77, 'test', 10, 10, 0, 100,
+           '2026-08-15T00:00:00.000Z', '2026-08-21T00:00:00.000Z',
+           '2026-05-17T00:00:00.000Z', '2026-08-15T00:00:00.000Z', '[]', '[]',
+           'histogram', '2026-08-31T00:00:00.000Z', '{}')`).run();
+        if (alreadyReady) {
+          // Model a pre-existing complete publication without planner-statistics upkeep.
+          while ((await runReceptionPublicationBatch(f.db, { evaluatedAt: AT })).status === "building") {}
+        }
+        const sources = f.sources();
+        const rows = f.rows();
+        const build = await getPublishedReceptionBuild(f.db);
+        const state = f.native.query("SELECT * FROM reception_publication_state").get();
+        const months = f.native.query("SELECT * FROM reception_publication_months ORDER BY history_key, appid, type, cutoff").all();
+        const result = await ensureReceptionPublicationReady(f.db, { evaluatedAt: AT });
+        expect(result).toMatchObject({ status: alreadyReady ? "unchanged" : "published", evaluatedAt: AT });
+        expectScalarStatistics(f.native, 64);
+        expect(f.sources()).toBe(sources);
+        if (alreadyReady) {
+          expect(result).toMatchObject({ buildId: build!.id, inspected: 0, evaluated: 0, reused: 0 });
+          expect(await getPublishedReceptionBuild(f.db)).toEqual(build);
+          expect(f.native.query("SELECT * FROM reception_publication_state").get()).toEqual(state);
+          expect(f.rows()).toEqual(rows);
+          expect(f.native.query("SELECT * FROM reception_publication_months ORDER BY history_key, appid, type, cutoff").all()).toEqual(months);
+        } else {
+          expect(f.rows()).toHaveLength(128);
+          expect(f.rows().find((row) => row.appid === 2 && row.type === "top_rated_all_time"))
+            .toMatchObject({ qualifying_reviews: 300, source_timestamp: "2026-08-01T00:00:00.000Z" });
+          expect((await getPublishedReceptionBuild(f.db))?.evaluated_at).toBe(AT);
+        }
+      } finally { f.native.close(); }
+    });
+  }
 
   test("reuses unexpired current values, and reuses immutable history through clock refresh and cleanup", async () => {
     const f = fixture();

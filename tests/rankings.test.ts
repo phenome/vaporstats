@@ -616,6 +616,76 @@ describe("reception ranking query domain", () => {
     }
   });
 
+  test.each(["top_rated_now", "top_rated_all_time"] as const)("preserves empty and ineligible scope freshness for %s", async (type) => {
+    const { db, native } = freshDb();
+    try {
+      addApp(native, 1);
+      addGenre(native, 1, 7);
+      addBuckets(native, 1, 1);
+      addSummary(native, 1, 1, 1);
+      await publishReceptionProjection(db, { evaluatedAt: EVALUATED_AT });
+      for (const filters of [undefined, { genres: [7] }]) {
+        const list = await getReceptionRankings(db, { type, filters });
+        expect(list.data).toMatchObject({ eligible_total: 0, total: 0, has_more: false, items: [] });
+        expect(list.sourceTimestamp).toBe("2026-09-07T00:00:00.000Z");
+        const comparison = await getReceptionComparison(db, { type, filters, appid: 1 });
+        expect(comparison.data).toMatchObject({
+          eligible_total: 0, in_current_group: false, points: [], reconstructed_members: 0,
+        });
+        expect(comparison.sourceTimestamp).toBe(list.sourceTimestamp);
+      }
+      const filters = { genres: [999] };
+      const empty = await getReceptionRankings(db, { type, filters });
+      expect(empty.data).toMatchObject({ eligible_total: 0, total: 0, has_more: false, items: [] });
+      expect(empty.sourceTimestamp).toBeNull();
+      const excluded = await getReceptionComparison(db, { type, filters, appid: 1 });
+      expect(excluded.data).toMatchObject({ eligible_total: 0, in_current_group: false, points: [], reconstructed_members: 0 });
+      expect(excluded.sourceTimestamp).toBeNull();
+      expect(await getReceptionComparison(db, { type, appid: 999 })).toEqual({ data: null, sourceTimestamp: null });
+    } finally {
+      native.close(true);
+    }
+  });
+
+  test("does not hydrate unselected publication payloads while counting and comparing the full cohort", async () => {
+    const { db, native } = freshDb();
+    try {
+      for (const appid of [1, 2, 3, 4]) {
+        addApp(native, appid);
+        addScore(native, appid, 90 - appid, "2026-08-15T00:00:00.000Z");
+        addBuckets(native, appid, 250);
+      }
+      await publishReceptionProjection(db, { evaluatedAt: EVALUATED_AT });
+      const expectedList = await getReceptionRankings(db, { limit: 1, offset: 1 });
+      const expectedComparison = await getReceptionComparison(db, { appid: 4 });
+      native.exec(`
+        CREATE TEMP TABLE allowed_card_payloads (appid INTEGER PRIMARY KEY);
+        INSERT INTO allowed_card_payloads VALUES (2);
+        CREATE TEMP TABLE allowed_comparison_payloads (appid INTEGER PRIMARY KEY);
+        INSERT INTO allowed_comparison_payloads VALUES (4);
+      `);
+      // Views leave the real scalar data intact and make payload evaluation
+      // observable inside SQLite, including intermediate materialized rows.
+      for (const [table, payloads] of [
+        ["apps", ["description"]],
+        ["reception_publication_current", ["metric_json", "population_json"]],
+        ["reception_publication_months", ["recalculation_json"]],
+      ] as const) {
+        const allowed = table === "reception_publication_months" ? "allowed_comparison_payloads" : "allowed_card_payloads";
+        const columns = native.query<{ name: string }, []>(`PRAGMA main.table_info(${table})`).all();
+        const selection = columns.map(({ name }) => (payloads as readonly string[]).includes(name)
+          ? `CASE WHEN appid IN (SELECT appid FROM ${allowed}) THEN "${name}" ELSE json_extract('unselected payload ' || appid, '$') END AS "${name}"`
+          : `"${name}"`).join(", ");
+        native.exec(`CREATE TEMP VIEW ${table} AS SELECT ${selection} FROM main.${table}`);
+      }
+      expect(await getReceptionRankings(db, { limit: 1, offset: 1 })).toEqual(expectedList);
+      native.exec("DELETE FROM allowed_card_payloads");
+      expect(await getReceptionComparison(db, { appid: 4 })).toEqual(expectedComparison);
+    } finally {
+      native.close(true);
+    }
+  });
+
   test.each(["list", "comparison"] as const)("keeps the %s response in one SQLite snapshot during publication swap and cleanup", async (view) => {
     const directory = mkdtempSync(join(tmpdir(), "reception-read-snapshot-"));
     const path = join(directory, "catalog.sqlite");
