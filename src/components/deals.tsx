@@ -126,7 +126,7 @@ export function DealsList({
                 <th scope="col" className="px-4 py-3">Type</th>
                 <th scope="col" className="px-4 py-3 text-right">Discount</th>
                 <th scope="col" className="px-4 py-3 text-right">Initial</th>
-                <th scope="col" className="px-4 py-3 text-right">Current Deal</th>
+                <th scope="col" className="px-4 py-3 text-right whitespace-nowrap">Current Deal</th>
                 <th scope="col" className="px-4 py-3 text-right hidden sm:table-cell">Observed</th>
               </tr>
             </thead>

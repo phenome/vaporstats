@@ -118,11 +118,11 @@ function GamesIndexComponent({ games: propGames }: { games?: CatalogEntity[] }) 
           <table className="w-full text-left text-xs font-mono">
             <thead>
               <tr className="border-b border-zinc-800 bg-zinc-900/60 text-zinc-400">
-                <th className="py-3 px-4 uppercase text-[10px] tracking-wider w-24">AppID</th>
-                <th className="py-3 px-4 uppercase text-[10px] tracking-wider">Game Title</th>
-                <th className="py-3 px-4 uppercase text-[10px] tracking-wider hidden sm:table-cell">Developer</th>
-                <th className="py-3 px-4 uppercase text-[10px] tracking-wider hidden md:table-cell">Released</th>
-                <th className="py-3 px-4 uppercase text-[10px] tracking-wider text-right">Actions</th>
+                <th className="py-3 px-4 uppercase text-[10px] tracking-wider w-24 whitespace-nowrap">AppID</th>
+                <th className="py-3 px-4 uppercase text-[10px] tracking-wider whitespace-nowrap">Game Title</th>
+                <th className="py-3 px-4 uppercase text-[10px] tracking-wider whitespace-nowrap hidden sm:table-cell">Developer</th>
+                <th className="py-3 px-4 uppercase text-[10px] tracking-wider w-px whitespace-nowrap hidden md:table-cell">Released</th>
+                <th className="py-3 px-4 uppercase text-[10px] tracking-wider w-px whitespace-nowrap text-right">Actions</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-zinc-900">
@@ -153,10 +153,10 @@ function GamesIndexComponent({ games: propGames }: { games?: CatalogEntity[] }) 
                         "—"
                       )}
                     </td>
-                    <td className="py-3 px-4 text-zinc-500 hidden md:table-cell">
+                    <td className="py-3 px-4 text-zinc-500 whitespace-nowrap hidden md:table-cell">
                       {game.release_date || "—"}
                     </td>
-                    <td className="py-3 px-4 text-right">
+                    <td className="py-3 px-4 text-right whitespace-nowrap">
                       <AppLink
                         href={canonicalUrl}
                         className="px-2.5 py-1 text-[11px] bg-zinc-900 hover:bg-orange-500 hover:text-white border border-zinc-800 text-zinc-300 transition-colors"

@@ -22,6 +22,12 @@ Desktop Chrome controls discovery and activation. Visiting the homepage and sear
 
 To verify changes, build and exercise the production request handler, not only Vite's public-file serving: check the descriptor's XML/MIME type, the discovery link in initial homepage and direct search-page HTML, and direct-load, reload, native GET-form, and client-side searches. Browser page inspection proves the search destination works, but does not prove native address-bar activation.
 
+## Responsive tables
+
+Keep compact table metadata atomic: role and lifecycle badges, release dates, actions, and short column headings should stay on one line. Reserve intrinsic width for compact columns while allowing game and publisher names to use the remaining space and wrap naturally. Apply these rules at application table call sites, not to generated UI primitives or all table text.
+
+Check real long-title rows at desktop, tablet, and narrow mobile widths. When the columns cannot fit, keep horizontal scrolling inside the table container rather than widening the page. Include expanded release history when checking lifecycle badges.
+
 ## License
 
 VaporStats is open source under the [GNU Affero General Public License v3.0](LICENSE). Modified versions used to provide a network service must offer their corresponding source as required by the license.

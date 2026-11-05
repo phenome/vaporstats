@@ -79,7 +79,7 @@ function LifecycleHistoryContent({ history }: { history: LifecycleHistory }) {
         Confirmed events are shown separately from retained release-plan observations. Plans describe what was expected at the time, not completed milestones.
       </p>
 
-      <section aria-labelledby="confirmed-lifecycle-events">
+      <section className="overflow-x-auto" aria-labelledby="confirmed-lifecycle-events">
         <h3 id="confirmed-lifecycle-events" className="mb-2 text-[10px] uppercase tracking-wider text-zinc-500">
           Confirmed events
         </h3>
@@ -89,16 +89,16 @@ function LifecycleHistoryContent({ history }: { history: LifecycleHistory }) {
               {history.events.map((event, index) => (
                 <tr key={`${event.event_type}-${event.event_date ?? "undated"}-${event.source}-${index}`} className="align-middle">
                   <td className="py-1 text-left align-middle">
-                    <span className="inline-block border border-zinc-700 bg-zinc-900 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider text-zinc-300">
+                    <span className="inline-block whitespace-nowrap border border-zinc-700 bg-zinc-900 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider text-zinc-300">
                       {formatEventLabel(event.event_type)}
                     </span>
                   </td>
                   <td className="py-1 text-right align-middle text-zinc-400">
                     {event.event_date ? (
                       isPreciseLifecycleDate(event.event_date) ? (
-                        <time dateTime={event.event_date}>{formatLifecycleDate(event.event_date)}</time>
+                        <time className="whitespace-nowrap" dateTime={event.event_date}>{formatLifecycleDate(event.event_date)}</time>
                       ) : (
-                        <span>{formatLifecycleDate(event.event_date)}</span>
+                        <span className="whitespace-nowrap">{formatLifecycleDate(event.event_date)}</span>
                       )
                     ) : (
                       <span>
@@ -118,7 +118,7 @@ function LifecycleHistoryContent({ history }: { history: LifecycleHistory }) {
         )}
       </section>
 
-      <section aria-labelledby="release-plan-observations">
+      <section className="overflow-x-auto" aria-labelledby="release-plan-observations">
         <h3 id="release-plan-observations" className="mb-2 text-[10px] uppercase tracking-wider text-zinc-500">
           Release-plan observations
         </h3>
@@ -128,15 +128,15 @@ function LifecycleHistoryContent({ history }: { history: LifecycleHistory }) {
               {history.plans.map((plan, index) => (
                 <tr key={`${plan.expected_date}-${plan.observed_at}-${index}`} className="align-middle">
                   <td className="py-1 text-left align-middle">
-                    <span className="inline-block border border-zinc-700 bg-zinc-900 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider text-zinc-300">
+                    <span className="inline-block whitespace-nowrap border border-zinc-700 bg-zinc-900 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider text-zinc-300">
                       Expected release
                     </span>
                   </td>
                   <td className="py-1 text-right align-middle text-zinc-400">
                     {isPreciseLifecycleDate(plan.expected_date) ? (
-                      <time dateTime={plan.expected_date}>{formatLifecycleDate(plan.expected_date)}</time>
+                      <time className="whitespace-nowrap" dateTime={plan.expected_date}>{formatLifecycleDate(plan.expected_date)}</time>
                     ) : (
-                      <span>{formatLifecycleDate(plan.expected_date)}</span>
+                      <span className="whitespace-nowrap">{formatLifecycleDate(plan.expected_date)}</span>
                     )}
                     <span className="ml-2 text-zinc-600">
                       Observed {observationDateTimeValue(plan.observed_at) ? (

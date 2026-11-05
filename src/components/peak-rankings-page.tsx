@@ -97,8 +97,8 @@ export function PeakRankingsPageView({
               <tr>
                 <th scope="col" className="px-4 py-3 w-16 text-center">#</th>
                 <th scope="col" className="px-4 py-3">Game</th>
-                <th scope="col" className="px-4 py-3 text-right">Highest Observed Peak</th>
-                <th scope="col" className="px-4 py-3 text-right">Window</th>
+                <th scope="col" className="px-4 py-3 text-right w-px whitespace-nowrap">Highest Observed Peak</th>
+                <th scope="col" className="px-4 py-3 text-right w-px whitespace-nowrap">Window</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-zinc-900 text-zinc-300">
@@ -123,7 +123,7 @@ export function PeakRankingsPageView({
                     <td className="px-4 py-3 text-right font-bold text-orange-400 tabular-nums">
                       {formatNumber(game.peak_players)}
                     </td>
-                    <td className="px-4 py-3 text-right text-zinc-500 uppercase text-[10px]">
+                    <td className="px-4 py-3 text-right text-zinc-500 uppercase text-[10px] whitespace-nowrap">
                       {periodOptions.find((p) => p.id === game.period)?.label ?? game.period}
                     </td>
                   </tr>
