@@ -9,6 +9,7 @@ import {
 import { openTestDatabase, type TestDatabase } from "./support/db";
 import {
   BALDURS_GATE,
+  insertCompletedRun,
   ControlledGeminiTransport,
   CYBERPUNK,
   discoveryFetch,
@@ -250,6 +251,21 @@ describe("processing limits across passes", () => {
     expect(fetched.filter((url) => url.includes("ign.com"))).toHaveLength(1);
     expect(fetched.filter((url) => url.includes("eurogamer.net"))).toHaveLength(1);
     expect(summary.stopReasons).toContain("IGN:fetch_http_403");
+  });
+
+  test("a later run's processing draws on the lifetime allowance the initial pass already charged", async () => {
+    const database = fixture();
+    const initialRunId = insertCompletedRun(database.native, "initial:charged", [CYBERPUNK]);
+    database.native.prepare("INSERT INTO media_processing_jobs (run_id, stage, appid, request_key, input_identity, model, config_version, max_input_tokens, max_output_tokens, reserved_microusd, charged_microusd, reservation_active, status) VALUES (?, 'extraction', ?, 'initial-charged', 'initial-input', 'model', 'config', 1, 1, 4999999, 4999999, 0, 'succeeded')").run(initialRunId, CYBERPUNK);
+    insertSources(database.native, CYBERPUNK, "later", 1, EUROGAMER);
+    const { fetched, advance } = await processingRun(database);
+
+    const summary = await advance(DAY_ONE);
+
+    expect(fetched).toHaveLength(1);
+    expect(summary.submitted).toBe(0);
+    expect(summary.chargedMicrousd).toBe(4999999);
+    expect(summary.stopReasons).toContain("lifetime_budget");
   });
 
   test("a same-day rate limit from discovery stops processing fetches on that outlet", async () => {
