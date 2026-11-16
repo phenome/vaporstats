@@ -6,6 +6,7 @@ import {
   GEMINI_BATCH_CAPABILITY_VERSION,
   GEMINI_BATCH_PRICING_VERSION,
 } from "../src/lib/media-processing";
+import { reserveOutletAttempt } from "../src/lib/media-outlet-access";
 import { openTestDatabase, type TestDatabase } from "./support/db";
 import {
   BALDURS_GATE,
@@ -115,6 +116,16 @@ describe("per-outlet UTC-day attempt cap across passes", () => {
     await runAuthorizedMediaDiscovery(database.db, { runId, tavilyApiKey: "test-key", fetch: fetchFn, now: DAY_TWO });
     expect(outletCalls(calls, "ign.com")).toEqual({ searches: 1, fetches: 1 });
     expect(count(database, "SELECT COUNT(*) AS count FROM media_sources WHERE pass = 'later' AND outlet = 'IGN'")).toBe(1);
+  });
+});
+
+describe("outlet attempt reservation", () => {
+  test("a reservation under a run that does not exist records nothing and fails instead of returning another attempt", async () => {
+    const database = fixture();
+    seedAttempts(database, "IGN", "initial", "2026-09-10", 1);
+
+    await expect(reserveOutletAttempt(database.db, { runId: 999, appid: CYBERPUNK, outlet: "IGN", kind: "fetch", url: "https://ign.com/a", date: DAY_ONE })).rejects.toThrow();
+    expect(count(database, "SELECT COUNT(*) AS count FROM media_discovery_attempts")).toBe(1);
   });
 });
 

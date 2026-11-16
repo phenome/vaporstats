@@ -84,12 +84,13 @@ export async function reserveOutletAttempt(
   return writeTransaction(db, async () => {
     const stop = await mediaOutletStop(db, attempt.outlet, attempt.date);
     if (stop) return { stop };
-    await db.prepare(
-      "INSERT INTO media_discovery_attempts (appid, outlet, pass, day, kind, url, succeeded, attempted_at) SELECT ?, ?, pass, ?, ?, ?, 0, ? FROM media_discovery_runs WHERE id = ?",
-    ).bind(attempt.appid, attempt.outlet, dayKey(attempt.date), attempt.kind, attempt.url, attempt.date.toISOString(), attempt.runId).run();
+    const reserved = await first<{ id: number }>(
+      db,
+      "INSERT INTO media_discovery_attempts (appid, outlet, pass, day, kind, url, succeeded, attempted_at) SELECT ?, ?, pass, ?, ?, ?, 0, ? FROM media_discovery_runs WHERE id = ? RETURNING id",
+      attempt.appid, attempt.outlet, dayKey(attempt.date), attempt.kind, attempt.url, attempt.date.toISOString(), attempt.runId,
+    );
+    if (!reserved) throw new Error(`Unable to reserve a media outlet attempt: run ${attempt.runId} not found`);
     await db.prepare("UPDATE media_discovery_runs SET attempt_count = attempt_count + 1 WHERE id = ?").bind(attempt.runId).run();
-    const reserved = await first<{ id: number }>(db, "SELECT id FROM media_discovery_attempts ORDER BY id DESC LIMIT 1");
-    if (!reserved) throw new Error("Unable to reserve a media outlet attempt");
     return { attemptId: reserved.id };
   });
 }
