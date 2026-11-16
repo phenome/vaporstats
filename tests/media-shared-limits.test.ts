@@ -299,6 +299,76 @@ describe("outlet stops across passes", () => {
   });
 });
 
+// A provider stop is any search-provider failure. It never denies or
+// day-stops an outlet, uses none of the outlet's daily attempts, keeps the
+// query for a later authorized run, and stops the run with a `tavily_*` reason.
+describe("provider stops for every search outcome", () => {
+  type ProviderStopCase = {
+    outcome: string;
+    outlet: MediaOutlet;
+    reason: string;
+    apiKey?: string;
+    search?: () => Promise<Response>;
+    usage?: () => Response;
+    /** The outlet's progress row after the stop; null when no query was ever recorded. */
+    kept: { status: string; stop_reason: string } | null;
+  };
+  const freeUsage = (planUsage: number) => (): Response =>
+    Response.json({ account: { current_plan: "free" }, plan_usage: planUsage, plan_limit: 100, paygo_usage: 0, paygo_limit: 0 });
+  const refusedWith = (status: number) => async (): Promise<Response> => new Response("", { status });
+
+  const cases: ProviderStopCase[] = [
+    { outcome: "HTTP 401", outlet: "IGN", reason: "tavily_search_http_401", search: refusedWith(401), kept: { status: "queued", stop_reason: "tavily_search_http_401" } },
+    { outcome: "HTTP 403", outlet: "IGN", reason: "tavily_search_http_403", search: refusedWith(403), kept: { status: "queued", stop_reason: "tavily_search_http_403" } },
+    { outcome: "HTTP 429", outlet: "IGN", reason: "tavily_search_http_429", search: refusedWith(429), kept: { status: "stopped", stop_reason: "tavily_search_http_429" } },
+    { outcome: "HTTP 500", outlet: "IGN", reason: "tavily_search_http_500", search: refusedWith(500), kept: { status: "queued", stop_reason: "tavily_search_http_500" } },
+    { outcome: "HTTP 503", outlet: "IGN", reason: "tavily_search_http_503", search: refusedWith(503), kept: { status: "queued", stop_reason: "tavily_search_http_503" } },
+    { outcome: "a thrown network error", outlet: "IGN", reason: "tavily_search_error", search: async () => { throw new TypeError("fetch failed"); }, kept: { status: "queued", stop_reason: "tavily_search_error" } },
+    { outcome: "credits exhausted before the run", outlet: "IGN", reason: "tavily_credits_exhausted", usage: freeUsage(100), kept: null },
+    { outcome: "credits exhausted during the run", outlet: "Eurogamer", reason: "tavily_credits_exhausted", usage: freeUsage(99), kept: { status: "queued", stop_reason: "tavily_credits_exhausted" } },
+    { outcome: "a missing key", outlet: "IGN", reason: "tavily_missing_key", apiKey: "", kept: null },
+  ];
+
+  test.each(cases.map((item) => [item.outcome, item] as const))("%s", async (_outcome, item) => {
+    const database = fixture();
+    const outlet = MEDIA_OUTLETS.find((candidate) => candidate.name === item.outlet)!;
+    seedAttempts(database, item.outlet, "initial", "2026-09-10", 28);
+    const base = discoveryFetch();
+    const failingFetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const url = String(input);
+      if (item.usage && url.endsWith("/usage")) return item.usage();
+      if (item.search && url.endsWith("/search")) return base.calls.push({ url, init }), item.search();
+      return base.fetchFn(input, init);
+    };
+    const first = await authorizeMediaRun(database.db, { pass: "initial", games: [CYBERPUNK] });
+    const stopped = await runAuthorizedMediaDiscovery(database.db, { runId: first.runId, tavilyApiKey: item.apiKey ?? "test-key", fetch: failingFetch, now: DAY_ONE });
+
+    // The run stops with the provider's reason, and only provider reasons.
+    expect(stopped.status).toBe("stopped");
+    expect(stopped.stopReasons).toContain(item.reason);
+    for (const reason of stopped.stopReasons) expect(reason).toMatch(/^tavily_/);
+
+    // The query is kept for a later authorized run: never marked searched.
+    expect(progress(database, "initial", item.outlet)).toEqual(item.kept);
+    expect(count(database, "SELECT COUNT(*) AS count FROM media_discovery_progress WHERE outlet = ? AND query_attempted_at IS NOT NULL", item.outlet)).toBe(0);
+
+    // The outlet is neither denied nor day-stopped, and its UTC-day count is
+    // unchanged: exactly the two attempts left before the stop remain.
+    const probe = () => reserveOutletAttempt(database.db, { runId: first.runId, appid: CYBERPUNK, outlet: item.outlet, kind: "fetch", url: null, date: DAY_ONE_LATE });
+    expect("attemptId" in (await probe())).toBe(true);
+    expect("attemptId" in (await probe())).toBe(true);
+    expect(await probe()).toEqual({ stop: "daily_attempt_cap" });
+
+    // The next authorized run issues the kept query exactly once.
+    const retry = await authorizeMediaRun(database.db, { pass: "initial", games: [CYBERPUNK] });
+    const { calls, fetchFn } = discoveryFetch();
+    const rerun = await runAuthorizedMediaDiscovery(database.db, { runId: retry.runId, tavilyApiKey: "test-key", fetch: fetchFn, now: DAY_TWO });
+    expect(rerun.status).toBe("completed");
+    expect(outletCalls(calls, outlet.domain)).toEqual({ searches: 1, fetches: 1 });
+    expect(progress(database, "initial", item.outlet)).toEqual({ status: "completed", stop_reason: null });
+  });
+});
+
 describe("discovery query bound per pass", () => {
   test("each pass queries every eligible entity once per outlet, and reruns and restarts add none", async () => {
     const database = fixture();
