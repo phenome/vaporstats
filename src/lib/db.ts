@@ -1,6 +1,7 @@
 import { mkdirSync, realpathSync, renameSync, statSync, unlinkSync } from "node:fs";
 import { open } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { basename, dirname, join, resolve } from "node:path";
 import { Database, type SQLQueryBindings, type Statement } from "bun:sqlite";
 import { applyMigrations } from "./migrations";
@@ -24,6 +25,8 @@ export interface AppDatabase {
     statements: AppPreparedStatement[]
   ): Promise<{ success: boolean; results?: T[] }[]>;
   exec(query: string): Promise<{ count: number; duration: number }>;
+  /** Serialized write transaction; see `writeTransaction` in ./db-transaction. */
+  writeTransaction?<T>(work: () => Promise<T>): Promise<T>;
 }
 
 type Binding = SQLQueryBindings;
@@ -45,7 +48,7 @@ class SqlitePreparedStatement implements AppPreparedStatement {
   }
 
   async first<T = unknown>(colName?: string): Promise<T | null> {
-    const row = this.#statement.get(...this.#values);
+    const row = await this.#database.whenFree(() => this.#statement.get(...this.#values));
     if (row == null) return null;
     return (colName ? row[colName] : row) as T;
   }
@@ -54,7 +57,7 @@ class SqlitePreparedStatement implements AppPreparedStatement {
     success: boolean;
     meta: RunMeta;
   }> {
-    return this.runSync<T>();
+    return this.#database.whenFree(() => this.runSync<T>());
   }
 
   async all<T = unknown>(): Promise<{
@@ -62,17 +65,19 @@ class SqlitePreparedStatement implements AppPreparedStatement {
     results: T[];
     meta: RunMeta;
   }> {
-    const started = performance.now();
-    const results = this.#statement.all(...this.#values) as T[];
-    return {
-      success: true,
-      results,
-      meta: { changes: 0, duration: performance.now() - started },
-    };
+    return this.#database.whenFree(() => {
+      const started = performance.now();
+      const results = this.#statement.all(...this.#values) as T[];
+      return {
+        success: true,
+        results,
+        meta: { changes: 0, duration: performance.now() - started },
+      };
+    });
   }
 
   async raw<T = unknown>(): Promise<T[]> {
-    return this.#statement.raw(...this.#values) as T[];
+    return this.#database.whenFree(() => this.#statement.raw(...this.#values) as T[]);
   }
 
   runSync<T = unknown>(): { success: boolean; meta: RunMeta } {
@@ -100,10 +105,64 @@ class SqlitePreparedStatement implements AppPreparedStatement {
 class SqliteAppDatabase implements AppDatabase {
   readonly native: Database;
   readonly path: string;
+  /** Identifies the async call chain that owns the open write transaction. */
+  readonly #owner = new AsyncLocalStorage<symbol>();
+  #active: symbol | undefined;
+  #idle: Promise<void> = Promise.resolve();
+  #queue: Promise<void> = Promise.resolve();
 
   constructor(native: Database, path: string) {
     this.native = native;
     this.path = path;
+  }
+
+  /**
+   * Runs a synchronous database operation now, or once no other call chain's
+   * write transaction is open. The final check and the operation run in one
+   * synchronous step, so the operation never fails on a nested BEGIN or
+   * joins, and possibly rolls back with, another chain's transaction.
+   */
+  whenFree<T>(operation: () => T): T | Promise<T> {
+    const open = this.#active && this.#owner.getStore() !== this.#active ? this.#idle : undefined;
+    return open ? open.then(() => this.whenFree(operation)) : operation();
+  }
+
+  /**
+   * The single serialized write path for work that awaits between
+   * statements: transactions run one at a time, in call order, as
+   * BEGIN IMMEDIATE ... COMMIT, and roll back if the work throws.
+   */
+  async writeTransaction<T>(work: () => Promise<T>): Promise<T> {
+    if (this.#active && this.#owner.getStore() === this.#active) {
+      throw new Error("Nested write transactions are not supported");
+    }
+    const previous = this.#queue;
+    let release!: () => void;
+    this.#queue = new Promise((resolve) => { release = resolve; });
+    const token = Symbol("write-transaction");
+    let markIdle: (() => void) | undefined;
+    try {
+      await previous;
+      await this.whenFree(() => {
+        this.native.exec("BEGIN IMMEDIATE");
+        this.#idle = new Promise((resolve) => { markIdle = resolve; });
+        this.#active = token;
+      });
+      return await this.#owner.run(token, async () => {
+        try {
+          const result = await work();
+          this.native.exec("COMMIT");
+          return result;
+        } catch (error) {
+          if (this.native.inTransaction) this.native.exec("ROLLBACK");
+          throw error;
+        }
+      });
+    } finally {
+      if (this.#active === token) this.#active = undefined;
+      markIdle?.();
+      release();
+    }
   }
 
   prepare(query: string): AppPreparedStatement {
@@ -124,13 +183,15 @@ class SqliteAppDatabase implements AppDatabase {
         return statement.runSync<T>();
       })
     );
-    return execute() as { success: boolean; results?: T[] }[];
+    return this.whenFree(() => execute() as { success: boolean; results?: T[] }[]);
   }
 
   async exec(query: string): Promise<{ count: number; duration: number }> {
-    const started = performance.now();
-    const result = this.native.exec(query);
-    return { count: Number(result?.changes ?? 0), duration: performance.now() - started };
+    return this.whenFree(() => {
+      const started = performance.now();
+      const result = this.native.exec(query);
+      return { count: Number(result?.changes ?? 0), duration: performance.now() - started };
+    });
   }
 
   close(): void {

@@ -1,6 +1,7 @@
 import { Readability } from "@mozilla/readability";
 import { parseHTML } from "linkedom";
 import type { AppDatabase } from "./db";
+import { writeTransaction } from "./db-transaction";
 import { ELIGIBLE_MEDIA_ENTITY_SQL } from "./media-similarity";
 
 const MEDIA_GAME_METADATA = [
@@ -280,15 +281,8 @@ async function rows<T>(db: AppDatabase, query: string, ...values: unknown[]): Pr
   return result.results ?? [];
 }
 
-async function transaction(db: AppDatabase, work: () => Promise<void>): Promise<void> {
-  await db.exec("BEGIN IMMEDIATE");
-  try {
-    await work();
-    await db.exec("COMMIT");
-  } catch (error) {
-    try { await db.exec("ROLLBACK"); } catch { /* preserve the original error */ }
-    throw error;
-  }
+function transaction(db: AppDatabase, work: () => Promise<void>): Promise<void> {
+  return writeTransaction(db, work);
 }
 
 async function prepareProgressForAuthorization(

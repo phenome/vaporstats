@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { Readability } from "@mozilla/readability";
 import { parseHTML } from "linkedom";
 import type { AppDatabase } from "./db";
+import { writeTransaction } from "./db-transaction";
 import {
   createMediaEvidenceSource,
   MEDIA_CATEGORY_NAMES,
@@ -174,15 +175,8 @@ async function rows<T>(db: AppDatabase, query: string, ...values: unknown[]): Pr
   return (await db.prepare(query).bind(...values).all<T>()).results ?? [];
 }
 
-async function transaction(db: AppDatabase, work: () => Promise<void>): Promise<void> {
-  await db.exec("BEGIN IMMEDIATE");
-  try {
-    await work();
-    await db.exec("COMMIT");
-  } catch (error) {
-    try { await db.exec("ROLLBACK"); } catch { /* preserve original error */ }
-    throw error;
-  }
+function transaction(db: AppDatabase, work: () => Promise<void>): Promise<void> {
+  return writeTransaction(db, work);
 }
 
 function providerError(status: number, body: unknown): GeminiHttpError {
