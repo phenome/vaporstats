@@ -744,7 +744,7 @@ export async function runAuthorizedMediaDiscovery(db: AppDatabase, options: Medi
     let searchesIssued = 0;
     let searchCreditsConsumed = 0;
   if (!apiKey) {
-    stopReasons.add("missing_tavily_key");
+    stopReasons.add("tavily_missing_key");
   } else {
     try {
       const usageResponse = await fetchFn("https://api.tavily.com/usage", { headers: { Authorization: `Bearer ${apiKey}` } });
@@ -908,9 +908,7 @@ export async function runAuthorizedMediaDiscovery(db: AppDatabase, options: Medi
     }
   }
   const counts = await mediaRunCounts(db, pass, targetAppids);
-  const providerStopped = [...stopReasons].some((reason) =>
-    reason === "missing_tavily_key" || reason === "tavily_usage_error" || reason.startsWith("tavily_"),
-  );
+  const providerStopped = [...stopReasons].some((reason) => reason.startsWith("tavily_"));
   const status: MediaRunSummary["status"] = providerStopped ? "stopped" : "completed";
   usageSummary = {
     ...usageSummary,
