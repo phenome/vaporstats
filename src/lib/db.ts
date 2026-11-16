@@ -281,7 +281,8 @@ export async function createDailySnapshot(
     const temporaryPath = outputPath + "." + randomUUID() + ".tmp";
     let temporaryCreated = false;
     try {
-      const serialized = db.native.serialize();
+      // Wait for any open write transaction so the copy holds committed state only.
+      const serialized = await db.whenFree(() => db.native.serialize());
       const temporaryFile = await open(temporaryPath, "wx");
       temporaryCreated = true;
       try {

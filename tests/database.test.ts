@@ -792,6 +792,33 @@ describe("Bun SQLite persistence", () => {
     snapshot.close(true);
   });
 
+  test("waits for an open write transaction instead of copying its uncommitted rows", async () => {
+    const db = await getDb();
+    let insideTransaction!: () => void;
+    const entered = new Promise<void>((resolve) => { insideTransaction = resolve; });
+    let finishTransaction!: () => void;
+    const finish = new Promise<void>((resolve) => { finishTransaction = resolve; });
+    const rolledBack = db.writeTransaction!(async () => {
+      await db.prepare("INSERT INTO apps (appid, name, slug) VALUES (?, ?, ?)")
+        .bind(22, "Uncommitted", "uncommitted").run();
+      insideTransaction();
+      await finish;
+      throw new Error("abandon transaction");
+    }).catch(() => undefined);
+    await entered;
+
+    const snapshotPath = join(temporaryDirectory, "snapshots", "during-transaction.sqlite");
+    const written = createDailySnapshot(db, snapshotPath, "2026-09-05");
+    finishTransaction();
+    await rolledBack;
+    const snapshot = new Database(await written, { readonly: true });
+    try {
+      expect(snapshot.prepare("SELECT appid FROM apps WHERE appid = ?").get(22)).toBeNull();
+    } finally {
+      snapshot.close(true);
+    }
+  });
+
   test("publishes committed WAL data before pruning managed daily snapshots", async () => {
     const db = await getDb();
     await db.exec("PRAGMA wal_autocheckpoint = 0");
