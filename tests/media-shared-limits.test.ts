@@ -268,6 +268,21 @@ describe("processing limits across passes", () => {
     expect(summary.stopReasons).toContain("lifetime_budget");
   });
 
+  test("an outlet that denied a discovery fetch is not contacted again by later processing, which keeps the original reason", async () => {
+    const database = fixture();
+    insertSources(database.native, CYBERPUNK, "initial", 2, IGN);
+    const denying = discoveryFetch({ variants: { [`https://ign.com/articles/${CYBERPUNK}-ign-com`]: { status: 403, body: " " } } });
+    const initial = await authorizeMediaRun(database.db, { pass: "initial", games: [CYBERPUNK] });
+    await runAuthorizedMediaDiscovery(database.db, { runId: initial.runId, tavilyApiKey: "test-key", fetch: denying.fetchFn, now: DAY_ONE });
+
+    database.reopen();
+    const { fetched, advance } = await processingRun(database);
+    const summary = await advance(new Date("2026-10-10T12:00:00.000Z"));
+
+    expect(fetched.filter((url) => url.includes("ign.com"))).toEqual([]);
+    expect(summary.stopReasons).toContain("IGN:fetch_http_403");
+  });
+
   test("a same-day rate limit from discovery stops processing fetches on that outlet", async () => {
     const database = fixture();
     database.native.prepare("INSERT INTO media_discovery_attempts (appid, outlet, pass, day, kind, status_code, succeeded, attempted_at) VALUES (?, 'IGN', 'initial', '2026-09-10', 'search', 429, 0, '2026-09-10T01:00:00.000Z')").run(CYBERPUNK);

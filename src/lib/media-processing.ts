@@ -15,9 +15,9 @@ import {
   MAX_MEDIA_ARTICLES_TOTAL,
   MEDIA_GAME_CHOICES,
   MEDIA_OUTLETS,
-  mediaOutletDayStop,
   type MediaOutlet,
 } from "./media-discovery";
+import { mediaOutletStop } from "./media-outlet-access";
 import {
   ELIGIBLE_MEDIA_ENTITY_SQL,
   GEMINI_EMBEDDING_CONFIG_VERSION,
@@ -572,8 +572,8 @@ async function fetchArticle(db: AppDatabase, source: SourceRow, runId: number, f
   if (!outlet || outlet.name !== source.outlet) return null;
   for (let redirect = 0; redirect <= MAX_REDIRECTS; redirect += 1) {
     const now = clock();
-    const dayStop = await mediaOutletDayStop(db, source.outlet, now);
-    if (dayStop) return { outletStop: dayStop };
+    const outletStop = await mediaOutletStop(db, source.outlet, now);
+    if (outletStop) return { outletStop };
     let response: Response | string;
     try { response = await fetchFn(current, { redirect: "manual", headers: { Accept: "text/html,application/xhtml+xml" } }); }
     catch (error) { await recordAttempt(db, source, runId, now, "failure", current, null, false, boundedError(error)); return null; }

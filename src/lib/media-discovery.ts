@@ -2,6 +2,7 @@ import { Readability } from "@mozilla/readability";
 import { parseHTML } from "linkedom";
 import type { AppDatabase } from "./db";
 import { writeTransaction } from "./db-transaction";
+import { MAX_ATTEMPTS_PER_OUTLET_DAY, mediaOutletStop } from "./media-outlet-access";
 import { ELIGIBLE_MEDIA_ENTITY_SQL } from "./media-similarity";
 
 const MEDIA_GAME_METADATA = [
@@ -99,8 +100,6 @@ export interface MediaDiscoveryOptions {
   now?: Date | (() => Date);
 }
 
-const MAX_ATTEMPTS_PER_OUTLET_DAY = 30;
-const TERMINAL_OUTLET_STOPS = ["search_http_401", "search_http_403", "fetch_http_401", "fetch_http_403"] as const;
 export const MAX_MEDIA_ARTICLES_PER_GAME = 15;
 export const MAX_MEDIA_ARTICLES_TOTAL = 45;
 const MAX_REDIRECTS = 5;
@@ -571,34 +570,6 @@ async function attemptsToday(db: AppDatabase, outlet: string, date: Date): Promi
   return Number(row?.count ?? 0);
 }
 
-/**
- * Why `outlet` must not be contacted during `date`'s UTC day, whichever pass
- * or stage recorded it: the daily attempt cap, or a rate limit that day.
- * Both reopen on the next UTC day.
- */
-export async function mediaOutletDayStop(db: AppDatabase, outlet: string, date: Date): Promise<string | null> {
-  if ((await attemptsToday(db, outlet, date)) >= MAX_ATTEMPTS_PER_OUTLET_DAY) return "daily_attempt_cap";
-  const limited = await first<{ kind: string }>(
-    db,
-    "SELECT kind FROM media_discovery_attempts WHERE outlet = ? AND day = ? AND status_code = 429 ORDER BY id LIMIT 1",
-    outlet,
-    dayKey(date),
-  );
-  if (!limited) return null;
-  return limited.kind === "search" ? "search_http_429" : "fetch_http_429";
-}
-
-/** The first terminal access denial recorded for `outlet` in any pass; it never reopens. */
-async function terminalOutletStop(db: AppDatabase, outlet: MediaOutlet): Promise<string | null> {
-  const row = await first<{ stop_reason: string }>(
-    db,
-    "SELECT stop_reason FROM media_discovery_progress WHERE outlet = ? AND status = 'stopped' AND stop_reason IN (SELECT value FROM json_each(?)) ORDER BY id LIMIT 1",
-    outlet,
-    JSON.stringify(TERMINAL_OUTLET_STOPS),
-  );
-  return row?.stop_reason ?? null;
-}
-
 async function stopProgress(db: AppDatabase, progressId: number, reason: string): Promise<void> {
   await db.prepare("UPDATE media_discovery_progress SET status = 'stopped', stop_reason = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(reason.slice(0, 128), progressId).run();
 }
@@ -791,7 +762,7 @@ export async function runAuthorizedMediaDiscovery(db: AppDatabase, options: Medi
         }
         const current = await first<ProgressRow>(db, "SELECT id, run_id, appid, pass, outlet, status, query_attempted_at, candidate_urls, candidate_index FROM media_discovery_progress WHERE id = ?", progressId);
         if (!current || current.status === "completed" || current.status === "stopped") continue;
-        const outletStop = await terminalOutletStop(db, outlet.name) ?? await mediaOutletDayStop(db, outlet.name, clock());
+        const outletStop = await mediaOutletStop(db, outlet.name, clock());
         if (outletStop) {
           await stopProgress(db, progressId, outletStop);
           stopReasons.add(`${outlet.name}:${outletStop}`);
