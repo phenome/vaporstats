@@ -185,3 +185,35 @@ _Avoid_: News modal, news popup, article sheet, milestone drawer
 **Linked Range Synchronization**:
 The coordinated update of the observation window across Player History and Score History driven by the shared `range` URL search parameter, while Price History retains an independent `pricerange` parameter.
 _Avoid_: Global zoom, shared timescale, unified period selector
+
+## Media discovery
+
+Terms for the bounded media-discovery experiment. The source rules are the experiment specification ([#51](https://github.com/phenome/vaporstats/issues/51)) and its shared-limits slice ([#66](https://github.com/phenome/vaporstats/issues/66)).
+
+**Outlet**:
+One of the six selected English-language gaming publications: IGN, Eurogamer, GameSpot, PC Gamer, Kotaku, and GamesRadar+. An access shortfall is reported, never filled by replacing an outlet.
+_Avoid_: Source, site, publisher, provider
+
+**Search provider**:
+The service that finds candidate article URLs on an outlet's domain (Tavily, free-only). It is never an outlet: its responses say nothing about an outlet's access, and its failures never count against one.
+_Avoid_: Search outlet, discovery source
+
+**Outlet denial**:
+An access refusal (HTTP 401 or 403) an outlet returns to its own article fetch. It is permanent across every assessment pass and stage, keeps its original reason, and nothing may bypass it or retrieve the outlet's articles indirectly.
+_Avoid_: Block, ban, outlet failure
+
+**Outlet day stop**:
+An outlet closed for the rest of a UTC day because it reached its daily attempt cap (30 attempts shared by every pass, stage, and run, counting the searches, fetches, redirects, and failures it served) or returned a rate limit (HTTP 429) to an article fetch. It reopens on the next UTC day and is distinct from an Outlet denial.
+_Avoid_: Outlet throttle, outlet cooldown
+
+**Provider stop**:
+A run's stop caused by any Search provider failure: HTTP 401, 403, 429, or 5xx, a network error, exhausted free credits, or a missing key. It never denies or day-stops an outlet and uses none of an outlet's daily attempts; the unserved query is kept for a later authorized run, and the run stops with a `tavily_*` reason.
+_Avoid_: Outlet denial, outlet rate limit, search denial
+
+**Assessment pass**:
+One of two separately authorized discovery rounds over the same outlets: the **initial** pass collects each outlet's earliest qualifying assessment found, and the **later** pass collects later assessments. Article ceilings, per-outlet attempt caps, query bounds, Outlet denials, and Outlet day stops are shared across passes and reruns; neither a rerun nor a new pass renews them.
+_Avoid_: Phase, round, stage
+
+**Authorized affected set**:
+The explicitly selected entities and assessment pass a run is authorized to discover, process, or rebuild. Work outside it, including optional improvements and catalog-wide rewrites, does not run.
+_Avoid_: Backfill scope, whole catalog
