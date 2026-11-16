@@ -1391,10 +1391,11 @@ async function advanceMediaProcessingNow(db: AppDatabase, options: MediaProcessi
   let stopReason: string | null = null;
   const outletStops = new Map<MediaOutlet, string>();
   const discardText = (sourceId: number) => db.prepare("UPDATE media_sources SET processing_content = NULL WHERE id = ?").bind(sourceId).run();
-  const skipSource = async (sourceId: number) => {
-    await discardText(sourceId);
+  /** Takes a source into this run without output: its text is discarded and it counts as skipped, in one write. */
+  const skipSource = (sourceId: number) => transaction(db, async () => {
+    await db.prepare("UPDATE media_sources SET processing_run_id = ?, processing_content = NULL WHERE id = ?").bind(auth.run_id, sourceId).run();
     await countOutputs(db, auth.run_id, "skipped");
-  };
+  });
 
   for (const source of sources) {
     if (!inScope(source)) continue;
@@ -1407,11 +1408,10 @@ async function advanceMediaProcessingNow(db: AppDatabase, options: MediaProcessi
         outletStops.set(source.outlet, body.outletStop);
         continue;
       }
-      await db.prepare("UPDATE media_sources SET processing_run_id = ? WHERE id = ?").bind(auth.run_id, source.id).run();
-      source.processing_run_id = auth.run_id;
       const cleaned = body ? cleanArticle(body) : null;
       if (!cleaned) {
         await skipSource(source.id);
+        source.processing_run_id = auth.run_id;
         continue;
       }
       content = cleaned.content;
@@ -1435,7 +1435,9 @@ async function advanceMediaProcessingNow(db: AppDatabase, options: MediaProcessi
         await markContributionChanged(db, source.id, auth.run_id);
       }
       const retained = kept ? null : content;
-      await db.prepare("UPDATE media_sources SET normalized_content_hash = ?, cleanup_version = ?, processing_content = ?, processing_input_identity = ? WHERE id = ?").bind(hash, CLEANUP_VERSION, retained, identity, source.id).run();
+      // Taking the source and storing or discarding its text is one write, so
+      // a restart never leaves a source taken without its outcome.
+      await db.prepare("UPDATE media_sources SET normalized_content_hash = ?, cleanup_version = ?, processing_content = ?, processing_input_identity = ?, processing_run_id = ? WHERE id = ?").bind(hash, CLEANUP_VERSION, retained, identity, auth.run_id, source.id).run();
       Object.assign(source, current, { normalized_content_hash: hash, cleanup_version: CLEANUP_VERSION, processing_content: retained, processing_input_identity: identity, processing_run_id: auth.run_id });
     });
     if (kept || !identity) continue;

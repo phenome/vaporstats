@@ -10,6 +10,7 @@ import {
 import { listPlayableGames } from "../src/lib/catalog";
 import { getMediaOverview } from "../src/lib/media-overview";
 import { MEDIA_OUTLETS } from "../src/lib/media-discovery";
+import type { AppDatabase } from "../src/lib/db";
 import { openTestDatabase, type TestDatabase } from "./support/db";
 import {
   CYBERPUNK,
@@ -50,6 +51,31 @@ async function authorizeRun(database: TestDatabase, key: string, affectedSourceI
   const runId = insertCompletedRun(database.native, `initial:${key}:test`, [CYBERPUNK]);
   await authorizeMediaProcessing(database.db, runId, { affectedSourceIds });
   return runId;
+}
+
+/**
+ * `db`, except that the first write storing an article's text for processing
+ * fails, as if the process stopped at that point.
+ */
+function crashingWhileStoringText(db: AppDatabase): AppDatabase {
+  let crashed = false;
+  return new Proxy(db, {
+    get(target, property) {
+      if (property !== "prepare") {
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      }
+      return (query: string) => {
+        const statement = target.prepare(query);
+        if (crashed || !/^UPDATE media_sources SET .*processing_content = \?/.test(query)) return statement;
+        statement.run = async () => {
+          crashed = true;
+          throw new Error("process stopped while storing article text");
+        };
+        return statement;
+      };
+    },
+  });
 }
 
 type VersionChange = "extraction" | "synthesis" | "cleanup";
@@ -298,6 +324,21 @@ describe("processing scope", () => {
     expect(resumed.status).toBe("completed");
     expect(recorded.outputs).toEqual({ new: 3, reused: 0, replaced: 0, invalidated: 0, skipped: 0 });
     expect(await getMediaOverview(db, CYBERPUNK, { includeUnpublished: true })).not.toBeNull();
+  });
+
+  test("a run stopped while taking a source still processes that source when it resumes", async () => {
+    const database = unprocessedGame();
+    const runId = await authorizeRun(database, "taking");
+    const transport = new ControlledGeminiTransport();
+    const outlet = outletArticles();
+
+    await expect(advanceMediaProcessing(crashingWhileStoringText(database.db), { runId, transport, articleFetch: outlet.articleFetch, now: new Date("2026-11-02T00:00:00.000Z"), ...PAID })).rejects.toThrow("process stopped");
+    const { db } = database.reopen();
+    const resumed = await advanceMediaProcessing(db, { runId, transport, articleFetch: outlet.articleFetch, now: new Date("2026-11-02T00:01:00.000Z"), ...PAID });
+
+    expect(outlet.fetched).toEqual([...sourceUrls(database), ...sourceUrls(database)]);
+    expect(resumed.submitted).toBe(1);
+    expect(transport.submissions).toHaveLength(1);
   });
 
   test("an affected set accepts only distinct sources of the run's games and is fixed once authorized", async () => {
