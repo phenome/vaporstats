@@ -31,7 +31,28 @@ export function insertCompletedRun(native: Database, identityKey: string, appids
   return row.id;
 }
 
-type InlineRequest = { key: string; request: Record<string, unknown> };
+/**
+ * Inserts a running later-pass discovery run for `appids` and returns its id.
+ * The trigger cannot authorize a later pass yet, so tests create its state directly.
+ */
+export function insertLaterRun(native: Database, appids: readonly number[]): number {
+  native
+    .prepare("INSERT INTO media_discovery_runs (pass, identity_key, selected_games, status) VALUES ('later', ?, ?, 'running')")
+    .run(`later:${appids.join(",")}:${crypto.randomUUID()}`, JSON.stringify(appids));
+  const row = native.query<{ id: number }, []>("SELECT id FROM media_discovery_runs ORDER BY id DESC LIMIT 1").get();
+  if (!row) throw new Error("Later media discovery run was not created");
+  return row.id;
+}
+
+/** Inserts `count` accepted sources for `appid` in `pass`, one URL each on `outlet`'s domain. */
+export function insertSources(native: Database, appid: number, pass: "initial" | "later", count: number, outlet: (typeof MEDIA_OUTLETS)[number] = MEDIA_OUTLETS[0]): void {
+  const insert = native.prepare("INSERT INTO media_sources (appid, pass, original_url, title, outlet, retrieved_at, type) VALUES (?, ?, ?, ?, ?, '2026-09-01T00:00:00.000Z', 'review')");
+  for (let index = 0; index < count; index += 1) {
+    insert.run(appid, pass, `https://${outlet.domain}/articles/${appid}-${pass}-seeded-${index}`, `${GAME_NAMES[appid] ?? appid} Review ${index}`, outlet.name);
+  }
+}
+
+type InlineRequest ={ key: string; request: Record<string, unknown> };
 
 /**
  * Deterministic Gemini batch transport. Each submission takes the next queued

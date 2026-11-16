@@ -1,0 +1,179 @@
+import { afterEach, describe, expect, test } from "bun:test";
+import { authorizeMediaRun, runAuthorizedMediaDiscovery } from "../src/lib/media-discovery";
+import { openTestDatabase, type TestDatabase } from "./support/db";
+import {
+  BALDURS_GATE,
+  CYBERPUNK,
+  discoveryFetch,
+  HADES_II,
+  insertLaterRun,
+  insertSources,
+  seedApps,
+} from "./support/media";
+
+// Media limits are shared by the initial and later assessment passes. The
+// trigger cannot start a later pass yet, so each test creates later-pass state
+// directly and drives discovery and processing with a controlled transport and clock.
+
+const cleanups: Array<() => void> = [];
+afterEach(() => { while (cleanups.length > 0) cleanups.pop()!(); });
+
+function fixture(): TestDatabase {
+  const database = openTestDatabase("vaporstats-media-limits-");
+  cleanups.push(database.cleanup);
+  seedApps(database.native, [CYBERPUNK, BALDURS_GATE, HADES_II]);
+  return database;
+}
+
+const DAY_ONE = new Date("2026-09-10T12:00:00.000Z");
+const DAY_ONE_LATE = new Date("2026-09-10T23:59:59.000Z");
+const DAY_TWO = new Date("2026-09-11T00:00:01.000Z");
+
+type Call = { url: string; init?: RequestInit };
+
+function outletCalls(calls: readonly Call[], domain: string): { searches: number; fetches: number } {
+  return {
+    searches: calls.filter((call) => call.url.endsWith("/search") && String(call.init?.body).includes(`"${domain}"`)).length,
+    fetches: calls.filter((call) => new URL(call.url).hostname === domain).length,
+  };
+}
+
+function seedAttempts(database: TestDatabase, outlet: string, pass: "initial" | "later", day: string, total: number): void {
+  const insert = database.native.prepare("INSERT INTO media_discovery_attempts (appid, outlet, pass, day, kind, succeeded, attempted_at) VALUES (?, ?, ?, ?, 'fetch', 1, ?)");
+  for (let index = 0; index < total; index += 1) insert.run(CYBERPUNK, outlet, pass, day, `${day}T00:00:00.000Z`);
+}
+
+function progress(database: TestDatabase, pass: string, outlet: string): { status: string; stop_reason: string | null } | null {
+  return database.native
+    .query<{ status: string; stop_reason: string | null }, [string, string, number]>("SELECT status, stop_reason FROM media_discovery_progress WHERE pass = ? AND outlet = ? AND appid = ?")
+    .get(pass, outlet, CYBERPUNK);
+}
+
+function count(database: TestDatabase, query: string, ...values: (string | number)[]): number {
+  return database.native.query<{ count: number }, (string | number)[]>(query).get(...values)?.count ?? 0;
+}
+
+describe("article ceilings across assessment passes", () => {
+  test("a later pass for a game at 15 articles across passes issues no query, fetch, or article", async () => {
+    const database = fixture();
+    insertSources(database.native, CYBERPUNK, "initial", 10);
+    insertSources(database.native, CYBERPUNK, "later", 5);
+    const runId = insertLaterRun(database.native, [CYBERPUNK]);
+    const { calls, fetchFn } = discoveryFetch();
+
+    await runAuthorizedMediaDiscovery(database.db, { runId, tavilyApiKey: "test-key", fetch: fetchFn, now: DAY_ONE });
+
+    expect(calls.filter((call) => !call.url.endsWith("/usage"))).toEqual([]);
+    expect(count(database, "SELECT COUNT(*) AS count FROM media_sources WHERE appid = ?", CYBERPUNK)).toBe(15);
+  });
+
+  test("a later pass admits no article once 45 are accepted across passes, and issues no query", async () => {
+    const database = fixture();
+    insertSources(database.native, BALDURS_GATE, "initial", 15);
+    insertSources(database.native, HADES_II, "initial", 10);
+    insertSources(database.native, HADES_II, "later", 5);
+    insertSources(database.native, CYBERPUNK, "initial", 14);
+    database.native.prepare("INSERT INTO apps (appid, name, slug, type, is_eligible, is_playable, parent_appid) VALUES (2138330, 'Phantom Liberty', 'phantom-liberty', 'expansion', 1, 1, ?)").run(CYBERPUNK);
+    insertSources(database.native, 2138330, "later", 1);
+    const runId = insertLaterRun(database.native, [CYBERPUNK]);
+    const { calls, fetchFn } = discoveryFetch();
+
+    await runAuthorizedMediaDiscovery(database.db, { runId, tavilyApiKey: "test-key", fetch: fetchFn, now: DAY_ONE });
+
+    expect(calls.filter((call) => !call.url.endsWith("/usage"))).toEqual([]);
+    expect(count(database, "SELECT COUNT(*) AS count FROM media_sources")).toBe(45);
+  });
+});
+
+describe("per-outlet UTC-day attempt cap across passes", () => {
+  test("initial-pass attempts leave the later pass one attempt that day, across a restart, and reopen on the next UTC day", async () => {
+    const database = fixture();
+    seedAttempts(database, "IGN", "initial", "2026-09-10", 29);
+    const runId = insertLaterRun(database.native, [CYBERPUNK]);
+    const { calls, fetchFn } = discoveryFetch();
+
+    const first = await runAuthorizedMediaDiscovery(database.db, { runId, tavilyApiKey: "test-key", fetch: fetchFn, now: DAY_ONE });
+
+    expect(outletCalls(calls, "ign.com")).toEqual({ searches: 1, fetches: 0 });
+    expect(count(database, "SELECT COUNT(*) AS count FROM media_discovery_attempts WHERE outlet = 'IGN' AND day = '2026-09-10'")).toBe(30);
+    expect(first.stopReasons).toContain("IGN:daily_attempt_cap");
+    expect(progress(database, "later", "IGN")).toEqual({ status: "stopped", stop_reason: "daily_attempt_cap" });
+
+    database.reopen();
+    await runAuthorizedMediaDiscovery(database.db, { runId, tavilyApiKey: "test-key", fetch: fetchFn, now: DAY_ONE_LATE });
+    expect(outletCalls(calls, "ign.com")).toEqual({ searches: 1, fetches: 0 });
+
+    await runAuthorizedMediaDiscovery(database.db, { runId, tavilyApiKey: "test-key", fetch: fetchFn, now: DAY_TWO });
+    expect(outletCalls(calls, "ign.com")).toEqual({ searches: 1, fetches: 1 });
+    expect(count(database, "SELECT COUNT(*) AS count FROM media_sources WHERE pass = 'later' AND outlet = 'IGN'")).toBe(1);
+  });
+});
+
+describe("outlet stops across passes", () => {
+  test("a terminal initial-pass denial stops the outlet's later-pass work with the original reason", async () => {
+    const database = fixture();
+    const denied = discoveryFetch();
+    const deniedFetch = async (input: RequestInfo | URL, init?: RequestInit) =>
+      String(input).endsWith("/search") && String(init?.body).includes("\"ign.com\"")
+        ? (denied.calls.push({ url: String(input), init }), new Response("", { status: 403 }))
+        : denied.fetchFn(input, init);
+    const initial = await authorizeMediaRun(database.db, { pass: "initial", games: [CYBERPUNK] });
+    await runAuthorizedMediaDiscovery(database.db, { runId: initial.runId, tavilyApiKey: "test-key", fetch: deniedFetch, now: DAY_ONE });
+    expect(progress(database, "initial", "IGN")).toEqual({ status: "stopped", stop_reason: "search_http_403" });
+
+    database.reopen();
+    const runId = insertLaterRun(database.native, [CYBERPUNK]);
+    const { calls, fetchFn } = discoveryFetch();
+    const later = await runAuthorizedMediaDiscovery(database.db, { runId, tavilyApiKey: "test-key", fetch: fetchFn, now: new Date("2026-10-10T12:00:00.000Z") });
+
+    expect(outletCalls(calls, "ign.com")).toEqual({ searches: 0, fetches: 0 });
+    expect(outletCalls(calls, "eurogamer.net")).toEqual({ searches: 1, fetches: 1 });
+    expect(progress(database, "later", "IGN")).toEqual({ status: "stopped", stop_reason: "search_http_403" });
+    expect(later.stopReasons).toContain("IGN:search_http_403");
+  });
+
+  test("a same-day initial-pass rate limit stops later-pass work that day and reopens on the next UTC day", async () => {
+    const database = fixture();
+    const limited = discoveryFetch({ variants: { [`https://ign.com/articles/${CYBERPUNK}-ign-com`]: { status: 429, body: " " } } });
+    const initial = await authorizeMediaRun(database.db, { pass: "initial", games: [CYBERPUNK] });
+    await runAuthorizedMediaDiscovery(database.db, { runId: initial.runId, tavilyApiKey: "test-key", fetch: limited.fetchFn, now: DAY_ONE });
+    expect(progress(database, "initial", "IGN")).toEqual({ status: "stopped", stop_reason: "fetch_http_429" });
+
+    const runId = insertLaterRun(database.native, [CYBERPUNK]);
+    const { calls, fetchFn } = discoveryFetch();
+    const sameDay = await runAuthorizedMediaDiscovery(database.db, { runId, tavilyApiKey: "test-key", fetch: fetchFn, now: DAY_ONE_LATE });
+    expect(outletCalls(calls, "ign.com")).toEqual({ searches: 0, fetches: 0 });
+    expect(progress(database, "later", "IGN")).toEqual({ status: "stopped", stop_reason: "fetch_http_429" });
+    expect(sameDay.stopReasons).toContain("IGN:fetch_http_429");
+
+    database.reopen();
+    await runAuthorizedMediaDiscovery(database.db, { runId, tavilyApiKey: "test-key", fetch: fetchFn, now: DAY_TWO });
+    expect(outletCalls(calls, "ign.com")).toEqual({ searches: 1, fetches: 1 });
+    expect(progress(database, "later", "IGN")?.status).toBe("completed");
+  });
+});
+
+describe("discovery query bound per pass", () => {
+  test("each pass queries every eligible entity once per outlet, and reruns and restarts add none", async () => {
+    const database = fixture();
+    database.native.prepare("INSERT INTO apps (appid, name, slug, type, is_eligible, is_playable, parent_appid) VALUES (2138330, 'Phantom Liberty', 'phantom-liberty', 'expansion', 1, 1, ?)").run(CYBERPUNK);
+    const { calls, fetchFn } = discoveryFetch();
+    const searches = () => calls.filter((call) => call.url.endsWith("/search")).length;
+    const initial = await authorizeMediaRun(database.db, { pass: "initial", games: [CYBERPUNK] });
+    await runAuthorizedMediaDiscovery(database.db, { runId: initial.runId, tavilyApiKey: "test-key", fetch: fetchFn, now: DAY_ONE });
+    expect(searches()).toBe(12);
+
+    const runId = insertLaterRun(database.native, [CYBERPUNK]);
+    const later = await runAuthorizedMediaDiscovery(database.db, { runId, tavilyApiKey: "test-key", fetch: fetchFn, now: DAY_TWO });
+    expect(later.queries).toBe(12);
+    expect(searches()).toBe(24);
+
+    database.reopen();
+    await runAuthorizedMediaDiscovery(database.db, { runId, tavilyApiKey: "test-key", fetch: fetchFn, now: DAY_TWO });
+    const rerunId = insertLaterRun(database.native, [CYBERPUNK]);
+    const rerun = await runAuthorizedMediaDiscovery(database.db, { runId: rerunId, tavilyApiKey: "test-key", fetch: fetchFn, now: new Date("2026-09-12T00:00:00.000Z") });
+    expect(searches()).toBe(24);
+    expect(rerun.queries).toBe(12);
+    expect(count(database, "SELECT COUNT(*) AS count FROM media_discovery_progress WHERE pass = 'later' AND query_attempted_at IS NOT NULL")).toBe(12);
+  });
+});

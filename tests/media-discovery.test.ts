@@ -137,7 +137,9 @@ describe("bounded media discovery", () => {
     const progressRows = await db.prepare("SELECT appid FROM media_discovery_progress ORDER BY appid").all<{ appid: number }>();
     expect(searchQueries).toContain("Cyberpunk 2077 review preview");
     expect(searchQueries).toContain("Phantom Liberty review preview");
-    expect(result.queries).toBe(18);
+    // Three games and one eligible child, each queried once per outlet: 4 × 6.
+    expect(result.queries).toBe(24);
+    expect(searchQueries).toHaveLength(24);
     expect(progressRows.results.map((row) => row.appid)).not.toContain(accessoryAppid);
     expect(rootSources.length).toBeGreaterThan(0);
     expect(rootSources.every((source) => source.title === "Cyberpunk 2077 Review")).toBe(true);

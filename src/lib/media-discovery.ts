@@ -26,7 +26,7 @@ export const MEDIA_OUTLETS = [
 ] as const;
 
 export type MediaOutlet = (typeof MEDIA_OUTLETS)[number]["name"];
-export type MediaPass = "initial";
+export type MediaPass = "initial" | "later";
 export type MediaArticleType = "review" | "preview";
 
 export interface MediaOutletShortfall {
@@ -99,8 +99,8 @@ export interface MediaDiscoveryOptions {
   now?: Date | (() => Date);
 }
 
-const MAX_QUERIES = 18;
 const MAX_ATTEMPTS_PER_OUTLET_DAY = 30;
+const TERMINAL_OUTLET_STOPS = ["search_http_401", "search_http_403", "fetch_http_401", "fetch_http_403"] as const;
 export const MAX_MEDIA_ARTICLES_PER_GAME = 15;
 export const MAX_MEDIA_ARTICLES_TOTAL = 45;
 const MAX_REDIRECTS = 5;
@@ -232,11 +232,16 @@ function validGameIds(games: readonly number[]): number[] {
 
 
 function parsePass(pass: unknown): asserts pass is MediaPass {
-  if (pass !== "initial") throw new Error("Only the initial media discovery pass is supported");
+  if (pass !== "initial" && pass !== "later") throw new Error("Unknown media discovery pass");
 }
 
-function identityFor(games: readonly number[]): string {
-  return `initial:${[...games].sort((a, b) => a - b).join(",")}`;
+/** Only the initial pass can be authorized; the later pass is recorded but not yet triggerable. */
+function parseAuthorizablePass(pass: unknown): asserts pass is "initial" {
+  if (pass !== "initial") throw new Error("Only the initial media discovery pass can be authorized");
+}
+
+function identityFor(pass: MediaPass, games: readonly number[]): string {
+  return `${pass}:${[...games].sort((a, b) => a - b).join(",")}`;
 }
 
 function isoNow(value: Date | (() => Date) | undefined): Date {
@@ -288,6 +293,7 @@ function transaction(db: AppDatabase, work: () => Promise<void>): Promise<void> 
 async function prepareProgressForAuthorization(
   db: AppDatabase,
   runId: number,
+  pass: MediaPass,
   games: readonly number[],
   includeCompleted: boolean,
 ): Promise<void> {
@@ -302,15 +308,16 @@ async function prepareProgressForAuthorization(
            ELSE status
          END,
          updated_at = CURRENT_TIMESTAMP
-     WHERE pass = 'initial'
+     WHERE pass = ?
        AND appid IN (SELECT value FROM json_each(?))
        ${statusFilter}`,
-  ).bind(runId, gamesJson).run();
+  ).bind(runId, pass, gamesJson).run();
 }
 
 async function reopenDayScopedProgress(
   db: AppDatabase,
   runId: number,
+  pass: MediaPass,
   games: readonly number[],
   day: string,
 ): Promise<void> {
@@ -321,26 +328,26 @@ async function reopenDayScopedProgress(
          status = CASE WHEN query_attempted_at IS NULL THEN 'queued' ELSE 'fetching' END,
          stop_reason = NULL,
          updated_at = CURRENT_TIMESTAMP
-     WHERE pass = 'initial'
+     WHERE pass = ?
        AND appid IN (SELECT value FROM json_each(?))
        AND status = 'stopped'
        AND stop_reason IN ('daily_attempt_cap', 'search_http_429', 'fetch_http_429')
        AND (
          SELECT MAX(attempt.day)
          FROM media_discovery_attempts AS attempt
-         WHERE attempt.pass = 'initial'
-           AND attempt.outlet = media_discovery_progress.outlet
+         WHERE attempt.outlet = media_discovery_progress.outlet
        ) < ?`,
-  ).bind(runId, gamesJson, day).run();
+  ).bind(runId, pass, gamesJson, day).run();
 }
 
 async function authorizeMediaRunNow(
   db: AppDatabase,
   input: { pass: MediaPass; games: readonly number[] },
 ): Promise<MediaRunAuthorization> {
-  parsePass(input?.pass);
+  parseAuthorizablePass(input?.pass);
+  const pass = input.pass;
   const games = validGameIds(input.games);
-  const identity = identityFor(games);
+  const identity = identityFor(pass, games);
   let result!: MediaRunAuthorization;
   await transaction(db, async () => {
     const existing = await first<RunRow>(
@@ -352,24 +359,25 @@ async function authorizeMediaRunNow(
       await db.prepare(
         "UPDATE media_discovery_runs SET status = 'running', resumed = 1, started_at = COALESCE(started_at, CURRENT_TIMESTAMP) WHERE id = ?",
       ).bind(existing.id).run();
-      await prepareProgressForAuthorization(db, existing.id, games, true);
-      result = { authorized: true, runId: existing.id, pass: "initial", games, identity: existing.identity_key, resumed: true };
+      await prepareProgressForAuthorization(db, existing.id, pass, games, true);
+      result = { authorized: true, runId: existing.id, pass, games, identity: existing.identity_key, resumed: true };
       return;
     }
     const reusableProgress = Number((await first<{ count: number }>(
       db,
-      "SELECT COUNT(*) AS count FROM media_discovery_progress WHERE pass = 'initial' AND appid IN (SELECT value FROM json_each(?))",
+      "SELECT COUNT(*) AS count FROM media_discovery_progress WHERE pass = ? AND appid IN (SELECT value FROM json_each(?))",
+      pass,
       JSON.stringify(games),
     ))?.count ?? 0);
     const identityWithNonce = `${identity}:${crypto.randomUUID()}`;
     const inserted = await db.prepare(
       "INSERT INTO media_discovery_runs (pass, identity_key, selected_games, status, resumed, started_at) VALUES (?, ?, ?, 'running', ?, CURRENT_TIMESTAMP)",
-    ).bind("initial", identityWithNonce, JSON.stringify(games), reusableProgress > 0 ? 1 : 0).run();
+    ).bind(pass, identityWithNonce, JSON.stringify(games), reusableProgress > 0 ? 1 : 0).run();
     if (!inserted.success) throw new Error("Unable to create media discovery run");
     const id = Number((await first<{ id: number }>(db, "SELECT id FROM media_discovery_runs WHERE identity_key = ?", identityWithNonce))?.id ?? 0);
     if (!id) throw new Error("Unable to create media discovery run");
-    await prepareProgressForAuthorization(db, id, games, false);
-    result = { authorized: true, runId: id, pass: "initial", games, identity: identityWithNonce, resumed: reusableProgress > 0 };
+    await prepareProgressForAuthorization(db, id, pass, games, false);
+    result = { authorized: true, runId: id, pass, games, identity: identityWithNonce, resumed: reusableProgress > 0 };
   });
   return result;
 }
@@ -545,10 +553,10 @@ function usageDetails(value: unknown): { plan: "free" | "rejected" | "unknown"; 
   return { plan, remainingCredits: remaining, planUsage, planLimit, paygoUsage, paygoLimit, valid };
 }
 
-async function reserveAttempt(db: AppDatabase, runId: number, appid: number, outlet: MediaOutlet, kind: "search" | "fetch", date: Date, url: string | null): Promise<number> {
+async function reserveAttempt(db: AppDatabase, runId: number, pass: MediaPass, appid: number, outlet: MediaOutlet, kind: "search" | "fetch", date: Date, url: string | null): Promise<number> {
   await db.prepare(
-    "INSERT INTO media_discovery_attempts (appid, outlet, pass, day, kind, url, succeeded, attempted_at) VALUES (?, ?, 'initial', ?, ?, ?, 0, ?)",
-  ).bind(appid, outlet, dayKey(date), kind, url, date.toISOString()).run();
+    "INSERT INTO media_discovery_attempts (appid, outlet, pass, day, kind, url, succeeded, attempted_at) VALUES (?, ?, ?, ?, ?, ?, 0, ?)",
+  ).bind(appid, outlet, pass, dayKey(date), kind, url, date.toISOString()).run();
   await db.prepare("UPDATE media_discovery_runs SET attempt_count = attempt_count + 1 WHERE id = ?").bind(runId).run();
   return Number((await first<{ id: number }>(db, "SELECT id FROM media_discovery_attempts ORDER BY id DESC LIMIT 1"))?.id ?? 0);
 }
@@ -557,24 +565,53 @@ async function finishAttempt(db: AppDatabase, id: number, kind: "fetch" | "redir
   await db.prepare("UPDATE media_discovery_attempts SET kind = ?, status_code = ?, succeeded = ?, error = ? WHERE id = ?").bind(kind, statusCode, succeeded ? 1 : 0, error, id).run();
 }
 
-async function attemptsToday(db: AppDatabase, _appid: number, outlet: MediaOutlet, date: Date): Promise<number> {
-  const row = await first<{ count: number }>(db, "SELECT COUNT(*) AS count FROM media_discovery_attempts WHERE outlet = ? AND pass = 'initial' AND day = ?", outlet, dayKey(date));
+/** Search, fetch, redirect and failed attempts on `outlet` during `date`'s UTC day, from every pass and from processing. */
+async function attemptsToday(db: AppDatabase, outlet: string, date: Date): Promise<number> {
+  const row = await first<{ count: number }>(db, "SELECT COUNT(*) AS count FROM media_discovery_attempts WHERE outlet = ? AND day = ?", outlet, dayKey(date));
   return Number(row?.count ?? 0);
+}
+
+/**
+ * Why `outlet` must not be contacted during `date`'s UTC day, whichever pass
+ * or stage recorded it: the daily attempt cap, or a rate limit that day.
+ * Both reopen on the next UTC day.
+ */
+export async function mediaOutletDayStop(db: AppDatabase, outlet: string, date: Date): Promise<string | null> {
+  if ((await attemptsToday(db, outlet, date)) >= MAX_ATTEMPTS_PER_OUTLET_DAY) return "daily_attempt_cap";
+  const limited = await first<{ kind: string }>(
+    db,
+    "SELECT kind FROM media_discovery_attempts WHERE outlet = ? AND day = ? AND status_code = 429 ORDER BY id LIMIT 1",
+    outlet,
+    dayKey(date),
+  );
+  if (!limited) return null;
+  return limited.kind === "search" ? "search_http_429" : "fetch_http_429";
+}
+
+/** The first terminal access denial recorded for `outlet` in any pass; it never reopens. */
+async function terminalOutletStop(db: AppDatabase, outlet: MediaOutlet): Promise<string | null> {
+  const row = await first<{ stop_reason: string }>(
+    db,
+    "SELECT stop_reason FROM media_discovery_progress WHERE outlet = ? AND status = 'stopped' AND stop_reason IN (SELECT value FROM json_each(?)) ORDER BY id LIMIT 1",
+    outlet,
+    JSON.stringify(TERMINAL_OUTLET_STOPS),
+  );
+  return row?.stop_reason ?? null;
 }
 
 async function stopProgress(db: AppDatabase, progressId: number, reason: string): Promise<void> {
   await db.prepare("UPDATE media_discovery_progress SET status = 'stopped', stop_reason = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(reason.slice(0, 128), progressId).run();
 }
 
-async function fetchManual(fetchFn: MediaFetch, url: string, outlet: (typeof MEDIA_OUTLETS)[number], db: AppDatabase, runId: number, appid: number, clock: MediaClock): Promise<{ html: string; finalUrl: string } | null> {
+async function fetchManual(fetchFn: MediaFetch, url: string, outlet: (typeof MEDIA_OUTLETS)[number], db: AppDatabase, runId: number, pass: MediaPass, appid: number, clock: MediaClock): Promise<{ html: string; finalUrl: string } | null> {
   let current = url;
   for (let redirect = 0; redirect <= MAX_REDIRECTS; redirect += 1) {
     if (!hostInOutlet(current, outlet)) return null;
     const capNow = clock();
-    const allowed = (await attemptsToday(db, appid, outlet.name, capNow)) < MAX_ATTEMPTS_PER_OUTLET_DAY;
+    const allowed = (await attemptsToday(db, outlet.name, capNow)) < MAX_ATTEMPTS_PER_OUTLET_DAY;
     if (!allowed) return null;
     const attemptNow = clock();
-    const attemptId = await reserveAttempt(db, runId, appid, outlet.name, "fetch", attemptNow, current);
+    const attemptId = await reserveAttempt(db, runId, pass, appid, outlet.name, "fetch", attemptNow, current);
     let response: Response;
     try {
       response = await fetchFn(current, { redirect: "manual", headers: { Accept: "text/html,application/xhtml+xml" } });
@@ -585,7 +622,7 @@ async function fetchManual(fetchFn: MediaFetch, url: string, outlet: (typeof MED
     const isRedirect = response.status >= 300 && response.status < 400;
     await finishAttempt(db, attemptId, isRedirect ? "redirect" : "fetch", response.status, response.ok, response.ok ? null : `HTTP ${response.status}`);
     if (response.status === 401 || response.status === 403 || response.status === 429) {
-      await db.prepare("UPDATE media_discovery_progress SET status = 'stopped', stop_reason = ?, updated_at = CURRENT_TIMESTAMP WHERE outlet = ? AND pass = 'initial'").bind(`fetch_http_${response.status}`, outlet.name).run();
+      await db.prepare("UPDATE media_discovery_progress SET status = 'stopped', stop_reason = ?, updated_at = CURRENT_TIMESTAMP WHERE outlet = ? AND pass = ?").bind(`fetch_http_${response.status}`, outlet.name, pass).run();
       return null;
     }
     if (isRedirect) {
@@ -602,13 +639,24 @@ async function fetchManual(fetchFn: MediaFetch, url: string, outlet: (typeof MED
   return null;
 }
 
-async function loadRun(db: AppDatabase, runId?: number): Promise<RunRow> {
+async function loadRun(db: AppDatabase, runId?: number): Promise<RunRow & { pass: MediaPass }> {
   const run = runId
     ? await first<RunRow>(db, "SELECT id, pass, identity_key, selected_games, status, resumed, query_count, article_count, attempt_count, provider_request_ids, usage, stop_reason, summary FROM media_discovery_runs WHERE id = ?", runId)
     : await first<RunRow>(db, "SELECT id, pass, identity_key, selected_games, status, resumed, query_count, article_count, attempt_count, provider_request_ids, usage, stop_reason, summary FROM media_discovery_runs WHERE pass = 'initial' AND status IN ('queued', 'running') ORDER BY id DESC LIMIT 1");
   if (!run) throw new Error("Media discovery run not found");
-  parsePass(run.pass);
-  return run;
+  const pass = run.pass;
+  parsePass(pass);
+  return { ...run, pass };
+}
+
+/** Accepted articles from every pass count toward the per-game and total ceilings. */
+async function articleCeilingReached(db: AppDatabase, appid: number): Promise<boolean> {
+  const row = await first<{ game: number; total: number }>(
+    db,
+    "SELECT COALESCE(SUM(appid = ?), 0) AS game, COUNT(*) AS total FROM media_sources",
+    appid,
+  );
+  return Number(row?.game ?? 0) >= MAX_MEDIA_ARTICLES_PER_GAME || Number(row?.total ?? 0) >= MAX_MEDIA_ARTICLES_TOTAL;
 }
 
 const EMPTY_USAGE_SUMMARY: MediaRunSummary["usage"] = {
@@ -633,37 +681,43 @@ type MediaRunCounts = {
   outletShortfall: MediaOutletShortfall | null;
 };
 
-async function mediaRunCounts(db: AppDatabase, targetAppids: readonly number[]): Promise<MediaRunCounts> {
+async function mediaRunCounts(db: AppDatabase, pass: MediaPass, targetAppids: readonly number[]): Promise<MediaRunCounts> {
   const targetAppidsJson = JSON.stringify(targetAppids);
   const articleCount = Number((await first<{ count: number }>(
     db,
-    "SELECT COUNT(*) AS count FROM media_sources WHERE pass = 'initial' AND appid IN (SELECT value FROM json_each(?))",
+    "SELECT COUNT(*) AS count FROM media_sources WHERE pass = ? AND appid IN (SELECT value FROM json_each(?))",
+    pass,
     targetAppidsJson,
   ))?.count ?? 0);
   const queryCount = Number((await first<{ count: number }>(
     db,
-    "SELECT COUNT(*) AS count FROM media_discovery_progress WHERE query_attempted_at IS NOT NULL AND pass = 'initial' AND appid IN (SELECT value FROM json_each(?))",
+    "SELECT COUNT(*) AS count FROM media_discovery_progress WHERE query_attempted_at IS NOT NULL AND pass = ? AND appid IN (SELECT value FROM json_each(?))",
+    pass,
     targetAppidsJson,
   ))?.count ?? 0);
   const progressCandidates = await rows<{ candidate_urls: string }>(
     db,
-    "SELECT candidate_urls FROM media_discovery_progress WHERE query_attempted_at IS NOT NULL AND pass = 'initial' AND appid IN (SELECT value FROM json_each(?))",
+    "SELECT candidate_urls FROM media_discovery_progress WHERE query_attempted_at IS NOT NULL AND pass = ? AND appid IN (SELECT value FROM json_each(?))",
+    pass,
     targetAppidsJson,
   );
   const discoveredCount = progressCandidates.reduce((total, row) => total + json<Candidate[]>(row.candidate_urls, []).length, 0);
   const attemptCount = Number((await first<{ count: number }>(
     db,
-    "SELECT COUNT(*) AS count FROM media_discovery_attempts WHERE pass = 'initial' AND appid IN (SELECT value FROM json_each(?))",
+    "SELECT COUNT(*) AS count FROM media_discovery_attempts WHERE pass = ? AND appid IN (SELECT value FROM json_each(?))",
+    pass,
     targetAppidsJson,
   ))?.count ?? 0);
   const sourceFailures = Number((await first<{ count: number }>(
     db,
-    "SELECT COUNT(*) AS count FROM media_discovery_attempts WHERE pass = 'initial' AND succeeded = 0 AND appid IN (SELECT value FROM json_each(?))",
+    "SELECT COUNT(*) AS count FROM media_discovery_attempts WHERE pass = ? AND succeeded = 0 AND appid IN (SELECT value FROM json_each(?))",
+    pass,
     targetAppidsJson,
   ))?.count ?? 0);
   const acceptedOutlets = await rows<{ outlet: MediaOutlet }>(
     db,
-    "SELECT DISTINCT outlet FROM media_sources WHERE pass = 'initial' AND appid IN (SELECT value FROM json_each(?))",
+    "SELECT DISTINCT outlet FROM media_sources WHERE pass = ? AND appid IN (SELECT value FROM json_each(?))",
+    pass,
     targetAppidsJson,
   );
   const acceptedOutletNames = new Set(acceptedOutlets.map((row) => row.outlet));
@@ -685,10 +739,11 @@ async function mediaRunCounts(db: AppDatabase, targetAppids: readonly number[]):
 export async function runAuthorizedMediaDiscovery(db: AppDatabase, options: MediaDiscoveryOptions = {}): Promise<MediaRunSummary> {
   if (options.pass !== undefined) parsePass(options.pass);
   if (!options.runId && options.games) {
-    const authorization = await authorizeMediaRun(db, { pass: "initial", games: options.games });
+    const authorization = await authorizeMediaRun(db, { pass: options.pass ?? "initial", games: options.games });
     options = { ...options, runId: authorization.runId };
   }
   const run = await loadRun(db, options.runId);
+  const pass = run.pass;
   const selectedGames = json<number[]>(run.selected_games, []);
   const discoveryTargets = await loadMediaTargets(db, selectedGames);
   const targetAppids = discoveryTargets.map((target) => target.appid);
@@ -697,7 +752,7 @@ export async function runAuthorizedMediaDiscovery(db: AppDatabase, options: Medi
   let usageSummary: MediaRunSummary["usage"] = { ...EMPTY_USAGE_SUMMARY };
   try {
     const clock: MediaClock = () => isoNow(options.now);
-    await reopenDayScopedProgress(db, run.id, targetAppids, dayKey(clock()));
+    await reopenDayScopedProgress(db, run.id, pass, targetAppids, dayKey(clock()));
     const stopReasons = new Set<string>();
     const stoppedOutlets = new Set<MediaOutlet>();
     let searchCreditBudget: number | null = null;
@@ -719,49 +774,48 @@ export async function runAuthorizedMediaDiscovery(db: AppDatabase, options: Medi
     }
   }
   if (stopReasons.size === 0) {
-    const progressRows = await rows<ProgressRow>(db, "SELECT id, run_id, appid, pass, outlet, status, query_attempted_at, candidate_urls, candidate_index FROM media_discovery_progress WHERE appid IN (SELECT value FROM json_each(?)) AND pass = 'initial' ORDER BY appid, id", JSON.stringify(targetAppids));
+    const progressRows = await rows<ProgressRow>(db, "SELECT id, run_id, appid, pass, outlet, status, query_attempted_at, candidate_urls, candidate_index FROM media_discovery_progress WHERE appid IN (SELECT value FROM json_each(?)) AND pass = ? ORDER BY appid, id", JSON.stringify(targetAppids), pass);
     const targetOutlets = MEDIA_OUTLETS.flatMap((outlet) => discoveryTargets.map((target) => ({ outlet, target })));
     for (const { outlet, target } of targetOutlets) {
       const appid = target.appid;
-      const existingArticles = await first<{ count: number }>(db, "SELECT COUNT(*) AS count FROM media_sources WHERE appid = ? AND pass = 'initial'", appid);
-      if (Number(existingArticles?.count ?? 0) >= MAX_MEDIA_ARTICLES_PER_GAME) continue;
+      if (await articleCeilingReached(db, appid)) continue;
       if (stoppedOutlets.has(outlet.name)) continue;
         const progress = progressRows.find((row) => row.appid === appid && row.outlet === outlet.name) ?? null;
         let progressId = progress?.id;
         if (!progressId) {
-          const inserted = await db.prepare("INSERT INTO media_discovery_progress (run_id, appid, pass, outlet, status) VALUES (?, ?, 'initial', ?, 'queued')").bind(run.id, appid, outlet.name).run();
+          const inserted = await db.prepare("INSERT INTO media_discovery_progress (run_id, appid, pass, outlet, status) VALUES (?, ?, ?, ?, 'queued')").bind(run.id, appid, pass, outlet.name).run();
           if (!inserted.success) throw new Error("Unable to create media outlet progress");
-          progressId = Number((await first<{ id: number }>(db, "SELECT id FROM media_discovery_progress WHERE appid = ? AND outlet = ? AND pass = 'initial'", appid, outlet.name))?.id ?? 0);
+          progressId = Number((await first<{ id: number }>(db, "SELECT id FROM media_discovery_progress WHERE appid = ? AND outlet = ? AND pass = ?", appid, outlet.name, pass))?.id ?? 0);
         } else if (progress?.run_id !== run.id) {
           await db.prepare("UPDATE media_discovery_progress SET run_id = ? WHERE id = ?").bind(run.id, progressId).run();
         }
         const current = await first<ProgressRow>(db, "SELECT id, run_id, appid, pass, outlet, status, query_attempted_at, candidate_urls, candidate_index FROM media_discovery_progress WHERE id = ?", progressId);
         if (!current || current.status === "completed" || current.status === "stopped") continue;
+        const outletStop = await terminalOutletStop(db, outlet.name) ?? await mediaOutletDayStop(db, outlet.name, clock());
+        if (outletStop) {
+          await stopProgress(db, progressId, outletStop);
+          stopReasons.add(`${outlet.name}:${outletStop}`);
+          continue;
+        }
         let candidates = json<Candidate[]>(current.candidate_urls, []).filter((candidate) => typeof candidate?.url === "string");
         let index = current.candidate_index;
         if (!current.query_attempted_at) {
-          const searchCapNow = clock();
-          if ((await attemptsToday(db, appid, outlet.name, searchCapNow)) >= MAX_ATTEMPTS_PER_OUTLET_DAY) {
-            await stopProgress(db, progressId, "daily_attempt_cap");
-            stopReasons.add(`${outlet.name}:daily_attempt_cap`);
-            continue;
-          }
           if (searchCreditBudget !== null && searchesIssued >= searchCreditBudget) {
             await stopProgress(db, progressId, "tavily_credits_exhausted");
             stopReasons.add("tavily_credits_exhausted");
             continue;
           }
-          if (searchesIssued >= MAX_QUERIES) {
-            stopReasons.add("query_cap");
-            break;
-          }
+          // The query bound is one search per eligible entity, outlet and pass, so
+          // eligible entities × outlets per pass: progress is unique per entity,
+          // outlet and pass, and query_attempted_at is persisted before the
+          // search, so reruns and restarts never search that row again.
           const query = `${target.name} review preview`;
           searchesIssued += 1;
           const attemptNow = clock();
           await db.prepare(
             "UPDATE media_discovery_progress SET query_attempted_at = ?, status = 'searching', updated_at = CURRENT_TIMESTAMP WHERE id = ?",
           ).bind(attemptNow.toISOString(), progressId).run();
-          const attemptId = await reserveAttempt(db, run.id, appid, outlet.name, "search", attemptNow, null);
+          const attemptId = await reserveAttempt(db, run.id, pass, appid, outlet.name, "search", attemptNow, null);
           let response: Response;
           try {
             response = await fetchFn("https://api.tavily.com/search", {
@@ -789,7 +843,7 @@ export async function runAuthorizedMediaDiscovery(db: AppDatabase, options: Medi
           await db.prepare("UPDATE media_discovery_progress SET query_attempted_at = ?, status = 'fetching', candidate_urls = ?, candidate_index = 0, provider_request_id = ?, credits_used = ?, usage = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(attemptNow.toISOString(), JSON.stringify(candidates), providerRequestId, typeof (usage.credits ?? usage.credits_used) === "number" ? (usage.credits ?? usage.credits_used) : null, JSON.stringify(usage), progressId).run();
           await db.prepare("UPDATE media_discovery_runs SET query_count = query_count + 1, provider_request_ids = json_insert(provider_request_ids, '$[#]', ?), usage = json_patch(usage, ?) WHERE id = ?").bind(providerRequestId, JSON.stringify(usage), run.id).run();
           if (response.status === 401 || response.status === 403 || response.status === 429) {
-            await db.prepare("UPDATE media_discovery_progress SET status = 'stopped', stop_reason = ?, updated_at = CURRENT_TIMESTAMP WHERE outlet = ? AND pass = 'initial'").bind(`search_http_${response.status}`, outlet.name).run();
+            await db.prepare("UPDATE media_discovery_progress SET status = 'stopped', stop_reason = ?, updated_at = CURRENT_TIMESTAMP WHERE outlet = ? AND pass = ?").bind(`search_http_${response.status}`, outlet.name, pass).run();
             stoppedOutlets.add(outlet.name);
             stopReasons.add(`${outlet.name}:search_http_${response.status}`);
             continue;
@@ -798,12 +852,12 @@ export async function runAuthorizedMediaDiscovery(db: AppDatabase, options: Medi
         const selections = new Map<number, { review: MediaSource | null; preview: MediaSource | null }>();
         for (; index < candidates.length; index += 1) {
           const fetchCapNow = clock();
-          if ((await attemptsToday(db, appid, outlet.name, fetchCapNow)) >= MAX_ATTEMPTS_PER_OUTLET_DAY) {
+          if ((await attemptsToday(db, outlet.name, fetchCapNow)) >= MAX_ATTEMPTS_PER_OUTLET_DAY) {
             await stopProgress(db, progressId, "daily_attempt_cap");
             stopReasons.add(`${outlet.name}:daily_attempt_cap`);
             break;
           }
-          const fetched = await fetchManual(fetchFn, candidates[index]!.url, outlet, db, run.id, appid, clock);
+          const fetched = await fetchManual(fetchFn, candidates[index]!.url, outlet, db, run.id, pass, appid, clock);
           await db.prepare("UPDATE media_discovery_progress SET candidate_index = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(index + 1, progressId).run();
           if (!fetched) {
             const stopped = await first<{ status: string; stop_reason: string | null }>(
@@ -832,10 +886,10 @@ export async function runAuthorizedMediaDiscovery(db: AppDatabase, options: Medi
         for (const selection of selections.values()) {
           const selected = selection.review ?? selection.preview;
           if (!selected) continue;
-          const total = await first<{ count: number }>(db, "SELECT COUNT(*) AS count FROM media_sources WHERE pass = 'initial'");
-          const gameTotal = await first<{ count: number }>(db, "SELECT COUNT(*) AS count FROM media_sources WHERE appid = ? AND pass = 'initial'", selected.appid);
+          const total = await first<{ count: number }>(db, "SELECT COUNT(*) AS count FROM media_sources");
+          const gameTotal = await first<{ count: number }>(db, "SELECT COUNT(*) AS count FROM media_sources WHERE appid = ?", selected.appid);
           if (Number(total?.count ?? 0) < MAX_MEDIA_ARTICLES_TOTAL && Number(gameTotal?.count ?? 0) < MAX_MEDIA_ARTICLES_PER_GAME) {
-            await db.prepare("INSERT OR IGNORE INTO media_sources (appid, pass, original_url, discovery_url, title, outlet, author, published_at, updated_at, retrieved_at, type, hands_on, affiliation, platform, build_context) VALUES (?, 'initial', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").bind(selected.appid, selected.originalUrl, selected.discoveryUrl, selected.title, selected.outlet, selected.author, selected.publishedAt, selected.updatedAt, selected.retrievedAt, selected.type, selected.handsOn === null ? null : selected.handsOn ? 1 : 0, selected.affiliation, selected.platform, selected.buildContext).run();
+            await db.prepare("INSERT OR IGNORE INTO media_sources (appid, pass, original_url, discovery_url, title, outlet, author, published_at, updated_at, retrieved_at, type, hands_on, affiliation, platform, build_context) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").bind(selected.appid, pass, selected.originalUrl, selected.discoveryUrl, selected.title, selected.outlet, selected.author, selected.publishedAt, selected.updatedAt, selected.retrievedAt, selected.type, selected.handsOn === null ? null : selected.handsOn ? 1 : 0, selected.affiliation, selected.platform, selected.buildContext).run();
           } else {
             stopReasons.add(Number(gameTotal?.count ?? 0) >= MAX_MEDIA_ARTICLES_PER_GAME ? `article_cap:${selected.appid}` : "article_cap");
           }
@@ -846,7 +900,7 @@ export async function runAuthorizedMediaDiscovery(db: AppDatabase, options: Medi
         await db.prepare("UPDATE media_discovery_progress SET status = 'completed', updated_at = CURRENT_TIMESTAMP WHERE id = ? AND status <> 'stopped'").bind(progressId).run();
     }
   }
-  const counts = await mediaRunCounts(db, targetAppids);
+  const counts = await mediaRunCounts(db, pass, targetAppids);
   const providerStopped = [...stopReasons].some((reason) =>
     reason === "missing_tavily_key" || reason === "tavily_usage_error" || reason.startsWith("tavily_"),
   );
@@ -877,9 +931,9 @@ export async function runAuthorizedMediaDiscovery(db: AppDatabase, options: Medi
     usage: usageSummary,
   };
   await db.prepare("UPDATE media_discovery_runs SET status = ?, article_count = ?, query_count = ?, attempt_count = ?, stop_reason = ?, summary = ?, usage = ?, finished_at = CURRENT_TIMESTAMP WHERE id = ?").bind(status, counts.articles, counts.queries, counts.attempts, stopReason, JSON.stringify(durableSummary), JSON.stringify(usageSummary), run.id).run();
-  return { runId: run.id, pass: "initial", status, games: selectedGames, resumed: run.resumed === 1, newIdentity: run.resumed !== 1, queries: counts.queries, attempts: counts.attempts, articles: counts.articles, stopReasons: [...stopReasons].sort(), summary, usage: usageSummary };
+  return { runId: run.id, pass, status, games: selectedGames, resumed: run.resumed === 1, newIdentity: run.resumed !== 1, queries: counts.queries, attempts: counts.attempts, articles: counts.articles, stopReasons: [...stopReasons].sort(), summary, usage: usageSummary };
   } catch (error) {
-    const counts = await mediaRunCounts(db, targetAppids);
+    const counts = await mediaRunCounts(db, pass, targetAppids);
     const stopReason = "execution_error";
     const failureMessage = boundedError(error, apiKey);
     const summary: MediaRunSummary["summary"] = {
@@ -913,7 +967,7 @@ export async function runAuthorizedMediaDiscovery(db: AppDatabase, options: Medi
     await transaction(db, async () => {
       await db.prepare("UPDATE media_discovery_runs SET status = 'failed', article_count = ?, query_count = ?, attempt_count = ?, stop_reason = ?, summary = ?, usage = ?, finished_at = CURRENT_TIMESTAMP WHERE id = ?").bind(counts.articles, counts.queries, counts.attempts, stopReason, JSON.stringify(durableSummary), JSON.stringify(usageSummary), run.id).run();
     });
-    return { runId: run.id, pass: "initial", status: "failed", games: selectedGames, resumed: run.resumed === 1, newIdentity: run.resumed !== 1, queries: counts.queries, attempts: counts.attempts, articles: counts.articles, stopReasons: [stopReason], summary, usage: usageSummary };
+    return { runId: run.id, pass, status: "failed", games: selectedGames, resumed: run.resumed === 1, newIdentity: run.resumed !== 1, queries: counts.queries, attempts: counts.attempts, articles: counts.articles, stopReasons: [stopReason], summary, usage: usageSummary };
   }
 }
 
