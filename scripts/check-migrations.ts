@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { Database } from "bun:sqlite";
@@ -351,6 +351,94 @@ function verifyReceptionRowsSurvivePublicationUpgrade(): void {
   }
 }
 
+const mediaTables = expectedTables.filter((table) => table.startsWith("media_"));
+
+/** Applies committed migrations up to, but excluding, `tag` through the production procedure. */
+function migrateBefore(db: Database, tag: string): void {
+  const index = journal.entries.findIndex((entry) => entry.tag === tag);
+  if (index < 1) throw new Error("Migration baseline " + tag + " is missing");
+  const baselineDirectory = join(temporaryDirectory, "baseline-" + tag);
+  mkdirSync(join(baselineDirectory, "meta"), { recursive: true });
+  const entries = journal.entries.slice(0, index);
+  for (const entry of entries) {
+    copyFileSync(join(migrationDirectory, entry.tag + ".sql"), join(baselineDirectory, entry.tag + ".sql"));
+  }
+  writeFileSync(join(baselineDirectory, "meta", "_journal.json"), JSON.stringify({ ...journal, entries }));
+  applyMigrations(db, baselineDirectory);
+}
+
+/**
+ * Seeds every media table after the first schema that holds them all, then
+ * applies every later committed migration with foreign keys on, as the app
+ * does. Each retained row must keep its baseline column values, so a media
+ * table rebuild that cascades, drops or rewrites retained rows fails here.
+ */
+function verifyRetainedMediaRowsSurviveUpgrade(): void {
+  const retained = new Database(join(temporaryDirectory, "retained-media.sqlite"));
+  retained.exec("PRAGMA foreign_keys = ON");
+  try {
+    migrateBefore(retained, "0015_easy_jasper_sitwell");
+    retained.exec(`
+      INSERT INTO apps (appid, name, slug) VALUES (900003, 'Media preservation', 'media-preservation'),
+        (900004, 'Media preservation match', 'media-preservation-match');
+      INSERT INTO media_discovery_runs (id, pass, identity_key, selected_games, status, query_count, article_count, attempt_count, provider_request_ids, usage, summary, started_at, finished_at)
+        VALUES (41, 'initial', 'retained-media-run', '[900003]', 'completed', 2, 1, 3, '["req-1"]', '{"credits":2}', '{"accepted":1}', '2026-10-01T00:00:00.000Z', '2026-10-01T00:05:00.000Z');
+      INSERT INTO media_discovery_progress (id, run_id, appid, pass, outlet, status, query_attempted_at, candidate_urls, candidate_index, provider_request_id, credits_used, usage, stop_reason)
+        VALUES (42, 41, 900003, 'initial', 'IGN', 'completed', '2026-10-01T00:01:00.000Z', '["https://www.ign.com/articles/retained"]', 1, 'req-1', 2, '{"credits":2}', 'accepted');
+      INSERT INTO media_discovery_attempts (id, appid, outlet, pass, day, kind, url, status_code, succeeded, error, attempted_at)
+        VALUES (43, 900003, 'IGN', 'initial', '2026-10-01', 'fetch', 'https://www.ign.com/articles/retained', 200, 1, NULL, '2026-10-01T00:02:00.000Z');
+      INSERT INTO media_sources (id, appid, pass, original_url, discovery_url, title, outlet, author, published_at, updated_at, retrieved_at, type, hands_on, affiliation, platform, build_context, normalized_content_hash, cleanup_version, processing_content, processing_input_identity)
+        VALUES (44, 900003, 'initial', 'https://www.ign.com/articles/retained', 'https://www.ign.com/search?q=retained', 'Retained review', 'IGN', 'Critic', '2026-09-30', '2026-09-30T12:00:00.000Z', '2026-10-01T00:02:00.000Z', 'review', 1, 'staff', 'PC', 'retail', 'retained-hash', 'cleanup-v1', 'retained processing text', 'retained-processing-identity');
+      INSERT INTO media_article_extractions (id, source_id, input_identity, content_hash, cleanup_version, model, config_version, output_json, active)
+        VALUES (45, 44, 'retained-extraction-identity', 'retained-hash', 'cleanup-v1', 'gemini-3.1-flash-lite', 'extraction-v1', '{"claims":["retained"]}', 1);
+      INSERT INTO media_game_overviews (id, appid, input_identity, model, config_version, output_json, active)
+        VALUES (46, 900003, 'retained-overview-identity', 'gemini-3.1-flash-lite', 'synthesis-v1', '{"overview":"retained"}', 1);
+      INSERT INTO media_processing_authorizations (run_id, status, billing_confirmation, stop_reason, authorized_at, updated_at)
+        VALUES (41, 'completed', 'retained-confirmation', NULL, '2026-10-01T00:06:00.000Z', '2026-10-01T00:30:00.000Z');
+      INSERT INTO media_processing_jobs (id, run_id, stage, appid, matched_appid, dimension, source_id, request_key, input_identity, model, config_version, max_input_tokens, max_output_tokens, reserved_microusd, charged_microusd, reservation_active, status, provider_batch_id, output_json, usage_json, submitted_at, completed_at)
+        VALUES (47, 41, 'extraction', 900003, 900004, 'gameplay', 44, 'retained-job', 'retained-extraction-identity', 'gemini-3.1-flash-lite', 'extraction-v1', 1000, 200, 1500, 900, 0, 'succeeded', 'retained-batch', '{"claims":["retained"]}', '{"tokens":1200}', '2026-10-01T00:07:00.000Z', '2026-10-01T00:20:00.000Z');
+      INSERT INTO media_tag_memberships (appid, tag_slug, tag_label, source_id, extraction_input_identity)
+        VALUES (900003, 'retained-tag', 'Retained tag', 44, 'retained-extraction-identity');
+    `);
+    retained
+      .query(
+        "INSERT INTO media_game_embeddings (id, appid, dimension, input_identity, overview_input_identity, model, dimensions, config_version, vector, active) VALUES (48, 900003, 'gameplay', 'retained-embedding-identity', 'retained-overview-identity', 'gemini-embedding-2', 3072, 'embedding-v1', ?, 1)"
+      )
+      .run(new Uint8Array(12288).fill(7));
+
+    const columns = new Map(
+      ["apps", ...mediaTables].map((table) => [
+        table,
+        retained
+          .query<{ name: string }, []>(`PRAGMA table_info(${table})`)
+          .all()
+          .map((column) => column.name),
+      ])
+    );
+    const snapshot = (table: string) =>
+      retained
+        .query(`SELECT ${columns.get(table)!.join(", ")} FROM ${table} ORDER BY rowid`)
+        .all();
+    const before = new Map([...columns.keys()].map((table) => [table, snapshot(table)]));
+    for (const table of mediaTables) {
+      if (before.get(table)!.length === 0) throw new Error("Retained media fixture is missing " + table + " rows");
+    }
+
+    applyMigrations(retained, migrationDirectory);
+
+    for (const [table, rows] of before) {
+      if (JSON.stringify(snapshot(table)) !== JSON.stringify(rows)) {
+        throw new Error("Migrations changed retained " + table + " rows");
+      }
+    }
+    if (retained.query<{ foreign_keys: number }, []>("PRAGMA foreign_keys").get()?.foreign_keys !== 1) {
+      throw new Error("Migrations did not restore foreign keys");
+    }
+  } finally {
+    retained.close(true);
+  }
+}
+
 let database: Database | undefined;
 
 try {
@@ -520,6 +608,7 @@ try {
 
   verifyExistingRowsSurviveUpgrade();
   verifyReceptionRowsSurvivePublicationUpgrade();
+  verifyRetainedMediaRowsSurviveUpgrade();
   if (!existsSync(databasePath)) throw new Error("SQLite database file was not created");
   console.log("SQLite migrations OK (" + appliedMigrations.length + " migrations; existing rows preserved)");
 } finally {
