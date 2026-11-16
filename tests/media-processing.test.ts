@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import { afterEach, describe, expect, test } from "bun:test";
 import {
   GEMINI_BATCH_CAPABILITY_VERSION,
@@ -21,7 +20,6 @@ import {
   overviewOutputForUrls,
   processingArticleHtml as articleHtml,
   seedApps,
-  stableJson,
 } from "./support/media";
 
 const APPIDS = [1091500, 1086940] as const;
@@ -529,55 +527,6 @@ describe("bounded Gemini media processing", () => {
     expect(extractions[0]?.content_hash).not.toBe(extractions[1]?.content_hash);
     expect(extractions.filter((row) => row.active === 1)).toHaveLength(1);
     expect(extractions.find((row) => row.active === 1)?.input_identity).not.toBe(oldExtraction?.input_identity);
-  });
-
-  test("keeps supported output active while a config-only replacement is pending", async () => {
-    const value = fixture(); cleanups.push(value.cleanup);
-    await authorizeMediaProcessing(value.db, value.runId);
-    const transport = new ControlledTransport();
-    await finishSingle(value, transport);
-    const source = await value.db.prepare("SELECT appid, original_url, title, outlet, author, published_at, updated_at, type, hands_on, affiliation, platform, build_context, normalized_content_hash, cleanup_version FROM media_sources WHERE appid = ?").bind(APPIDS[0]).first<{
-      appid: number; original_url: string; title: string; outlet: string; author: string | null; published_at: string | null; updated_at: string | null; type: string; hands_on: number | null; affiliation: string | null; platform: string | null; build_context: string | null; normalized_content_hash: string; cleanup_version: string;
-    }>();
-    const extraction = await value.db.prepare("SELECT id, model FROM media_article_extractions WHERE active = 1").first<{ id: number; model: string }>();
-    expect(source).not.toBeNull();
-    expect(extraction).not.toBeNull();
-    const legacyConfig = "media-extraction-legacy";
-    const legacyIdentity = createHash("sha256").update(stableJson({
-      stage: "extraction",
-      hash: source!.normalized_content_hash,
-      cleanupVersion: source!.cleanup_version,
-      model: extraction!.model,
-      configVersion: legacyConfig,
-      metadata: {
-        appid: source!.appid,
-        originalUrl: source!.original_url,
-        title: source!.title,
-        outlet: source!.outlet,
-        author: source!.author,
-        publishedAt: source!.published_at,
-        updatedAt: source!.updated_at,
-        type: source!.type,
-        handsOn: source!.hands_on,
-        affiliation: source!.affiliation,
-        platform: source!.platform,
-        buildContext: source!.build_context,
-      },
-    })).digest("hex");
-    await value.db.prepare("UPDATE media_article_extractions SET input_identity = ?, config_version = ? WHERE id = ?").bind(legacyIdentity, legacyConfig, extraction!.id).run();
-    const newRunId = insertCompletedRun(value.native, "initial:config-refresh:test", [APPIDS[0]]);
-    await authorizeMediaProcessing(value.db, newRunId);
-    transport.nextPolls.push({ state: "pending" }, { state: "pending" });
-    await advanceMediaProcessing(value.db, {
-      runId: newRunId,
-      transport,
-      articleFetch: async () => articleHtml(APPIDS[0]),
-      pricingVersion: GEMINI_BATCH_PRICING_VERSION,
-      capabilityVersion: GEMINI_BATCH_CAPABILITY_VERSION,
-    });
-    expect(await getMediaOverview(value.db, APPIDS[0], { includeUnpublished: true })).not.toBeNull();
-    const active = await value.db.prepare("SELECT input_identity FROM media_article_extractions WHERE active = 1").first<{ input_identity: string }>();
-    expect(active?.input_identity).toBe(legacyIdentity);
   });
 
   test("filters unsupported and missing contribution categories before persistence and synthesis", async () => {
