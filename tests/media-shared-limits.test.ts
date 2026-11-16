@@ -264,6 +264,39 @@ describe("processing limits across passes", () => {
     expect(fetched).toHaveLength(3);
   });
 
+  test("an article fetch's attempt is recorded before the outlet is contacted", async () => {
+    const database = fixture();
+    insertSources(database.native, CYBERPUNK, "later", 1, IGN);
+    const recordedBeforeFetch: number[] = [];
+    const { advance } = await processingRun(database, () => {
+      recordedBeforeFetch.push(count(database, "SELECT COUNT(*) AS count FROM media_discovery_attempts WHERE outlet = 'IGN' AND day = '2026-09-10'"));
+      return processingArticleHtml(CYBERPUNK);
+    });
+
+    await advance(DAY_ONE);
+
+    expect(recordedBeforeFetch).toEqual([1]);
+    expect(count(database, "SELECT COUNT(*) AS count FROM media_discovery_attempts WHERE outlet = 'IGN'")).toBe(1);
+  });
+
+  test("concurrent discovery and processing admit only the last attempt left under the UTC-day cap", async () => {
+    const database = fixture();
+    seedAttempts(database, "IGN", "initial", "2026-09-10", 29);
+    insertSources(database.native, CYBERPUNK, "later", 1, IGN);
+    const { fetched, advance } = await processingRun(database);
+    const discoveryRunId = insertLaterRun(database.native, [BALDURS_GATE]);
+    const { calls, fetchFn } = discoveryFetch();
+
+    await Promise.all([
+      advance(DAY_ONE),
+      runAuthorizedMediaDiscovery(database.db, { runId: discoveryRunId, tavilyApiKey: "test-key", fetch: fetchFn, now: DAY_ONE }),
+    ]);
+
+    const ignContacts = fetched.filter((url) => url.includes("ign.com")).length + outletCalls(calls, "ign.com").searches + outletCalls(calls, "ign.com").fetches;
+    expect(ignContacts).toBe(1);
+    expect(count(database, "SELECT COUNT(*) AS count FROM media_discovery_attempts WHERE outlet = 'IGN' AND day = '2026-09-10'")).toBe(30);
+  });
+
   test("an access denial during an article fetch stops that outlet for the rest of the run with its reason", async () => {
     const database = fixture();
     insertSources(database.native, CYBERPUNK, "initial", 3, IGN);

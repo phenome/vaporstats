@@ -1,4 +1,5 @@
 import type { AppDatabase } from "./db";
+import { writeTransaction } from "./db-transaction";
 
 /**
  * Outlet access rules shared by every media pass and stage. Discovery
@@ -7,7 +8,7 @@ import type { AppDatabase } from "./db";
  * source for whether an outlet may be contacted.
  */
 
-export const MAX_ATTEMPTS_PER_OUTLET_DAY = 30;
+const MAX_ATTEMPTS_PER_OUTLET_DAY = 30;
 
 function dayKey(date: Date): string {
   return date.toISOString().slice(0, 10);
@@ -60,3 +61,38 @@ export async function mediaOutletStop(db: AppDatabase, outlet: string, date: Dat
   return (await outletDenial(db, outlet)) ?? outletDayStop(db, outlet, date);
 }
 
+
+export type OutletAttemptKind = "search" | "fetch" | "redirect" | "failure";
+
+/**
+ * Reserves one attempt on `outlet` under `runId`'s pass before the outlet is
+ * contacted, or returns why it must not be contacted. The stop check and the
+ * reservation run in one serialized write transaction, so concurrent passes
+ * and stages never admit more than the outlet's remaining allowance.
+ */
+export async function reserveOutletAttempt(
+  db: AppDatabase,
+  attempt: { runId: number; appid: number; outlet: string; kind: "search" | "fetch"; url: string | null; date: Date },
+): Promise<{ attemptId: number } | { stop: string }> {
+  return writeTransaction(db, async () => {
+    const stop = await mediaOutletStop(db, attempt.outlet, attempt.date);
+    if (stop) return { stop };
+    await db.prepare(
+      "INSERT INTO media_discovery_attempts (appid, outlet, pass, day, kind, url, succeeded, attempted_at) SELECT ?, ?, pass, ?, ?, ?, 0, ? FROM media_discovery_runs WHERE id = ?",
+    ).bind(attempt.appid, attempt.outlet, dayKey(attempt.date), attempt.kind, attempt.url, attempt.date.toISOString(), attempt.runId).run();
+    await db.prepare("UPDATE media_discovery_runs SET attempt_count = attempt_count + 1 WHERE id = ?").bind(attempt.runId).run();
+    const reserved = await first<{ id: number }>(db, "SELECT id FROM media_discovery_attempts ORDER BY id DESC LIMIT 1");
+    if (!reserved) throw new Error("Unable to reserve a media outlet attempt");
+    return { attemptId: reserved.id };
+  });
+}
+
+/** Records how a reserved attempt ended. */
+export async function finishOutletAttempt(
+  db: AppDatabase,
+  attemptId: number,
+  outcome: { kind: OutletAttemptKind; statusCode: number | null; succeeded: boolean; error: string | null },
+): Promise<void> {
+  await db.prepare("UPDATE media_discovery_attempts SET kind = ?, status_code = ?, succeeded = ?, error = ? WHERE id = ?")
+    .bind(outcome.kind, outcome.statusCode, outcome.succeeded ? 1 : 0, outcome.error, attemptId).run();
+}

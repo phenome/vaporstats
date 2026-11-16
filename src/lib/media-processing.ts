@@ -17,7 +17,7 @@ import {
   MEDIA_OUTLETS,
   type MediaOutlet,
 } from "./media-discovery";
-import { mediaOutletStop } from "./media-outlet-access";
+import { finishOutletAttempt, reserveOutletAttempt } from "./media-outlet-access";
 import {
   ELIGIBLE_MEDIA_ENTITY_SQL,
   GEMINI_EMBEDDING_CONFIG_VERSION,
@@ -149,10 +149,6 @@ function isoNow(value: Date | (() => Date) | undefined): Date {
   const date = result ?? new Date();
   if (!(date instanceof Date) || !Number.isFinite(date.getTime())) throw new Error("Invalid media processing clock");
   return new Date(date.getTime());
-}
-
-function dayKey(date: Date): string {
-  return date.toISOString().slice(0, 10);
 }
 
 function sha256(value: string): string {
@@ -553,36 +549,31 @@ type ReservationInput = {
   requireEligibleEntity?: boolean;
 };
 
-/** Records an article fetch attempt under the pass of the run being processed. */
-async function recordAttempt(db: AppDatabase, source: SourceRow, runId: number, date: Date, kind: "fetch" | "redirect" | "failure", url: string, statusCode: number | null, succeeded: boolean, error: string | null): Promise<void> {
-  await db.batch([
-    db.prepare("INSERT INTO media_discovery_attempts (appid, outlet, pass, day, kind, url, status_code, succeeded, error, attempted_at) SELECT ?, ?, pass, ?, ?, ?, ?, ?, ?, ? FROM media_discovery_runs WHERE id = ?").bind(source.appid, source.outlet, dayKey(date), kind, url, statusCode, succeeded ? 1 : 0, error, date.toISOString(), runId),
-    db.prepare("UPDATE media_discovery_runs SET attempt_count = attempt_count + 1 WHERE id = ?").bind(runId),
-  ]);
-}
-
 /**
  * Fetches a source's article, or returns why its outlet must not be contacted
- * again in this run: the shared UTC-day attempt cap, a same-day rate limit, or
- * an access denial. Any other failure skips only this source.
+ * again in this run: an access denial, the shared UTC-day attempt cap, or a
+ * same-day rate limit. Every request reserves its attempt under the run's pass
+ * first; any other failure skips only this source.
  */
 async function fetchArticle(db: AppDatabase, source: SourceRow, runId: number, fetchFn: ArticleFetch, clock: () => Date): Promise<string | { outletStop: string } | null> {
   let current = source.original_url;
   const outlet = outletFor(current);
   if (!outlet || outlet.name !== source.outlet) return null;
   for (let redirect = 0; redirect <= MAX_REDIRECTS; redirect += 1) {
-    const now = clock();
-    const outletStop = await mediaOutletStop(db, source.outlet, now);
-    if (outletStop) return { outletStop };
+    const reservation = await reserveOutletAttempt(db, { runId, appid: source.appid, outlet: source.outlet, kind: "fetch", url: current, date: clock() });
+    if ("stop" in reservation) return { outletStop: reservation.stop };
     let response: Response | string;
     try { response = await fetchFn(current, { redirect: "manual", headers: { Accept: "text/html,application/xhtml+xml" } }); }
-    catch (error) { await recordAttempt(db, source, runId, now, "failure", current, null, false, boundedError(error)); return null; }
+    catch (error) {
+      await finishOutletAttempt(db, reservation.attemptId, { kind: "failure", statusCode: null, succeeded: false, error: boundedError(error) });
+      return null;
+    }
     if (typeof response === "string") {
-      await recordAttempt(db, source, runId, now, "fetch", current, 200, true, null);
+      await finishOutletAttempt(db, reservation.attemptId, { kind: "fetch", statusCode: 200, succeeded: true, error: null });
       return response;
     }
     const isRedirect = response.status >= 300 && response.status < 400;
-    await recordAttempt(db, source, runId, now, isRedirect ? "redirect" : "fetch", current, response.status, response.ok, response.ok ? null : `HTTP ${response.status}`);
+    await finishOutletAttempt(db, reservation.attemptId, { kind: isRedirect ? "redirect" : "fetch", statusCode: response.status, succeeded: response.ok, error: response.ok ? null : `HTTP ${response.status}` });
     if (response.status === 401 || response.status === 403 || response.status === 429) return { outletStop: `fetch_http_${response.status}` };
     if (isRedirect) {
       const location = response.headers.get("location");

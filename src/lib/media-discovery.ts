@@ -2,7 +2,7 @@ import { Readability } from "@mozilla/readability";
 import { parseHTML } from "linkedom";
 import type { AppDatabase } from "./db";
 import { writeTransaction } from "./db-transaction";
-import { MAX_ATTEMPTS_PER_OUTLET_DAY, mediaOutletStop } from "./media-outlet-access";
+import { finishOutletAttempt, reserveOutletAttempt } from "./media-outlet-access";
 import { ELIGIBLE_MEDIA_ENTITY_SQL } from "./media-similarity";
 
 const MEDIA_GAME_METADATA = [
@@ -552,50 +552,32 @@ function usageDetails(value: unknown): { plan: "free" | "rejected" | "unknown"; 
   return { plan, remainingCredits: remaining, planUsage, planLimit, paygoUsage, paygoLimit, valid };
 }
 
-async function reserveAttempt(db: AppDatabase, runId: number, pass: MediaPass, appid: number, outlet: MediaOutlet, kind: "search" | "fetch", date: Date, url: string | null): Promise<number> {
-  await db.prepare(
-    "INSERT INTO media_discovery_attempts (appid, outlet, pass, day, kind, url, succeeded, attempted_at) VALUES (?, ?, ?, ?, ?, ?, 0, ?)",
-  ).bind(appid, outlet, pass, dayKey(date), kind, url, date.toISOString()).run();
-  await db.prepare("UPDATE media_discovery_runs SET attempt_count = attempt_count + 1 WHERE id = ?").bind(runId).run();
-  return Number((await first<{ id: number }>(db, "SELECT id FROM media_discovery_attempts ORDER BY id DESC LIMIT 1"))?.id ?? 0);
-}
-
-async function finishAttempt(db: AppDatabase, id: number, kind: "fetch" | "redirect" | "failure" | "search", statusCode: number | null, succeeded: boolean, error: string | null): Promise<void> {
-  await db.prepare("UPDATE media_discovery_attempts SET kind = ?, status_code = ?, succeeded = ?, error = ? WHERE id = ?").bind(kind, statusCode, succeeded ? 1 : 0, error, id).run();
-}
-
-/** Search, fetch, redirect and failed attempts on `outlet` during `date`'s UTC day, from every pass and from processing. */
-async function attemptsToday(db: AppDatabase, outlet: string, date: Date): Promise<number> {
-  const row = await first<{ count: number }>(db, "SELECT COUNT(*) AS count FROM media_discovery_attempts WHERE outlet = ? AND day = ?", outlet, dayKey(date));
-  return Number(row?.count ?? 0);
-}
-
 async function stopProgress(db: AppDatabase, progressId: number, reason: string): Promise<void> {
   await db.prepare("UPDATE media_discovery_progress SET status = 'stopped', stop_reason = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(reason.slice(0, 128), progressId).run();
 }
 
-async function fetchManual(fetchFn: MediaFetch, url: string, outlet: (typeof MEDIA_OUTLETS)[number], db: AppDatabase, runId: number, pass: MediaPass, appid: number, clock: MediaClock): Promise<{ html: string; finalUrl: string } | null> {
+/**
+ * Fetches an outlet article without following redirects off the outlet, or
+ * returns why the outlet must not be contacted again and whether this
+ * candidate reached it. Every request reserves its attempt first; any other
+ * failure skips only this candidate.
+ */
+async function fetchManual(fetchFn: MediaFetch, url: string, outlet: (typeof MEDIA_OUTLETS)[number], db: AppDatabase, runId: number, appid: number, clock: MediaClock): Promise<{ html: string; finalUrl: string } | { stop: string; contacted: boolean } | null> {
   let current = url;
   for (let redirect = 0; redirect <= MAX_REDIRECTS; redirect += 1) {
     if (!hostInOutlet(current, outlet)) return null;
-    const capNow = clock();
-    const allowed = (await attemptsToday(db, outlet.name, capNow)) < MAX_ATTEMPTS_PER_OUTLET_DAY;
-    if (!allowed) return null;
-    const attemptNow = clock();
-    const attemptId = await reserveAttempt(db, runId, pass, appid, outlet.name, "fetch", attemptNow, current);
+    const reservation = await reserveOutletAttempt(db, { runId, appid, outlet: outlet.name, kind: "fetch", url: current, date: clock() });
+    if ("stop" in reservation) return { stop: reservation.stop, contacted: redirect > 0 };
     let response: Response;
     try {
       response = await fetchFn(current, { redirect: "manual", headers: { Accept: "text/html,application/xhtml+xml" } });
     } catch (error) {
-      await finishAttempt(db, attemptId, "failure", null, false, boundedError(error));
+      await finishOutletAttempt(db, reservation.attemptId, { kind: "failure", statusCode: null, succeeded: false, error: boundedError(error) });
       return null;
     }
     const isRedirect = response.status >= 300 && response.status < 400;
-    await finishAttempt(db, attemptId, isRedirect ? "redirect" : "fetch", response.status, response.ok, response.ok ? null : `HTTP ${response.status}`);
-    if (response.status === 401 || response.status === 403 || response.status === 429) {
-      await db.prepare("UPDATE media_discovery_progress SET status = 'stopped', stop_reason = ?, updated_at = CURRENT_TIMESTAMP WHERE outlet = ? AND pass = ?").bind(`fetch_http_${response.status}`, outlet.name, pass).run();
-      return null;
-    }
+    await finishOutletAttempt(db, reservation.attemptId, { kind: isRedirect ? "redirect" : "fetch", statusCode: response.status, succeeded: response.ok, error: response.ok ? null : `HTTP ${response.status}` });
+    if (response.status === 401 || response.status === 403 || response.status === 429) return { stop: `fetch_http_${response.status}`, contacted: true };
     if (isRedirect) {
       const location = response.headers.get("location");
       if (!location || redirect === MAX_REDIRECTS) return null;
@@ -762,12 +744,6 @@ export async function runAuthorizedMediaDiscovery(db: AppDatabase, options: Medi
         }
         const current = await first<ProgressRow>(db, "SELECT id, run_id, appid, pass, outlet, status, query_attempted_at, candidate_urls, candidate_index FROM media_discovery_progress WHERE id = ?", progressId);
         if (!current || current.status === "completed" || current.status === "stopped") continue;
-        const outletStop = await mediaOutletStop(db, outlet.name, clock());
-        if (outletStop) {
-          await stopProgress(db, progressId, outletStop);
-          stopReasons.add(`${outlet.name}:${outletStop}`);
-          continue;
-        }
         let candidates = json<Candidate[]>(current.candidate_urls, []).filter((candidate) => typeof candidate?.url === "string");
         let index = current.candidate_index;
         if (!current.query_attempted_at) {
@@ -781,12 +757,19 @@ export async function runAuthorizedMediaDiscovery(db: AppDatabase, options: Medi
           // outlet and pass, and query_attempted_at is persisted before the
           // search, so reruns and restarts never search that row again.
           const query = `${target.name} review preview`;
-          searchesIssued += 1;
           const attemptNow = clock();
+          const reservation = await reserveOutletAttempt(db, { runId: run.id, appid, outlet: outlet.name, kind: "search", url: null, date: attemptNow });
+          if ("stop" in reservation) {
+            await stopProgress(db, progressId, reservation.stop);
+            stoppedOutlets.add(outlet.name);
+            stopReasons.add(`${outlet.name}:${reservation.stop}`);
+            continue;
+          }
+          const attemptId = reservation.attemptId;
+          searchesIssued += 1;
           await db.prepare(
             "UPDATE media_discovery_progress SET query_attempted_at = ?, status = 'searching', updated_at = CURRENT_TIMESTAMP WHERE id = ?",
           ).bind(attemptNow.toISOString(), progressId).run();
-          const attemptId = await reserveAttempt(db, run.id, pass, appid, outlet.name, "search", attemptNow, null);
           let response: Response;
           try {
             response = await fetchFn("https://api.tavily.com/search", {
@@ -795,12 +778,12 @@ export async function runAuthorizedMediaDiscovery(db: AppDatabase, options: Medi
               body: JSON.stringify({ query, search_depth: "basic", auto_parameters: false, include_domains: [outlet.domain], max_results: 10, include_answer: false, include_raw_content: false, include_usage: true }),
             });
           } catch (error) {
-            await finishAttempt(db, attemptId, "failure", null, false, boundedError(error));
+            await finishOutletAttempt(db, attemptId, { kind: "failure", statusCode: null, succeeded: false, error: boundedError(error) });
             await db.prepare("UPDATE media_discovery_progress SET query_attempted_at = ?, status = 'completed', stop_reason = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(attemptNow.toISOString(), `search_error:${boundedError(error)}`, progressId).run();
             stopReasons.add(`${outlet.name}:search_error`);
             continue;
           }
-          await finishAttempt(db, attemptId, "search", response.status, response.ok, response.ok ? null : `HTTP ${response.status}`);
+          await finishOutletAttempt(db, attemptId, { kind: "search", statusCode: response.status, succeeded: response.ok, error: response.ok ? null : `HTTP ${response.status}` });
           const body = await response.json().catch(() => ({}));
           const providerRequestId = cleanText(jsonObject(body).request_id ?? jsonObject(body).requestId);
           const usage = jsonObject(jsonObject(body).usage);
@@ -830,27 +813,18 @@ export async function runAuthorizedMediaDiscovery(db: AppDatabase, options: Medi
         }
         const selections = new Map<number, { review: MediaSource | null; preview: MediaSource | null }>();
         for (; index < candidates.length; index += 1) {
-          const fetchCapNow = clock();
-          if ((await attemptsToday(db, outlet.name, fetchCapNow)) >= MAX_ATTEMPTS_PER_OUTLET_DAY) {
-            await stopProgress(db, progressId, "daily_attempt_cap");
-            stopReasons.add(`${outlet.name}:daily_attempt_cap`);
+          const fetched = await fetchManual(fetchFn, candidates[index]!.url, outlet, db, run.id, appid, clock);
+          if (fetched && "stop" in fetched) {
+            // A candidate the outlet answered is done; one refused before any
+            // request is retried when the outlet reopens.
+            if (fetched.contacted) await db.prepare("UPDATE media_discovery_progress SET candidate_index = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(index + 1, progressId).run();
+            await stopProgress(db, progressId, fetched.stop);
+            stoppedOutlets.add(outlet.name);
+            stopReasons.add(`${outlet.name}:${fetched.stop}`);
             break;
           }
-          const fetched = await fetchManual(fetchFn, candidates[index]!.url, outlet, db, run.id, pass, appid, clock);
           await db.prepare("UPDATE media_discovery_progress SET candidate_index = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(index + 1, progressId).run();
-          if (!fetched) {
-            const stopped = await first<{ status: string; stop_reason: string | null }>(
-              db,
-              "SELECT status, stop_reason FROM media_discovery_progress WHERE id = ?",
-              progressId,
-            );
-            if (stopped?.status === "stopped") {
-              stoppedOutlets.add(outlet.name);
-              stopReasons.add(`${outlet.name}:${stopped.stop_reason ?? "stopped"}`);
-              break;
-            }
-            continue;
-          }
+          if (!fetched) continue;
           const source = parseSource(fetched.html, fetched.finalUrl, target, discoveryTargets, outlet.name, clock().toISOString());
           if (!source) continue;
           source.discoveryUrl = candidates[index]!.url;
