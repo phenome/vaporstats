@@ -249,6 +249,34 @@ describe("outlet stops across passes", () => {
     expect(rerun.queries).toBe(MEDIA_OUTLETS.length);
   });
 
+  test.each([
+    ["a server error", "tavily_search_http_503", async (): Promise<Response> => new Response("", { status: 503 })],
+  ])("%s from the search provider stops searching without using the outlet's attempts, and the next authorized run issues the query once", async (_failure, reason, failingSearch) => {
+    const database = fixture();
+    seedAttempts(database, "IGN", "initial", "2026-09-10", 28);
+    const failing = discoveryFetch();
+    const failingFetch = async (input: RequestInfo | URL, init?: RequestInit) =>
+      String(input).endsWith("/search") ? (failing.calls.push({ url: String(input), init }), failingSearch()) : failing.fetchFn(input, init);
+    const first = await authorizeMediaRun(database.db, { pass: "initial", games: [CYBERPUNK] });
+    const stopped = await runAuthorizedMediaDiscovery(database.db, { runId: first.runId, tavilyApiKey: "test-key", fetch: failingFetch, now: DAY_ONE });
+
+    expect(stopped.status).toBe("stopped");
+    expect(stopped.stopReasons).toEqual([reason]);
+    expect(stopped.queries).toBe(0);
+    expect(failing.calls.filter((call) => call.url.endsWith("/search"))).toHaveLength(1);
+    expect(progress(database, "initial", "IGN")).toEqual({ status: "queued", stop_reason: reason });
+
+    const resumed = await authorizeMediaRun(database.db, { pass: "initial", games: [CYBERPUNK] });
+    const { calls, fetchFn } = discoveryFetch();
+    const rerun = await runAuthorizedMediaDiscovery(database.db, { runId: resumed.runId, tavilyApiKey: "test-key", fetch: fetchFn, now: DAY_ONE_LATE });
+
+    expect(rerun.status).toBe("completed");
+    expect(rerun.stopReasons.filter((stop) => stop.startsWith("IGN:"))).toEqual([]);
+    expect(outletCalls(calls, "ign.com")).toEqual({ searches: 1, fetches: 1 });
+    expect(progress(database, "initial", "IGN")).toEqual({ status: "completed", stop_reason: null });
+    expect(rerun.queries).toBe(MEDIA_OUTLETS.length);
+  });
+
   test("a same-day initial-pass rate limit stops later-pass work that day and reopens on the next UTC day", async () => {
     const database = fixture();
     const limited = discoveryFetch({ variants: { [`https://ign.com/articles/${CYBERPUNK}-ign-com`]: { status: 429, body: " " } } });

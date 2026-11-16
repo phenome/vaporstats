@@ -574,9 +574,10 @@ async function stopProgress(db: AppDatabase, progressId: number, reason: string)
 }
 
 /**
- * Returns a query the search provider refused, or could not serve, to the row's unsearched state,
- * keeping `reason` on the row until the query is issued again. No search was
- * served, so the entity, outlet and pass keep their one query.
+ * Returns a query the search provider refused, or could not serve, to the
+ * row's unsearched state, keeping `reason` on the row until the query is
+ * issued again. No search was served, so the entity, outlet and pass keep
+ * their one query.
  */
 async function releaseRefusedQuery(db: AppDatabase, progressId: number, status: "queued" | "stopped", reason: string): Promise<void> {
   await db.prepare("UPDATE media_discovery_progress SET status = ?, stop_reason = ?, query_attempted_at = NULL, candidate_urls = '[]', candidate_index = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(status, reason, progressId).run();
@@ -834,6 +835,16 @@ export async function runAuthorizedMediaDiscovery(db: AppDatabase, options: Medi
             // for the rest of the run and retry this query on the next UTC day.
             const reason = "tavily_search_http_429";
             await releaseRefusedQuery(db, progressId, "stopped", reason);
+            stopReasons.add(reason);
+            searchesStopped = true;
+            continue;
+          }
+          if (response.status >= 500) {
+            // The search provider failed to serve the query: stop searching for
+            // the rest of the run as a provider stop, leave every outlet open,
+            // and keep the query for the next authorized run.
+            const reason = `tavily_search_http_${response.status}`;
+            await releaseRefusedQuery(db, progressId, "queued", reason);
             stopReasons.add(reason);
             searchesStopped = true;
             continue;

@@ -20,11 +20,12 @@ async function first<T>(db: AppDatabase, query: string, ...values: unknown[]): P
 }
 
 /**
- * A search the provider refused (401, 403 or 429) was never served, so it is
- * not anything the outlet did: it uses none of the outlet's attempts and never
- * limits or denies it. The attempt stays in the log as the provider stop's record.
+ * A search the provider refused (401, 403 or 429) or failed to serve (5xx) was
+ * never served, so it is not anything the outlet did: it uses none of the
+ * outlet's attempts and never limits or denies it. The attempt stays in the
+ * log as the provider stop's record.
  */
-const SERVED_ATTEMPT_SQL = "NOT (kind = 'search' AND COALESCE(status_code, 0) IN (401, 403, 429))";
+const SERVED_ATTEMPT_SQL = "NOT (kind = 'search' AND (COALESCE(status_code, 0) IN (401, 403, 429) OR COALESCE(status_code, 0) >= 500))";
 
 /** Search, fetch, redirect and failed attempts on `outlet` during `date`'s UTC day, from every pass and stage. */
 async function attemptsToday(db: AppDatabase, outlet: MediaOutlet, date: Date): Promise<number> {
