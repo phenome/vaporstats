@@ -6,6 +6,7 @@ import {
   authorizeMediaProcessing,
   type ArticleFetch,
 } from "../src/lib/media-processing";
+import { listPlayableGames } from "../src/lib/catalog";
 import { getMediaOverview } from "../src/lib/media-overview";
 import { openTestDatabase, type TestDatabase } from "./support/db";
 import {
@@ -24,6 +25,18 @@ const SUCCEEDED_USAGE = { inputTokens: 100, outputTokens: 20 };
 
 const cleanups: Array<() => void> = [];
 afterEach(() => { while (cleanups.length > 0) cleanups.pop()!(); });
+
+/** Lists games carrying `tag` with public Media Discovery enabled. */
+async function gamesTagged(database: TestDatabase, tag: string): Promise<number[]> {
+  const previous = process.env.MEDIA_OVERVIEW_PUBLIC;
+  process.env.MEDIA_OVERVIEW_PUBLIC = "true";
+  try {
+    return (await listPlayableGames(database.db, { mediaTag: tag })).map((game) => game.appid);
+  } finally {
+    if (previous === undefined) delete process.env.MEDIA_OVERVIEW_PUBLIC;
+    else process.env.MEDIA_OVERVIEW_PUBLIC = previous;
+  }
+}
 
 function sourceIds(database: TestDatabase): number[] {
   return database.native.query<{ id: number }, []>("SELECT id FROM media_sources ORDER BY id").all().map(({ id }) => id);
@@ -86,5 +99,32 @@ describe("processing scope", () => {
     expect(transport.counts.length).toBe(countsBefore);
     expect(summary.status).toBe("completed");
     expect(await getMediaOverview(database.db, CYBERPUNK, { includeUnpublished: true })).not.toBeNull();
+  });
+
+  test("a changed affected article withdraws the game's Overview from tag results until it is rebuilt", async () => {
+    const { database, transport } = await processedGame(2);
+    expect(await gamesTagged(database, "build experimentation")).toEqual([CYBERPUNK]);
+    const [unchanged, changed] = sourceUrls(database);
+    const correction = await authorizeRun(database, "correction", [sourceIds(database)[1]!]);
+    const outlet = outletArticles({ [changed!]: processingArticleHtml(CYBERPUNK).replace("flexible combat", "deliberate tactical combat") });
+    transport.nextPolls.push({ state: "pending" });
+
+    const pending = await advanceMediaProcessing(database.db, { runId: correction, transport, articleFetch: outlet.articleFetch, now: new Date("2026-11-02T00:00:00.000Z"), ...PAID });
+
+    expect(outlet.fetched).toEqual([changed]);
+    expect(pending.outputs.invalidated).toBe(2);
+    expect(await getMediaOverview(database.db, CYBERPUNK, { includeUnpublished: true })).toBeNull();
+    expect(await gamesTagged(database, "build experimentation")).toEqual([]);
+
+    transport.polls.set(`batches/test-${transport.submissions.length}`, { state: "succeeded", output: extractionOutput(), usage: SUCCEEDED_USAGE });
+    transport.nextPolls.push({ state: "succeeded", output: overviewOutputForUrls([unchanged!, changed!]), usage: SUCCEEDED_USAGE });
+    await advanceMediaProcessing(database.db, { runId: correction, transport, articleFetch: outlet.articleFetch, now: new Date("2026-11-02T00:01:00.000Z"), ...PAID });
+    const rebuilt = await advanceMediaProcessing(database.db, { runId: correction, transport, articleFetch: outlet.articleFetch, now: new Date("2026-11-02T00:02:00.000Z"), ...PAID });
+
+    expect(rebuilt.status).toBe("completed");
+    expect(rebuilt.outputs).toEqual({ new: 0, reused: 1, replaced: 2, invalidated: 2, skipped: 0 });
+    expect(await getMediaOverview(database.db, CYBERPUNK, { includeUnpublished: true })).not.toBeNull();
+    expect(await gamesTagged(database, "build experimentation")).toEqual([CYBERPUNK]);
+    expect(outlet.fetched).toEqual([changed]);
   });
 });

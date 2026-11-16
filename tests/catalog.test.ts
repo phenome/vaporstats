@@ -186,8 +186,9 @@ describe("Catalog Foundation", () => {
       await upsertApp(freshDb, { appid: 9101, name: "Tagged One", type: "game", is_playable: true, is_eligible: true });
       await upsertApp(freshDb, { appid: 9102, name: "Tagged Two", type: "game", is_playable: true, is_eligible: true });
       await upsertApp(freshDb, { appid: 9103, name: "Child", type: "game", is_playable: true, is_eligible: true, parent_appid: 9101 });
+      await upsertApp(freshDb, { appid: 9104, name: "Invalidated Overview", type: "game", is_playable: true, is_eligible: true });
 
-      for (const [appid, url] of [[9101, "https://ign.com/tagged-one"], [9102, "https://ign.com/tagged-two"], [9103, "https://ign.com/child"]] as const) {
+      for (const [appid, url] of [[9101, "https://ign.com/tagged-one"], [9102, "https://ign.com/tagged-two"], [9103, "https://ign.com/child"], [9104, "https://ign.com/invalidated"]] as const) {
         await freshDb
           .prepare("INSERT INTO media_sources (appid, pass, original_url, title, outlet, retrieved_at, type, hands_on) VALUES (?, 'initial', ?, ?, 'IGN', '2026-09-13T00:00:00.000Z', 'review', 1)")
           .bind(appid, url, `${appid} review`)
@@ -200,6 +201,10 @@ describe("Catalog Foundation", () => {
         await freshDb
           .prepare("INSERT INTO media_tag_memberships (appid, tag_slug, tag_label, source_id, extraction_input_identity) VALUES (?, 'first-person-shooter', 'First-person shooter', ?, ?)")
           .bind(appid, source!.id, `identity-${appid}`)
+          .run();
+        await freshDb
+          .prepare("INSERT INTO media_game_overviews (appid, input_identity, model, config_version, output_json, active) VALUES (?, ?, 'model', 'config', '{}', ?)")
+          .bind(appid, `overview-${appid}`, appid === 9104 ? 0 : 1)
           .run();
       }
 

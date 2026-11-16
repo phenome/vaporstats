@@ -171,6 +171,9 @@ export async function listPlayableGames(
              ON extraction.source_id = membership.source_id
             AND extraction.input_identity = membership.extraction_input_identity
             AND extraction.active = 1
+           JOIN media_game_overviews AS overview
+             ON overview.appid = app.appid
+            AND overview.active = 1
            WHERE app.is_playable = 1
              AND app.is_eligible = 1
              AND app.parent_appid IS NULL
