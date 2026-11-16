@@ -172,9 +172,6 @@ A characteristic of a game supported by attributed media coverage, organized wit
 **Media Discovery Tag**:
 A shared, normalized label for a coverage-supported game characteristic, used to find games with that characteristic. Its wording is independent of the game summary, and it is distinct from a Steam Catalog Facet.
 
-**Authorized Affected Set**:
-The media sources a processing run is explicitly authorized to refetch and reprocess in addition to sources new to processing. It may be empty. Sources outside it keep their outputs without a fetch or paid work. Within it, paid re-extraction happens only when an article's cleaned content changes; a metadata, cleanup, model, or configuration version change alone keeps the active output.
-
 **Monthly Score Comparison**:
 An earlier score comparison for the games eligible in a selected catalog group now. It may use a Reconstructed Player Score when no Recorded Player Score exists; missing historical evidence remains missing, and the comparison does not assert that the same games were eligible then.
 
@@ -218,5 +215,5 @@ One of two separately authorized discovery rounds over the same outlets: the **i
 _Avoid_: Phase, round, stage
 
 **Authorized affected set**:
-The explicitly selected entities and assessment pass a run is authorized to discover, process, or rebuild. Work outside it, including optional improvements and catalog-wide rewrites, does not run.
+The media sources, by source id, that a processing run is explicitly authorized to refetch and reprocess in addition to sources new to processing. It is fixed when the run is authorized, may be empty, and must belong to the run's eligible games. Sources outside it keep their outputs without a fetch or paid work. Within it, paid re-extraction happens only when an article's cleaned content changes; a metadata, cleanup, model, or configuration version change alone keeps the active output. Optional improvements and catalog-wide rewrites never run outside it.
 _Avoid_: Backfill scope, whole catalog
