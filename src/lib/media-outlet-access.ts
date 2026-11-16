@@ -24,16 +24,18 @@ async function attemptsToday(db: AppDatabase, outlet: string, date: Date): Promi
 }
 
 /**
- * The first access denial `outlet` returned to any pass or stage. A denial
- * never reopens, and its original reason is kept.
+ * The first access denial `outlet` itself returned to an article fetch in any
+ * pass or stage. A denial never reopens, and its original reason is kept.
+ * Search attempts go to the search provider, so a 401 or 403 there is a
+ * provider stop, not an outlet denial.
  */
 async function outletDenial(db: AppDatabase, outlet: string): Promise<string | null> {
-  const denied = await first<{ kind: string; status_code: number }>(
+  const denied = await first<{ status_code: number }>(
     db,
-    "SELECT kind, status_code FROM media_discovery_attempts WHERE outlet = ? AND status_code IN (401, 403) ORDER BY id LIMIT 1",
+    "SELECT status_code FROM media_discovery_attempts WHERE outlet = ? AND kind = 'fetch' AND status_code IN (401, 403) ORDER BY id LIMIT 1",
     outlet,
   );
-  return denied ? `${denied.kind}_http_${denied.status_code}` : null;
+  return denied ? `fetch_http_${denied.status_code}` : null;
 }
 
 /**

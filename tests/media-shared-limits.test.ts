@@ -119,16 +119,12 @@ describe("per-outlet UTC-day attempt cap across passes", () => {
 });
 
 describe("outlet stops across passes", () => {
-  test("a terminal initial-pass denial stops the outlet's later-pass work with the original reason", async () => {
+  test("an outlet's initial-pass access denial stops its later-pass work with the original reason", async () => {
     const database = fixture();
-    const denied = discoveryFetch();
-    const deniedFetch = async (input: RequestInfo | URL, init?: RequestInit) =>
-      String(input).endsWith("/search") && String(init?.body).includes("\"ign.com\"")
-        ? (denied.calls.push({ url: String(input), init }), new Response("", { status: 403 }))
-        : denied.fetchFn(input, init);
+    const denied = discoveryFetch({ variants: { [`https://ign.com/articles/${CYBERPUNK}-ign-com`]: { status: 403, body: " " } } });
     const initial = await authorizeMediaRun(database.db, { pass: "initial", games: [CYBERPUNK] });
-    await runAuthorizedMediaDiscovery(database.db, { runId: initial.runId, tavilyApiKey: "test-key", fetch: deniedFetch, now: DAY_ONE });
-    expect(progress(database, "initial", "IGN")).toEqual({ status: "stopped", stop_reason: "search_http_403" });
+    await runAuthorizedMediaDiscovery(database.db, { runId: initial.runId, tavilyApiKey: "test-key", fetch: denied.fetchFn, now: DAY_ONE });
+    expect(progress(database, "initial", "IGN")).toEqual({ status: "stopped", stop_reason: "fetch_http_403" });
 
     database.reopen();
     const runId = insertLaterRun(database.native, [CYBERPUNK]);
@@ -137,8 +133,33 @@ describe("outlet stops across passes", () => {
 
     expect(outletCalls(calls, "ign.com")).toEqual({ searches: 0, fetches: 0 });
     expect(outletCalls(calls, "eurogamer.net")).toEqual({ searches: 1, fetches: 1 });
-    expect(progress(database, "later", "IGN")).toEqual({ status: "stopped", stop_reason: "search_http_403" });
-    expect(later.stopReasons).toContain("IGN:search_http_403");
+    expect(progress(database, "later", "IGN")).toEqual({ status: "stopped", stop_reason: "fetch_http_403" });
+    expect(later.stopReasons).toContain("IGN:fetch_http_403");
+  });
+
+  test("a search provider authorization failure stops the run without denying any outlet", async () => {
+    const database = fixture();
+    const rejected = discoveryFetch();
+    const rejectingFetch = async (input: RequestInfo | URL, init?: RequestInit) =>
+      String(input).endsWith("/search")
+        ? (rejected.calls.push({ url: String(input), init }), new Response("", { status: 401 }))
+        : rejected.fetchFn(input, init);
+    const initial = await authorizeMediaRun(database.db, { pass: "initial", games: [CYBERPUNK] });
+    const stopped = await runAuthorizedMediaDiscovery(database.db, { runId: initial.runId, tavilyApiKey: "test-key", fetch: rejectingFetch, now: DAY_ONE });
+    expect(stopped.status).toBe("stopped");
+    expect(stopped.stopReasons).toEqual(["tavily_search_http_401"]);
+    expect(rejected.calls.filter((call) => call.url.endsWith("/search"))).toHaveLength(1);
+
+    const runId = insertLaterRun(database.native, [CYBERPUNK]);
+    const { calls, fetchFn } = discoveryFetch();
+    const later = await runAuthorizedMediaDiscovery(database.db, { runId, tavilyApiKey: "test-key", fetch: fetchFn, now: DAY_TWO });
+    expect(outletCalls(calls, "ign.com")).toEqual({ searches: 1, fetches: 1 });
+    expect(later.stopReasons.filter((reason) => reason.startsWith("IGN:"))).toEqual([]);
+
+    insertSources(database.native, BALDURS_GATE, "initial", 1, IGN);
+    const { fetched, advance } = await processingRunFor(database, [BALDURS_GATE]);
+    await advance(DAY_TWO);
+    expect(fetched).toEqual([`https://ign.com/articles/${BALDURS_GATE}-initial-seeded-0`]);
   });
 
   test("a same-day initial-pass rate limit stops later-pass work that day and reopens on the next UTC day", async () => {
@@ -191,8 +212,12 @@ const IGN = MEDIA_OUTLETS[0];
 const EUROGAMER = MEDIA_OUTLETS[1];
 
 /** A completed later-pass run authorized for processing, with fetches recorded by URL. */
-async function processingRun(database: TestDatabase, respond: (url: string) => Response | string = () => processingArticleHtml(CYBERPUNK)) {
-  const runId = insertLaterRun(database.native, [CYBERPUNK]);
+function processingRun(database: TestDatabase, respond: (url: string) => Response | string = () => processingArticleHtml(CYBERPUNK)) {
+  return processingRunFor(database, [CYBERPUNK], respond);
+}
+
+async function processingRunFor(database: TestDatabase, games: readonly number[], respond: (url: string) => Response | string = () => processingArticleHtml(CYBERPUNK)) {
+  const runId = insertLaterRun(database.native, games);
   database.native.prepare("UPDATE media_discovery_runs SET status = 'completed' WHERE id = ?").run(runId);
   await authorizeMediaProcessing(database.db, runId);
   const fetched: string[] = [];

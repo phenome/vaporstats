@@ -326,13 +326,14 @@ describe("bounded media discovery", () => {
       const url = String(input);
       calls.push(url);
       if (url.endsWith("/usage")) return Response.json({ account: { current_plan: "free" }, plan_usage: 1, plan_limit: 20, paygo_usage: 0, paygo_limit: 0 });
-      if (url.endsWith("/search") && String(init?.body).includes("ign.com")) return new Response("denied", { status: 403 });
+      if (url.endsWith("/search") && String(init?.body).includes("ign.com")) return Response.json({ results: [{ url: "https://www.ign.com/articles/cyberpunk-2077-review" }] });
       if (url.endsWith("/search")) return Response.json({ results: [] });
+      if (url.includes("ign.com")) return new Response("denied", { status: 403 });
       return new Response("", { status: 500 });
     };
     const authorization = await authorizeMediaRun(db, { pass: "initial", games: [1091500] });
     const result = await runAuthorizedMediaDiscovery(db, { runId: authorization.runId, tavilyApiKey: "test-key", fetch: fetchFn, now: new Date("2026-09-10T00:00:00.000Z") });
-    expect(result.stopReasons).toContain("IGN:search_http_403");
+    expect(result.stopReasons).toContain("IGN:fetch_http_403");
     expect(calls.filter((url) => url.endsWith("/search") && url.includes("tavily") || url.endsWith("/search")).length).toBe(6);
     const summary = await db.prepare("SELECT summary, usage FROM media_discovery_runs WHERE id = ?").bind(authorization.runId).first<{ summary: string; usage: string }>();
     expect(summary?.summary).not.toContain("test-key");
@@ -474,25 +475,27 @@ describe("bounded media discovery", () => {
           calls.push({ url, init });
           if (url.endsWith("/usage")) return Response.json({ account: { current_plan: "free" }, plan_usage: 0, plan_limit: 100, paygo_usage: 0, paygo_limit: 0 });
           if (url.endsWith("/search")) {
-            if (String(init?.body).includes("\"ign.com\"")) return new Response("", { status: denialStatus });
+            if (String(init?.body).includes("\"ign.com\"")) return Response.json({ results: [{ url: "https://www.ign.com/articles/cyberpunk-2077-review" }] });
             return Response.json({ results: [] });
           }
+          if (url.includes("ign.com")) return new Response("", { status: denialStatus });
           return new Response("", { status: 500 });
         };
         const authorization = await authorizeMediaRun(db, { pass: "initial", games: [1091500] });
         const first = await runAuthorizedMediaDiscovery(db, { runId: authorization.runId, tavilyApiKey: "test-key", fetch: fetchFn, now: new Date("2026-09-10T00:00:00.000Z") });
-        expect(first.stopReasons).toContain(`IGN:search_http_${denialStatus}`);
-        expect(first.summary.stopReason).toBe(`IGN:search_http_${denialStatus}`);
+        expect(first.stopReasons).toContain(`IGN:fetch_http_${denialStatus}`);
+        expect(first.summary.stopReason).toBe(`IGN:fetch_http_${denialStatus}`);
         const stopped = await db.prepare("SELECT status, stop_reason FROM media_discovery_progress WHERE appid = ? AND outlet = 'IGN'").bind(1091500).first<{ status: string; stop_reason: string | null }>();
-        expect(stopped).toEqual({ status: "stopped", stop_reason: `search_http_${denialStatus}` });
+        expect(stopped).toEqual({ status: "stopped", stop_reason: `fetch_http_${denialStatus}` });
 
         const resumedAuthorization = await authorizeMediaRun(db, { pass: "initial", games: [1091500] });
         const resumed = await runAuthorizedMediaDiscovery(db, { runId: resumedAuthorization.runId, tavilyApiKey: "test-key", fetch: fetchFn, now: new Date("2026-09-11T00:00:00.000Z") });
         expect(resumedAuthorization.resumed).toBe(true);
         expect(resumed.status).toBe("completed");
         expect(calls.filter((call) => call.url.endsWith("/search"))).toHaveLength(6);
+        expect(calls.filter((call) => call.url.includes("ign.com/"))).toHaveLength(1);
         const stillStopped = await db.prepare("SELECT status, stop_reason FROM media_discovery_progress WHERE appid = ? AND outlet = 'IGN'").bind(1091500).first<{ status: string; stop_reason: string | null }>();
-        expect(stillStopped).toEqual({ status: "stopped", stop_reason: `search_http_${denialStatus}` });
+        expect(stillStopped).toEqual({ status: "stopped", stop_reason: `fetch_http_${denialStatus}` });
       } finally {
         cleanup();
       }

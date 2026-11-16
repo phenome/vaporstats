@@ -813,7 +813,15 @@ export async function runAuthorizedMediaDiscovery(db: AppDatabase, options: Medi
             : [];
           await db.prepare("UPDATE media_discovery_progress SET query_attempted_at = ?, status = 'fetching', candidate_urls = ?, candidate_index = 0, provider_request_id = ?, credits_used = ?, usage = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(attemptNow.toISOString(), JSON.stringify(candidates), providerRequestId, typeof (usage.credits ?? usage.credits_used) === "number" ? (usage.credits ?? usage.credits_used) : null, JSON.stringify(usage), progressId).run();
           await db.prepare("UPDATE media_discovery_runs SET query_count = query_count + 1, provider_request_ids = json_insert(provider_request_ids, '$[#]', ?), usage = json_patch(usage, ?) WHERE id = ?").bind(providerRequestId, JSON.stringify(usage), run.id).run();
-          if (response.status === 401 || response.status === 403 || response.status === 429) {
+          if (response.status === 401 || response.status === 403) {
+            // The search provider rejected the request, not the outlet: stop the
+            // whole run as a provider stop and leave every outlet open.
+            const reason = `tavily_search_http_${response.status}`;
+            await stopProgress(db, progressId, reason);
+            stopReasons.add(reason);
+            break;
+          }
+          if (response.status === 429) {
             await db.prepare("UPDATE media_discovery_progress SET status = 'stopped', stop_reason = ?, updated_at = CURRENT_TIMESTAMP WHERE outlet = ? AND pass = ?").bind(`search_http_${response.status}`, outlet.name, pass).run();
             stoppedOutlets.add(outlet.name);
             stopReasons.add(`${outlet.name}:search_http_${response.status}`);
