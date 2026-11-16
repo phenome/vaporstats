@@ -399,6 +399,19 @@ function verifyRetainedMediaRowsSurviveUpgrade(): void {
         VALUES (47, 41, 'extraction', 900003, 900004, 'gameplay', 44, 'retained-job', 'retained-extraction-identity', 'gemini-3.1-flash-lite', 'extraction-v1', 1000, 200, 1500, 900, 0, 'succeeded', 'retained-batch', '{"claims":["retained"]}', '{"tokens":1200}', '2026-10-01T00:07:00.000Z', '2026-10-01T00:20:00.000Z');
       INSERT INTO media_tag_memberships (appid, tag_slug, tag_label, source_id, extraction_input_identity)
         VALUES (900003, 'retained-tag', 'Retained tag', 44, 'retained-extraction-identity');
+      -- Source 49 was taken by run 41 but its fetch failed, so its only trace
+      -- is run 41's attempt on its URL. Source 50 was discovered before run 41
+      -- was authorized but only its discovery fetch touched it. Source 51 was
+      -- discovered, and fetched by discovery, after run 41 was authorized.
+      INSERT INTO media_sources (id, appid, pass, original_url, title, outlet, retrieved_at, type)
+        VALUES (49, 900003, 'initial', 'https://www.ign.com/articles/unreachable', 'Unreachable review', 'IGN', '2026-10-01T00:03:00.000Z', 'review'),
+          (50, 900003, 'initial', 'https://www.ign.com/articles/never-taken', 'Never taken review', 'IGN', '2026-10-01T00:04:00.000Z', 'review'),
+          (51, 900003, 'initial', 'https://www.ign.com/articles/discovered-later', 'Later review', 'IGN', '2026-10-02T00:01:00.000Z', 'review');
+      INSERT INTO media_discovery_attempts (id, appid, outlet, pass, day, kind, url, status_code, succeeded, error, attempted_at)
+        VALUES (52, 900003, 'IGN', 'initial', '2026-10-01', 'fetch', 'https://www.ign.com/articles/unreachable', 200, 1, NULL, '2026-10-01T00:03:00.000Z'),
+          (53, 900003, 'IGN', 'initial', '2026-10-01', 'fetch', 'https://www.ign.com/articles/unreachable', 503, 0, 'HTTP 503', '2026-10-01T00:08:00.000Z'),
+          (54, 900003, 'IGN', 'initial', '2026-10-01', 'fetch', 'https://www.ign.com/articles/never-taken', 200, 1, NULL, '2026-10-01T00:04:00.000Z'),
+          (55, 900003, 'IGN', 'initial', '2026-10-02', 'fetch', 'https://www.ign.com/articles/discovered-later', 200, 1, NULL, '2026-10-02T00:01:00.000Z');
     `);
     retained
       .query(
@@ -444,7 +457,17 @@ function verifyRetainedMediaRowsSurviveUpgrade(): void {
 
     applyMigrations(retained, migrationDirectory);
 
-    for (const [table, rows] of before) {
+    // Text retained for processing by a finished run is discarded; every
+    // other retained value is kept.
+    const expected = new Map(before);
+    expected.set(
+      "media_sources",
+      before.get("media_sources")!.map((row) => {
+        const source = row as { id: number };
+        return source.id === 44 ? { ...source, processing_content: null } : source;
+      })
+    );
+    for (const [table, rows] of expected) {
       if (JSON.stringify(snapshot(table)) !== JSON.stringify(rows)) {
         throw new Error("Migrations changed retained " + table + " rows");
       }
@@ -458,13 +481,17 @@ function verifyRetainedMediaRowsSurviveUpgrade(): void {
     if (retained.query<{ foreign_keys: number }, []>("PRAGMA foreign_keys").get()?.foreign_keys !== 1) {
       throw new Error("Migrations did not restore foreign keys");
     }
-    // A source processed before processing scope existed must not count as
-    // new to processing, or the next authorized run would refetch it.
-    const retainedClaim = retained
-      .query<{ processing_run_id: number | null }, []>("SELECT processing_run_id FROM media_sources WHERE id = 44")
-      .get();
-    if (retainedClaim?.processing_run_id !== 41) {
-      throw new Error("Migrations left a processed media source new to processing");
+    // A source processed before processing scope existed, including one
+    // whose fetch failed, must not count as new to processing, or the next
+    // authorized run would refetch it. A source no run took stays new.
+    const claims = Object.fromEntries(
+      retained
+        .query<{ id: number; processing_run_id: number | null }, []>("SELECT id, processing_run_id FROM media_sources WHERE id IN (44, 49, 50, 51) ORDER BY id")
+        .all()
+        .map((row) => [row.id, row.processing_run_id])
+    );
+    if (JSON.stringify(claims) !== JSON.stringify({ 44: 41, 49: 41, 50: null, 51: null })) {
+      throw new Error("Migrations misattributed media sources to processing runs: " + JSON.stringify(claims));
     }
     verifyMediaPassesAccepted(retained);
   } finally {
