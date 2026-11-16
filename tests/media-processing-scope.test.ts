@@ -311,4 +311,19 @@ describe("processing scope", () => {
     await expect(authorizeMediaProcessing(database.db, runId, { affectedSourceIds: [] })).rejects.toThrow();
     await expect(authorizeMediaProcessing(database.db, runId)).resolves.toMatchObject({ runId, status: "queued" });
   });
+
+  test("a failed extraction is retried only within an affected set", async () => {
+    const database = unprocessedGame();
+    const transport = new ControlledGeminiTransport();
+    transport.nextPolls.push({ state: "failed", error: "extraction failed", usage: SUCCEEDED_USAGE });
+    const first = await advanceMediaProcessing(database.db, { runId: await authorizeRun(database, "extraction-failure"), transport, articleFetch: outletArticles().articleFetch, now: new Date("2026-11-02T00:00:00.000Z"), ...PAID });
+    const rerun = await advanceMediaProcessing(database.db, { runId: await authorizeRun(database, "extraction-rerun"), transport, articleFetch: outletArticles().articleFetch, now: new Date("2026-11-02T00:01:00.000Z"), ...PAID });
+    transport.nextPolls.push({ state: "pending" });
+    const retry = await advanceMediaProcessing(database.db, { runId: await authorizeRun(database, "extraction-retry", sourceIds(database)), transport, articleFetch: outletArticles().articleFetch, now: new Date("2026-11-02T00:02:00.000Z"), ...PAID });
+
+    expect(first.outputs.skipped).toBe(1);
+    expect(rerun.submitted).toBe(0);
+    expect(retry.submitted).toBe(1);
+    expect(transport.submissions).toHaveLength(2);
+  });
 });
