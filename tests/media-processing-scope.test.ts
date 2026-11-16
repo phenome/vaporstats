@@ -312,6 +312,35 @@ describe("processing scope", () => {
     await expect(authorizeMediaProcessing(database.db, runId)).resolves.toMatchObject({ runId, status: "queued" });
   });
 
+  test("a game whose Overview an earlier run left unbuilt gets no Overview work from a run that changes none of its contributions", async () => {
+    const database = unprocessedGame();
+    const transport = new ControlledGeminiTransport();
+    transport.countTokens = async (model, request) => {
+      if (JSON.stringify(request).includes("Synthesize")) throw new Error("synthesis count unavailable");
+      return ControlledGeminiTransport.prototype.countTokens.call(transport, model, request);
+    };
+    transport.nextPolls.push({ state: "succeeded", output: extractionOutput(), usage: SUCCEEDED_USAGE });
+    await advanceMediaProcessing(database.db, { runId: await authorizeRun(database, "unbuilt"), transport, articleFetch: outletArticles().articleFetch, now: new Date("2026-11-02T00:00:00.000Z"), ...PAID });
+    expect(await getMediaOverview(database.db, CYBERPUNK, { includeUnpublished: true })).toBeNull();
+    delete (transport as Partial<ControlledGeminiTransport>).countTokens;
+    const countsBefore = transport.counts.length;
+    const submissionsBefore = transport.submissions.length;
+
+    const unaffected = outletArticles();
+    const rerun = await advanceMediaProcessing(database.db, { runId: await authorizeRun(database, "unbuilt-rerun"), transport, articleFetch: unaffected.articleFetch, now: new Date("2026-11-02T00:01:00.000Z"), ...PAID });
+    const affected = outletArticles();
+    const refetch = await advanceMediaProcessing(database.db, { runId: await authorizeRun(database, "unbuilt-affected", sourceIds(database)), transport, articleFetch: affected.articleFetch, now: new Date("2026-11-02T00:02:00.000Z"), ...PAID });
+
+    expect(unaffected.fetched).toEqual([]);
+    expect(affected.fetched).toEqual(sourceUrls(database));
+    expect(transport.counts.length).toBe(countsBefore);
+    expect(transport.submissions.length).toBe(submissionsBefore);
+    for (const summary of [rerun, refetch]) {
+      expect(summary.submitted).toBe(0);
+      expect(summary.outputs).toEqual({ new: 0, reused: 1, replaced: 0, invalidated: 0, skipped: 0 });
+    }
+  });
+
   test("a failed extraction is retried only within an affected set", async () => {
     const database = unprocessedGame();
     const transport = new ControlledGeminiTransport();

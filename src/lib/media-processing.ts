@@ -625,6 +625,26 @@ function parseAffectedSourceIds(value: string): number[] {
   return Array.isArray(parsed) ? parsed.filter((id): id is number => Number.isSafeInteger(id) && id > 0) : [];
 }
 
+/** Records that `runId` changed `sourceId`'s active contribution: it activated or withdrew the source's extraction. */
+async function markContributionChanged(db: AppDatabase, sourceId: number, runId: number): Promise<void> {
+  await db.prepare("UPDATE media_sources SET contribution_run_id = ? WHERE id = ?").bind(runId, sourceId).run();
+}
+
+/**
+ * The games among `entities` whose current contributions `runId` changed. A
+ * run rebuilds an Overview, and embeds it, only for these games; any other
+ * game keeps its outputs whatever its version identities or earlier jobs.
+ */
+async function contributionChangedGames(db: AppDatabase, runId: number, entities: readonly number[]): Promise<Set<number>> {
+  const changed = await rows<{ appid: number }>(
+    db,
+    "SELECT DISTINCT appid FROM media_sources WHERE contribution_run_id = ? AND appid IN (SELECT value FROM json_each(?))",
+    runId,
+    JSON.stringify(entities),
+  );
+  return new Set(changed.map(({ appid }) => appid));
+}
+
 type ExtractionRow = { id: number; source_id: number; input_identity: string; content_hash: string; cleanup_version: string; model: string; config_version: string; output_json: string; active: number };
 type JobStage = "extraction" | "embedding" | "synthesis" | "explanation";
 type JobRow = { id: number; run_id: number; stage: JobStage; appid: number; matched_appid: number | null; dimension: SimilarityDimension | null; source_id: number | null; request_key: string; input_identity: string; model: string; config_version: string; max_input_tokens: number; max_output_tokens: number; reserved_microusd: number; charged_microusd: number | null; reservation_active: number; status: "reserved" | "submitted" | "succeeded" | "failed" | "uncertain" | "stale"; provider_batch_id: string | null; output_json: string | null; usage_json: string; error: string | null };
@@ -824,6 +844,7 @@ async function persistExtraction(db: AppDatabase, job: JobRow, output: unknown, 
     await countOutputs(db, job.run_id, earlier ? "replaced" : "new");
     await db.prepare("UPDATE media_article_extractions SET active = 0 WHERE source_id = ? AND active = 1").bind(source.id).run();
     await db.prepare("INSERT OR IGNORE INTO media_article_extractions (source_id, input_identity, content_hash, cleanup_version, model, config_version, output_json, active, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)").bind(source.id, job.input_identity, source.normalized_content_hash ?? "", CLEANUP_VERSION, job.model, job.config_version, stored, now.toISOString()).run();
+    await markContributionChanged(db, source.id, job.run_id);
     await db.prepare("UPDATE media_processing_jobs SET status = 'succeeded', output_json = ?, error = NULL, completed_at = ? WHERE id = ?").bind(stored, now.toISOString(), job.id).run();
     status = "succeeded";
   });
@@ -1194,10 +1215,11 @@ export function authorizeMediaProcessing(db: AppDatabase, runId: number, scope: 
 
 const JOB_COLUMNS = "id, run_id, stage, appid, matched_appid, dimension, source_id, request_key, input_identity, model, config_version, max_input_tokens, max_output_tokens, reserved_microusd, charged_microusd, reservation_active, status, provider_batch_id, output_json, usage_json, error";
 
+/** Embeds the active Overviews of `changedGames`, the games whose contributions `runId` changed. */
 async function scheduleEmbeddings(
   db: AppDatabase,
   runId: number,
-  processingEntities: readonly number[],
+  changedGames: readonly number[],
   transport: GeminiBatchTransport,
   secret: string | undefined,
   now: Date,
@@ -1205,7 +1227,7 @@ async function scheduleEmbeddings(
   const overviews = await rows<{ appid: number; input_identity: string; output_json: string }>(
     db,
     "SELECT appid, input_identity, output_json FROM media_game_overviews WHERE active = 1 AND appid IN (SELECT value FROM json_each(?)) ORDER BY appid",
-    JSON.stringify(processingEntities),
+    JSON.stringify(changedGames),
   );
   let submitted = 0;
   let stopReason: string | null = null;
@@ -1391,6 +1413,7 @@ async function advanceMediaProcessingNow(db: AppDatabase, options: MediaProcessi
         const overviews = await db.prepare("UPDATE media_game_overviews SET active = 0 WHERE appid = ? AND active = 1").bind(current.appid).run();
         const embeddings = await db.prepare("UPDATE media_game_embeddings SET active = 0 WHERE appid = ? AND active = 1").bind(current.appid).run();
         await countOutputs(db, auth.run_id, "invalidated", extractions.meta.changes + overviews.meta.changes + embeddings.meta.changes);
+        await markContributionChanged(db, source.id, auth.run_id);
       }
       const retained = kept ? null : content;
       await db.prepare("UPDATE media_sources SET normalized_content_hash = ?, cleanup_version = ?, processing_content = ?, processing_input_identity = ? WHERE id = ?").bind(hash, CLEANUP_VERSION, retained, identity, source.id).run();
@@ -1402,6 +1425,7 @@ async function advanceMediaProcessingNow(db: AppDatabase, options: MediaProcessi
       await transaction(db, async () => {
         await db.prepare("UPDATE media_article_extractions SET active = 0 WHERE source_id = ? AND active = 1").bind(source.id).run();
         await db.prepare("UPDATE media_article_extractions SET active = 1 WHERE id = ?").bind(knownExtraction.id).run();
+        await markContributionChanged(db, source.id, auth.run_id);
         await discardText(source.id);
       });
       source.processing_content = null;
@@ -1460,7 +1484,8 @@ async function advanceMediaProcessingNow(db: AppDatabase, options: MediaProcessi
   let uncertain = prePoll.uncertain + currentPoll.uncertain;
   const activeExtractions = await rows<ExtractionRow>(db, "SELECT e.id, e.source_id, e.input_identity, e.content_hash, e.cleanup_version, e.model, e.config_version, e.output_json, e.active FROM media_article_extractions e JOIN media_sources s ON s.id = e.source_id WHERE e.active = 1 AND s.appid IN (SELECT value FROM json_each(?))", JSON.stringify(processingEntities));
 
-  const appids = [...new Set(activeExtractions.map((row) => sourceById.get(row.source_id)?.appid).filter((appid): appid is number => typeof appid === "number"))];
+  const changedGames = await contributionChangedGames(db, auth.run_id, processingEntities);
+  const appids = [...new Set(activeExtractions.map((row) => sourceById.get(row.source_id)?.appid).filter((appid): appid is number => typeof appid === "number" && changedGames.has(appid)))];
   for (const appid of appids) {
     const pendingExtractions = Number((await first<{ count: number }>(
       db,
@@ -1507,7 +1532,7 @@ async function advanceMediaProcessingNow(db: AppDatabase, options: MediaProcessi
     if (!job || job.status !== "reserved") continue;
     if (await submitJob(db, job, request, transport, options.geminiApiKey, now, null) === "submitted") synthesisSubmitted += 1;
   }
-  const embeddingResult = await scheduleEmbeddings(db, auth.run_id, processingEntities, transport, options.geminiApiKey, now);
+  const embeddingResult = await scheduleEmbeddings(db, auth.run_id, [...changedGames], transport, options.geminiApiKey, now);
   embeddingSubmitted += embeddingResult.submitted;
   if (!stopReason && embeddingResult.stopReason) stopReason = embeddingResult.stopReason;
 

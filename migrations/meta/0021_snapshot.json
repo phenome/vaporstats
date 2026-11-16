@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "77286921-00a5-4810-9511-2c893a57dee4",
+  "id": "8904c883-03d3-4e56-8579-bc41b5424b8e",
   "prevId": "283ef3c4-334e-4e17-802e-7be78ce1533c",
   "tables": {
     "app_facet_memberships": {
@@ -2473,6 +2473,13 @@
         },
         "processing_run_id": {
           "name": "processing_run_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "contribution_run_id": {
+          "name": "contribution_run_id",
           "type": "integer",
           "primaryKey": false,
           "notNull": false,

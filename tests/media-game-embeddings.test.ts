@@ -95,6 +95,32 @@ function sourceIds(value: EmbeddingFixture): number[] {
   return value.native.query<{ id: number }, []>("SELECT id FROM media_sources ORDER BY id").all().map(({ id }) => id);
 }
 
+const TACTICAL_GAMEPLAY = ["Combat supports tactical builds"];
+const CITY_STORY = ["The campaign follows factions across a dense city"];
+
+/**
+ * Starts a run whose affected article now reads `article`, so the run rebuilds
+ * the game's Overview with `input`. Returns once the rebuilt Overview is active
+ * and its embedding work is submitted; `embeddings` answer that work.
+ */
+async function rebuildOverview(
+  value: EmbeddingFixture,
+  transport: ControlledGeminiTransport,
+  key: string,
+  input: { gameplay?: string[]; storyWorld?: string[] },
+  article: string,
+  embeddings: readonly Record<string, unknown>[] = [],
+): Promise<void> {
+  await startNextRun(value, key, sourceIds(value));
+  transport.nextPolls.push(
+    { state: "succeeded", output: extractionOutput(), usage: { inputTokens: 100, outputTokens: 20 } },
+    { state: "succeeded", output: overviewOutput(input), usage: { inputTokens: 100, outputTokens: 20 } },
+    ...embeddings.map((output) => ({ state: "succeeded" as const, output, usage: { inputTokens: 100 } })),
+  );
+  await advance(value, transport, article);
+  await advance(value, transport, article);
+}
+
 
 describe("game overview aggregate embeddings", () => {
   test("submits one canonical vector per supported dimension and no explanation work", async () => {
@@ -164,25 +190,16 @@ describe("game overview aggregate embeddings", () => {
     const value = fixture();
     const transport = new ControlledGeminiTransport({ embeddings: true });
     await completeInitial(value, transport);
-    await startNextRun(value, "changed-category");
     const before = transport.embeddingSubmissions.length;
-    await value.db.prepare("UPDATE media_game_overviews SET output_json = ? WHERE appid = ? AND active = 1").bind(JSON.stringify(overviewOutput({
-      gameplay: ["Combat supports tactical builds"],
-      storyWorld: ["The campaign follows factions across a dense city"],
-    })), APPID).run();
-    transport.nextPolls.push({ state: "succeeded", output: embeddingOutput(3), usage: { inputTokens: 100 } });
-    await advance(value, transport);
-    await advance(value, transport);
+    const changed = ARTICLE_HTML.replace("memorable", "notable");
+    await rebuildOverview(value, transport, "changed-category", { gameplay: TACTICAL_GAMEPLAY, storyWorld: CITY_STORY }, changed, [embeddingOutput(3)]);
+    await advance(value, transport, changed);
     expect(transport.embeddingSubmissions.length - before).toBe(1);
     expect(transport.embeddingSubmissions.at(-1)).toContain(":gameplay:");
     const activeAfterChange = await value.db.prepare("SELECT dimension FROM media_game_embeddings WHERE appid = ? AND active = 1 ORDER BY dimension").bind(APPID).all<{ dimension: string }>();
     expect(activeAfterChange.results?.map(({ dimension }) => dimension)).toEqual(["gameplay", "story_world"]);
-    await startNextRun(value, "removed-category");
 
-    await value.db.prepare("UPDATE media_game_overviews SET output_json = ? WHERE appid = ? AND active = 1").bind(JSON.stringify(overviewOutput({
-      gameplay: ["Combat supports tactical builds"],
-    })), APPID).run();
-    await advance(value, transport);
+    await rebuildOverview(value, transport, "removed-category", { gameplay: TACTICAL_GAMEPLAY }, ARTICLE_HTML.replace("memorable", "vivid"));
     const active = await value.db.prepare("SELECT dimension FROM media_game_embeddings WHERE appid = ? AND active = 1 ORDER BY dimension").bind(APPID).all<{ dimension: string }>();
     expect(active.results?.map(({ dimension }) => dimension)).toEqual(["gameplay"]);
     expect(transport.embeddingSubmissions.length - before).toBe(1);
@@ -212,11 +229,8 @@ describe("game overview aggregate embeddings", () => {
     const value = fixture();
     const transport = new ControlledGeminiTransport({ embeddings: true });
     await completeInitial(value, transport);
-    await startNextRun(value, "stale-completion");
-    await value.db.prepare("UPDATE media_game_overviews SET output_json = ? WHERE appid = ? AND active = 1").bind(JSON.stringify(overviewOutput({ gameplay: ["Combat supports tactical builds"], storyWorld: ["The campaign follows factions across a dense city"] })), APPID).run();
-    transport.nextPolls.push({ state: "succeeded", output: embeddingOutput(4), usage: { inputTokens: 100 } });
     const before = transport.embeddingSubmissions.length;
-    await advance(value, transport);
+    await rebuildOverview(value, transport, "stale-completion", { gameplay: TACTICAL_GAMEPLAY, storyWorld: CITY_STORY }, ARTICLE_HTML.replace("memorable", "notable"), [embeddingOutput(4)]);
     expect(transport.embeddingSubmissions.length).toBe(before + 1);
     await value.db.prepare("UPDATE media_game_overviews SET input_identity = ? WHERE appid = ? AND active = 1").bind("c".repeat(64), APPID).run();
     const result = await advanceMediaProcessing(value.db, {
@@ -234,14 +248,8 @@ describe("game overview aggregate embeddings", () => {
     const value = fixture();
     const transport = new ControlledGeminiTransport({ embeddings: true });
     await completeInitial(value, transport);
-    await startNextRun(value, "lost-eligibility");
-    await value.db.prepare("UPDATE media_game_overviews SET output_json = ? WHERE appid = ? AND active = 1").bind(JSON.stringify(overviewOutput({
-      gameplay: ["Combat supports tactical builds"],
-      storyWorld: ["The campaign follows factions across a dense city"],
-    })), APPID).run();
-    transport.nextPolls.push({ state: "succeeded", output: embeddingOutput(4), usage: { inputTokens: 100 } });
     const before = transport.embeddingSubmissions.length;
-    await advance(value, transport);
+    await rebuildOverview(value, transport, "lost-eligibility", { gameplay: TACTICAL_GAMEPLAY, storyWorld: CITY_STORY }, ARTICLE_HTML.replace("memorable", "notable"), [embeddingOutput(4)]);
     expect(transport.embeddingSubmissions.length).toBe(before + 1);
     await value.db.prepare("UPDATE apps SET is_eligible = 0 WHERE appid = ?").bind(APPID).run();
     const result = await advanceMediaProcessing(value.db, {
@@ -299,6 +307,33 @@ describe("game overview aggregate embeddings", () => {
     const jobs = await value.db.prepare("SELECT status, reservation_active FROM media_processing_jobs WHERE stage = 'embedding'").all<{ status: string; reservation_active: number }>();
     expect(jobs.results?.length).toBeGreaterThan(0);
     expect(jobs.results?.every((job) => job.status === "reserved" && job.reservation_active === 1)).toBe(true);
+  });
+
+  test("a run that changes none of a game's contributions submits no embedding work an earlier run left undone", async () => {
+    const value = fixture();
+    const transport = new ControlledGeminiTransport({ embeddings: true });
+    transport.countTokens = async (model, request) => {
+      if (model.includes("embedding")) throw new Error("embedding count unavailable");
+      return ControlledGeminiTransport.prototype.countTokens.call(transport, model, request);
+    };
+    await authorizeMediaProcessing(value.db, value.runId);
+    transport.nextPolls.push(
+      { state: "succeeded", output: extractionOutput(), usage: { inputTokens: 100, outputTokens: 20 } },
+      { state: "succeeded", output: overviewOutput(), usage: { inputTokens: 100, outputTokens: 20 } },
+    );
+    await advance(value, transport);
+    await advance(value, transport);
+    expect(transport.embeddingSubmissions).toEqual([]);
+    delete (transport as Partial<ControlledGeminiTransport>).countTokens;
+    const countsBefore = transport.counts.length;
+
+    await startNextRun(value, "embedding-rerun");
+    await advance(value, transport);
+    await startNextRun(value, "embedding-affected", sourceIds(value));
+    await advance(value, transport);
+
+    expect(transport.counts.length).toBe(countsBefore);
+    expect(transport.embeddingSubmissions).toEqual([]);
   });
 
   test("keeps aggregate reservations within the shared five-dollar bound", async () => {

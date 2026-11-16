@@ -1010,6 +1010,8 @@ export const mediaSources = sqliteTable(
     processingInputIdentity: text("processing_input_identity"),
     /** The authorized processing run that last took this source into processing; null while the source is new to processing. */
     processingRunId: integer("processing_run_id"),
+    /** The authorized processing run that last changed this source's active contribution; its game's Overview is rebuilt only by that run. */
+    contributionRunId: integer("contribution_run_id"),
   },
   (table) => [
     uniqueIndex("uq_media_sources_game_url").on(table.appid, table.originalUrl),
