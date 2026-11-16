@@ -1,7 +1,5 @@
 import { readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { drizzle } from "drizzle-orm/bun-sqlite";
-import { migrate } from "drizzle-orm/bun-sqlite/migrator";
 import { readMigrationFiles, type MigrationMeta } from "drizzle-orm/migrator";
 import { Database } from "bun:sqlite";
 
@@ -98,12 +96,83 @@ function adoptLegacyMigrations(
   }).immediate();
 }
 
+interface ForeignKeyViolation {
+  table: string;
+  rowid: number | null;
+  parent: string;
+  fkid: number;
+}
+
+function assertNoForeignKeyViolations(db: Database): void {
+  const violations = db
+    .query<ForeignKeyViolation, []>("PRAGMA foreign_key_check")
+    .all();
+  if (violations.length === 0) return;
+  const summary = violations
+    .slice(0, 10)
+    .map((violation) => violation.table + "(rowid " + violation.rowid + ") -> " + violation.parent)
+    .join(", ");
+  throw new Error(
+    "Migrations left " + violations.length + " foreign key violations: " + summary
+  );
+}
+
+/**
+ * Applies pending migrations in one transaction, mirroring drizzle's SQLite
+ * migrator ledger (same table, hash and created_at semantics), and checks
+ * foreign keys before committing so a violating migration rolls back.
+ */
+function applyPendingMigrations(db: Database, migrations: MigrationMeta[]): void {
+  db.exec(
+    "CREATE TABLE IF NOT EXISTS " +
+      DRIZZLE_MIGRATION_TABLE +
+      " (id SERIAL PRIMARY KEY, hash text NOT NULL, created_at numeric)"
+  );
+  const last = db
+    .query<{ created_at: number | string }, []>(
+      "SELECT created_at FROM " + DRIZZLE_MIGRATION_TABLE + " ORDER BY created_at DESC LIMIT 1"
+    )
+    .get();
+  const pending = migrations.filter(
+    (migration) => !last || Number(last.created_at) < migration.folderMillis
+  );
+  if (pending.length === 0) return;
+
+  const recordMigration = db.query(
+    "INSERT INTO " + DRIZZLE_MIGRATION_TABLE + " (hash, created_at) VALUES (?, ?)"
+  );
+  db.transaction(() => {
+    for (const migration of pending) {
+      for (const statement of migration.sql) db.prepare(statement).run();
+      recordMigration.run(migration.hash, migration.folderMillis);
+    }
+    assertNoForeignKeyViolations(db);
+  }).immediate();
+}
+
+/**
+ * The single migration procedure for every entry point (app startup,
+ * `db:migrate`, migration checks and test fixtures). SQLite ignores
+ * `PRAGMA foreign_keys` inside a transaction, so foreign keys are disabled
+ * here, outside the migration transaction, which keeps table rebuilds from
+ * cascading deletes or failing on referenced parents. `foreign_key_check`
+ * must be empty before commit, and the caller's foreign-key setting is
+ * restored afterwards.
+ */
 export function applyMigrations(db: Database, directory = migrationsDirectory): void {
+  if (db.inTransaction) {
+    throw new Error("Migrations cannot run inside an open transaction");
+  }
   const entries = readJournal(directory);
   const migrations = readMigrationFiles({ migrationsFolder: directory });
-  adoptLegacyMigrations(db, entries, migrations);
-  migrate(drizzle(db), {
-    migrationsFolder: directory,
-    migrationsTable: DRIZZLE_MIGRATION_TABLE,
-  });
+  const foreignKeys = db
+    .query<{ foreign_keys: number }, []>("PRAGMA foreign_keys")
+    .get()?.foreign_keys;
+  db.exec("PRAGMA foreign_keys = OFF");
+  try {
+    adoptLegacyMigrations(db, entries, migrations);
+    applyPendingMigrations(db, migrations);
+  } finally {
+    db.exec("PRAGMA foreign_keys = " + (foreignKeys === 1 ? "ON" : "OFF"));
+  }
 }
