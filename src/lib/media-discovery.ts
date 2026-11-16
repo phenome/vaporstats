@@ -815,9 +815,13 @@ export async function runAuthorizedMediaDiscovery(db: AppDatabase, options: Medi
               body: JSON.stringify({ query, search_depth: "basic", auto_parameters: false, include_domains: [outlet.domain], max_results: 10, include_answer: false, include_raw_content: false, include_usage: true }),
             });
           } catch (error) {
-            await finishOutletAttempt(db, attemptId, { kind: "failure", statusCode: null, succeeded: false, error: boundedError(error) });
-            await db.prepare("UPDATE media_discovery_progress SET query_attempted_at = ?, status = 'completed', stop_reason = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(attemptNow.toISOString(), `search_error:${boundedError(error)}`, progressId).run();
-            stopReasons.add(`${outlet.name}:search_error`);
+            // The search provider could not be reached, so no search was served:
+            // stop searching for the rest of the run as a provider stop, leave
+            // every outlet open, and keep the query for the next authorized run.
+            await finishOutletAttempt(db, attemptId, { kind: "search", statusCode: null, succeeded: false, error: boundedError(error) });
+            await releaseRefusedQuery(db, progressId, "queued", "tavily_search_error");
+            stopReasons.add("tavily_search_error");
+            searchesStopped = true;
             continue;
           }
           await finishOutletAttempt(db, attemptId, { kind: "search", statusCode: response.status, succeeded: response.ok, error: response.ok ? null : `HTTP ${response.status}` });
