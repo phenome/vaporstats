@@ -131,6 +131,11 @@ class SqliteAppDatabase implements AppDatabase {
    * The single serialized write path for work that awaits between
    * statements: transactions run one at a time, in call order, as
    * BEGIN IMMEDIATE ... COMMIT, and roll back if the work throws.
+   *
+   * The work may await only its own database calls and plain computation.
+   * Awaiting a promise that another call chain started (a shared cache
+   * entry, another queue's job) deadlocks: that chain's database calls wait
+   * for this transaction, which waits for them.
    */
   async writeTransaction<T>(work: () => Promise<T>): Promise<T> {
     if (this.#active && this.#owner.getStore() === this.#active) {
@@ -207,8 +212,6 @@ function configureDatabase(database: Database): void {
   database.exec("PRAGMA foreign_keys = ON");
   database.exec("PRAGMA busy_timeout = 5000");
 }
-
-export type { SqliteAppDatabase };
 
 /**
  * Opens a Bun SQLite database exactly as the application does: production

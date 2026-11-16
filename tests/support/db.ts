@@ -29,8 +29,9 @@ export function openTestDatabase(prefix = "vaporstats-test-"): TestDatabase {
   const handles = [openSqliteAppDatabase(databasePath)];
   const current = () => handles[handles.length - 1]!;
   return {
-    native: current().native,
-    db: current(),
+    /** Always the open handle, including after reopen(). */
+    get native() { return current().native; },
+    get db() { return current(); },
     databasePath,
     directory,
     reopen() {

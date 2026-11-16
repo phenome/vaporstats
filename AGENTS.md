@@ -25,5 +25,6 @@ Repository artifacts are written for external collaborators and readers.
 - Migrations change schema and transform existing data; they never seed catalog or observation data. Keep ingestion separate.
 - Commit the reviewed SQL with its Drizzle journal and snapshots. Treat applied migrations as immutable; corrections require a new migration.
 - Verify migration behavior on both an empty database and an existing database with representative retained rows.
+- Migrations run with foreign keys off and must leave every reference valid: a table rebuild copies its rows back intact, and a migration that deletes or remaps parent rows handles their children explicitly. The procedure rejects any remaining `foreign_key_check` violation.
 - Deployments apply committed migrations after stopping the single writer and taking a database snapshot; they never generate migrations or use schema push. Read [ADR 0004](docs/adr/0004-reviewed-sqlite-migrations.md) and [ADR 0016](docs/adr/0016-foreign-key-safe-sqlite-migrations.md) before changing migration or deployment behavior.
 
