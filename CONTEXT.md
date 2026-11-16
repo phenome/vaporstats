@@ -172,6 +172,9 @@ A characteristic of a game supported by attributed media coverage, organized wit
 **Media Discovery Tag**:
 A shared, normalized label for a coverage-supported game characteristic, used to find games with that characteristic. Its wording is independent of the game summary, and it is distinct from a Steam Catalog Facet.
 
+**Authorized Affected Set**:
+The media sources a processing run is explicitly authorized to refetch and reprocess in addition to sources new to processing. It may be empty. Sources outside it keep their outputs without a fetch or paid work. Within it, paid re-extraction happens only when an article's cleaned content changes; a metadata, cleanup, model, or configuration version change alone keeps the active output.
+
 **Monthly Score Comparison**:
 An earlier score comparison for the games eligible in a selected catalog group now. It may use a Reconstructed Player Score when no Recorded Player Score exists; missing historical evidence remains missing, and the comparison does not assert that the same games were eligible then.
 
