@@ -851,6 +851,51 @@ async function persistExtraction(db: AppDatabase, job: JobRow, output: unknown, 
   return status;
 }
 
+type GameEvidence = { sources: SourceRow[]; extractions: ExtractionRow[]; evidenceSources: Map<string, MediaEvidenceSource> };
+
+/** `appid`'s sources, its active extractions, and the evidence each current extraction lends an Overview. */
+async function currentGameEvidence(db: AppDatabase, appid: number): Promise<GameEvidence> {
+  const sources = await rows<SourceRow>(db, `SELECT ${SOURCE_COLUMNS} FROM media_sources WHERE appid = ?`, appid);
+  const extractions = await rows<ExtractionRow>(db, "SELECT id, source_id, input_identity, content_hash, cleanup_version, model, config_version, output_json, active FROM media_article_extractions WHERE source_id IN (SELECT id FROM media_sources WHERE appid = ?) AND active = 1", appid);
+  const sourceById = new Map(sources.map((source) => [source.id, source]));
+  const evidenceSources = new Map<string, MediaEvidenceSource>();
+  for (const extraction of extractions) {
+    const source = sourceById.get(extraction.source_id);
+    if (!source) continue;
+    const originatingAssessment = parseExtraction(extraction.output_json).originatingAssessment;
+    evidenceSources.set(source.original_url, createMediaEvidenceSource({
+      outlet: source.outlet,
+      url: source.original_url,
+      contentHash: extraction.content_hash,
+      author: source.author,
+      title: source.title,
+      originatingAssessment,
+      current: true,
+    }));
+  }
+  return { sources, extractions, evidenceSources };
+}
+
+/**
+ * Rewrites `appid`'s tag memberships to the tags of `overview`, the Overview
+ * becoming active, each tied to the current extraction of a source it cites.
+ * Every activation of an Overview calls it, so tag results match the active
+ * Overview.
+ */
+async function replaceTagMemberships(db: AppDatabase, appid: number, overview: unknown, evidence: GameEvidence, now: Date): Promise<void> {
+  await db.prepare("DELETE FROM media_tag_memberships WHERE appid = ?").bind(appid).run();
+  const sourceByUrl = new Map(evidence.sources.map((source) => [source.original_url, source]));
+  const extractionBySourceId = new Map(evidence.extractions.map((extraction) => [extraction.source_id, extraction]));
+  for (const { tag, sourceUrls } of parseMediaTagEvidence(overview, evidence.evidenceSources)) {
+    for (const sourceUrl of sourceUrls) {
+      const source = sourceByUrl.get(sourceUrl);
+      const extraction = source ? extractionBySourceId.get(source.id) : undefined;
+      if (!source || !extraction) continue;
+      await db.prepare("INSERT OR IGNORE INTO media_tag_memberships (appid, tag_slug, tag_label, source_id, extraction_input_identity, created_at) VALUES (?, ?, ?, ?, ?, ?)").bind(appid, tag.slug, tag.label, source.id, extraction.input_identity, now.toISOString()).run();
+    }
+  }
+}
+
 async function persistOverview(db: AppDatabase, job: JobRow, output: unknown, now: Date): Promise<"succeeded" | "stale" | "failed"> {
   let status: "succeeded" | "stale" | "failed" = "failed";
   await transaction(db, async () => {
@@ -864,29 +909,12 @@ async function persistOverview(db: AppDatabase, job: JobRow, output: unknown, no
       status = "stale";
       return;
     }
-    const sources = await rows<SourceRow>(db, `SELECT ${SOURCE_COLUMNS} FROM media_sources WHERE appid = ?`, job.appid);
-    const extractions = await rows<ExtractionRow>(db, "SELECT id, source_id, input_identity, content_hash, cleanup_version, model, config_version, output_json, active FROM media_article_extractions WHERE source_id IN (SELECT id FROM media_sources WHERE appid = ?) AND active = 1", job.appid);
-    if (synthesisIdentity(job.appid, extractions) !== job.input_identity) {
+    const evidence = await currentGameEvidence(db, job.appid);
+    const { evidenceSources } = evidence;
+    if (synthesisIdentity(job.appid, evidence.extractions) !== job.input_identity) {
       await db.prepare("UPDATE media_processing_jobs SET status = 'stale', completed_at = ? WHERE id = ?").bind(now.toISOString(), job.id).run();
       status = "stale";
       return;
-    }
-    const sourceById = new Map(sources.map((source) => [source.id, source]));
-    const sourceByUrl = new Map(sources.map((source) => [source.original_url, source]));
-    const evidenceSources = new Map<string, MediaEvidenceSource>();
-    for (const extraction of extractions) {
-      const source = sourceById.get(extraction.source_id);
-      if (!source) continue;
-      const originatingAssessment = parseExtraction(extraction.output_json).originatingAssessment;
-      evidenceSources.set(source.original_url, createMediaEvidenceSource({
-        outlet: source.outlet,
-        url: source.original_url,
-        contentHash: extraction.content_hash,
-        author: source.author,
-        title: source.title,
-        originatingAssessment,
-        current: true,
-      }));
     }
     const tagEvidence = parseMediaTagEvidence(output, evidenceSources);
     const overview = parseMediaOverview(output, job.appid, evidenceSources);
@@ -916,16 +944,7 @@ async function persistOverview(db: AppDatabase, job: JobRow, output: unknown, no
     await countOutputs(db, job.run_id, earlier ? "replaced" : "new");
     await db.prepare("UPDATE media_game_overviews SET active = 0 WHERE appid = ? AND active = 1").bind(job.appid).run();
     await db.prepare("INSERT OR IGNORE INTO media_game_overviews (appid, input_identity, model, config_version, output_json, active, created_at) VALUES (?, ?, ?, ?, ?, 1, ?)").bind(job.appid, job.input_identity, job.model, job.config_version, JSON.stringify(storedOverview), now.toISOString()).run();
-    await db.prepare("DELETE FROM media_tag_memberships WHERE appid = ?").bind(job.appid).run();
-    const extractionBySourceId = new Map(extractions.map((extraction) => [extraction.source_id, extraction]));
-    for (const { tag, sourceUrls } of tagEvidence) {
-      for (const sourceUrl of sourceUrls) {
-        const source = sourceByUrl.get(sourceUrl);
-        const extraction = source ? extractionBySourceId.get(source.id) : undefined;
-        if (!source || !extraction) continue;
-        await db.prepare("INSERT OR IGNORE INTO media_tag_memberships (appid, tag_slug, tag_label, source_id, extraction_input_identity, created_at) VALUES (?, ?, ?, ?, ?, ?)").bind(job.appid, tag.slug, tag.label, source.id, extraction.input_identity, now.toISOString()).run();
-      }
-    }
+    await replaceTagMemberships(db, job.appid, storedOverview, evidence, now);
     await db.prepare("UPDATE media_processing_jobs SET status = 'succeeded', output_json = ?, error = NULL, completed_at = ? WHERE id = ?").bind(JSON.stringify(storedOverview), now.toISOString(), job.id).run();
     status = "succeeded";
   });
@@ -1503,11 +1522,12 @@ async function advanceMediaProcessingNow(db: AppDatabase, options: MediaProcessi
     const activeOverview = await first<{ input_identity: string; model: string; config_version: string }>(db, "SELECT input_identity, model, config_version FROM media_game_overviews WHERE appid = ? AND active = 1 ORDER BY id DESC LIMIT 1", appid);
     if (activeOverview && synthesisIdentityFor(appid, appExtractions, activeOverview.model, activeOverview.config_version) === activeOverview.input_identity) continue;
     const identity = synthesisIdentity(appid, appExtractions);
-    const old = await first<{ input_identity: string; id: number; active: number }>(db, "SELECT input_identity, id, active FROM media_game_overviews WHERE appid = ? AND input_identity = ? ORDER BY id DESC LIMIT 1", appid, identity);
+    const old = await first<{ id: number; output_json: string }>(db, "SELECT id, output_json FROM media_game_overviews WHERE appid = ? AND input_identity = ? ORDER BY id DESC LIMIT 1", appid, identity);
     if (old) {
       await transaction(db, async () => {
         await db.prepare("UPDATE media_game_overviews SET active = 0 WHERE appid = ? AND active = 1").bind(appid).run();
         await db.prepare("UPDATE media_game_overviews SET active = 1 WHERE id = ?").bind(old.id).run();
+        await replaceTagMemberships(db, appid, old.output_json, await currentGameEvidence(db, appid), now);
       });
       continue;
     }

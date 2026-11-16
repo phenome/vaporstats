@@ -341,6 +341,31 @@ describe("processing scope", () => {
     }
   });
 
+  test("an Overview reactivated by identity serves its own tags again", async () => {
+    const { database, transport } = await processedGame();
+    const [url] = sourceUrls(database);
+    const original = processingArticleHtml(CYBERPUNK);
+    const corrected = original.replace("flexible combat", "deliberate tactical combat");
+    transport.nextPolls.push(
+      { state: "succeeded", output: extractionOutput("tactical depth"), usage: SUCCEEDED_USAGE },
+      { state: "succeeded", output: { ...overviewOutputForUrls([url!]), tags: [{ label: "Tactical depth", sourceUrls: [url!] }] }, usage: SUCCEEDED_USAGE },
+    );
+    const correction = await authorizeRun(database, "tactical", sourceIds(database));
+    for (const minute of [0, 1]) {
+      await advanceMediaProcessing(database.db, { runId: correction, transport, articleFetch: outletArticles({ [url!]: corrected }).articleFetch, now: new Date(`2026-11-02T00:0${minute}:00.000Z`), ...PAID });
+    }
+    expect(await gamesTagged(database, "tactical depth")).toEqual([CYBERPUNK]);
+    const submissionsBefore = transport.submissions.length;
+
+    const reverted = await advanceMediaProcessing(database.db, { runId: await authorizeRun(database, "reverted", sourceIds(database)), transport, articleFetch: outletArticles({ [url!]: original }).articleFetch, now: new Date("2026-11-02T00:02:00.000Z"), ...PAID });
+
+    expect(reverted.status).toBe("completed");
+    expect(transport.submissions.length).toBe(submissionsBefore);
+    expect(await getMediaOverview(database.db, CYBERPUNK, { includeUnpublished: true })).not.toBeNull();
+    expect(await gamesTagged(database, "tactical depth")).toEqual([]);
+    expect(await gamesTagged(database, "build experimentation")).toEqual([CYBERPUNK]);
+  });
+
   test("a failed extraction is retried only within an affected set", async () => {
     const database = unprocessedGame();
     const transport = new ControlledGeminiTransport();
