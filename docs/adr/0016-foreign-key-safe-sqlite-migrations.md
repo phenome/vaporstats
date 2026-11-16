@@ -15,11 +15,11 @@ SQLite changes a constraint by rebuilding the table: create a replacement, copy 
 1. Refuse to run inside an open transaction, where the foreign-key pragma cannot change.
 2. Record the connection's foreign-key setting and turn foreign keys off, outside the migration transaction.
 3. Adopt the legacy `schema_migrations` ledger as described in ADR 0004.
-4. Apply pending migrations in one `BEGIN IMMEDIATE` transaction. The procedure keeps drizzle's ledger semantics: the same `__drizzle_migrations` table, hash, and `created_at` ordering.
-5. Before commit, `PRAGMA foreign_key_check` must return no rows. Any violation fails the migration and rolls back its schema, data and history, preserving ADR 0004's atomicity.
+4. Apply pending migrations with drizzle's migrator, unchanged. It runs them in one transaction, which now executes with foreign keys off.
+5. When any migration was applied, `PRAGMA foreign_key_check` must return no rows. A violation fails the migration step. The migrator has already committed at that point, so recovery is the pre-migration snapshot that deployment takes and restores on failure (ADR 0004).
 6. Restore the recorded foreign-key setting, including after a failure.
 
-The procedure applies statements itself instead of calling drizzle's migrator. drizzle's migrator commits without a hook for checks before commit. Generated SQL, journals and snapshots still come from `bun run db:generate` and follow ADR 0004's review rules.
+The project keeps drizzle's migrator rather than reimplementing its ledger. Disabling foreign keys before the migrator starts is enough to make rebuilds safe. A check before commit would need a copy of drizzle's apply loop, and the deployment snapshot already provides rollback. Generated SQL, journals and snapshots still come from `bun run db:generate` and follow ADR 0004's review rules.
 
 Rebuild migrations can rely on foreign keys being off. They must leave every reference valid. A migration that deletes or remaps parent rows also handles their children explicitly.
 
