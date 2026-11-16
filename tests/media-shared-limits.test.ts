@@ -222,6 +222,33 @@ describe("outlet stops across passes", () => {
     expect(reopened.queries).toBe(MEDIA_OUTLETS.length);
   });
 
+  test("exhausted search credits stop the run and leave the unissued query for the next authorized run, which issues it once", async () => {
+    const database = fixture();
+    const oneCredit = discoveryFetch();
+    const oneCreditFetch = async (input: RequestInfo | URL, init?: RequestInit) =>
+      String(input).endsWith("/usage")
+        ? Response.json({ account: { current_plan: "free" }, plan_usage: 99, plan_limit: 100, paygo_usage: 0, paygo_limit: 0 })
+        : oneCredit.fetchFn(input, init);
+    const first = await authorizeMediaRun(database.db, { pass: "initial", games: [CYBERPUNK] });
+    const stopped = await runAuthorizedMediaDiscovery(database.db, { runId: first.runId, tavilyApiKey: "test-key", fetch: oneCreditFetch, now: DAY_ONE });
+
+    expect(stopped.status).toBe("stopped");
+    expect(stopped.stopReasons).toEqual(["tavily_credits_exhausted"]);
+    expect(stopped.queries).toBe(1);
+    expect(outletCalls(oneCredit.calls, "eurogamer.net")).toEqual({ searches: 0, fetches: 0 });
+    expect(progress(database, "initial", "Eurogamer")).toEqual({ status: "queued", stop_reason: "tavily_credits_exhausted" });
+
+    const resumed = await authorizeMediaRun(database.db, { pass: "initial", games: [CYBERPUNK] });
+    const { calls, fetchFn } = discoveryFetch();
+    const rerun = await runAuthorizedMediaDiscovery(database.db, { runId: resumed.runId, tavilyApiKey: "test-key", fetch: fetchFn, now: DAY_ONE_LATE });
+
+    expect(rerun.status).toBe("completed");
+    expect(outletCalls(calls, "ign.com")).toEqual({ searches: 0, fetches: 0 });
+    expect(outletCalls(calls, "eurogamer.net")).toEqual({ searches: 1, fetches: 1 });
+    expect(progress(database, "initial", "Eurogamer")).toEqual({ status: "completed", stop_reason: null });
+    expect(rerun.queries).toBe(MEDIA_OUTLETS.length);
+  });
+
   test("a same-day initial-pass rate limit stops later-pass work that day and reopens on the next UTC day", async () => {
     const database = fixture();
     const limited = discoveryFetch({ variants: { [`https://ign.com/articles/${CYBERPUNK}-ign-com`]: { status: 429, body: " " } } });

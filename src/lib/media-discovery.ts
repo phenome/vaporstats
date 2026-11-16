@@ -574,7 +574,7 @@ async function stopProgress(db: AppDatabase, progressId: number, reason: string)
 }
 
 /**
- * Returns a query the search provider refused to the row's unsearched state,
+ * Returns a query the search provider refused, or could not serve, to the row's unsearched state,
  * keeping `reason` on the row until the query is issued again. No search was
  * served, so the entity, outlet and pass keep their one query.
  */
@@ -780,8 +780,12 @@ export async function runAuthorizedMediaDiscovery(db: AppDatabase, options: Medi
         if (!current.query_attempted_at) {
           if (searchesStopped) continue;
           if (searchCreditBudget !== null && searchesIssued >= searchCreditBudget) {
-            await stopProgress(db, progressId, "tavily_credits_exhausted");
+            // No credit is left for this query: stop searching for the rest of
+            // the run as a provider stop and keep the query for the next
+            // authorized run.
+            await releaseRefusedQuery(db, progressId, "queued", "tavily_credits_exhausted");
             stopReasons.add("tavily_credits_exhausted");
+            searchesStopped = true;
             continue;
           }
           // The query bound is one search per eligible entity, outlet and pass, so
