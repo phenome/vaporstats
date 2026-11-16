@@ -19,9 +19,16 @@ async function first<T>(db: AppDatabase, query: string, ...values: unknown[]): P
   return db.prepare(query).bind(...values).first<T>();
 }
 
+/**
+ * A search the provider refused (401, 403 or 429) was never served, so it is
+ * not anything the outlet did: it uses none of the outlet's attempts and never
+ * limits or denies it. The attempt stays in the log as the provider stop's record.
+ */
+const SERVED_ATTEMPT_SQL = "NOT (kind = 'search' AND COALESCE(status_code, 0) IN (401, 403, 429))";
+
 /** Search, fetch, redirect and failed attempts on `outlet` during `date`'s UTC day, from every pass and stage. */
 async function attemptsToday(db: AppDatabase, outlet: MediaOutlet, date: Date): Promise<number> {
-  const row = await first<{ count: number }>(db, "SELECT COUNT(*) AS count FROM media_discovery_attempts WHERE outlet = ? AND day = ?", outlet, dayKey(date));
+  const row = await first<{ count: number }>(db, `SELECT COUNT(*) AS count FROM media_discovery_attempts WHERE outlet = ? AND day = ? AND ${SERVED_ATTEMPT_SQL}`, outlet, dayKey(date));
   return Number(row?.count ?? 0);
 }
 
@@ -42,19 +49,18 @@ async function outletDenial(db: AppDatabase, outlet: MediaOutlet): Promise<strin
 
 /**
  * Why `outlet` must not be contacted during `date`'s UTC day, whichever pass
- * or stage recorded it: the daily attempt cap, or a rate limit that day.
- * Both reopen on the next UTC day.
+ * or stage recorded it: the daily attempt cap, or a rate limit the outlet
+ * returned to an article fetch that day. Both reopen on the next UTC day.
  */
 async function outletDayStop(db: AppDatabase, outlet: MediaOutlet, date: Date): Promise<string | null> {
   if ((await attemptsToday(db, outlet, date)) >= MAX_ATTEMPTS_PER_OUTLET_DAY) return "daily_attempt_cap";
-  const limited = await first<{ kind: string }>(
+  const limited = await first<{ id: number }>(
     db,
-    "SELECT kind FROM media_discovery_attempts WHERE outlet = ? AND day = ? AND status_code = 429 ORDER BY id LIMIT 1",
+    "SELECT id FROM media_discovery_attempts WHERE outlet = ? AND day = ? AND kind = 'fetch' AND status_code = 429 LIMIT 1",
     outlet,
     dayKey(date),
   );
-  if (!limited) return null;
-  return limited.kind === "search" ? "search_http_429" : "fetch_http_429";
+  return limited ? "fetch_http_429" : null;
 }
 
 /** Why `outlet` must not be contacted at `date`: a lasting access denial first, then a same-day stop. */

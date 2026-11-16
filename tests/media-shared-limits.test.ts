@@ -183,6 +183,34 @@ describe("outlet stops across passes", () => {
     expect(rerun.queries).toBe(MEDIA_OUTLETS.length);
   });
 
+  test("a search provider rate limit stops searching for the run without limiting the outlet, and its query reopens on the next UTC day", async () => {
+    const database = fixture();
+    const limited = discoveryFetch();
+    const limitedFetch = async (input: RequestInfo | URL, init?: RequestInit) =>
+      String(input).endsWith("/search") ? (limited.calls.push({ url: String(input), init }), new Response("", { status: 429 })) : limited.fetchFn(input, init);
+    const first = await authorizeMediaRun(database.db, { pass: "initial", games: [CYBERPUNK] });
+    const stopped = await runAuthorizedMediaDiscovery(database.db, { runId: first.runId, tavilyApiKey: "test-key", fetch: limitedFetch, now: DAY_ONE });
+
+    expect(stopped.status).toBe("stopped");
+    expect(stopped.stopReasons).toEqual(["tavily_search_http_429"]);
+    expect(stopped.queries).toBe(0);
+    expect(limited.calls.filter((call) => call.url.endsWith("/search"))).toHaveLength(1);
+    expect(progress(database, "initial", "IGN")).toEqual({ status: "stopped", stop_reason: "tavily_search_http_429" });
+
+    const sameDay = discoveryFetch();
+    const sameDayRun = await authorizeMediaRun(database.db, { pass: "initial", games: [CYBERPUNK] });
+    await runAuthorizedMediaDiscovery(database.db, { runId: sameDayRun.runId, tavilyApiKey: "test-key", fetch: sameDay.fetchFn, now: DAY_ONE_LATE });
+    expect(outletCalls(sameDay.calls, "ign.com")).toEqual({ searches: 0, fetches: 0 });
+    expect(outletCalls(sameDay.calls, "eurogamer.net")).toEqual({ searches: 1, fetches: 1 });
+
+    const nextDay = discoveryFetch();
+    const nextDayRun = await authorizeMediaRun(database.db, { pass: "initial", games: [CYBERPUNK] });
+    const reopened = await runAuthorizedMediaDiscovery(database.db, { runId: nextDayRun.runId, tavilyApiKey: "test-key", fetch: nextDay.fetchFn, now: DAY_TWO });
+    expect(outletCalls(nextDay.calls, "ign.com")).toEqual({ searches: 1, fetches: 1 });
+    expect(progress(database, "initial", "IGN")).toEqual({ status: "completed", stop_reason: null });
+    expect(reopened.queries).toBe(MEDIA_OUTLETS.length);
+  });
+
   test("a same-day initial-pass rate limit stops later-pass work that day and reopens on the next UTC day", async () => {
     const database = fixture();
     const limited = discoveryFetch({ variants: { [`https://ign.com/articles/${CYBERPUNK}-ign-com`]: { status: 429, body: " " } } });
@@ -398,15 +426,20 @@ describe("processing limits across passes", () => {
     expect(summary.stopReasons).toContain("IGN:fetch_http_403");
   });
 
-  test("a same-day rate limit from discovery stops processing fetches on that outlet", async () => {
+  test("a same-day search provider rate limit neither limits the outlet's article fetches nor uses its daily attempts", async () => {
     const database = fixture();
-    database.native.prepare("INSERT INTO media_discovery_attempts (appid, outlet, pass, day, kind, status_code, succeeded, attempted_at) VALUES (?, 'IGN', 'initial', '2026-09-10', 'search', 429, 0, '2026-09-10T01:00:00.000Z')").run(CYBERPUNK);
-    insertSources(database.native, CYBERPUNK, "initial", 2, IGN);
-    const { fetched, advance } = await processingRun(database);
+    seedAttempts(database, "IGN", "initial", "2026-09-10", 29);
+    const limitedFetch = async (input: RequestInfo | URL, init?: RequestInit) =>
+      String(input).endsWith("/search") ? new Response("", { status: 429 }) : discoveryFetch().fetchFn(input, init);
+    const later = insertLaterRun(database.native, [CYBERPUNK]);
+    const discovery = await runAuthorizedMediaDiscovery(database.db, { runId: later, tavilyApiKey: "test-key", fetch: limitedFetch, now: DAY_ONE });
+    expect(discovery.stopReasons).toEqual(["tavily_search_http_429"]);
 
+    insertSources(database.native, BALDURS_GATE, "initial", 1, IGN);
+    const { fetched, advance } = await processingRunFor(database, [BALDURS_GATE]);
     const summary = await advance(DAY_ONE);
 
-    expect(fetched).toEqual([]);
-    expect(summary.stopReasons).toContain("IGN:search_http_429");
+    expect(fetched).toEqual([`https://ign.com/articles/${BALDURS_GATE}-initial-seeded-0`]);
+    expect(summary.stopReasons.filter((reason) => reason.startsWith("IGN:"))).toEqual([]);
   });
 });

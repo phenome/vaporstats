@@ -330,13 +330,30 @@ async function reopenDayScopedProgress(
      WHERE pass = ?
        AND appid IN (SELECT value FROM json_each(?))
        AND status = 'stopped'
-       AND stop_reason IN ('daily_attempt_cap', 'search_http_429', 'fetch_http_429')
        AND (
-         SELECT MAX(attempt.day)
-         FROM media_discovery_attempts AS attempt
-         WHERE attempt.outlet = media_discovery_progress.outlet
-       ) < ?`,
-  ).bind(runId, pass, gamesJson, day).run();
+         (
+           stop_reason IN ('daily_attempt_cap', 'search_http_429', 'fetch_http_429')
+           AND (
+             SELECT MAX(attempt.day)
+             FROM media_discovery_attempts AS attempt
+             WHERE attempt.outlet = media_discovery_progress.outlet
+           ) < ?
+         )
+         OR (
+           stop_reason = 'tavily_search_http_429'
+           AND NOT EXISTS (
+             SELECT 1
+             FROM media_discovery_attempts AS attempt
+             WHERE attempt.appid = media_discovery_progress.appid
+               AND attempt.outlet = media_discovery_progress.outlet
+               AND attempt.pass = media_discovery_progress.pass
+               AND attempt.kind = 'search'
+               AND attempt.status_code = 429
+               AND attempt.day >= ?
+           )
+         )
+       )`,
+  ).bind(runId, pass, gamesJson, day, day).run();
 }
 
 async function authorizeMediaRunNow(
@@ -721,6 +738,7 @@ export async function runAuthorizedMediaDiscovery(db: AppDatabase, options: Medi
     await reopenDayScopedProgress(db, run.id, pass, targetAppids, dayKey(clock()));
     const stopReasons = new Set<string>();
     const stoppedOutlets = new Set<MediaOutlet>();
+    let searchesStopped = false;
     let searchCreditBudget: number | null = null;
     let searchesIssued = 0;
     let searchCreditsConsumed = 0;
@@ -760,6 +778,7 @@ export async function runAuthorizedMediaDiscovery(db: AppDatabase, options: Medi
         let candidates = json<Candidate[]>(current.candidate_urls, []).filter((candidate) => typeof candidate?.url === "string");
         let index = current.candidate_index;
         if (!current.query_attempted_at) {
+          if (searchesStopped) continue;
           if (searchCreditBudget !== null && searchesIssued >= searchCreditBudget) {
             await stopProgress(db, progressId, "tavily_credits_exhausted");
             stopReasons.add("tavily_credits_exhausted");
@@ -806,6 +825,15 @@ export async function runAuthorizedMediaDiscovery(db: AppDatabase, options: Medi
             stopReasons.add(reason);
             break;
           }
+          if (response.status === 429) {
+            // The search provider's rate limit, not the outlet's: stop searching
+            // for the rest of the run and retry this query on the next UTC day.
+            const reason = "tavily_search_http_429";
+            await releaseRefusedQuery(db, progressId, "stopped", reason);
+            stopReasons.add(reason);
+            searchesStopped = true;
+            continue;
+          }
           const body = await response.json().catch(() => ({}));
           const providerRequestId = cleanText(jsonObject(body).request_id ?? jsonObject(body).requestId);
           const usage = jsonObject(jsonObject(body).usage);
@@ -818,12 +846,6 @@ export async function runAuthorizedMediaDiscovery(db: AppDatabase, options: Medi
             : [];
           await db.prepare("UPDATE media_discovery_progress SET query_attempted_at = ?, status = 'fetching', candidate_urls = ?, candidate_index = 0, provider_request_id = ?, credits_used = ?, usage = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(attemptNow.toISOString(), JSON.stringify(candidates), providerRequestId, typeof (usage.credits ?? usage.credits_used) === "number" ? (usage.credits ?? usage.credits_used) : null, JSON.stringify(usage), progressId).run();
           await db.prepare("UPDATE media_discovery_runs SET query_count = query_count + 1, provider_request_ids = json_insert(provider_request_ids, '$[#]', ?), usage = json_patch(usage, ?) WHERE id = ?").bind(providerRequestId, JSON.stringify(usage), run.id).run();
-          if (response.status === 429) {
-            await db.prepare("UPDATE media_discovery_progress SET status = 'stopped', stop_reason = ?, updated_at = CURRENT_TIMESTAMP WHERE outlet = ? AND pass = ?").bind(`search_http_${response.status}`, outlet.name, pass).run();
-            stoppedOutlets.add(outlet.name);
-            stopReasons.add(`${outlet.name}:search_http_${response.status}`);
-            continue;
-          }
         }
         const selections = new Map<number, { review: MediaSource | null; preview: MediaSource | null }>();
         for (; index < candidates.length; index += 1) {
