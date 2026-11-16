@@ -886,7 +886,7 @@ export const mediaDiscoveryRuns = sqliteTable(
     createdAt: text("created_at").notNull().default(currentTimestamp),
   },
   (table) => [
-    check("media_discovery_runs_pass_check", sql`${table.pass} = 'initial'`),
+    check("media_discovery_runs_pass_check", sql`${table.pass} IN ('initial', 'later')`),
     check(
       "media_discovery_runs_status_check",
       sql`${table.status} IN ('queued', 'running', 'completed', 'stopped', 'failed')`,
@@ -926,7 +926,7 @@ export const mediaDiscoveryProgress = sqliteTable(
       table.pass,
     ),
     index("idx_media_discovery_progress_run").on(table.runId),
-    check("media_discovery_progress_pass_check", sql`${table.pass} = 'initial'`),
+    check("media_discovery_progress_pass_check", sql`${table.pass} IN ('initial', 'later')`),
     check(
       "media_discovery_progress_outlet_check",
       sql`${table.outlet} IN ('IGN', 'Eurogamer', 'GameSpot', 'PC Gamer', 'Kotaku', 'GamesRadar+')`,
@@ -966,7 +966,7 @@ export const mediaDiscoveryAttempts = sqliteTable(
   (table) => [
     index("idx_media_discovery_attempts_outlet_day").on(table.outlet, table.day),
     index("idx_media_discovery_attempts_game").on(table.appid, table.pass),
-    check("media_discovery_attempts_pass_check", sql`${table.pass} = 'initial'`),
+    check("media_discovery_attempts_pass_check", sql`${table.pass} IN ('initial', 'later')`),
     check(
       "media_discovery_attempts_outlet_check",
       sql`${table.outlet} IN ('IGN', 'Eurogamer', 'GameSpot', 'PC Gamer', 'Kotaku', 'GamesRadar+')`,
@@ -1012,7 +1012,7 @@ export const mediaSources = sqliteTable(
   (table) => [
     uniqueIndex("uq_media_sources_game_url").on(table.appid, table.originalUrl),
     index("idx_media_sources_game").on(table.appid, table.publishedAt),
-    check("media_sources_pass_check", sql`${table.pass} = 'initial'`),
+    check("media_sources_pass_check", sql`${table.pass} IN ('initial', 'later')`),
     check(
       "media_sources_outlet_check",
       sql`${table.outlet} IN ('IGN', 'Eurogamer', 'GameSpot', 'PC Gamer', 'Kotaku', 'GamesRadar+')`,

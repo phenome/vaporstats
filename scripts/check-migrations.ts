@@ -434,8 +434,44 @@ function verifyRetainedMediaRowsSurviveUpgrade(): void {
     if (retained.query<{ foreign_keys: number }, []>("PRAGMA foreign_keys").get()?.foreign_keys !== 1) {
       throw new Error("Migrations did not restore foreign keys");
     }
+    verifyMediaPassesAccepted(retained);
   } finally {
     retained.close(true);
+  }
+}
+
+/**
+ * Every pass-scoped media table accepts both assessment passes and rejects any
+ * other value. Each statement runs on its own: a multi-statement exec does not
+ * surface a failing statement that is not the last one.
+ */
+function verifyMediaPassesAccepted(db: Database): void {
+  const inserts: Record<string, string> = {
+    media_discovery_runs:
+      "INSERT INTO media_discovery_runs (id, pass, identity_key, selected_games) VALUES (91, ?1, 'pass-check-' || ?1, '[900003]')",
+    media_discovery_progress:
+      "INSERT INTO media_discovery_progress (run_id, appid, pass, outlet) VALUES (41, 900003, ?1, 'Kotaku')",
+    media_discovery_attempts:
+      "INSERT INTO media_discovery_attempts (appid, outlet, pass, day, kind, attempted_at) VALUES (900003, 'IGN', ?1, '2026-10-02', 'search', '2026-10-02T00:00:00.000Z')",
+    media_sources:
+      "INSERT INTO media_sources (appid, pass, original_url, title, outlet, retrieved_at, type) VALUES (900003, ?1, 'https://www.ign.com/articles/pass-check-' || ?1, 'Pass check', 'IGN', '2026-10-02T00:00:00.000Z', 'review')",
+  };
+  db.exec("SAVEPOINT media_pass_check");
+  try {
+    for (const [table, insert] of Object.entries(inserts)) {
+      db.query(insert).run("later");
+      let accepted = false;
+      try {
+        db.query(insert).run("other");
+        accepted = true;
+      } catch {
+        // Expected: only the initial and later passes are valid.
+      }
+      if (accepted) throw new Error(table + " accepts a pass other than initial or later");
+    }
+  } finally {
+    db.exec("ROLLBACK TO media_pass_check");
+    db.exec("RELEASE media_pass_check");
   }
 }
 
