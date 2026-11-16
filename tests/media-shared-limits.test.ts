@@ -253,6 +253,42 @@ describe("processing limits across passes", () => {
     expect(summary.stopReasons).toContain("IGN:fetch_http_403");
   });
 
+  test("a processing denial persists across a reopen, for the rest of the run and for later-pass discovery", async () => {
+    const database = fixture();
+    insertSources(database.native, CYBERPUNK, "initial", 2, IGN);
+    const { fetched, advance } = await processingRun(database, (url) =>
+      url.includes("ign.com") ? new Response("", { status: 403 }) : processingArticleHtml(CYBERPUNK));
+    await advance(DAY_ONE);
+    expect(fetched).toHaveLength(1);
+
+    database.reopen();
+    const resumed = await advance(DAY_TWO);
+    expect(fetched).toHaveLength(1);
+    expect(resumed.stopReasons).toContain("IGN:fetch_http_403");
+
+    const laterId = insertLaterRun(database.native, [CYBERPUNK]);
+    const { calls, fetchFn } = discoveryFetch();
+    const later = await runAuthorizedMediaDiscovery(database.db, { runId: laterId, tavilyApiKey: "test-key", fetch: fetchFn, now: new Date("2026-10-10T12:00:00.000Z") });
+
+    expect(outletCalls(calls, "ign.com")).toEqual({ searches: 0, fetches: 0 });
+    expect(later.stopReasons).toContain("IGN:fetch_http_403");
+  });
+
+  test("a processing run records the explicit reason for every outlet it stopped", async () => {
+    const database = fixture();
+    insertSources(database.native, CYBERPUNK, "initial", 1, IGN);
+    insertSources(database.native, CYBERPUNK, "initial", 1, EUROGAMER);
+    const { runId, advance } = await processingRun(database, (url) =>
+      new Response("", { status: url.includes("ign.com") ? 403 : 401 }));
+
+    const summary = await advance(DAY_ONE);
+
+    expect(summary.stopReasons).toEqual(expect.arrayContaining(["IGN:fetch_http_403", "Eurogamer:fetch_http_401"]));
+    const recorded = database.native.query<{ stop_reason: string | null }, [number]>("SELECT stop_reason FROM media_processing_authorizations WHERE run_id = ?").get(runId)?.stop_reason ?? "";
+    expect(recorded).toContain("IGN:fetch_http_403");
+    expect(recorded).toContain("Eurogamer:fetch_http_401");
+  });
+
   test("a later run's processing draws on the lifetime allowance the initial pass already charged", async () => {
     const database = fixture();
     const initialRunId = insertCompletedRun(database.native, "initial:charged", [CYBERPUNK]);
