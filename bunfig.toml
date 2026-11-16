@@ -1,0 +1,4 @@
+[test]
+# Discover tests only under tests/, so worktrees nested in the repository
+# root are never collected.
+root = "tests"
