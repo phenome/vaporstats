@@ -1,13 +1,21 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { authorizeMediaRun, runAuthorizedMediaDiscovery } from "../src/lib/media-discovery";
+import { authorizeMediaRun, MEDIA_OUTLETS, runAuthorizedMediaDiscovery } from "../src/lib/media-discovery";
+import {
+  advanceMediaProcessing,
+  authorizeMediaProcessing,
+  GEMINI_BATCH_CAPABILITY_VERSION,
+  GEMINI_BATCH_PRICING_VERSION,
+} from "../src/lib/media-processing";
 import { openTestDatabase, type TestDatabase } from "./support/db";
 import {
   BALDURS_GATE,
+  ControlledGeminiTransport,
   CYBERPUNK,
   discoveryFetch,
   HADES_II,
   insertLaterRun,
   insertSources,
+  processingArticleHtml,
   seedApps,
 } from "./support/media";
 
@@ -175,5 +183,84 @@ describe("discovery query bound per pass", () => {
     expect(searches()).toBe(24);
     expect(rerun.queries).toBe(12);
     expect(count(database, "SELECT COUNT(*) AS count FROM media_discovery_progress WHERE pass = 'later' AND query_attempted_at IS NOT NULL")).toBe(12);
+  });
+});
+
+const IGN = MEDIA_OUTLETS[0];
+const EUROGAMER = MEDIA_OUTLETS[1];
+
+/** A completed later-pass run authorized for processing, with fetches recorded by URL. */
+async function processingRun(database: TestDatabase, respond: (url: string) => Response | string = () => processingArticleHtml(CYBERPUNK)) {
+  const runId = insertLaterRun(database.native, [CYBERPUNK]);
+  database.native.prepare("UPDATE media_discovery_runs SET status = 'completed' WHERE id = ?").run(runId);
+  await authorizeMediaProcessing(database.db, runId);
+  const fetched: string[] = [];
+  const transport = new ControlledGeminiTransport();
+  const advance = (now: Date) => advanceMediaProcessing(database.db, {
+    runId,
+    transport,
+    articleFetch: async (url) => { fetched.push(url); return respond(url); },
+    now,
+    pricingVersion: GEMINI_BATCH_PRICING_VERSION,
+    capabilityVersion: GEMINI_BATCH_CAPABILITY_VERSION,
+  });
+  return { runId, fetched, advance };
+}
+
+describe("processing limits across passes", () => {
+  test("the processing source set holds at most 15 articles per game counted across passes", async () => {
+    const database = fixture();
+    insertSources(database.native, CYBERPUNK, "initial", 10);
+    insertSources(database.native, CYBERPUNK, "later", 6, EUROGAMER);
+    const { fetched, advance } = await processingRun(database);
+
+    await advance(DAY_ONE);
+
+    expect(fetched).toHaveLength(15);
+    expect(fetched.filter((url) => url.includes("-initial-"))).toHaveLength(10);
+    expect(fetched.filter((url) => url.includes("-later-"))).toHaveLength(5);
+  });
+
+  test("article fetches count toward the outlet's UTC-day cap with every pass's attempts", async () => {
+    const database = fixture();
+    seedAttempts(database, "IGN", "initial", "2026-09-10", 29);
+    insertSources(database.native, CYBERPUNK, "later", 3, IGN);
+    const { fetched, advance } = await processingRun(database);
+
+    const summary = await advance(DAY_ONE);
+
+    expect(fetched).toHaveLength(1);
+    expect(count(database, "SELECT COUNT(*) AS count FROM media_discovery_attempts WHERE outlet = 'IGN' AND day = '2026-09-10'")).toBe(30);
+    expect(count(database, "SELECT COUNT(*) AS count FROM media_discovery_attempts WHERE pass = 'later'")).toBe(1);
+    expect(summary.stopReasons).toContain("IGN:daily_attempt_cap");
+
+    await advance(DAY_TWO);
+    expect(fetched).toHaveLength(3);
+  });
+
+  test("an access denial during an article fetch stops that outlet for the rest of the run with its reason", async () => {
+    const database = fixture();
+    insertSources(database.native, CYBERPUNK, "initial", 3, IGN);
+    insertSources(database.native, CYBERPUNK, "initial", 1, EUROGAMER);
+    const { fetched, advance } = await processingRun(database, (url) =>
+      url.includes("ign.com") ? new Response("", { status: 403 }) : processingArticleHtml(CYBERPUNK));
+
+    const summary = await advance(DAY_ONE);
+
+    expect(fetched.filter((url) => url.includes("ign.com"))).toHaveLength(1);
+    expect(fetched.filter((url) => url.includes("eurogamer.net"))).toHaveLength(1);
+    expect(summary.stopReasons).toContain("IGN:fetch_http_403");
+  });
+
+  test("a same-day rate limit from discovery stops processing fetches on that outlet", async () => {
+    const database = fixture();
+    database.native.prepare("INSERT INTO media_discovery_attempts (appid, outlet, pass, day, kind, status_code, succeeded, attempted_at) VALUES (?, 'IGN', 'initial', '2026-09-10', 'search', 429, 0, '2026-09-10T01:00:00.000Z')").run(CYBERPUNK);
+    insertSources(database.native, CYBERPUNK, "initial", 2, IGN);
+    const { fetched, advance } = await processingRun(database);
+
+    const summary = await advance(DAY_ONE);
+
+    expect(fetched).toEqual([]);
+    expect(summary.stopReasons).toContain("IGN:search_http_429");
   });
 });

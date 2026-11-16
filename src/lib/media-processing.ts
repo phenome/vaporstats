@@ -15,6 +15,7 @@ import {
   MAX_MEDIA_ARTICLES_TOTAL,
   MEDIA_GAME_CHOICES,
   MEDIA_OUTLETS,
+  mediaOutletDayStop,
   type MediaOutlet,
 } from "./media-discovery";
 import {
@@ -42,7 +43,6 @@ const MAX_INPUT_TOKENS = 24_000;
 const MAX_EMBEDDING_INPUT_TOKENS = 8_192;
 const MAX_ARTICLE_CHARS = 120_000;
 const MAX_REDIRECTS = 5;
-const MAX_ATTEMPTS_PER_OUTLET_DAY = 30;
 const MAX_ERROR_LENGTH = 256;
 const SIMILARITY_DIMENSIONS = ["gameplay", "story_world"] as const;
 type SimilarityDimension = (typeof SIMILARITY_DIMENSIONS)[number];
@@ -553,21 +553,27 @@ type ReservationInput = {
   requireEligibleEntity?: boolean;
 };
 
+/** Records an article fetch attempt under the pass of the run being processed. */
 async function recordAttempt(db: AppDatabase, source: SourceRow, runId: number, date: Date, kind: "fetch" | "redirect" | "failure", url: string, statusCode: number | null, succeeded: boolean, error: string | null): Promise<void> {
   await db.batch([
-    db.prepare("INSERT INTO media_discovery_attempts (appid, outlet, pass, day, kind, url, status_code, succeeded, error, attempted_at) VALUES (?, ?, 'initial', ?, ?, ?, ?, ?, ?, ?)").bind(source.appid, source.outlet, dayKey(date), kind, url, statusCode, succeeded ? 1 : 0, error, date.toISOString()),
+    db.prepare("INSERT INTO media_discovery_attempts (appid, outlet, pass, day, kind, url, status_code, succeeded, error, attempted_at) SELECT ?, ?, pass, ?, ?, ?, ?, ?, ?, ? FROM media_discovery_runs WHERE id = ?").bind(source.appid, source.outlet, dayKey(date), kind, url, statusCode, succeeded ? 1 : 0, error, date.toISOString(), runId),
     db.prepare("UPDATE media_discovery_runs SET attempt_count = attempt_count + 1 WHERE id = ?").bind(runId),
   ]);
 }
 
-async function fetchArticle(db: AppDatabase, source: SourceRow, runId: number, fetchFn: ArticleFetch, clock: () => Date): Promise<string | null> {
+/**
+ * Fetches a source's article, or returns why its outlet must not be contacted
+ * again in this run: the shared UTC-day attempt cap, a same-day rate limit, or
+ * an access denial. Any other failure skips only this source.
+ */
+async function fetchArticle(db: AppDatabase, source: SourceRow, runId: number, fetchFn: ArticleFetch, clock: () => Date): Promise<string | { outletStop: string } | null> {
   let current = source.original_url;
   const outlet = outletFor(current);
   if (!outlet || outlet.name !== source.outlet) return null;
   for (let redirect = 0; redirect <= MAX_REDIRECTS; redirect += 1) {
     const now = clock();
-    const count = await first<{ count: number }>(db, "SELECT COUNT(*) AS count FROM media_discovery_attempts WHERE outlet = ? AND pass = 'initial' AND day = ?", source.outlet, dayKey(now));
-    if (Number(count?.count ?? 0) >= MAX_ATTEMPTS_PER_OUTLET_DAY) return null;
+    const dayStop = await mediaOutletDayStop(db, source.outlet, now);
+    if (dayStop) return { outletStop: dayStop };
     let response: Response | string;
     try { response = await fetchFn(current, { redirect: "manual", headers: { Accept: "text/html,application/xhtml+xml" } }); }
     catch (error) { await recordAttempt(db, source, runId, now, "failure", current, null, false, boundedError(error)); return null; }
@@ -577,7 +583,7 @@ async function fetchArticle(db: AppDatabase, source: SourceRow, runId: number, f
     }
     const isRedirect = response.status >= 300 && response.status < 400;
     await recordAttempt(db, source, runId, now, isRedirect ? "redirect" : "fetch", current, response.status, response.ok, response.ok ? null : `HTTP ${response.status}`);
-    if (response.status === 401 || response.status === 403 || response.status === 429) return null;
+    if (response.status === 401 || response.status === 403 || response.status === 429) return { outletStop: `fetch_http_${response.status}` };
     if (isRedirect) {
       const location = response.headers.get("location");
       if (!location || redirect === MAX_REDIRECTS) return null;
@@ -750,8 +756,8 @@ async function persistOverview(db: AppDatabase, job: JobRow, output: unknown, no
       status = "stale";
       return;
     }
-    const sources = await rows<SourceRow>(db, "SELECT id, appid, original_url, title, outlet, author, published_at, updated_at, retrieved_at, type, hands_on, affiliation, platform, build_context, normalized_content_hash, cleanup_version, processing_content, processing_input_identity FROM media_sources WHERE appid = ? AND pass = 'initial'", job.appid);
-    const extractions = await rows<ExtractionRow>(db, "SELECT id, source_id, input_identity, content_hash, cleanup_version, model, config_version, output_json, active FROM media_article_extractions WHERE source_id IN (SELECT id FROM media_sources WHERE appid = ? AND pass = 'initial') AND active = 1", job.appid);
+    const sources = await rows<SourceRow>(db, "SELECT id, appid, original_url, title, outlet, author, published_at, updated_at, retrieved_at, type, hands_on, affiliation, platform, build_context, normalized_content_hash, cleanup_version, processing_content, processing_input_identity FROM media_sources WHERE appid = ?", job.appid);
+    const extractions = await rows<ExtractionRow>(db, "SELECT id, source_id, input_identity, content_hash, cleanup_version, model, config_version, output_json, active FROM media_article_extractions WHERE source_id IN (SELECT id FROM media_sources WHERE appid = ?) AND active = 1", job.appid);
     if (synthesisIdentity(job.appid, extractions) !== job.input_identity) {
       await db.prepare("UPDATE media_processing_jobs SET status = 'stale', completed_at = ? WHERE id = ?").bind(now.toISOString(), job.id).run();
       status = "stale";
@@ -1185,7 +1191,7 @@ async function advanceMediaProcessingNow(db: AppDatabase, options: MediaProcessi
   });
   const processingEntities = await eligibleProcessingEntities(db, selectedGames);
   const articleFetch = options.articleFetch ?? fetch;
-  const allSources = await rows<SourceRow>(db, `SELECT id, appid, original_url, title, outlet, author, published_at, updated_at, retrieved_at, type, hands_on, affiliation, platform, build_context, normalized_content_hash, cleanup_version, processing_content, processing_input_identity FROM media_sources WHERE pass = 'initial' AND appid IN (SELECT value FROM json_each(?)) ORDER BY appid, id`, JSON.stringify(processingEntities));
+  const allSources = await rows<SourceRow>(db, `SELECT id, appid, original_url, title, outlet, author, published_at, updated_at, retrieved_at, type, hands_on, affiliation, platform, build_context, normalized_content_hash, cleanup_version, processing_content, processing_input_identity FROM media_sources WHERE appid IN (SELECT value FROM json_each(?)) ORDER BY appid, id`, JSON.stringify(processingEntities));
   const sourceCountByGame = new Map<number, number>();
   let boundedSourceCount = 0;
   const sources = allSources.filter((source) => {
@@ -1202,8 +1208,10 @@ async function advanceMediaProcessingNow(db: AppDatabase, options: MediaProcessi
   let synthesisSubmitted = 0;
   let reused = 0;
   let stopReason: string | null = null;
+  const outletStops = new Map<string, string>();
 
   for (const source of sources) {
+    if (outletStops.has(source.outlet)) continue;
     const cachedIdentity = source.processing_input_identity && source.cleanup_version === CLEANUP_VERSION && source.normalized_content_hash
       ? extractionIdentity(source, source.normalized_content_hash)
       : null;
@@ -1219,6 +1227,10 @@ async function advanceMediaProcessingNow(db: AppDatabase, options: MediaProcessi
     }
     if (!content) {
       const body = await fetchArticle(db, source, auth.run_id, articleFetch, clock);
+      if (body && typeof body === "object") {
+        outletStops.set(source.outlet, body.outletStop);
+        continue;
+      }
       const cleaned = body ? cleanArticle(body) : null;
       if (!cleaned) continue;
       content = cleaned.content;
@@ -1295,7 +1307,7 @@ async function advanceMediaProcessingNow(db: AppDatabase, options: MediaProcessi
   let succeeded = prePoll.succeeded + currentPoll.succeeded;
   let failed = prePoll.failed + currentPoll.failed;
   let uncertain = prePoll.uncertain + currentPoll.uncertain;
-  const activeExtractions = await rows<ExtractionRow>(db, "SELECT e.id, e.source_id, e.input_identity, e.content_hash, e.cleanup_version, e.model, e.config_version, e.output_json, e.active FROM media_article_extractions e JOIN media_sources s ON s.id = e.source_id WHERE e.active = 1 AND s.pass = 'initial' AND s.appid IN (SELECT value FROM json_each(?))", JSON.stringify(processingEntities));
+  const activeExtractions = await rows<ExtractionRow>(db, "SELECT e.id, e.source_id, e.input_identity, e.content_hash, e.cleanup_version, e.model, e.config_version, e.output_json, e.active FROM media_article_extractions e JOIN media_sources s ON s.id = e.source_id WHERE e.active = 1 AND s.appid IN (SELECT value FROM json_each(?))", JSON.stringify(processingEntities));
 
   const appids = [...new Set(activeExtractions.map((row) => sourceById.get(row.source_id)?.appid).filter((appid): appid is number => typeof appid === "number"))];
   for (const appid of appids) {
@@ -1364,8 +1376,8 @@ async function advanceMediaProcessingNow(db: AppDatabase, options: MediaProcessi
   const terminalFailure = pending === 0 && hardFailures > 0;
   if (!stopReason && terminalFailure) stopReason = "terminal_failure";
   const status: MediaProcessingSummary["status"] = pending > 0 || (stopReason && recoverable) || (!allCovered && !terminalFailure && !stopReason) ? (auth.status === "queued" && !hasJobs && sources.length === 0 ? "queued" : "waiting") : terminalFailure ? "stopped" : allCovered ? "completed" : "stopped";
-  await db.prepare("UPDATE media_processing_authorizations SET status = ?, stop_reason = ?, updated_at = ? WHERE run_id = ? AND status <> 'stopped'").bind(status, stopReason, now.toISOString(), auth.run_id).run();
-  const stopReasons = stopReason ? [stopReason] : [];
+  const stopReasons = [...(stopReason ? [stopReason] : []), ...[...outletStops].map(([outlet, reason]) => `${outlet}:${reason}`)];
+  await db.prepare("UPDATE media_processing_authorizations SET status = ?, stop_reason = ?, updated_at = ? WHERE run_id = ? AND status <> 'stopped'").bind(status, stopReasons[0] ?? null, now.toISOString(), auth.run_id).run();
   return { runId: auth.run_id, status, submitted: extractionSubmitted + embeddingSubmitted + synthesisSubmitted, completed: Number(runAggregate?.succeeded ?? succeeded), reused, chargedMicrousd: Number(aggregate?.charged ?? 0), outstandingReservedMicrousd: Number(aggregate?.reserved ?? 0), stopReasons, failed: Number(runAggregate?.failed ?? failed), uncertain: Number(runAggregate?.uncertain ?? uncertain), overviewAppids: activeOverview.map((row) => row.appid) };
 }
 
