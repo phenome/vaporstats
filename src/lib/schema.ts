@@ -1008,6 +1008,8 @@ export const mediaSources = sqliteTable(
     cleanupVersion: text("cleanup_version"),
     processingContent: text("processing_content"),
     processingInputIdentity: text("processing_input_identity"),
+    /** The authorized processing run that last took this source into processing; null while the source is new to processing. */
+    processingRunId: integer("processing_run_id"),
   },
   (table) => [
     uniqueIndex("uq_media_sources_game_url").on(table.appid, table.originalUrl),
@@ -1031,6 +1033,13 @@ export const mediaProcessingAuthorizations = sqliteTable(
     status: text("status").notNull().default("queued"),
     billingConfirmation: text("billing_confirmation"),
     stopReason: text("stop_reason"),
+    /** JSON array of media source ids this run may reprocess beyond sources new to processing. */
+    affectedSourceIds: text("affected_source_ids").notNull().default("[]"),
+    newOutputs: integer("new_outputs").notNull().default(0),
+    reusedOutputs: integer("reused_outputs").notNull().default(0),
+    replacedOutputs: integer("replaced_outputs").notNull().default(0),
+    invalidatedOutputs: integer("invalidated_outputs").notNull().default(0),
+    skippedOutputs: integer("skipped_outputs").notNull().default(0),
     authorizedAt: text("authorized_at").notNull().default(currentTimestamp),
     updatedAt: text("updated_at").notNull().default(currentTimestamp),
   },

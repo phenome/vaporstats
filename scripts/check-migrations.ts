@@ -458,6 +458,14 @@ function verifyRetainedMediaRowsSurviveUpgrade(): void {
     if (retained.query<{ foreign_keys: number }, []>("PRAGMA foreign_keys").get()?.foreign_keys !== 1) {
       throw new Error("Migrations did not restore foreign keys");
     }
+    // A source processed before processing scope existed must not count as
+    // new to processing, or the next authorized run would refetch it.
+    const retainedClaim = retained
+      .query<{ processing_run_id: number | null }, []>("SELECT processing_run_id FROM media_sources WHERE id = 44")
+      .get();
+    if (retainedClaim?.processing_run_id !== 41) {
+      throw new Error("Migrations left a processed media source new to processing");
+    }
     verifyMediaPassesAccepted(retained);
   } finally {
     retained.close(true);
