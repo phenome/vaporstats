@@ -1,5 +1,6 @@
 import type { AppDatabase } from "./db";
 import { writeTransaction } from "./db-transaction";
+import type { MediaOutlet } from "./media-discovery";
 
 /**
  * Outlet access rules shared by every media pass and stage. Discovery
@@ -19,7 +20,7 @@ async function first<T>(db: AppDatabase, query: string, ...values: unknown[]): P
 }
 
 /** Search, fetch, redirect and failed attempts on `outlet` during `date`'s UTC day, from every pass and stage. */
-async function attemptsToday(db: AppDatabase, outlet: string, date: Date): Promise<number> {
+async function attemptsToday(db: AppDatabase, outlet: MediaOutlet, date: Date): Promise<number> {
   const row = await first<{ count: number }>(db, "SELECT COUNT(*) AS count FROM media_discovery_attempts WHERE outlet = ? AND day = ?", outlet, dayKey(date));
   return Number(row?.count ?? 0);
 }
@@ -30,7 +31,7 @@ async function attemptsToday(db: AppDatabase, outlet: string, date: Date): Promi
  * Search attempts go to the search provider, so a 401 or 403 there is a
  * provider stop, not an outlet denial.
  */
-async function outletDenial(db: AppDatabase, outlet: string): Promise<string | null> {
+async function outletDenial(db: AppDatabase, outlet: MediaOutlet): Promise<string | null> {
   const denied = await first<{ status_code: number }>(
     db,
     "SELECT status_code FROM media_discovery_attempts WHERE outlet = ? AND kind = 'fetch' AND status_code IN (401, 403) ORDER BY id LIMIT 1",
@@ -44,7 +45,7 @@ async function outletDenial(db: AppDatabase, outlet: string): Promise<string | n
  * or stage recorded it: the daily attempt cap, or a rate limit that day.
  * Both reopen on the next UTC day.
  */
-async function outletDayStop(db: AppDatabase, outlet: string, date: Date): Promise<string | null> {
+async function outletDayStop(db: AppDatabase, outlet: MediaOutlet, date: Date): Promise<string | null> {
   if ((await attemptsToday(db, outlet, date)) >= MAX_ATTEMPTS_PER_OUTLET_DAY) return "daily_attempt_cap";
   const limited = await first<{ kind: string }>(
     db,
@@ -57,12 +58,12 @@ async function outletDayStop(db: AppDatabase, outlet: string, date: Date): Promi
 }
 
 /** Why `outlet` must not be contacted at `date`: a lasting access denial first, then a same-day stop. */
-export async function mediaOutletStop(db: AppDatabase, outlet: string, date: Date): Promise<string | null> {
+async function mediaOutletStop(db: AppDatabase, outlet: MediaOutlet, date: Date): Promise<string | null> {
   return (await outletDenial(db, outlet)) ?? outletDayStop(db, outlet, date);
 }
 
 
-export type OutletAttemptKind = "search" | "fetch" | "redirect" | "failure";
+type OutletAttemptKind = "search" | "fetch" | "redirect" | "failure";
 
 /**
  * Reserves one attempt on `outlet` under `runId`'s pass before the outlet is
@@ -72,7 +73,7 @@ export type OutletAttemptKind = "search" | "fetch" | "redirect" | "failure";
  */
 export async function reserveOutletAttempt(
   db: AppDatabase,
-  attempt: { runId: number; appid: number; outlet: string; kind: "search" | "fetch"; url: string | null; date: Date },
+  attempt: { runId: number; appid: number; outlet: MediaOutlet; kind: "search" | "fetch"; url: string | null; date: Date },
 ): Promise<{ attemptId: number } | { stop: string }> {
   return writeTransaction(db, async () => {
     const stop = await mediaOutletStop(db, attempt.outlet, attempt.date);

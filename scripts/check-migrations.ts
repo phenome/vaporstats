@@ -466,22 +466,26 @@ function verifyRetainedMediaRowsSurviveUpgrade(): void {
 
 /**
  * Every pass-scoped media table accepts both assessment passes and rejects any
- * other value. Each statement runs on its own: a multi-statement exec does not
- * surface a failing statement that is not the last one.
+ * other value. The check creates the rows it references, so it runs on an
+ * empty or a populated database, and rolls everything back. Each statement
+ * runs on its own: a multi-statement exec does not surface a failing
+ * statement that is not the last one.
  */
 function verifyMediaPassesAccepted(db: Database): void {
   const inserts: Record<string, string> = {
     media_discovery_runs:
-      "INSERT INTO media_discovery_runs (id, pass, identity_key, selected_games) VALUES (91, ?1, 'pass-check-' || ?1, '[900003]')",
+      "INSERT INTO media_discovery_runs (pass, identity_key, selected_games) VALUES (?1, 'pass-check-' || ?1, '[900090]')",
     media_discovery_progress:
-      "INSERT INTO media_discovery_progress (run_id, appid, pass, outlet) VALUES (41, 900003, ?1, 'Kotaku')",
+      "INSERT INTO media_discovery_progress (run_id, appid, pass, outlet) VALUES (900091, 900090, ?1, 'Kotaku')",
     media_discovery_attempts:
-      "INSERT INTO media_discovery_attempts (appid, outlet, pass, day, kind, attempted_at) VALUES (900003, 'IGN', ?1, '2026-10-02', 'search', '2026-10-02T00:00:00.000Z')",
+      "INSERT INTO media_discovery_attempts (appid, outlet, pass, day, kind, attempted_at) VALUES (900090, 'IGN', ?1, '2026-10-02', 'search', '2026-10-02T00:00:00.000Z')",
     media_sources:
-      "INSERT INTO media_sources (appid, pass, original_url, title, outlet, retrieved_at, type) VALUES (900003, ?1, 'https://www.ign.com/articles/pass-check-' || ?1, 'Pass check', 'IGN', '2026-10-02T00:00:00.000Z', 'review')",
+      "INSERT INTO media_sources (appid, pass, original_url, title, outlet, retrieved_at, type) VALUES (900090, ?1, 'https://www.ign.com/articles/pass-check-' || ?1, 'Pass check', 'IGN', '2026-10-02T00:00:00.000Z', 'review')",
   };
   db.exec("SAVEPOINT media_pass_check");
   try {
+    db.query("INSERT INTO apps (appid, name, slug) VALUES (900090, 'Pass check', 'pass-check')").run();
+    db.query("INSERT INTO media_discovery_runs (id, pass, identity_key, selected_games) VALUES (900091, 'initial', 'pass-check-run', '[900090]')").run();
     for (const [table, insert] of Object.entries(inserts)) {
       db.query(insert).run("later");
       let accepted = false;
@@ -665,6 +669,7 @@ try {
   ) {
     throw new Error("Applied migrations do not match the migration journal");
   }
+  verifyMediaPassesAccepted(database);
 
   verifyExistingRowsSurviveUpgrade();
   verifyReceptionRowsSurvivePublicationUpgrade();

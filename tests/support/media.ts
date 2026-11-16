@@ -1,6 +1,6 @@
 import type { Database } from "bun:sqlite";
 import type { GeminiBatchPoll, GeminiBatchTransport } from "../../src/lib/media-processing";
-import { MEDIA_OUTLETS } from "../../src/lib/media-discovery";
+import { MEDIA_OUTLETS, type MediaPass } from "../../src/lib/media-discovery";
 
 export const CYBERPUNK = 1091500;
 export const BALDURS_GATE = 1086940;
@@ -45,14 +45,14 @@ export function insertLaterRun(native: Database, appids: readonly number[]): num
 }
 
 /** Inserts `count` accepted sources for `appid` in `pass`, one URL each on `outlet`'s domain. */
-export function insertSources(native: Database, appid: number, pass: "initial" | "later", count: number, outlet: (typeof MEDIA_OUTLETS)[number] = MEDIA_OUTLETS[0]): void {
+export function insertSources(native: Database, appid: number, pass: MediaPass, count: number, outlet: (typeof MEDIA_OUTLETS)[number] = MEDIA_OUTLETS[0]): void {
   const insert = native.prepare("INSERT INTO media_sources (appid, pass, original_url, title, outlet, retrieved_at, type) VALUES (?, ?, ?, ?, ?, '2026-09-01T00:00:00.000Z', 'review')");
   for (let index = 0; index < count; index += 1) {
     insert.run(appid, pass, `https://${outlet.domain}/articles/${appid}-${pass}-seeded-${index}`, `${GAME_NAMES[appid] ?? appid} Review ${index}`, outlet.name);
   }
 }
 
-type InlineRequest ={ key: string; request: Record<string, unknown> };
+type InlineRequest = { key: string; request: Record<string, unknown> };
 
 /**
  * Deterministic Gemini batch transport. Each submission takes the next queued

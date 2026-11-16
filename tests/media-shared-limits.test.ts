@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { authorizeMediaRun, MEDIA_OUTLETS, runAuthorizedMediaDiscovery } from "../src/lib/media-discovery";
+import { authorizeMediaRun, MEDIA_OUTLETS, runAuthorizedMediaDiscovery, type MediaOutlet, type MediaPass } from "../src/lib/media-discovery";
 import {
   advanceMediaProcessing,
   authorizeMediaProcessing,
@@ -47,12 +47,12 @@ function outletCalls(calls: readonly Call[], domain: string): { searches: number
   };
 }
 
-function seedAttempts(database: TestDatabase, outlet: string, pass: "initial" | "later", day: string, total: number): void {
+function seedAttempts(database: TestDatabase, outlet: MediaOutlet, pass: MediaPass, day: string, total: number): void {
   const insert = database.native.prepare("INSERT INTO media_discovery_attempts (appid, outlet, pass, day, kind, succeeded, attempted_at) VALUES (?, ?, ?, ?, 'fetch', 1, ?)");
   for (let index = 0; index < total; index += 1) insert.run(CYBERPUNK, outlet, pass, day, `${day}T00:00:00.000Z`);
 }
 
-function progress(database: TestDatabase, pass: string, outlet: string): { status: string; stop_reason: string | null } | null {
+function progress(database: TestDatabase, pass: MediaPass, outlet: MediaOutlet): { status: string; stop_reason: string | null } | null {
   return database.native
     .query<{ status: string; stop_reason: string | null }, [string, string, number]>("SELECT status, stop_reason FROM media_discovery_progress WHERE pass = ? AND outlet = ? AND appid = ?")
     .get(pass, outlet, CYBERPUNK);

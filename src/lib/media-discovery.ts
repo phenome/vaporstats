@@ -106,7 +106,7 @@ const MAX_REDIRECTS = 5;
 
 type RunRow = {
   id: number;
-  pass: string;
+  pass: MediaPass;
   identity_key: string;
   selected_games: string;
   status: string;
@@ -124,7 +124,7 @@ type ProgressRow = {
   id: number;
   run_id: number;
   appid: number;
-  pass: string;
+  pass: MediaPass;
   outlet: MediaOutlet;
   status: string;
   query_attempted_at: string | null;
@@ -592,24 +592,28 @@ async function fetchManual(fetchFn: MediaFetch, url: string, outlet: (typeof MED
   return null;
 }
 
-async function loadRun(db: AppDatabase, runId?: number): Promise<RunRow & { pass: MediaPass }> {
+async function loadRun(db: AppDatabase, runId?: number): Promise<RunRow> {
   const run = runId
     ? await first<RunRow>(db, "SELECT id, pass, identity_key, selected_games, status, resumed, query_count, article_count, attempt_count, provider_request_ids, usage, stop_reason, summary FROM media_discovery_runs WHERE id = ?", runId)
     : await first<RunRow>(db, "SELECT id, pass, identity_key, selected_games, status, resumed, query_count, article_count, attempt_count, provider_request_ids, usage, stop_reason, summary FROM media_discovery_runs WHERE pass = 'initial' AND status IN ('queued', 'running') ORDER BY id DESC LIMIT 1");
   if (!run) throw new Error("Media discovery run not found");
-  const pass = run.pass;
-  parsePass(pass);
-  return { ...run, pass };
+  parsePass(run.pass);
+  return run;
 }
 
-/** Accepted articles from every pass count toward the per-game and total ceilings. */
-async function articleCeilingReached(db: AppDatabase, appid: number): Promise<boolean> {
+/**
+ * Why `appid` can admit no further article, if it cannot. Accepted articles
+ * from every pass count toward the per-game and total ceilings.
+ */
+async function articleCeiling(db: AppDatabase, appid: number): Promise<string | null> {
   const row = await first<{ game: number; total: number }>(
     db,
     "SELECT COALESCE(SUM(appid = ?), 0) AS game, COUNT(*) AS total FROM media_sources",
     appid,
   );
-  return Number(row?.game ?? 0) >= MAX_MEDIA_ARTICLES_PER_GAME || Number(row?.total ?? 0) >= MAX_MEDIA_ARTICLES_TOTAL;
+  if (Number(row?.game ?? 0) >= MAX_MEDIA_ARTICLES_PER_GAME) return `article_cap:${appid}`;
+  if (Number(row?.total ?? 0) >= MAX_MEDIA_ARTICLES_TOTAL) return "article_cap";
+  return null;
 }
 
 const EMPTY_USAGE_SUMMARY: MediaRunSummary["usage"] = {
@@ -731,7 +735,7 @@ export async function runAuthorizedMediaDiscovery(db: AppDatabase, options: Medi
     const targetOutlets = MEDIA_OUTLETS.flatMap((outlet) => discoveryTargets.map((target) => ({ outlet, target })));
     for (const { outlet, target } of targetOutlets) {
       const appid = target.appid;
-      if (await articleCeilingReached(db, appid)) continue;
+      if (await articleCeiling(db, appid)) continue;
       if (stoppedOutlets.has(outlet.name)) continue;
         const progress = progressRows.find((row) => row.appid === appid && row.outlet === outlet.name) ?? null;
         let progressId = progress?.id;
@@ -839,12 +843,11 @@ export async function runAuthorizedMediaDiscovery(db: AppDatabase, options: Medi
         for (const selection of selections.values()) {
           const selected = selection.review ?? selection.preview;
           if (!selected) continue;
-          const total = await first<{ count: number }>(db, "SELECT COUNT(*) AS count FROM media_sources");
-          const gameTotal = await first<{ count: number }>(db, "SELECT COUNT(*) AS count FROM media_sources WHERE appid = ?", selected.appid);
-          if (Number(total?.count ?? 0) < MAX_MEDIA_ARTICLES_TOTAL && Number(gameTotal?.count ?? 0) < MAX_MEDIA_ARTICLES_PER_GAME) {
+          const ceiling = await articleCeiling(db, selected.appid);
+          if (!ceiling) {
             await db.prepare("INSERT OR IGNORE INTO media_sources (appid, pass, original_url, discovery_url, title, outlet, author, published_at, updated_at, retrieved_at, type, hands_on, affiliation, platform, build_context) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").bind(selected.appid, pass, selected.originalUrl, selected.discoveryUrl, selected.title, selected.outlet, selected.author, selected.publishedAt, selected.updatedAt, selected.retrievedAt, selected.type, selected.handsOn === null ? null : selected.handsOn ? 1 : 0, selected.affiliation, selected.platform, selected.buildContext).run();
           } else {
-            stopReasons.add(Number(gameTotal?.count ?? 0) >= MAX_MEDIA_ARTICLES_PER_GAME ? `article_cap:${selected.appid}` : "article_cap");
+            stopReasons.add(ceiling);
           }
         }
         if (selections.size === 0 && current.status !== "stopped") {

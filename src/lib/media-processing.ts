@@ -1199,7 +1199,7 @@ async function advanceMediaProcessingNow(db: AppDatabase, options: MediaProcessi
   let synthesisSubmitted = 0;
   let reused = 0;
   let stopReason: string | null = null;
-  const outletStops = new Map<string, string>();
+  const outletStops = new Map<MediaOutlet, string>();
 
   for (const source of sources) {
     if (outletStops.has(source.outlet)) continue;
