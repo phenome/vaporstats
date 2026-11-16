@@ -1608,7 +1608,11 @@ async function advanceMediaProcessingNow(db: AppDatabase, options: MediaProcessi
   // that this advance has since met.
   const earlierReasons = allCovered ? [] : recordedWorkStops(auth.stop_reason);
   const stopReasons = [...new Set([...(stopReason ? [stopReason] : []), ...[...outletStops].map(([outlet, reason]) => `${outlet}:${reason}`), ...sourceSkips, ...earlierReasons])];
-  await db.prepare("UPDATE media_processing_authorizations SET status = ?, stop_reason = ?, updated_at = ? WHERE run_id = ? AND status <> 'stopped'").bind(status, stopReasons.length > 0 ? stopReasons.join("; ") : null, now.toISOString(), auth.run_id).run();
+  await transaction(db, async () => {
+    await db.prepare("UPDATE media_processing_authorizations SET status = ?, stop_reason = ?, updated_at = ? WHERE run_id = ? AND status <> 'stopped'").bind(status, stopReasons.length > 0 ? stopReasons.join("; ") : null, now.toISOString(), auth.run_id).run();
+    // A finished run has no pending work left for text it retained.
+    if (status === "completed" || status === "stopped") await db.prepare("UPDATE media_sources SET processing_content = NULL WHERE processing_run_id = ? AND processing_content IS NOT NULL").bind(auth.run_id).run();
+  });
   await recordReusedOutputs(db, auth.run_id, sources.map((source) => source.id), currentProcessingEntities);
   return { runId: auth.run_id, status, submitted: extractionSubmitted + embeddingSubmitted + synthesisSubmitted, completed: Number(runAggregate?.succeeded ?? succeeded), outputs: await outputCounts(db, auth.run_id), chargedMicrousd: Number(aggregate?.charged ?? 0), outstandingReservedMicrousd: Number(aggregate?.reserved ?? 0), stopReasons, failed: Number(runAggregate?.failed ?? failed), uncertain: Number(runAggregate?.uncertain ?? uncertain), overviewAppids: activeOverview.map((row) => row.appid) };
 }

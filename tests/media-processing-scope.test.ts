@@ -13,6 +13,7 @@ import { MEDIA_OUTLETS } from "../src/lib/media-discovery";
 import type { AppDatabase } from "../src/lib/db";
 import { openTestDatabase, type TestDatabase } from "./support/db";
 import {
+  BALDURS_GATE,
   CYBERPUNK,
   ControlledGeminiTransport,
   extractionOutput,
@@ -406,6 +407,26 @@ describe("processing scope", () => {
       expect(summary.stopReasons).toEqual([`${MEDIA_OUTLETS[0].name}:article_${kind}`]);
     }
     expect(first.outputs.skipped).toBe(1);
+  });
+
+  test("a run that finishes discards text it retained for work it never submitted", async () => {
+    const database = unprocessedGame();
+    seedApps(database.native, [BALDURS_GATE]);
+    const runId = insertCompletedRun(database.native, "initial:retained-text:test", [BALDURS_GATE, CYBERPUNK]);
+    await authorizeMediaProcessing(database.db, runId);
+    const transport = new ControlledGeminiTransport();
+    await expect(advanceMediaProcessing(crashingOnWrite(database.db, /^INSERT INTO media_processing_jobs/), { runId, transport, articleFetch: outletArticles().articleFetch, now: new Date("2026-11-02T00:00:00.000Z"), ...PAID })).rejects.toThrow("process stopped");
+    const retainedText = () => database.native.query<{ count: number }, []>("SELECT COUNT(*) AS count FROM media_sources WHERE processing_content IS NOT NULL").get()?.count;
+    expect(retainedText()).toBe(1);
+
+    const { db } = database.reopen();
+    insertSources(database.native, BALDURS_GATE, "initial", 1);
+    refuseRequests(transport, database.native, () => true, "allowance", BALDURS_GATE);
+    const finished = await advanceMediaProcessing(db, { runId, transport, articleFetch: outletArticles().articleFetch, now: new Date("2026-11-02T00:01:00.000Z"), ...PAID });
+
+    expect(finished.status).toBe("stopped");
+    expect(finished.stopReasons).toContain("lifetime_budget");
+    expect(retainedText()).toBe(0);
   });
 
   test("an affected set accepts only distinct sources of the run's games and is fixed once authorized", async () => {
