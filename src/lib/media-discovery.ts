@@ -557,6 +557,15 @@ async function stopProgress(db: AppDatabase, progressId: number, reason: string)
 }
 
 /**
+ * Returns a query the search provider refused to the row's unsearched state,
+ * keeping `reason` on the row until the query is issued again. No search was
+ * served, so the entity, outlet and pass keep their one query.
+ */
+async function releaseRefusedQuery(db: AppDatabase, progressId: number, status: "queued" | "stopped", reason: string): Promise<void> {
+  await db.prepare("UPDATE media_discovery_progress SET status = ?, stop_reason = ?, query_attempted_at = NULL, candidate_urls = '[]', candidate_index = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(status, reason, progressId).run();
+}
+
+/**
  * Fetches an outlet article without following redirects off the outlet, or
  * returns why the outlet must not be contacted again and whether this
  * candidate reached it. Every request reserves its attempt first; any other
@@ -772,7 +781,7 @@ export async function runAuthorizedMediaDiscovery(db: AppDatabase, options: Medi
           const attemptId = reservation.attemptId;
           searchesIssued += 1;
           await db.prepare(
-            "UPDATE media_discovery_progress SET query_attempted_at = ?, status = 'searching', updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+            "UPDATE media_discovery_progress SET query_attempted_at = ?, status = 'searching', stop_reason = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
           ).bind(attemptNow.toISOString(), progressId).run();
           let response: Response;
           try {
@@ -788,6 +797,15 @@ export async function runAuthorizedMediaDiscovery(db: AppDatabase, options: Medi
             continue;
           }
           await finishOutletAttempt(db, attemptId, { kind: "search", statusCode: response.status, succeeded: response.ok, error: response.ok ? null : `HTTP ${response.status}` });
+          if (response.status === 401 || response.status === 403) {
+            // The search provider rejected the request, not the outlet: stop the
+            // whole run as a provider stop, leave every outlet open, and keep
+            // the unserved query for the next authorized run.
+            const reason = `tavily_search_http_${response.status}`;
+            await releaseRefusedQuery(db, progressId, "queued", reason);
+            stopReasons.add(reason);
+            break;
+          }
           const body = await response.json().catch(() => ({}));
           const providerRequestId = cleanText(jsonObject(body).request_id ?? jsonObject(body).requestId);
           const usage = jsonObject(jsonObject(body).usage);
@@ -800,14 +818,6 @@ export async function runAuthorizedMediaDiscovery(db: AppDatabase, options: Medi
             : [];
           await db.prepare("UPDATE media_discovery_progress SET query_attempted_at = ?, status = 'fetching', candidate_urls = ?, candidate_index = 0, provider_request_id = ?, credits_used = ?, usage = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(attemptNow.toISOString(), JSON.stringify(candidates), providerRequestId, typeof (usage.credits ?? usage.credits_used) === "number" ? (usage.credits ?? usage.credits_used) : null, JSON.stringify(usage), progressId).run();
           await db.prepare("UPDATE media_discovery_runs SET query_count = query_count + 1, provider_request_ids = json_insert(provider_request_ids, '$[#]', ?), usage = json_patch(usage, ?) WHERE id = ?").bind(providerRequestId, JSON.stringify(usage), run.id).run();
-          if (response.status === 401 || response.status === 403) {
-            // The search provider rejected the request, not the outlet: stop the
-            // whole run as a provider stop and leave every outlet open.
-            const reason = `tavily_search_http_${response.status}`;
-            await stopProgress(db, progressId, reason);
-            stopReasons.add(reason);
-            break;
-          }
           if (response.status === 429) {
             await db.prepare("UPDATE media_discovery_progress SET status = 'stopped', stop_reason = ?, updated_at = CURRENT_TIMESTAMP WHERE outlet = ? AND pass = ?").bind(`search_http_${response.status}`, outlet.name, pass).run();
             stoppedOutlets.add(outlet.name);
