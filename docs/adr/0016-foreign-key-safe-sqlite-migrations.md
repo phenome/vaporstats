@@ -21,7 +21,7 @@ SQLite changes a constraint by rebuilding the table: create a replacement, copy 
 
 The project keeps drizzle's migrator rather than reimplementing its ledger. Disabling foreign keys before the migrator starts is enough to make rebuilds safe. A check before commit would need a copy of drizzle's apply loop, and the deployment snapshot already provides rollback. Generated SQL, journals and snapshots still come from `bun run db:generate` and follow ADR 0004's review rules.
 
-Rebuild migrations can rely on foreign keys being off. They must leave every reference valid. A migration that deletes or remaps parent rows also handles their children explicitly.
+Rebuild migrations can rely on foreign keys being off. They must leave every reference valid. A rebuild of an `AUTOINCREMENT` table also copies the original `sqlite_sequence` high-water mark to the replacement before dropping the original; otherwise new rows can reuse ids of deleted rows. `check:migrations` compares `sqlite_sequence` before and after upgrading retained rows. A migration that deletes or remaps parent rows also handles their children explicitly.
 
 ## Verification
 

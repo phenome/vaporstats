@@ -20,6 +20,8 @@ CREATE TABLE `__new_media_discovery_attempts` (
 );
 --> statement-breakpoint
 INSERT INTO `__new_media_discovery_attempts`("id", "appid", "outlet", "pass", "day", "kind", "url", "status_code", "succeeded", "error", "attempted_at") SELECT "id", "appid", "outlet", "pass", "day", "kind", "url", "status_code", "succeeded", "error", "attempted_at" FROM `media_discovery_attempts`;--> statement-breakpoint
+DELETE FROM sqlite_sequence WHERE name = '__new_media_discovery_attempts';--> statement-breakpoint
+INSERT INTO sqlite_sequence (name, seq) SELECT '__new_media_discovery_attempts', seq FROM sqlite_sequence WHERE name = 'media_discovery_attempts';--> statement-breakpoint
 DROP TABLE `media_discovery_attempts`;--> statement-breakpoint
 ALTER TABLE `__new_media_discovery_attempts` RENAME TO `media_discovery_attempts`;--> statement-breakpoint
 PRAGMA foreign_keys=ON;--> statement-breakpoint
@@ -50,6 +52,8 @@ CREATE TABLE `__new_media_discovery_progress` (
 );
 --> statement-breakpoint
 INSERT INTO `__new_media_discovery_progress`("id", "run_id", "appid", "pass", "outlet", "status", "query_attempted_at", "candidate_urls", "candidate_index", "provider_request_id", "credits_used", "usage", "stop_reason", "updated_at") SELECT "id", "run_id", "appid", "pass", "outlet", "status", "query_attempted_at", "candidate_urls", "candidate_index", "provider_request_id", "credits_used", "usage", "stop_reason", "updated_at" FROM `media_discovery_progress`;--> statement-breakpoint
+DELETE FROM sqlite_sequence WHERE name = '__new_media_discovery_progress';--> statement-breakpoint
+INSERT INTO sqlite_sequence (name, seq) SELECT '__new_media_discovery_progress', seq FROM sqlite_sequence WHERE name = 'media_discovery_progress';--> statement-breakpoint
 DROP TABLE `media_discovery_progress`;--> statement-breakpoint
 ALTER TABLE `__new_media_discovery_progress` RENAME TO `media_discovery_progress`;--> statement-breakpoint
 CREATE UNIQUE INDEX `uq_media_discovery_progress_game_outlet_pass` ON `media_discovery_progress` (`appid`,`outlet`,`pass`);--> statement-breakpoint
@@ -78,6 +82,8 @@ CREATE TABLE `__new_media_discovery_runs` (
 );
 --> statement-breakpoint
 INSERT INTO `__new_media_discovery_runs`("id", "pass", "identity_key", "selected_games", "status", "resumed", "query_count", "article_count", "attempt_count", "provider_request_ids", "usage", "stop_reason", "summary", "started_at", "finished_at", "created_at") SELECT "id", "pass", "identity_key", "selected_games", "status", "resumed", "query_count", "article_count", "attempt_count", "provider_request_ids", "usage", "stop_reason", "summary", "started_at", "finished_at", "created_at" FROM `media_discovery_runs`;--> statement-breakpoint
+DELETE FROM sqlite_sequence WHERE name = '__new_media_discovery_runs';--> statement-breakpoint
+INSERT INTO sqlite_sequence (name, seq) SELECT '__new_media_discovery_runs', seq FROM sqlite_sequence WHERE name = 'media_discovery_runs';--> statement-breakpoint
 DROP TABLE `media_discovery_runs`;--> statement-breakpoint
 ALTER TABLE `__new_media_discovery_runs` RENAME TO `media_discovery_runs`;--> statement-breakpoint
 CREATE UNIQUE INDEX `uq_media_discovery_runs_identity` ON `media_discovery_runs` (`identity_key`);--> statement-breakpoint
@@ -110,6 +116,8 @@ CREATE TABLE `__new_media_sources` (
 );
 --> statement-breakpoint
 INSERT INTO `__new_media_sources`("id", "appid", "pass", "original_url", "discovery_url", "title", "outlet", "author", "published_at", "updated_at", "retrieved_at", "type", "hands_on", "affiliation", "platform", "build_context", "normalized_content_hash", "cleanup_version", "processing_content", "processing_input_identity") SELECT "id", "appid", "pass", "original_url", "discovery_url", "title", "outlet", "author", "published_at", "updated_at", "retrieved_at", "type", "hands_on", "affiliation", "platform", "build_context", "normalized_content_hash", "cleanup_version", "processing_content", "processing_input_identity" FROM `media_sources`;--> statement-breakpoint
+DELETE FROM sqlite_sequence WHERE name = '__new_media_sources';--> statement-breakpoint
+INSERT INTO sqlite_sequence (name, seq) SELECT '__new_media_sources', seq FROM sqlite_sequence WHERE name = 'media_sources';--> statement-breakpoint
 DROP TABLE `media_sources`;--> statement-breakpoint
 ALTER TABLE `__new_media_sources` RENAME TO `media_sources`;--> statement-breakpoint
 CREATE UNIQUE INDEX `uq_media_sources_game_url` ON `media_sources` (`appid`,`original_url`);--> statement-breakpoint

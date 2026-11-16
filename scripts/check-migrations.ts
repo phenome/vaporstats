@@ -423,12 +423,36 @@ function verifyRetainedMediaRowsSurviveUpgrade(): void {
     for (const table of mediaTables) {
       if (before.get(table)!.length === 0) throw new Error("Retained media fixture is missing " + table + " rows");
     }
+    // Deleted rows above the retained ones leave each AUTOINCREMENT high-water
+    // mark above the largest retained id. A table rebuild must keep that mark,
+    // or new rows would reuse ids that retained evidence once referenced.
+    retained.exec("UPDATE sqlite_sequence SET seq = seq + 100");
+    const sequences = () =>
+      new Map(
+        retained
+          .query<{ name: string; seq: number }, []>("SELECT name, seq FROM sqlite_sequence")
+          .all()
+          .map((row) => [row.name, row.seq])
+      );
+    const sequencesBefore = sequences();
+    const autoincrementTables = retained
+      .query<{ name: string }, []>("SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'media_%' AND sql LIKE '%AUTOINCREMENT%'")
+      .all();
+    for (const { name } of autoincrementTables) {
+      if (!sequencesBefore.has(name)) throw new Error("Retained media fixture has no sqlite_sequence row for " + name);
+    }
 
     applyMigrations(retained, migrationDirectory);
 
     for (const [table, rows] of before) {
       if (JSON.stringify(snapshot(table)) !== JSON.stringify(rows)) {
         throw new Error("Migrations changed retained " + table + " rows");
+      }
+    }
+    const sequencesAfter = sequences();
+    for (const [table, seq] of sequencesBefore) {
+      if (sequencesAfter.get(table) !== seq) {
+        throw new Error("Migrations changed the sqlite_sequence high-water mark of " + table);
       }
     }
     if (retained.query<{ foreign_keys: number }, []>("PRAGMA foreign_keys").get()?.foreign_keys !== 1) {
