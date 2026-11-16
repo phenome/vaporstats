@@ -147,18 +147,28 @@ function configureDatabase(database: Database): void {
   database.exec("PRAGMA busy_timeout = 5000");
 }
 
-async function openDatabase(): Promise<SqliteAppDatabase> {
-  const databasePath = resolve(process.env.DATABASE_PATH ?? join("data", "vaporstats.sqlite"));
-  mkdirSync(dirname(databasePath), { recursive: true });
+export type { SqliteAppDatabase };
+
+/**
+ * Opens a Bun SQLite database exactly as the application does: production
+ * pragmas, then the shared migration procedure. Tests use this so their
+ * adapter and foreign-key state match production.
+ */
+export function openSqliteAppDatabase(databasePath: string, migrationsDirectory?: string): SqliteAppDatabase {
+  if (databasePath !== ":memory:") mkdirSync(dirname(databasePath), { recursive: true });
   const native = new Database(databasePath);
   try {
     configureDatabase(native);
-    applyMigrations(native);
+    applyMigrations(native, migrationsDirectory);
     return new SqliteAppDatabase(native, databasePath);
   } catch (error) {
     native.close(true);
     throw error;
   }
+}
+
+async function openDatabase(): Promise<SqliteAppDatabase> {
+  return openSqliteAppDatabase(resolve(process.env.DATABASE_PATH ?? join("data", "vaporstats.sqlite")));
 }
 
 export async function getDb(explicitDb?: AppDatabase): Promise<AppDatabase> {

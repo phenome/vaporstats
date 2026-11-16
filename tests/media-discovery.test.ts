@@ -1,116 +1,29 @@
-import { mkdtempSync, rmSync } from "node:fs";
-import { join } from "node:path";
-import { tmpdir } from "node:os";
-import { Database, type SQLQueryBindings } from "bun:sqlite";
-import { afterEach, describe, expect, test } from "bun:test";
-import { applyMigrations } from "../src/lib/migrations";
-import type { AppDatabase, AppPreparedStatement } from "../src/lib/db";
+import { describe, expect, test } from "bun:test";
 import {
   authorizeMediaRun,
   getMediaSources,
-  MEDIA_OUTLETS,
   runAuthorizedMediaDiscovery,
   runSerializedMediaDiscovery,
 } from "../src/lib/media-discovery";
 import { handleRequest } from "../src/server";
+import { openTestDatabase } from "./support/db";
+import {
+  BALDURS_GATE,
+  CYBERPUNK,
+  discoveryArticleHtml as html,
+  discoveryFetch,
+  GAME_NAMES as NAMES,
+  HADES_II,
+  seedApps,
+} from "./support/media";
 
-function createAdapter(native: Database): AppDatabase {
-  return {
-    prepare(query: string): AppPreparedStatement {
-      let values: unknown[] = [];
-      const statement: AppPreparedStatement = {
-        bind(...next) {
-          values = next;
-          return statement;
-        },
-        async first<T>(column?: string) {
-          const row = native.prepare(query).get(...(values as SQLQueryBindings[])) as Record<string, unknown> | null;
-          if (!row) return null;
-          return (column ? row[column] : row) as T;
-        },
-        async run() {
-          const result = native.prepare(query).run(...(values as SQLQueryBindings[]));
-          return { success: true, meta: { changes: result.changes, duration: 0 } };
-        },
-        async all<T>() {
-          return { success: true, results: native.prepare(query).all(...(values as SQLQueryBindings[])) as T[], meta: { changes: 0, duration: 0 } };
-        },
-        async raw<T>() {
-          return native.prepare(query).values(...(values as SQLQueryBindings[])) as T[];
-        },
-      };
-      return statement;
-    },
-    async batch(statements) {
-      native.exec("BEGIN IMMEDIATE");
-      try {
-        const results = [];
-        for (const statement of statements) results.push(await statement.run());
-        native.exec("COMMIT");
-        return results;
-      } catch (error) {
-        native.exec("ROLLBACK");
-        throw error;
-      }
-    },
-    async exec(query) {
-      native.exec(query);
-      return { count: 0, duration: 0 };
-    },
-  };
-}
-
-const APPIDS = [1091500, 1086940, 1145350] as const;
-const NAMES: Record<number, string> = {
-  1091500: "Cyberpunk 2077",
-  1086940: "Baldur's Gate 3",
-  1145350: "Hades II",
-};
+const APPIDS = [CYBERPUNK, BALDURS_GATE, HADES_II] as const;
 
 function fixture() {
-  const directory = mkdtempSync(join(tmpdir(), "vaporstats-media-test-"));
-  const databasePath = join(directory, "media.sqlite");
-  const native = new Database(databasePath);
-  applyMigrations(native);
-  native.exec("PRAGMA foreign_keys = ON");
-  for (const appid of APPIDS) {
-    native.prepare("INSERT INTO apps (appid, name, slug) VALUES (?, ?, ?)").run(appid, NAMES[appid], NAMES[appid]!.toLowerCase().replaceAll(" ", "-"));
-  }
-  return { native, databasePath, directory, db: createAdapter(native), cleanup: () => { native.close(true); rmSync(directory, { recursive: true, force: true }); } };
+  const database = openTestDatabase("vaporstats-media-test-");
+  seedApps(database.native, APPIDS);
+  return database;
 }
-
-function html(appid: number, title: string, options: { date?: string; author?: string; affiliation?: string; body?: string } = {}): string {
-  const body = options.body ?? `${NAMES[appid]} delivers a substantial playable campaign with detailed systems and memorable encounters. `.repeat(5);
-  const affiliation = options.affiliation ? `<meta name="author_affiliation" content="${options.affiliation}">` : "";
-  return `<!doctype html><html><head><meta property="og:title" content="${title}"><meta property="article:published_time" content="${options.date ?? "2025-01-01"}"><meta name="author" content="${options.author ?? "Reviewer"}">${affiliation}</head><body><article><h1>${title}</h1><p>${body}</p></article></body></html>`;
-}
-
-function discoveryFetch(options: { variants?: Record<string, { status?: number; body?: string; redirect?: string }> } = {}) {
-  const calls: { url: string; init?: RequestInit }[] = [];
-  const fetchFn = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
-    const url = String(input);
-    calls.push({ url, init });
-    if (url.endsWith("/usage")) return Response.json({ account: { current_plan: "free" }, plan_usage: 1, plan_limit: 100, paygo_usage: 0, paygo_limit: 0, request_id: "usage-1" });
-    if (url.endsWith("/search")) {
-      const payload = JSON.parse(String(init?.body)) as { include_domains: string[]; query: string };
-      const domain = payload.include_domains[0]!;
-      const appid = payload.query.includes("Baldur") ? 1086940 : payload.query.includes("Hades") ? 1145350 : 1091500;
-      const slug = `${appid}-${domain.replaceAll(".", "-")}`;
-      return Response.json({ request_id: `search-${domain}`, usage: { credits_used: 1 }, results: [{ url: `https://${domain}/articles/${slug}` }] });
-    }
-    const variant = options.variants?.[url];
-    if (variant?.redirect) return new Response(null, { status: variant.status ?? 302, headers: { location: variant.redirect } });
-    if (variant?.body) return new Response(variant.body, { status: variant.status ?? 200 });
-    const appid = url.includes("1086940") ? 1086940 : url.includes("1145350") ? 1145350 : 1091500;
-    const outlet = MEDIA_OUTLETS.find((item) => url.includes(item.domain));
-    return new Response(html(appid, `${NAMES[appid]} Review${outlet ? ` - ${outlet.name}` : ""}`));
-  };
-  return { calls, fetchFn };
-}
-
-afterEach(() => {
-  // Fixtures are intentionally short-lived; each test owns its in-memory native handle.
-});
 
 describe("bounded media discovery", () => {
   test("authorizes only the initial subset, sends exact Tavily requests, persists metadata, and resumes without new queries", async () => {
@@ -372,8 +285,7 @@ describe("bounded media discovery", () => {
   });
 
   test("enforces the daily cap and resumes persisted progress after restart", async () => {
-    const { native, databasePath, directory, db } = fixture();
-    let restartedNative: Database | undefined;
+    const { db, reopen, cleanup } = fixture();
     try {
       for (let id = 0; id < 30; id += 1) {
         await db.prepare("INSERT INTO media_discovery_attempts (appid, outlet, pass, day, kind, succeeded, attempted_at) VALUES (?, 'IGN', 'initial', ?, 'failure', 0, ?)").bind(1091500, "2026-09-10", `2026-09-10T00:00:${String(id).padStart(2, "0")}.000Z`).run();
@@ -395,18 +307,13 @@ describe("bounded media discovery", () => {
       expect(result.stopReasons).toContain("IGN:daily_attempt_cap");
       expect(searched.every((body) => !body.includes("\"ign.com\""))).toBe(true);
 
-      native.close(true);
-      restartedNative = new Database(databasePath);
-      restartedNative.exec("PRAGMA foreign_keys = ON");
-      const restartedDb = createAdapter(restartedNative);
+      const { db: restartedDb } = reopen();
       const resumedAuthorization = await authorizeMediaRun(restartedDb, { pass: "initial", games: [1091500] });
       expect(resumedAuthorization.resumed).toBe(true);
       await runAuthorizedMediaDiscovery(restartedDb, { runId: resumedAuthorization.runId, tavilyApiKey: "test-key", fetch: fetchFn, now: new Date("2026-09-11T12:00:00.000Z") });
       expect(searched.some((body) => body.includes("\"ign.com\""))).toBe(true);
     } finally {
-      try { native.close(true); } catch { /* already closed for the restart */ }
-      restartedNative?.close(true);
-      rmSync(directory, { recursive: true, force: true });
+      cleanup();
     }
   });
 
@@ -432,8 +339,7 @@ describe("bounded media discovery", () => {
   });
 
   test("atomically records unexpected failure and reopens progress without repeating a search", async () => {
-    const { native, databasePath, directory, db } = fixture();
-    let restartedNative: Database | undefined;
+    const { db, reopen, cleanup } = fixture();
     let throwArticleBody = true;
     const searchCalls: string[] = [];
     const fetchFn = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
@@ -466,19 +372,14 @@ describe("bounded media discovery", () => {
     expect(failedSummary).toEqual(expect.objectContaining({ runId: authorization.runId, status: "failed", stopReason: expect.stringContaining("execution_error") }));
     expect(JSON.stringify(failedSummary)).not.toContain("test-key");
 
-    native.close(true);
-    restartedNative = new Database(databasePath);
-    restartedNative.exec("PRAGMA foreign_keys = ON");
-    const restartedDb = createAdapter(restartedNative);
+    const { db: restartedDb } = reopen();
     const resumedAuthorization = await authorizeMediaRun(restartedDb, { pass: "initial", games: [1091500] });
     expect(resumedAuthorization.resumed).toBe(true);
     const recovered = await runAuthorizedMediaDiscovery(restartedDb, { runId: resumedAuthorization.runId, tavilyApiKey: "test-key", fetch: fetchFn, now: new Date("2026-09-11T00:00:00.000Z") });
     expect(recovered.status).toBe("completed");
     expect(searchCalls).toHaveLength(6);
     expect(searchCalls.filter((body) => body.includes("\"ign.com\""))).toHaveLength(1);
-    try { native.close(true); } catch { /* already closed for the restart */ }
-    restartedNative.close(true);
-    rmSync(directory, { recursive: true, force: true });
+    cleanup();
   });
 
   test("reports a shortfall when fewer than three outlets produce accepted sources", async () => {

@@ -1,7 +1,5 @@
-import { Database, type SQLQueryBindings } from "bun:sqlite";
+import type { Database } from "bun:sqlite";
 import { afterEach, describe, expect, test } from "bun:test";
-import { applyMigrations } from "../src/lib/migrations";
-import type { AppDatabase, AppPreparedStatement } from "../src/lib/db";
 import {
   GEMINI_EMBEDDING_CONFIG_VERSION,
   GEMINI_EMBEDDING_DIMENSIONS,
@@ -11,43 +9,8 @@ import {
 } from "../src/lib/media-similarity";
 import { getCanonicalChildPath } from "../src/lib/related";
 import { getCanonicalGamePath } from "../src/lib/slug";
+import { openMemoryDatabase } from "./support/db";
 
-function adapter(native: Database): AppDatabase {
-  return {
-    prepare(query: string): AppPreparedStatement {
-      let values: unknown[] = [];
-      const statement: AppPreparedStatement = {
-        bind(...next) { values = next; return statement; },
-        async first<T>(column?: string) {
-          const row = native.prepare(query).get(...values as SQLQueryBindings[]) as Record<string, unknown> | null;
-          return row ? (column ? row[column] : row) as T : null;
-        },
-        async run() {
-          const result = native.prepare(query).run(...values as SQLQueryBindings[]);
-          return { success: true, meta: { changes: result.changes, duration: 0 } };
-        },
-        async all<T>() {
-          return { success: true, results: native.prepare(query).all(...values as SQLQueryBindings[]) as T[], meta: { changes: 0, duration: 0 } };
-        },
-        async raw<T>() { return native.prepare(query).values(...values as SQLQueryBindings[]) as T[]; },
-      };
-      return statement;
-    },
-    async batch(statements) {
-      native.exec("BEGIN IMMEDIATE");
-      try {
-        const results = [];
-        for (const statement of statements) results.push(await statement.run());
-        native.exec("COMMIT");
-        return results;
-      } catch (error) {
-        native.exec("ROLLBACK");
-        throw error;
-      }
-    },
-    async exec(query) { native.exec(query); return { count: 0, duration: 0 }; },
-  };
-}
 function countRows(native: Database, table: "media_processing_jobs" | "media_game_embeddings" | "media_game_overviews"): number {
   const row = native.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get() as { count: number };
   return row.count;
@@ -101,9 +64,8 @@ function addVector(
 }
 
 function fixture() {
-  const native = new Database(":memory:");
-  applyMigrations(native);
-  native.exec("PRAGMA foreign_keys = ON");
+  const database = openMemoryDatabase();
+  const native = database.native;
   native.prepare(
     `INSERT INTO apps (appid, name, slug, type, is_eligible, is_playable, parent_appid)
      VALUES
@@ -150,7 +112,7 @@ function fixture() {
   addVector(native, 408, "gameplay", vector(0, 0));
   addVector(native, 409, "gameplay", vector(1, 0));
   addVector(native, 410, "gameplay", vector(0.8, 0.6));
-  return { native, db: adapter(native) };
+  return database;
 }
 
 const cleanups: Array<() => void> = [];
@@ -159,7 +121,7 @@ afterEach(() => { while (cleanups.length > 0) cleanups.pop()!(); });
 describe("live media similarity", () => {
   test("ranks exact cosine matches independently per dimension with deterministic ties", async () => {
     const value = fixture();
-    cleanups.push(() => value.native.close(true));
+    cleanups.push(value.close);
     const matches = await getMediaGameMatches(value.db, 100, { limit: 2, includeUnpublished: true });
 
     expect(matches).toHaveLength(4);
@@ -181,7 +143,7 @@ describe("live media similarity", () => {
 
   test("resolves canonical root and child paths once per matched appid", async () => {
     const value = fixture();
-    cleanups.push(() => value.native.close(true));
+    cleanups.push(value.close);
     const paths = await getMediaGameMatchPaths(value.db, [
       {
         dimension: "gameplay",
@@ -233,7 +195,7 @@ describe("live media similarity", () => {
 
   test("requires every child match and path to have an eligible playable root parent", async () => {
     const value = fixture();
-    cleanups.push(() => value.native.close(true));
+    cleanups.push(value.close);
     value.native.prepare(
       `INSERT INTO apps (appid, name, slug, type, is_eligible, is_playable, parent_appid)
        VALUES
@@ -274,7 +236,7 @@ describe("live media similarity", () => {
 
   test("handles limits and keeps each dimension independently bounded", async () => {
     const value = fixture();
-    cleanups.push(() => value.native.close(true));
+    cleanups.push(value.close);
     const limited = await getMediaGameMatches(value.db, 100, { limit: 1, includeUnpublished: true });
     expect(limited.map((match) => [match.dimension, match.matchedGame.appid])).toEqual([
       ["gameplay", 202],
@@ -289,7 +251,7 @@ describe("live media similarity", () => {
 
   test("scans compatible vectors in bounded batches without losing later exact matches", async () => {
     const value = fixture();
-    cleanups.push(() => value.native.close(true));
+    cleanups.push(value.close);
     value.native.prepare("UPDATE media_game_embeddings SET active = 0 WHERE appid <> 100 AND dimension = 'gameplay'").run();
     for (let appid = 1000; appid < 1130; appid += 1) {
       value.native.prepare("INSERT INTO apps (appid, name, slug) VALUES (?, ?, ?)").run(appid, `Candidate ${appid}`, `candidate-${appid}`);
@@ -303,7 +265,7 @@ describe("live media similarity", () => {
 
   test("isolates incompatible, stale, inactive, malformed, and accessory vectors while retaining separate expansions", async () => {
     const value = fixture();
-    cleanups.push(() => value.native.close(true));
+    cleanups.push(value.close);
     const matches = await getMediaGameMatches(value.db, 100, { limit: 100, includeUnpublished: true });
     const matchedAppids = new Set(matches.map((match) => match.matchedGame.appid));
 
@@ -323,7 +285,7 @@ describe("live media similarity", () => {
 
   test("requires an active vector tied to the current Overview", async () => {
     const value = fixture();
-    cleanups.push(() => value.native.close(true));
+    cleanups.push(value.close);
     value.native.prepare("UPDATE media_game_embeddings SET active = 0 WHERE appid = 100").run();
     expect(await getMediaGameMatches(value.db, 100, { includeUnpublished: true })).toEqual([]);
 
@@ -334,7 +296,7 @@ describe("live media similarity", () => {
 
   test("applies the publication gate without creating read-time jobs or spending", async () => {
     const value = fixture();
-    cleanups.push(() => value.native.close(true));
+    cleanups.push(value.close);
     const before = {
       jobs: countRows(value.native, "media_processing_jobs"),
       embeddings: countRows(value.native, "media_game_embeddings"),

@@ -1,11 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdtempSync, rmSync } from "node:fs";
-import { join } from "node:path";
-import { tmpdir } from "node:os";
-import { Database, type SQLQueryBindings } from "bun:sqlite";
 import { afterEach, describe, expect, test } from "bun:test";
-import { applyMigrations } from "../src/lib/migrations";
-import type { AppDatabase, AppPreparedStatement } from "../src/lib/db";
 import {
   GEMINI_BATCH_CAPABILITY_VERSION,
   GEMINI_BATCH_BILLING_CONFIRMATION,
@@ -13,109 +7,37 @@ import {
   advanceMediaProcessing,
   authorizeMediaProcessing,
   createGeminiBatchTransport,
-  type GeminiBatchPoll,
-  type GeminiBatchTransport,
 } from "../src/lib/media-processing";
 import { getMediaOverview, normalizeMediaTag, parseMediaOverview } from "../src/lib/media-overview";
 import { getMediaSources } from "../src/lib/media-discovery";
 import { handleGameDetailRequest } from "../src/routes/api.games.$appid.detail";
-
-function adapter(native: Database): AppDatabase {
-  return {
-    prepare(query: string): AppPreparedStatement {
-      let values: unknown[] = [];
-      const statement: AppPreparedStatement = {
-        bind(...next) { values = next; return statement; },
-        async first<T>(column?: string) {
-          const row = native.prepare(query).get(...(values as SQLQueryBindings[])) as Record<string, unknown> | null;
-          return row ? (column ? row[column] : row) as T : null;
-        },
-        async run() {
-          const result = native.prepare(query).run(...(values as SQLQueryBindings[]));
-          return { success: true, meta: { changes: result.changes, duration: 0 } };
-        },
-        async all<T>() {
-          return { success: true, results: native.prepare(query).all(...(values as SQLQueryBindings[])) as T[], meta: { changes: 0, duration: 0 } };
-        },
-        async raw<T>() { return native.prepare(query).values(...(values as SQLQueryBindings[])) as T[]; },
-      };
-      return statement;
-    },
-    async batch(statements) {
-      native.exec("BEGIN IMMEDIATE");
-      try {
-        const result = [];
-        for (const statement of statements) result.push(await statement.run());
-        native.exec("COMMIT");
-        return result;
-      } catch (error) {
-        native.exec("ROLLBACK");
-        throw error;
-      }
-    },
-    async exec(query) { native.exec(query); return { count: 0, duration: 0 }; },
-  };
-}
+import { openTestDatabase } from "./support/db";
+import {
+  ControlledGeminiTransport as ControlledTransport,
+  GAME_NAMES,
+  extractionOutput,
+  insertCompletedRun,
+  overviewOutput,
+  overviewOutputForUrls,
+  processingArticleHtml as articleHtml,
+  seedApps,
+  stableJson,
+} from "./support/media";
 
 const APPIDS = [1091500, 1086940] as const;
-const NAMES: Record<number, string> = { 1091500: "Cyberpunk 2077", 1086940: "Baldur's Gate 3" };
 const URLS: Record<number, string> = {
   1091500: "https://ign.com/articles/cyberpunk-review",
   1086940: "https://ign.com/articles/baldurs-review",
 };
 
-function articleHtml(appid: number): string {
-  const name = NAMES[appid];
-  return `<!doctype html><html><head><title>${name} Review</title><script>secret-not-content</script></head><body><nav>Navigation noise</nav><article><h1>${name} Review</h1><p>${name} has a focused campaign with flexible combat and memorable encounters.</p><h2>Qualifications</h2><p>This preview was played on PC during Early Access and does not assess the final release.</p><ul><li>Builds reward experimentation</li><li>Performance varies by platform</li></ul></article><aside class="advertisement">Advertisement noise</aside></body></html>`;
-}
-
 function fixture(appids: readonly number[] = [APPIDS[0]]) {
-  const directory = mkdtempSync(join(tmpdir(), "vaporstats-media-processing-"));
-  const databasePath = join(directory, "processing.sqlite");
-  const native = new Database(databasePath);
-  applyMigrations(native);
-  native.exec("PRAGMA foreign_keys = ON");
-  for (const appid of appids) native.prepare("INSERT INTO apps (appid, name, slug) VALUES (?, ?, ?)").run(appid, NAMES[appid], NAMES[appid]!.toLowerCase().replaceAll(" ", "-"));
-  native.prepare("INSERT INTO media_discovery_runs (pass, identity_key, selected_games, status) VALUES ('initial', ?, ?, 'completed')").run(`initial:${appids.join(",")}:test`, JSON.stringify(appids));
-  const runId = Number((native.prepare("SELECT id FROM media_discovery_runs ORDER BY id DESC LIMIT 1").get() as { id: number } | null)?.id);
+  const database = openTestDatabase("vaporstats-media-processing-");
+  seedApps(database.native, appids);
+  const runId = insertCompletedRun(database.native, `initial:${appids.join(",")}:test`, appids);
   for (const appid of appids) {
-    native.prepare("INSERT INTO media_sources (appid, pass, original_url, title, outlet, retrieved_at, type, hands_on, platform, build_context) VALUES (?, 'initial', ?, ?, 'IGN', ?, 'preview', 1, 'PC', 'Early Access')").run(appid, URLS[appid], `${NAMES[appid]} Review`, "2026-09-11T00:00:00.000Z");
+    database.native.prepare("INSERT INTO media_sources (appid, pass, original_url, title, outlet, retrieved_at, type, hands_on, platform, build_context) VALUES (?, 'initial', ?, ?, 'IGN', ?, 'preview', 1, 'PC', 'Early Access')").run(appid, URLS[appid], `${GAME_NAMES[appid]} Review`, "2026-09-11T00:00:00.000Z");
   }
-  return { native, databasePath, directory, db: adapter(native), runId, cleanup: () => { try { native.close(true); } catch { /* already reopened */ } rmSync(directory, { recursive: true, force: true }); } };
-}
-
-class ControlledTransport implements GeminiBatchTransport {
-  readonly submissions: string[] = [];
-  readonly counts: string[] = [];
-  readonly requestBodies: Record<string, unknown>[] = [];
-  readonly polls = new Map<string, GeminiBatchPoll>();
-  nextPolls: GeminiBatchPoll[] = [];
-  throwSubmission = false;
-  inspectDuringSubmit: ((requestKey: string) => void | Promise<void>) | undefined;
-
-  async countTokens(model: string, request: Record<string, unknown>): Promise<number> {
-    this.counts.push(model + JSON.stringify(request).slice(0, 20));
-    return 100;
-  }
-
-  async submitBatch(_model: string, requests: readonly { key: string; request: Record<string, unknown> }[]): Promise<{ name: string }> {
-    const request = requests[0]!;
-    this.requestBodies.push(request.request);
-    await this.inspectDuringSubmit?.(request.key);
-    if (this.throwSubmission) throw new Error("network dropped before batch acknowledgement");
-    const name = `batches/test-${this.submissions.length + 1}`;
-    this.submissions.push(request.key);
-    this.polls.set(name, this.nextPolls.shift() ?? { state: "pending" });
-    return { name };
-  }
-
-  async pollBatch(name: string): Promise<GeminiBatchPoll> {
-    return this.polls.get(name) ?? { state: "pending" };
-  }
-}
-
-function extractionOutput(trait = "build experimentation"): Record<string, unknown> {
-  return { contributions: [{ text: "The combat supports flexible builds", category: "Gameplay & systems" }], traits: [trait], qualifications: ["Early Access", "PC preview"], provenance: [] };
+  return { ...database, runId };
 }
 
 function extractionOutputWithUnsupportedCategories(): Record<string, unknown> {
@@ -129,19 +51,6 @@ function extractionOutputWithUnsupportedCategories(): Record<string, unknown> {
     traits: [],
     qualifications: [],
     provenance: [],
-  };
-}
-
-function overviewOutput(url: string): Record<string, unknown> {
-  return {
-    statements: [{ text: "The game presents a focused campaign with flexible combat, with the preview's Early Access and PC qualification retained.", sourceUrls: [url] }],
-    tags: [{ label: "Build.Experimentation", sourceUrls: [url] }],
-  };
-}
-function overviewOutputForUrls(urls: readonly string[]): Record<string, unknown> {
-  return {
-    statements: [{ text: "The game presents a focused campaign with flexible combat.", sourceUrls: [...urls] }],
-    tags: [{ label: "Build experimentation", sourceUrls: [...urls] }],
   };
 }
 
@@ -180,14 +89,6 @@ function richOverviewOutput(urls: {
       cons: [],
     },
   };
-}
-
-function stableJson(value: unknown): string {
-  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
-  if (value && typeof value === "object") {
-    return `{${Object.entries(value as Record<string, unknown>).sort(([a], [b]) => a.localeCompare(b)).map(([key, item]) => `${JSON.stringify(key)}:${stableJson(item)}`).join(",")}}`;
-  }
-  return JSON.stringify(value) ?? "null";
 }
 
 async function finishSingle(fixtureValue: ReturnType<typeof fixture>, transport: ControlledTransport) {
@@ -410,22 +311,21 @@ describe("bounded Gemini media processing", () => {
     await finishSingle(value, transport);
     const countBefore = await value.db.prepare("SELECT COUNT(*) AS count FROM media_tag_memberships WHERE appid = ?").bind(APPIDS[0]).first<{ count: number }>();
     expect(countBefore?.count).toBe(1);
-    value.native.prepare("INSERT INTO media_discovery_runs (pass, identity_key, selected_games, status) VALUES ('initial', ?, ?, 'completed')").run("initial:empty-tags:test", JSON.stringify([APPIDS[0]]));
-    const nextRun = value.native.prepare("SELECT id FROM media_discovery_runs ORDER BY id DESC LIMIT 1").get() as { id: number };
-    await authorizeMediaProcessing(value.db, nextRun.id);
+    const nextRunId = insertCompletedRun(value.native, "initial:empty-tags:test", [APPIDS[0]]);
+    await authorizeMediaProcessing(value.db, nextRunId);
     transport.nextPolls.push(
       { state: "succeeded", output: extractionOutput(), usage: { inputTokens: 100, outputTokens: 20 } },
       { state: "succeeded", output: overviewOutputWithoutTags(URLS[APPIDS[0]]), usage: { inputTokens: 100, outputTokens: 20 } },
     );
     await advanceMediaProcessing(value.db, {
-      runId: nextRun.id,
+      runId: nextRunId,
       transport,
       articleFetch: async () => articleHtml(APPIDS[0]).replace("flexible combat", "deliberate combat"),
       pricingVersion: GEMINI_BATCH_PRICING_VERSION,
       capabilityVersion: GEMINI_BATCH_CAPABILITY_VERSION,
     });
     await advanceMediaProcessing(value.db, {
-      runId: nextRun.id,
+      runId: nextRunId,
       transport,
       articleFetch: async () => articleHtml(APPIDS[0]).replace("flexible combat", "deliberate combat"),
       pricingVersion: GEMINI_BATCH_PRICING_VERSION,
@@ -590,9 +490,7 @@ describe("bounded Gemini media processing", () => {
     const transport = new ControlledTransport();
     await finishSingle(value, transport);
     const oldExtraction = await value.db.prepare("SELECT input_identity, content_hash FROM media_article_extractions WHERE active = 1").first<{ input_identity: string; content_hash: string }>();
-    value.native.prepare("INSERT INTO media_discovery_runs (pass, identity_key, selected_games, status) VALUES ('initial', ?, ?, 'completed')").run("initial:changed-run:test", JSON.stringify([APPIDS[0]]));
-    const latestRun = value.native.prepare("SELECT id FROM media_discovery_runs ORDER BY id DESC LIMIT 1").get() as { id: number };
-    const newRunId = Number(latestRun.id);
+    const newRunId = insertCompletedRun(value.native, "initial:changed-run:test", [APPIDS[0]]);
     await authorizeMediaProcessing(value.db, newRunId);
     const changedArticle = articleHtml(APPIDS[0]).replace("flexible combat", "deliberate tactical combat");
     let fetches = 0;
@@ -663,12 +561,11 @@ describe("bounded Gemini media processing", () => {
       },
     })).digest("hex");
     await value.db.prepare("UPDATE media_article_extractions SET input_identity = ?, config_version = ? WHERE id = ?").bind(legacyIdentity, legacyConfig, extraction!.id).run();
-    value.native.prepare("INSERT INTO media_discovery_runs (pass, identity_key, selected_games, status) VALUES ('initial', ?, ?, 'completed')").run("initial:config-refresh:test", JSON.stringify([APPIDS[0]]));
-    const newRun = value.native.prepare("SELECT id FROM media_discovery_runs ORDER BY id DESC LIMIT 1").get() as { id: number };
-    await authorizeMediaProcessing(value.db, newRun.id);
+    const newRunId = insertCompletedRun(value.native, "initial:config-refresh:test", [APPIDS[0]]);
+    await authorizeMediaProcessing(value.db, newRunId);
     transport.nextPolls.push({ state: "pending" }, { state: "pending" });
     await advanceMediaProcessing(value.db, {
-      runId: newRun.id,
+      runId: newRunId,
       transport,
       articleFetch: async () => articleHtml(APPIDS[0]),
       pricingVersion: GEMINI_BATCH_PRICING_VERSION,
@@ -779,11 +676,7 @@ describe("bounded Gemini media processing", () => {
     transport.nextPolls.push({ state: "failed", error: "one item failed", usage: { inputTokens: 100, outputTokens: 1 } });
     transport.nextPolls.push({ state: "succeeded", output: overviewOutput(URLS[APPIDS[1]]), usage: { inputTokens: 100, outputTokens: 20 } });
     await advanceMediaProcessing(value.db, { runId: value.runId, transport, articleFetch: async (url) => articleHtml(url.includes("baldurs") ? APPIDS[1] : APPIDS[0]), pricingVersion: GEMINI_BATCH_PRICING_VERSION, capabilityVersion: GEMINI_BATCH_CAPABILITY_VERSION });
-    value.native.close(true);
-    const reopenedNative = new Database(value.databasePath);
-    reopenedNative.exec("PRAGMA foreign_keys = ON");
-    cleanups.push(() => reopenedNative.close(true));
-    const reopenedDb = adapter(reopenedNative);
+    const { db: reopenedDb } = value.reopen();
     const reopened = await advanceMediaProcessing(reopenedDb, { runId: value.runId, transport, articleFetch: async (url) => articleHtml(url.includes("baldurs") ? APPIDS[1] : APPIDS[0]), pricingVersion: GEMINI_BATCH_PRICING_VERSION, capabilityVersion: GEMINI_BATCH_CAPABILITY_VERSION });
     expect(await getMediaOverview(reopenedDb, APPIDS[1], { includeUnpublished: true })).not.toBeNull();
     expect(await getMediaOverview(reopenedDb, APPIDS[0], { includeUnpublished: true })).toBeNull();
@@ -800,12 +693,11 @@ describe("bounded Gemini media processing", () => {
     );
     await advanceMediaProcessing(value.db, { runId: value.runId, transport, articleFetch: async () => articleHtml(APPIDS[0]), pricingVersion: GEMINI_BATCH_PRICING_VERSION, capabilityVersion: GEMINI_BATCH_CAPABILITY_VERSION });
 
-    value.native.prepare("INSERT INTO media_discovery_runs (pass, identity_key, selected_games, status) VALUES ('initial', ?, ?, 'completed')").run("initial:later-authorization:test", JSON.stringify([APPIDS[0]]));
-    const laterRun = value.native.prepare("SELECT id FROM media_discovery_runs ORDER BY id DESC LIMIT 1").get() as { id: number };
-    await authorizeMediaProcessing(value.db, laterRun.id);
+    const laterRunId = insertCompletedRun(value.native, "initial:later-authorization:test", [APPIDS[0]]);
+    await authorizeMediaProcessing(value.db, laterRunId);
     transport.polls.set("batches/test-2", { state: "succeeded", output: overviewOutput(URLS[APPIDS[0]]), usage: { inputTokens: 100, outputTokens: 20 } });
 
-    const result = await advanceMediaProcessing(value.db, { runId: laterRun.id, transport, articleFetch: async () => articleHtml(APPIDS[0]), pricingVersion: GEMINI_BATCH_PRICING_VERSION, capabilityVersion: GEMINI_BATCH_CAPABILITY_VERSION });
+    const result = await advanceMediaProcessing(value.db, { runId: laterRunId, transport, articleFetch: async () => articleHtml(APPIDS[0]), pricingVersion: GEMINI_BATCH_PRICING_VERSION, capabilityVersion: GEMINI_BATCH_CAPABILITY_VERSION });
     expect(result.status).toBe("completed");
     expect(await getMediaOverview(value.db, APPIDS[0], { includeUnpublished: true })).not.toBeNull();
   });
