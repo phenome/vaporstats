@@ -4,6 +4,7 @@ ALTER TABLE `media_processing_authorizations` ADD `reused_outputs` integer DEFAU
 ALTER TABLE `media_processing_authorizations` ADD `replaced_outputs` integer DEFAULT 0 NOT NULL;--> statement-breakpoint
 ALTER TABLE `media_processing_authorizations` ADD `invalidated_outputs` integer DEFAULT 0 NOT NULL;--> statement-breakpoint
 ALTER TABLE `media_processing_authorizations` ADD `skipped_outputs` integer DEFAULT 0 NOT NULL;--> statement-breakpoint
+ALTER TABLE `media_processing_authorizations` ADD `refused_request_keys` text DEFAULT '[]' NOT NULL;--> statement-breakpoint
 ALTER TABLE `media_sources` ADD `processing_run_id` integer;--> statement-breakpoint
 ALTER TABLE `media_sources` ADD `contribution_run_id` integer;--> statement-breakpoint
 -- Sources processed before this migration are no longer new to processing.

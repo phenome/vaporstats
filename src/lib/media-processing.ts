@@ -580,6 +580,23 @@ async function countOutputs(db: AppDatabase, runId: number, outcome: keyof typeo
 }
 
 /**
+ * Records that `runId` refused `requestKey` before submission (a failed token
+ * count, the input-token cap or the allowance) and counts it skipped, once. A
+ * refused request is final for the run.
+ */
+async function refuseRequest(db: AppDatabase, runId: number, requestKey: string): Promise<void> {
+  await transaction(db, async () => {
+    const refused = await db.prepare("UPDATE media_processing_authorizations SET refused_request_keys = json_insert(refused_request_keys, '$[#]', ?1) WHERE run_id = ?2 AND NOT EXISTS (SELECT 1 FROM json_each(refused_request_keys) WHERE value = ?1)").bind(requestKey, runId).run();
+    if (refused.meta.changes === 1) await countOutputs(db, runId, "skipped");
+  });
+}
+
+async function refusedInRun(db: AppDatabase, runId: number, requestKey: string): Promise<boolean> {
+  const refused = await first<{ refused: number }>(db, "SELECT 1 AS refused FROM media_processing_authorizations, json_each(refused_request_keys) WHERE run_id = ? AND value = ?", runId, requestKey);
+  return refused !== null;
+}
+
+/**
  * Records how many active outputs for the run's bounded sources and entities
  * the run kept without producing them. It is a snapshot, so repeated advances
  * of one run do not add to it.
@@ -768,8 +785,10 @@ async function submitJob(db: AppDatabase, job: JobRow, request: GeminiRequest, t
     }
   } catch (error) {
     const definite = isDefiniteProviderError(error);
-    await db.prepare("UPDATE media_processing_jobs SET status = ?, reservation_active = ?, error = ?, completed_at = ? WHERE id = ? AND status = 'uncertain'").bind(definite ? "failed" : "uncertain", definite ? 0 : 1, boundedError(error, secret), definite ? now.toISOString() : null, job.id).run();
-    if (definite) await countOutputs(db, job.run_id, "skipped");
+    await transaction(db, async () => {
+      await db.prepare("UPDATE media_processing_jobs SET status = ?, reservation_active = ?, error = ?, completed_at = ? WHERE id = ? AND status = 'uncertain'").bind(definite ? "failed" : "uncertain", definite ? 0 : 1, boundedError(error, secret), definite ? now.toISOString() : null, job.id).run();
+      if (definite) await countOutputs(db, job.run_id, "skipped");
+    });
     return definite ? "failed" : "uncertain";
   }
   if (!result?.name) {
@@ -813,42 +832,36 @@ function overviewSimilarityInput(value: unknown, dimension: SimilarityDimension)
 
 async function persistExtraction(db: AppDatabase, job: JobRow, output: unknown, now: Date): Promise<"succeeded" | "stale" | "failed"> {
   if (job.source_id === null) return "failed";
-  let status: "succeeded" | "stale" | "failed" = "failed";
-  await transaction(db, async () => {
-    const source = await currentSource(db, job.source_id!);
-    if (!source || source.processing_input_identity !== job.input_identity) {
-      await db.prepare("UPDATE media_processing_jobs SET status = 'stale', completed_at = ? WHERE id = ?").bind(now.toISOString(), job.id).run();
-      if (source) await db.prepare("UPDATE media_sources SET processing_content = NULL WHERE id = ?").bind(source.id).run();
-      status = "stale";
-      return;
-    }
-    const eligible = await first<{ appid: number }>(
-      db,
-      `SELECT app.appid FROM apps AS app WHERE app.appid = ? AND ${ELIGIBLE_MEDIA_PROCESSING_ENTITY_SQL}`,
-      source.appid,
-    );
-    if (!eligible) {
-      await db.prepare("UPDATE media_sources SET processing_content = NULL WHERE id = ?").bind(source.id).run();
-      await db.prepare("UPDATE media_processing_jobs SET status = 'stale', completed_at = ? WHERE id = ?").bind(now.toISOString(), job.id).run();
-      status = "stale";
-      return;
-    }
-    const parsed = parseExtraction(output);
-    if (parsed.contributions.length === 0 && parsed.traits.length === 0 && !parsed.categories && !parsed.similarityInputs) {
-      await db.prepare("UPDATE media_processing_jobs SET status = 'failed', error = ?, completed_at = ? WHERE id = ?").bind("Gemini extraction returned no supported contributions", now.toISOString(), job.id).run();
-      await db.prepare("UPDATE media_sources SET processing_content = NULL WHERE id = ?").bind(source.id).run();
-      return;
-    }
-    const stored = storedExtractionJson(output, job.input_identity, source.original_url);
-    const earlier = await first<{ id: number }>(db, "SELECT id FROM media_article_extractions WHERE source_id = ? LIMIT 1", source.id);
-    await countOutputs(db, job.run_id, earlier ? "replaced" : "new");
-    await db.prepare("UPDATE media_article_extractions SET active = 0 WHERE source_id = ? AND active = 1").bind(source.id).run();
-    await db.prepare("INSERT OR IGNORE INTO media_article_extractions (source_id, input_identity, content_hash, cleanup_version, model, config_version, output_json, active, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)").bind(source.id, job.input_identity, source.normalized_content_hash ?? "", CLEANUP_VERSION, job.model, job.config_version, stored, now.toISOString()).run();
-    await markContributionChanged(db, source.id, job.run_id);
-    await db.prepare("UPDATE media_processing_jobs SET status = 'succeeded', output_json = ?, error = NULL, completed_at = ? WHERE id = ?").bind(stored, now.toISOString(), job.id).run();
-    status = "succeeded";
-  });
-  return status;
+  const source = await currentSource(db, job.source_id!);
+  if (!source || source.processing_input_identity !== job.input_identity) {
+    await db.prepare("UPDATE media_processing_jobs SET status = 'stale', completed_at = ? WHERE id = ?").bind(now.toISOString(), job.id).run();
+    if (source) await db.prepare("UPDATE media_sources SET processing_content = NULL WHERE id = ?").bind(source.id).run();
+    return "stale";
+  }
+  const eligible = await first<{ appid: number }>(
+    db,
+    `SELECT app.appid FROM apps AS app WHERE app.appid = ? AND ${ELIGIBLE_MEDIA_PROCESSING_ENTITY_SQL}`,
+    source.appid,
+  );
+  if (!eligible) {
+    await db.prepare("UPDATE media_sources SET processing_content = NULL WHERE id = ?").bind(source.id).run();
+    await db.prepare("UPDATE media_processing_jobs SET status = 'stale', completed_at = ? WHERE id = ?").bind(now.toISOString(), job.id).run();
+    return "stale";
+  }
+  const parsed = parseExtraction(output);
+  if (parsed.contributions.length === 0 && parsed.traits.length === 0 && !parsed.categories && !parsed.similarityInputs) {
+    await db.prepare("UPDATE media_processing_jobs SET status = 'failed', error = ?, completed_at = ? WHERE id = ?").bind("Gemini extraction returned no supported contributions", now.toISOString(), job.id).run();
+    await db.prepare("UPDATE media_sources SET processing_content = NULL WHERE id = ?").bind(source.id).run();
+    return "failed";
+  }
+  const stored = storedExtractionJson(output, job.input_identity, source.original_url);
+  const earlier = await first<{ id: number }>(db, "SELECT id FROM media_article_extractions WHERE source_id = ? LIMIT 1", source.id);
+  await countOutputs(db, job.run_id, earlier ? "replaced" : "new");
+  await db.prepare("UPDATE media_article_extractions SET active = 0 WHERE source_id = ? AND active = 1").bind(source.id).run();
+  await db.prepare("INSERT OR IGNORE INTO media_article_extractions (source_id, input_identity, content_hash, cleanup_version, model, config_version, output_json, active, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)").bind(source.id, job.input_identity, source.normalized_content_hash ?? "", CLEANUP_VERSION, job.model, job.config_version, stored, now.toISOString()).run();
+  await markContributionChanged(db, source.id, job.run_id);
+  await db.prepare("UPDATE media_processing_jobs SET status = 'succeeded', output_json = ?, error = NULL, completed_at = ? WHERE id = ?").bind(stored, now.toISOString(), job.id).run();
+  return "succeeded";
 }
 
 type GameEvidence = { sources: SourceRow[]; extractions: ExtractionRow[]; evidenceSources: Map<string, MediaEvidenceSource> };
@@ -897,58 +910,52 @@ async function replaceTagMemberships(db: AppDatabase, appid: number, overview: u
 }
 
 async function persistOverview(db: AppDatabase, job: JobRow, output: unknown, now: Date): Promise<"succeeded" | "stale" | "failed"> {
-  let status: "succeeded" | "stale" | "failed" = "failed";
-  await transaction(db, async () => {
-    const eligible = await first<{ appid: number }>(
-      db,
-      `SELECT app.appid FROM apps AS app WHERE app.appid = ? AND ${ELIGIBLE_MEDIA_PROCESSING_ENTITY_SQL}`,
-      job.appid,
-    );
-    if (!eligible) {
-      await db.prepare("UPDATE media_processing_jobs SET status = 'stale', completed_at = ? WHERE id = ?").bind(now.toISOString(), job.id).run();
-      status = "stale";
-      return;
+  const eligible = await first<{ appid: number }>(
+    db,
+    `SELECT app.appid FROM apps AS app WHERE app.appid = ? AND ${ELIGIBLE_MEDIA_PROCESSING_ENTITY_SQL}`,
+    job.appid,
+  );
+  if (!eligible) {
+    await db.prepare("UPDATE media_processing_jobs SET status = 'stale', completed_at = ? WHERE id = ?").bind(now.toISOString(), job.id).run();
+    return "stale";
+  }
+  const evidence = await currentGameEvidence(db, job.appid);
+  const { evidenceSources } = evidence;
+  if (synthesisIdentity(job.appid, evidence.extractions) !== job.input_identity) {
+    await db.prepare("UPDATE media_processing_jobs SET status = 'stale', completed_at = ? WHERE id = ?").bind(now.toISOString(), job.id).run();
+    return "stale";
+  }
+  const tagEvidence = parseMediaTagEvidence(output, evidenceSources);
+  const overview = parseMediaOverview(output, job.appid, evidenceSources);
+  if (!overview) {
+    await db.prepare("UPDATE media_processing_jobs SET status = 'failed', error = ?, completed_at = ? WHERE id = ?").bind("Gemini synthesis returned no cited statements", now.toISOString(), job.id).run();
+    return "failed";
+  }
+  const similarityInputs = similarityInputsForOverview(output);
+  const storedOverview = {
+    ...overview,
+    tags: tagEvidence.map(({ tag, sourceUrls }) => ({ ...tag, sourceUrls })),
+    ...(similarityInputs ? { similarityInputs } : {}),
+  };
+  const previous = await first<{ output_json: string }>(db, "SELECT output_json FROM media_game_overviews WHERE appid = ? AND active = 1 ORDER BY id DESC LIMIT 1", job.appid);
+  for (const dimension of SIMILARITY_DIMENSIONS) {
+    const oldInput = overviewSimilarityInput(previous?.output_json, dimension);
+    const nextInput = overviewSimilarityInput(storedOverview, dimension);
+    const oldIdentity = oldInput.length > 0 ? similarityInputIdentity(dimension, oldInput) : null;
+    const nextIdentity = nextInput.length > 0 ? similarityInputIdentity(dimension, nextInput) : null;
+    if (oldIdentity && oldIdentity === nextIdentity) {
+      await db.prepare("UPDATE media_game_embeddings SET overview_input_identity = ? WHERE appid = ? AND dimension = ? AND input_identity = ? AND model = ? AND dimensions = ? AND config_version = ? AND active = 1").bind(job.input_identity, job.appid, dimension, nextIdentity, GEMINI_EMBEDDING_MODEL, GEMINI_EMBEDDING_DIMENSIONS, GEMINI_EMBEDDING_CONFIG_VERSION).run();
+    } else {
+      await db.prepare("UPDATE media_game_embeddings SET active = 0 WHERE appid = ? AND dimension = ? AND active = 1").bind(job.appid, dimension).run();
     }
-    const evidence = await currentGameEvidence(db, job.appid);
-    const { evidenceSources } = evidence;
-    if (synthesisIdentity(job.appid, evidence.extractions) !== job.input_identity) {
-      await db.prepare("UPDATE media_processing_jobs SET status = 'stale', completed_at = ? WHERE id = ?").bind(now.toISOString(), job.id).run();
-      status = "stale";
-      return;
-    }
-    const tagEvidence = parseMediaTagEvidence(output, evidenceSources);
-    const overview = parseMediaOverview(output, job.appid, evidenceSources);
-    if (!overview) {
-      await db.prepare("UPDATE media_processing_jobs SET status = 'failed', error = ?, completed_at = ? WHERE id = ?").bind("Gemini synthesis returned no cited statements", now.toISOString(), job.id).run();
-      return;
-    }
-    const similarityInputs = similarityInputsForOverview(output);
-    const storedOverview = {
-      ...overview,
-      tags: tagEvidence.map(({ tag, sourceUrls }) => ({ ...tag, sourceUrls })),
-      ...(similarityInputs ? { similarityInputs } : {}),
-    };
-    const previous = await first<{ output_json: string }>(db, "SELECT output_json FROM media_game_overviews WHERE appid = ? AND active = 1 ORDER BY id DESC LIMIT 1", job.appid);
-    for (const dimension of SIMILARITY_DIMENSIONS) {
-      const oldInput = overviewSimilarityInput(previous?.output_json, dimension);
-      const nextInput = overviewSimilarityInput(storedOverview, dimension);
-      const oldIdentity = oldInput.length > 0 ? similarityInputIdentity(dimension, oldInput) : null;
-      const nextIdentity = nextInput.length > 0 ? similarityInputIdentity(dimension, nextInput) : null;
-      if (oldIdentity && oldIdentity === nextIdentity) {
-        await db.prepare("UPDATE media_game_embeddings SET overview_input_identity = ? WHERE appid = ? AND dimension = ? AND input_identity = ? AND model = ? AND dimensions = ? AND config_version = ? AND active = 1").bind(job.input_identity, job.appid, dimension, nextIdentity, GEMINI_EMBEDDING_MODEL, GEMINI_EMBEDDING_DIMENSIONS, GEMINI_EMBEDDING_CONFIG_VERSION).run();
-      } else {
-        await db.prepare("UPDATE media_game_embeddings SET active = 0 WHERE appid = ? AND dimension = ? AND active = 1").bind(job.appid, dimension).run();
-      }
-    }
-    const earlier = await first<{ id: number }>(db, "SELECT id FROM media_game_overviews WHERE appid = ? LIMIT 1", job.appid);
-    await countOutputs(db, job.run_id, earlier ? "replaced" : "new");
-    await db.prepare("UPDATE media_game_overviews SET active = 0 WHERE appid = ? AND active = 1").bind(job.appid).run();
-    await db.prepare("INSERT OR IGNORE INTO media_game_overviews (appid, input_identity, model, config_version, output_json, active, created_at) VALUES (?, ?, ?, ?, ?, 1, ?)").bind(job.appid, job.input_identity, job.model, job.config_version, JSON.stringify(storedOverview), now.toISOString()).run();
-    await replaceTagMemberships(db, job.appid, storedOverview, evidence, now);
-    await db.prepare("UPDATE media_processing_jobs SET status = 'succeeded', output_json = ?, error = NULL, completed_at = ? WHERE id = ?").bind(JSON.stringify(storedOverview), now.toISOString(), job.id).run();
-    status = "succeeded";
-  });
-  return status;
+  }
+  const earlier = await first<{ id: number }>(db, "SELECT id FROM media_game_overviews WHERE appid = ? LIMIT 1", job.appid);
+  await countOutputs(db, job.run_id, earlier ? "replaced" : "new");
+  await db.prepare("UPDATE media_game_overviews SET active = 0 WHERE appid = ? AND active = 1").bind(job.appid).run();
+  await db.prepare("INSERT OR IGNORE INTO media_game_overviews (appid, input_identity, model, config_version, output_json, active, created_at) VALUES (?, ?, ?, ?, ?, 1, ?)").bind(job.appid, job.input_identity, job.model, job.config_version, JSON.stringify(storedOverview), now.toISOString()).run();
+  await replaceTagMemberships(db, job.appid, storedOverview, evidence, now);
+  await db.prepare("UPDATE media_processing_jobs SET status = 'succeeded', output_json = ?, error = NULL, completed_at = ? WHERE id = ?").bind(JSON.stringify(storedOverview), now.toISOString(), job.id).run();
+  return "succeeded";
 }
 
 function decodeVector(value: unknown): Float32Array | null {
@@ -994,62 +1001,53 @@ function embeddingOverviewIdentity(job: JobRow): string | null {
 }
 
 async function persistEmbedding(db: AppDatabase, job: JobRow, output: unknown, now: Date): Promise<"succeeded" | "stale" | "failed"> {
-  const overviewInputIdentity = embeddingOverviewIdentity(job);
-  if (!overviewInputIdentity || !job.dimension) {
+  const markStale = async () => {
     await db.prepare("UPDATE media_processing_jobs SET status = 'stale', completed_at = ? WHERE id = ?").bind(now.toISOString(), job.id).run();
-    return "stale";
+    return "stale" as const;
+  };
+  const overviewInputIdentity = embeddingOverviewIdentity(job);
+  if (!overviewInputIdentity || !job.dimension) return markStale();
+  const eligible = await first<{ appid: number }>(
+    db,
+    `SELECT app.appid FROM apps AS app WHERE app.appid = ? AND ${ELIGIBLE_MEDIA_PROCESSING_ENTITY_SQL}`,
+    job.appid,
+  );
+  if (!eligible) {
+    await db.prepare("UPDATE media_game_embeddings SET active = 0 WHERE appid = ? AND active = 1").bind(job.appid).run();
+    return markStale();
   }
   const overview = await first<{ input_identity: string; output_json: string }>(db, "SELECT input_identity, output_json FROM media_game_overviews WHERE appid = ? AND active = 1 ORDER BY id DESC LIMIT 1", job.appid);
   const input = overviewSimilarityInput(overview?.output_json, job.dimension);
-  if (!overview || overview.input_identity !== overviewInputIdentity || input.length === 0 || similarityInputIdentity(job.dimension, input) !== job.input_identity) {
-    await db.prepare("UPDATE media_processing_jobs SET status = 'stale', completed_at = ? WHERE id = ?").bind(now.toISOString(), job.id).run();
-    return "stale";
-  }
+  if (!overview || overview.input_identity !== overviewInputIdentity || input.length === 0 || similarityInputIdentity(job.dimension, input) !== job.input_identity) return markStale();
   const values = embeddingValues(output);
   if (!values) {
     await db.prepare("UPDATE media_processing_jobs SET status = 'failed', error = ?, completed_at = ? WHERE id = ?").bind("Gemini embedding returned an incompatible vector", now.toISOString(), job.id).run();
     return "failed";
   }
   const vector = encodeVector(values);
-  let stale = false;
-  await transaction(db, async () => {
-    const eligible = await first<{ appid: number }>(
-      db,
-      `SELECT app.appid FROM apps AS app WHERE app.appid = ? AND ${ELIGIBLE_MEDIA_PROCESSING_ENTITY_SQL}`,
-      job.appid,
-    );
-    if (!eligible) {
-      await db.prepare("UPDATE media_game_embeddings SET active = 0 WHERE appid = ? AND active = 1").bind(job.appid).run();
-      await db.prepare("UPDATE media_processing_jobs SET status = 'stale', completed_at = ? WHERE id = ?").bind(now.toISOString(), job.id).run();
-      stale = true;
-      return;
-    }
-    const currentOverview = await first<{ input_identity: string; output_json: string }>(db, "SELECT input_identity, output_json FROM media_game_overviews WHERE appid = ? AND active = 1 ORDER BY id DESC LIMIT 1", job.appid);
-    const currentInput = overviewSimilarityInput(currentOverview?.output_json, job.dimension!);
-    if (!currentOverview || currentOverview.input_identity !== overviewInputIdentity || currentInput.length === 0 || similarityInputIdentity(job.dimension!, currentInput) !== job.input_identity) {
-      await db.prepare("UPDATE media_processing_jobs SET status = 'stale', completed_at = ? WHERE id = ?").bind(now.toISOString(), job.id).run();
-      stale = true;
-      return;
-    }
-    const existing = await first<{ id: number }>(db, "SELECT id FROM media_game_embeddings WHERE appid = ? AND dimension = ? AND input_identity = ? AND model = ? AND dimensions = ? AND config_version = ? ORDER BY id DESC LIMIT 1", job.appid, job.dimension, job.input_identity, GEMINI_EMBEDDING_MODEL, GEMINI_EMBEDDING_DIMENSIONS, GEMINI_EMBEDDING_CONFIG_VERSION);
-    const earlier = await first<{ id: number }>(db, "SELECT id FROM media_game_embeddings WHERE appid = ? AND dimension = ? LIMIT 1", job.appid, job.dimension);
-    await countOutputs(db, job.run_id, earlier ? "replaced" : "new");
-    await db.prepare("UPDATE media_game_embeddings SET active = 0 WHERE appid = ? AND dimension = ? AND active = 1").bind(job.appid, job.dimension).run();
-    if (existing) {
-      await db.prepare("UPDATE media_game_embeddings SET overview_input_identity = ?, vector = ?, active = 1 WHERE id = ? AND appid = ? AND dimension = ? AND input_identity = ? AND model = ? AND dimensions = ? AND config_version = ?").bind(overviewInputIdentity, vector, existing.id, job.appid, job.dimension, job.input_identity, GEMINI_EMBEDDING_MODEL, GEMINI_EMBEDDING_DIMENSIONS, GEMINI_EMBEDDING_CONFIG_VERSION).run();
-    } else {
-      await db.prepare("INSERT INTO media_game_embeddings (appid, dimension, input_identity, overview_input_identity, model, dimensions, config_version, vector, active, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?)").bind(job.appid, job.dimension, job.input_identity, overviewInputIdentity, GEMINI_EMBEDDING_MODEL, GEMINI_EMBEDDING_DIMENSIONS, GEMINI_EMBEDDING_CONFIG_VERSION, vector, now.toISOString()).run();
-    }
-    await db.prepare("UPDATE media_processing_jobs SET status = 'succeeded', output_json = ?, error = NULL, completed_at = ? WHERE id = ?").bind(JSON.stringify({ dimensions: GEMINI_EMBEDDING_DIMENSIONS, dimension: job.dimension, inputIdentity: job.input_identity, overviewInputIdentity }), now.toISOString(), job.id).run();
-  });
-  if (stale) return "stale";
+  const existing = await first<{ id: number }>(db, "SELECT id FROM media_game_embeddings WHERE appid = ? AND dimension = ? AND input_identity = ? AND model = ? AND dimensions = ? AND config_version = ? ORDER BY id DESC LIMIT 1", job.appid, job.dimension, job.input_identity, GEMINI_EMBEDDING_MODEL, GEMINI_EMBEDDING_DIMENSIONS, GEMINI_EMBEDDING_CONFIG_VERSION);
+  const earlier = await first<{ id: number }>(db, "SELECT id FROM media_game_embeddings WHERE appid = ? AND dimension = ? LIMIT 1", job.appid, job.dimension);
+  await countOutputs(db, job.run_id, earlier ? "replaced" : "new");
+  await db.prepare("UPDATE media_game_embeddings SET active = 0 WHERE appid = ? AND dimension = ? AND active = 1").bind(job.appid, job.dimension).run();
+  if (existing) {
+    await db.prepare("UPDATE media_game_embeddings SET overview_input_identity = ?, vector = ?, active = 1 WHERE id = ? AND appid = ? AND dimension = ? AND input_identity = ? AND model = ? AND dimensions = ? AND config_version = ?").bind(overviewInputIdentity, vector, existing.id, job.appid, job.dimension, job.input_identity, GEMINI_EMBEDDING_MODEL, GEMINI_EMBEDDING_DIMENSIONS, GEMINI_EMBEDDING_CONFIG_VERSION).run();
+  } else {
+    await db.prepare("INSERT INTO media_game_embeddings (appid, dimension, input_identity, overview_input_identity, model, dimensions, config_version, vector, active, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?)").bind(job.appid, job.dimension, job.input_identity, overviewInputIdentity, GEMINI_EMBEDDING_MODEL, GEMINI_EMBEDDING_DIMENSIONS, GEMINI_EMBEDDING_CONFIG_VERSION, vector, now.toISOString()).run();
+  }
+  await db.prepare("UPDATE media_processing_jobs SET status = 'succeeded', output_json = ?, error = NULL, completed_at = ? WHERE id = ?").bind(JSON.stringify({ dimensions: GEMINI_EMBEDDING_DIMENSIONS, dimension: job.dimension, inputIdentity: job.input_identity, overviewInputIdentity }), now.toISOString(), job.id).run();
   return "succeeded";
 }
 
-async function reconcileJob(db: AppDatabase, job: JobRow, result: GeminiBatchPoll, now: Date, secret: string | undefined): Promise<"succeeded" | "failed" | "stale" | "uncertain"> {
-  const status = await settleJob(db, job, result, now, secret);
-  if ((status === "failed" || status === "stale") && job.stage !== "explanation") await countOutputs(db, job.run_id, "skipped");
-  return status;
+/**
+ * Settles `job` with its provider `result` and counts its output, in one
+ * transaction, so a restart never leaves a settled job uncounted.
+ */
+function reconcileJob(db: AppDatabase, job: JobRow, result: GeminiBatchPoll, now: Date, secret: string | undefined): Promise<"succeeded" | "failed" | "stale" | "uncertain"> {
+  return writeTransaction(db, async () => {
+    const status = await settleJob(db, job, result, now, secret);
+    if ((status === "failed" || status === "stale") && job.stage !== "explanation") await countOutputs(db, job.run_id, "skipped");
+    return status;
+  });
 }
 
 async function settleJob(db: AppDatabase, job: JobRow, result: GeminiBatchPoll, now: Date, secret: string | undefined): Promise<"succeeded" | "failed" | "stale" | "uncertain"> {
@@ -1286,12 +1284,17 @@ async function scheduleEmbeddings(
       }
       const requestKey = `embedding:${overview.appid}:${dimension}:${overview.input_identity}:${identity}`;
       const priorJob = await first<{ status: JobRow["status"] }>(db, "SELECT status FROM media_processing_jobs WHERE request_key = ?", requestKey);
-      if (priorJob && priorJob.status !== "reserved") continue;
+      if ((priorJob && priorJob.status !== "reserved") || await refusedInRun(db, runId, requestKey)) continue;
       const request = makeEmbeddingRequest(input);
       let tokenCount: number;
       try { tokenCount = await transport.countTokens(GEMINI_EMBEDDING_MODEL, request); }
-      catch (error) { stopReason ??= `count_tokens:${boundedError(error, secret)}`; continue; }
+      catch (error) {
+        await refuseRequest(db, runId, requestKey);
+        stopReason ??= `count_tokens:${boundedError(error, secret)}`;
+        continue;
+      }
       if (!Number.isInteger(tokenCount) || tokenCount < 0 || tokenCount > MAX_EMBEDDING_INPUT_TOKENS) {
+        await refuseRequest(db, runId, requestKey);
         stopReason ??= "input_token_cap";
         continue;
       }
@@ -1299,6 +1302,7 @@ async function scheduleEmbeddings(
       if (!reserved) {
         const eligible = await first<{ appid: number }>(db, `SELECT app.appid FROM apps AS app WHERE app.appid = ? AND ${ELIGIBLE_MEDIA_PROCESSING_ENTITY_SQL}`, overview.appid);
         if (eligible) {
+          await refuseRequest(db, runId, requestKey);
           stopReason ??= "lifetime_budget";
           break;
         }
@@ -1535,19 +1539,30 @@ async function advanceMediaProcessingNow(db: AppDatabase, options: MediaProcessi
     }
     const requestKey = `synthesis:${appid}:${identity}`;
     const existing = await first<JobRow>(db, "SELECT id, run_id, stage, appid, matched_appid, dimension, source_id, request_key, input_identity, model, config_version, max_input_tokens, max_output_tokens, reserved_microusd, charged_microusd, reservation_active, status, provider_batch_id, output_json, usage_json, error FROM media_processing_jobs WHERE request_key = ?", requestKey);
-    if (existing && existing.status !== "reserved") continue;
+    if ((existing && existing.status !== "reserved") || await refusedInRun(db, auth.run_id, requestKey)) continue;
     const request = makeSynthesisRequest(appid, game?.name ?? "", appExtractions, appSources);
     let tokenCount: number;
     try { tokenCount = await transport.countTokens(GEMINI_MEDIA_MODEL, request); }
-    catch (error) { stopReason ??= `count_tokens:${boundedError(error, options.geminiApiKey)}`; continue; }
-    if (!Number.isInteger(tokenCount) || tokenCount < 0 || tokenCount > MAX_INPUT_TOKENS) { stopReason ??= "input_token_cap"; continue; }
+    catch (error) {
+      await refuseRequest(db, auth.run_id, requestKey);
+      stopReason ??= `count_tokens:${boundedError(error, options.geminiApiKey)}`;
+      continue;
+    }
+    if (!Number.isInteger(tokenCount) || tokenCount < 0 || tokenCount > MAX_INPUT_TOKENS) {
+      await refuseRequest(db, auth.run_id, requestKey);
+      stopReason ??= "input_token_cap";
+      continue;
+    }
     let reserved = true;
     if (!existing) {
       reserved = await reserveJob(db, { run_id: auth.run_id, stage: "synthesis", appid, source_id: null, request_key: requestKey, input_identity: identity, model: GEMINI_MEDIA_MODEL, config_version: SYNTHESIS_CONFIG_VERSION, max_input_tokens: tokenCount, max_output_tokens: SYNTHESIS_MAX_OUTPUT_TOKENS, reserved_microusd: conservativeCharge(tokenCount, SYNTHESIS_MAX_OUTPUT_TOKENS), requireEligibleEntity: true });
     }
     if (!reserved) {
       const eligible = await first<{ appid: number }>(db, `SELECT app.appid FROM apps AS app WHERE app.appid = ? AND ${ELIGIBLE_MEDIA_PROCESSING_ENTITY_SQL}`, appid);
-      if (eligible) stopReason ??= "lifetime_budget";
+      if (eligible) {
+        await refuseRequest(db, auth.run_id, requestKey);
+        stopReason ??= "lifetime_budget";
+      }
       continue;
     }
     const job = existing ?? await first<JobRow>(db, "SELECT id, run_id, stage, appid, matched_appid, dimension, source_id, request_key, input_identity, model, config_version, max_input_tokens, max_output_tokens, reserved_microusd, charged_microusd, reservation_active, status, provider_batch_id, output_json, usage_json, error FROM media_processing_jobs WHERE request_key = ?", requestKey);

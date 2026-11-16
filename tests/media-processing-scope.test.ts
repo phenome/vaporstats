@@ -20,6 +20,9 @@ import {
   insertSources,
   overviewOutputForUrls,
   processingArticleHtml,
+  REFUSALS,
+  refuseRequests,
+  type Refusal,
   seedApps,
   stableJson,
 } from "./support/media";
@@ -54,10 +57,10 @@ async function authorizeRun(database: TestDatabase, key: string, affectedSourceI
 }
 
 /**
- * `db`, except that the first write storing an article's text for processing
- * fails, as if the process stopped at that point.
+ * `db`, except that the first write whose statement matches `write` fails, as
+ * if the process stopped at that point.
  */
-function crashingWhileStoringText(db: AppDatabase): AppDatabase {
+function crashingOnWrite(db: AppDatabase, write: RegExp): AppDatabase {
   let crashed = false;
   return new Proxy(db, {
     get(target, property) {
@@ -67,10 +70,10 @@ function crashingWhileStoringText(db: AppDatabase): AppDatabase {
       }
       return (query: string) => {
         const statement = target.prepare(query);
-        if (crashed || !/^UPDATE media_sources SET .*processing_content = \?/.test(query)) return statement;
+        if (crashed || !write.test(query)) return statement;
         statement.run = async () => {
           crashed = true;
-          throw new Error("process stopped while storing article text");
+          throw new Error("process stopped");
         };
         return statement;
       };
@@ -332,13 +335,41 @@ describe("processing scope", () => {
     const transport = new ControlledGeminiTransport();
     const outlet = outletArticles();
 
-    await expect(advanceMediaProcessing(crashingWhileStoringText(database.db), { runId, transport, articleFetch: outlet.articleFetch, now: new Date("2026-11-02T00:00:00.000Z"), ...PAID })).rejects.toThrow("process stopped");
+    await expect(advanceMediaProcessing(crashingOnWrite(database.db, /^UPDATE media_sources SET .*processing_content = \?/), { runId, transport, articleFetch: outlet.articleFetch, now: new Date("2026-11-02T00:00:00.000Z"), ...PAID })).rejects.toThrow("process stopped");
     const { db } = database.reopen();
     const resumed = await advanceMediaProcessing(db, { runId, transport, articleFetch: outlet.articleFetch, now: new Date("2026-11-02T00:01:00.000Z"), ...PAID });
 
     expect(outlet.fetched).toEqual([...sourceUrls(database), ...sourceUrls(database)]);
     expect(resumed.submitted).toBe(1);
     expect(transport.submissions).toHaveLength(1);
+  });
+
+  test("a run stopped while settling a failed job still counts it skipped when it resumes", async () => {
+    const database = unprocessedGame();
+    const runId = await authorizeRun(database, "settling");
+    const transport = new ControlledGeminiTransport();
+    transport.nextPolls.push({ state: "failed", error: "extraction failed", usage: SUCCEEDED_USAGE });
+
+    await advanceMediaProcessing(crashingOnWrite(database.db, /^UPDATE media_processing_authorizations SET skipped_outputs/), { runId, transport, articleFetch: outletArticles().articleFetch, now: new Date("2026-11-02T00:00:00.000Z"), ...PAID });
+    const { db } = database.reopen();
+    const resumed = await advanceMediaProcessing(db, { runId, transport, articleFetch: outletArticles().articleFetch, now: new Date("2026-11-02T00:01:00.000Z"), ...PAID });
+
+    expect(resumed.outputs).toEqual({ new: 0, reused: 0, replaced: 0, invalidated: 0, skipped: 1 });
+  });
+
+  test.each<Refusal>([...REFUSALS])("an Overview refused by its %s counts as skipped once and is not retried by the run", async (refusal) => {
+    const database = unprocessedGame();
+    const runId = await authorizeRun(database, "overview-refused");
+    const transport = new ControlledGeminiTransport();
+    const synthesisCounts = refuseRequests(transport, database.native, (_model, request) => JSON.stringify(request).includes("Synthesize"), refusal, CYBERPUNK);
+    transport.nextPolls.push({ state: "succeeded", output: extractionOutput(), usage: SUCCEEDED_USAGE });
+
+    const refused = await advanceMediaProcessing(database.db, { runId, transport, articleFetch: outletArticles().articleFetch, now: new Date("2026-11-02T00:00:00.000Z"), ...PAID });
+    const resumed = await advanceMediaProcessing(database.db, { runId, transport, articleFetch: outletArticles().articleFetch, now: new Date("2026-11-02T00:01:00.000Z"), ...PAID });
+
+    expect(refused.outputs).toEqual({ new: 1, reused: 0, replaced: 0, invalidated: 0, skipped: 1 });
+    expect(synthesisCounts()).toBe(1);
+    expect(resumed.outputs).toEqual({ new: 1, reused: 0, replaced: 0, invalidated: 0, skipped: 1 });
   });
 
   test("an affected set accepts only distinct sources of the run's games and is fixed once authorized", async () => {

@@ -1042,6 +1042,8 @@ export const mediaProcessingAuthorizations = sqliteTable(
     replacedOutputs: integer("replaced_outputs").notNull().default(0),
     invalidatedOutputs: integer("invalidated_outputs").notNull().default(0),
     skippedOutputs: integer("skipped_outputs").notNull().default(0),
+    /** JSON array of request keys this run refused before submission; a refused request is final for the run. */
+    refusedRequestKeys: text("refused_request_keys").notNull().default("[]"),
     authorizedAt: text("authorized_at").notNull().default(currentTimestamp),
     updatedAt: text("updated_at").notNull().default(currentTimestamp),
   },

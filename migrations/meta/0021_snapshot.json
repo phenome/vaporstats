@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "8904c883-03d3-4e56-8579-bc41b5424b8e",
+  "id": "55f4b2b6-4c1c-4e78-9a6d-47676e8f849f",
   "prevId": "283ef3c4-334e-4e17-802e-7be78ce1533c",
   "tables": {
     "app_facet_memberships": {
@@ -2002,6 +2002,14 @@
           "notNull": true,
           "autoincrement": false,
           "default": 0
+        },
+        "refused_request_keys": {
+          "name": "refused_request_keys",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "'[]'"
         },
         "authorized_at": {
           "name": "authorized_at",

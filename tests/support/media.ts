@@ -108,6 +108,38 @@ export class ControlledGeminiTransport implements GeminiBatchTransport {
 }
 
 /** Key-sorted JSON, matching how processing input identities serialize values. */
+/** Ways a request can be refused before submission. */
+export const REFUSALS = ["token count", "token cap", "allowance"] as const;
+export type Refusal = (typeof REFUSALS)[number];
+
+/**
+ * Makes `transport` refuse every request that `matches` selects with
+ * `refusal`: its token count fails, exceeds every input cap, or is answered
+ * after another run's reservation for `appid` has used the lifetime allowance.
+ * Returns how many matching requests were counted.
+ */
+export function refuseRequests(
+  transport: ControlledGeminiTransport,
+  native: Database,
+  matches: (model: string, request: Record<string, unknown>) => boolean,
+  refusal: Refusal,
+  appid: number,
+): () => number {
+  let counted = 0;
+  transport.countTokens = async (model, request) => {
+    if (!matches(model, request)) return ControlledGeminiTransport.prototype.countTokens.call(transport, model, request);
+    counted += 1;
+    if (refusal === "token count") throw new Error("token counting unavailable");
+    if (refusal === "token cap") return 1_000_000;
+    if (counted === 1) {
+      const competingRun = insertCompletedRun(native, "initial:competing-reservation", [appid]);
+      native.prepare("INSERT INTO media_processing_jobs (run_id, stage, appid, request_key, input_identity, model, config_version, max_input_tokens, max_output_tokens, reserved_microusd) VALUES (?, 'extraction', ?, 'competing-reservation', 'competing-input', 'competing-model', 'competing-config', 1, 1, 5000000)").run(competingRun, appid);
+    }
+    return 100;
+  };
+  return () => counted;
+}
+
 export function stableJson(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
   if (value && typeof value === "object") {

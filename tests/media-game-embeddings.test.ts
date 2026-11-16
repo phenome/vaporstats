@@ -6,9 +6,10 @@ import {
   authorizeMediaProcessing,
   GEMINI_BATCH_CAPABILITY_VERSION,
   GEMINI_BATCH_PRICING_VERSION,
+  type MediaProcessingSummary,
 } from "../src/lib/media-processing";
 import { openTestDatabase } from "./support/db";
-import { ControlledGeminiTransport, CYBERPUNK, insertCompletedRun, seedApps } from "./support/media";
+import { ControlledGeminiTransport, CYBERPUNK, insertCompletedRun, refuseRequests, seedApps, type Refusal } from "./support/media";
 
 const APPID = CYBERPUNK;
 const URL = "https://ign.com/articles/cyberpunk-review";
@@ -61,8 +62,8 @@ function embeddingOutput(value: number): Record<string, unknown> {
   return { embedding: { values: Array.from({ length: 3072 }, () => value) } };
 }
 
-async function advance(value: EmbeddingFixture, transport: ControlledGeminiTransport, article = ARTICLE_HTML): Promise<void> {
-  await advanceMediaProcessing(value.db, {
+async function advance(value: EmbeddingFixture, transport: ControlledGeminiTransport, article = ARTICLE_HTML): Promise<MediaProcessingSummary> {
+  return advanceMediaProcessing(value.db, {
     runId: value.runId,
     transport,
     articleFetch: async () => article,
@@ -334,6 +335,23 @@ describe("game overview aggregate embeddings", () => {
 
     expect(transport.counts.length).toBe(countsBefore);
     expect(transport.embeddingSubmissions).toEqual([]);
+  });
+
+  test.each<[Refusal, number]>([["token count", 2], ["token cap", 2], ["allowance", 1]])("counts each embedding refused by its %s as skipped once and does not retry it in the run", async (refusal, refusals) => {
+    const value = fixture();
+    const transport = new ControlledGeminiTransport({ embeddings: true });
+    const embeddingCounts = refuseRequests(transport, value.native, (model) => model.includes("embedding"), refusal, APPID);
+    await authorizeMediaProcessing(value.db, value.runId);
+    transport.nextPolls.push(
+      { state: "succeeded", output: extractionOutput(), usage: { inputTokens: 100, outputTokens: 20 } },
+      { state: "succeeded", output: overviewOutput(), usage: { inputTokens: 100, outputTokens: 20 } },
+    );
+    await advance(value, transport);
+    await advance(value, transport);
+    const refused = await advance(value, transport);
+
+    expect(embeddingCounts()).toBe(refusals);
+    expect(refused.outputs).toEqual({ new: 2, reused: 0, replaced: 0, invalidated: 0, skipped: refusals });
   });
 
   test("keeps aggregate reservations within the shared five-dollar bound", async () => {
