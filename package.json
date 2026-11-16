@@ -16,7 +16,7 @@
     "check:types": "tsc --noEmit && echo TYPECHECK OK",
     "check:output": "bun scripts/check-output.ts",
     "check:migrations": "bun scripts/check-migrations.ts",
-    "verify": "tsc --noEmit && bun test && bun run build && bun run check:output && echo LAUNCH VERIFY OK"
+    "verify": "tsc --noEmit && bun test && bun run check:migrations && bun run build && bun run check:output && echo LAUNCH VERIFY OK"
   },
   "dependencies": {
     "@mozilla/readability": "^0.6.0",
