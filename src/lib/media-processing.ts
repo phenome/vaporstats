@@ -60,12 +60,43 @@ const ELIGIBLE_MEDIA_PROCESSING_ENTITY_SQL = `app.is_eligible = 1 AND ${ELIGIBLE
 )`;
 const SIMILARITY_EXCLUDED_LANGUAGE = /\b(?:quality|rating|ratings|score|scores|popular(?:ity)?|prais(?:e|ed|ing)|acclaim(?:ed|ing)?|reception|critic(?:ism|isms|al)?|criticized|criticism|complaint|complaints|performance|bug(?:s)?|technical|technically|optimization|optimisation|framerate|frame rate|stutter(?:ing)?|crash(?:es|ed)?|awful|excellent|great|bad|good|poor|disappoint(?:ed|ing)?|enjoy(?:ment|able)?|fun)\b/i;
 
+/**
+ * What one authorized processing run did with media outputs: article
+ * extractions, game Overviews and their embeddings. The counts are durable on
+ * the run's authorization.
+ */
+export interface MediaProcessingOutputCounts {
+  /** Outputs produced for a source, game or dimension that had none before. */
+  new: number;
+  /** Active outputs for the run's games that the run kept without producing them. */
+  reused: number;
+  /** Outputs produced to supersede an earlier version. */
+  replaced: number;
+  /** Active outputs withdrawn because their article content changed. */
+  invalidated: number;
+  /**
+   * In-scope work that produced no output: an unreachable or unusable article,
+   * a failed token count, a token-cap or allowance refusal, or a failed or
+   * stale provider result.
+   */
+  skipped: number;
+}
+
+/**
+ * An explicitly authorized set of media sources that a processing run may
+ * refetch and reprocess in addition to sources new to processing. It may be
+ * empty.
+ */
+export interface MediaProcessingScope {
+  affectedSourceIds?: readonly number[];
+}
+
 export interface MediaProcessingSummary {
   runId: number;
   status: "queued" | "waiting" | "completed" | "stopped";
   submitted: number;
   completed: number;
-  reused: number;
+  outputs: MediaProcessingOutputCounts;
   chargedMicrousd: number;
   outstandingReservedMicrousd: number;
   stopReasons: string[];
@@ -406,7 +437,11 @@ function extractionIdentity(source: SourceRow, hash: string): string {
 }
 
 function synthesisIdentity(appid: number, extractions: ExtractionRow[]): string {
-  return sha256(stableJson({ stage: "synthesis", appid, model: GEMINI_MEDIA_MODEL, configVersion: SYNTHESIS_CONFIG_VERSION, extractions: extractions.map((row) => ({ sourceId: row.source_id, inputIdentity: row.input_identity })).sort((a, b) => a.sourceId - b.sourceId) }));
+  return synthesisIdentityFor(appid, extractions, GEMINI_MEDIA_MODEL, SYNTHESIS_CONFIG_VERSION);
+}
+
+function synthesisIdentityFor(appid: number, extractions: ExtractionRow[], model: string, configVersion: string): string {
+  return sha256(stableJson({ stage: "synthesis", appid, model, configVersion, extractions: extractions.map((row) => ({ sourceId: row.source_id, inputIdentity: row.input_identity })).sort((a, b) => a.sourceId - b.sourceId) }));
 }
 
 function makeExtractionRequest(source: SourceRow, content: string, identity: string): GeminiRequest {
@@ -526,9 +561,70 @@ function storedExtractionJson(value: unknown, sourceIdentity: string, sourceUrl:
   });
 }
 
-type AuthorizationRow = { run_id: number; status: string; stop_reason: string | null; billing_confirmation: string | null };
+type AuthorizationRow = { run_id: number; status: string; stop_reason: string | null; billing_confirmation: string | null; affected_source_ids: string };
 
-type SourceRow = { id: number; appid: number; original_url: string; title: string; outlet: MediaOutlet; author: string | null; published_at: string | null; updated_at: string | null; retrieved_at: string; type: string; hands_on: number | null; affiliation: string | null; platform: string | null; build_context: string | null; normalized_content_hash: string | null; cleanup_version: string | null; processing_content: string | null; processing_input_identity: string | null };
+type SourceRow = { id: number; appid: number; original_url: string; title: string; outlet: MediaOutlet; author: string | null; published_at: string | null; updated_at: string | null; retrieved_at: string; type: string; hands_on: number | null; affiliation: string | null; platform: string | null; build_context: string | null; normalized_content_hash: string | null; cleanup_version: string | null; processing_content: string | null; processing_input_identity: string | null; processing_run_id: number | null };
+const SOURCE_COLUMNS = "id, appid, original_url, title, outlet, author, published_at, updated_at, retrieved_at, type, hands_on, affiliation, platform, build_context, normalized_content_hash, cleanup_version, processing_content, processing_input_identity, processing_run_id";
+const COUNTED_OUTPUT_COLUMNS = {
+  new: "new_outputs",
+  replaced: "replaced_outputs",
+  invalidated: "invalidated_outputs",
+  skipped: "skipped_outputs",
+} as const;
+
+/** Adds `count` outputs with `outcome` to `runId`'s durable output counts. */
+async function countOutputs(db: AppDatabase, runId: number, outcome: keyof typeof COUNTED_OUTPUT_COLUMNS, count = 1): Promise<void> {
+  if (count <= 0) return;
+  const column = COUNTED_OUTPUT_COLUMNS[outcome];
+  await db.prepare(`UPDATE media_processing_authorizations SET ${column} = ${column} + ? WHERE run_id = ?`).bind(count, runId).run();
+}
+
+/**
+ * Records how many active outputs for the run's bounded sources and entities
+ * the run kept without producing them. It is a snapshot, so repeated advances
+ * of one run do not add to it.
+ */
+async function recordReusedOutputs(db: AppDatabase, runId: number, sourceIds: readonly number[], entities: readonly number[]): Promise<void> {
+  const reused = await first<{ count: number }>(
+    db,
+    `SELECT
+       (SELECT COUNT(*) FROM media_article_extractions AS e
+         WHERE e.active = 1 AND e.source_id IN (SELECT value FROM json_each(?1))
+           AND NOT EXISTS (SELECT 1 FROM media_processing_jobs AS j WHERE j.run_id = ?3 AND j.stage = 'extraction' AND j.status = 'succeeded' AND j.source_id = e.source_id AND j.input_identity = e.input_identity))
+     + (SELECT COUNT(*) FROM media_game_overviews AS o
+         WHERE o.active = 1 AND o.appid IN (SELECT value FROM json_each(?2))
+           AND NOT EXISTS (SELECT 1 FROM media_processing_jobs AS j WHERE j.run_id = ?3 AND j.stage = 'synthesis' AND j.status = 'succeeded' AND j.appid = o.appid AND j.input_identity = o.input_identity))
+     + (SELECT COUNT(*) FROM media_game_embeddings AS m
+         WHERE m.active = 1 AND m.appid IN (SELECT value FROM json_each(?2))
+           AND NOT EXISTS (SELECT 1 FROM media_processing_jobs AS j WHERE j.run_id = ?3 AND j.stage = 'embedding' AND j.status = 'succeeded' AND j.appid = m.appid AND j.dimension = m.dimension AND j.input_identity = m.input_identity))
+     AS count`,
+    JSON.stringify(sourceIds),
+    JSON.stringify(entities),
+    runId,
+  );
+  await db.prepare("UPDATE media_processing_authorizations SET reused_outputs = ? WHERE run_id = ?").bind(Number(reused?.count ?? 0), runId).run();
+}
+
+async function outputCounts(db: AppDatabase, runId: number): Promise<MediaProcessingOutputCounts> {
+  const row = await first<{ new_outputs: number; reused_outputs: number; replaced_outputs: number; invalidated_outputs: number; skipped_outputs: number }>(
+    db,
+    "SELECT new_outputs, reused_outputs, replaced_outputs, invalidated_outputs, skipped_outputs FROM media_processing_authorizations WHERE run_id = ?",
+    runId,
+  );
+  return {
+    new: Number(row?.new_outputs ?? 0),
+    reused: Number(row?.reused_outputs ?? 0),
+    replaced: Number(row?.replaced_outputs ?? 0),
+    invalidated: Number(row?.invalidated_outputs ?? 0),
+    skipped: Number(row?.skipped_outputs ?? 0),
+  };
+}
+
+function parseAffectedSourceIds(value: string): number[] {
+  const parsed = parseJson(value);
+  return Array.isArray(parsed) ? parsed.filter((id): id is number => Number.isSafeInteger(id) && id > 0) : [];
+}
+
 type ExtractionRow = { id: number; source_id: number; input_identity: string; content_hash: string; cleanup_version: string; model: string; config_version: string; output_json: string; active: number };
 type JobStage = "extraction" | "embedding" | "synthesis" | "explanation";
 type JobRow = { id: number; run_id: number; stage: JobStage; appid: number; matched_appid: number | null; dimension: SimilarityDimension | null; source_id: number | null; request_key: string; input_identity: string; model: string; config_version: string; max_input_tokens: number; max_output_tokens: number; reserved_microusd: number; charged_microusd: number | null; reservation_active: number; status: "reserved" | "submitted" | "succeeded" | "failed" | "uncertain" | "stale"; provider_batch_id: string | null; output_json: string | null; usage_json: string; error: string | null };
@@ -653,6 +749,7 @@ async function submitJob(db: AppDatabase, job: JobRow, request: GeminiRequest, t
   } catch (error) {
     const definite = isDefiniteProviderError(error);
     await db.prepare("UPDATE media_processing_jobs SET status = ?, reservation_active = ?, error = ?, completed_at = ? WHERE id = ? AND status = 'uncertain'").bind(definite ? "failed" : "uncertain", definite ? 0 : 1, boundedError(error, secret), definite ? now.toISOString() : null, job.id).run();
+    if (definite) await countOutputs(db, job.run_id, "skipped");
     return definite ? "failed" : "uncertain";
   }
   if (!result?.name) {
@@ -668,17 +765,14 @@ async function submitJob(db: AppDatabase, job: JobRow, request: GeminiRequest, t
 }
 
 async function currentSource(db: AppDatabase, sourceId: number): Promise<SourceRow | null> {
-  return first<SourceRow>(db, "SELECT id, appid, original_url, title, outlet, author, published_at, updated_at, retrieved_at, type, hands_on, affiliation, platform, build_context, normalized_content_hash, cleanup_version, processing_content, processing_input_identity FROM media_sources WHERE id = ?", sourceId);
+  return first<SourceRow>(db, `SELECT ${SOURCE_COLUMNS} FROM media_sources WHERE id = ?`, sourceId);
 }
 function similarityInputIdentity(dimension: SimilarityDimension, input: readonly string[]): string {
-  return sha256(stableJson({
-    stage: "embedding",
-    dimension,
-    input: [...input],
-    model: GEMINI_EMBEDDING_MODEL,
-    dimensions: GEMINI_EMBEDDING_DIMENSIONS,
-    configVersion: GEMINI_EMBEDDING_CONFIG_VERSION,
-  }));
+  return similarityInputIdentityFor(dimension, input, GEMINI_EMBEDDING_MODEL, GEMINI_EMBEDDING_DIMENSIONS, GEMINI_EMBEDDING_CONFIG_VERSION);
+}
+
+function similarityInputIdentityFor(dimension: SimilarityDimension, input: readonly string[], model: string, dimensions: number, configVersion: string): string {
+  return sha256(stableJson({ stage: "embedding", dimension, input: [...input], model, dimensions, configVersion }));
 }
 function makeEmbeddingRequest(input: readonly string[]): GeminiRequest {
   return {
@@ -726,6 +820,8 @@ async function persistExtraction(db: AppDatabase, job: JobRow, output: unknown, 
       return;
     }
     const stored = storedExtractionJson(output, job.input_identity, source.original_url);
+    const earlier = await first<{ id: number }>(db, "SELECT id FROM media_article_extractions WHERE source_id = ? LIMIT 1", source.id);
+    await countOutputs(db, job.run_id, earlier ? "replaced" : "new");
     await db.prepare("UPDATE media_article_extractions SET active = 0 WHERE source_id = ? AND active = 1").bind(source.id).run();
     await db.prepare("INSERT OR IGNORE INTO media_article_extractions (source_id, input_identity, content_hash, cleanup_version, model, config_version, output_json, active, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)").bind(source.id, job.input_identity, source.normalized_content_hash ?? "", CLEANUP_VERSION, job.model, job.config_version, stored, now.toISOString()).run();
     await db.prepare("UPDATE media_processing_jobs SET status = 'succeeded', output_json = ?, error = NULL, completed_at = ? WHERE id = ?").bind(stored, now.toISOString(), job.id).run();
@@ -747,7 +843,7 @@ async function persistOverview(db: AppDatabase, job: JobRow, output: unknown, no
       status = "stale";
       return;
     }
-    const sources = await rows<SourceRow>(db, "SELECT id, appid, original_url, title, outlet, author, published_at, updated_at, retrieved_at, type, hands_on, affiliation, platform, build_context, normalized_content_hash, cleanup_version, processing_content, processing_input_identity FROM media_sources WHERE appid = ?", job.appid);
+    const sources = await rows<SourceRow>(db, `SELECT ${SOURCE_COLUMNS} FROM media_sources WHERE appid = ?`, job.appid);
     const extractions = await rows<ExtractionRow>(db, "SELECT id, source_id, input_identity, content_hash, cleanup_version, model, config_version, output_json, active FROM media_article_extractions WHERE source_id IN (SELECT id FROM media_sources WHERE appid = ?) AND active = 1", job.appid);
     if (synthesisIdentity(job.appid, extractions) !== job.input_identity) {
       await db.prepare("UPDATE media_processing_jobs SET status = 'stale', completed_at = ? WHERE id = ?").bind(now.toISOString(), job.id).run();
@@ -795,6 +891,8 @@ async function persistOverview(db: AppDatabase, job: JobRow, output: unknown, no
         await db.prepare("UPDATE media_game_embeddings SET active = 0 WHERE appid = ? AND dimension = ? AND active = 1").bind(job.appid, dimension).run();
       }
     }
+    const earlier = await first<{ id: number }>(db, "SELECT id FROM media_game_overviews WHERE appid = ? LIMIT 1", job.appid);
+    await countOutputs(db, job.run_id, earlier ? "replaced" : "new");
     await db.prepare("UPDATE media_game_overviews SET active = 0 WHERE appid = ? AND active = 1").bind(job.appid).run();
     await db.prepare("INSERT OR IGNORE INTO media_game_overviews (appid, input_identity, model, config_version, output_json, active, created_at) VALUES (?, ?, ?, ?, ?, 1, ?)").bind(job.appid, job.input_identity, job.model, job.config_version, JSON.stringify(storedOverview), now.toISOString()).run();
     await db.prepare("DELETE FROM media_tag_memberships WHERE appid = ?").bind(job.appid).run();
@@ -894,6 +992,8 @@ async function persistEmbedding(db: AppDatabase, job: JobRow, output: unknown, n
       return;
     }
     const existing = await first<{ id: number }>(db, "SELECT id FROM media_game_embeddings WHERE appid = ? AND dimension = ? AND input_identity = ? AND model = ? AND dimensions = ? AND config_version = ? ORDER BY id DESC LIMIT 1", job.appid, job.dimension, job.input_identity, GEMINI_EMBEDDING_MODEL, GEMINI_EMBEDDING_DIMENSIONS, GEMINI_EMBEDDING_CONFIG_VERSION);
+    const earlier = await first<{ id: number }>(db, "SELECT id FROM media_game_embeddings WHERE appid = ? AND dimension = ? LIMIT 1", job.appid, job.dimension);
+    await countOutputs(db, job.run_id, earlier ? "replaced" : "new");
     await db.prepare("UPDATE media_game_embeddings SET active = 0 WHERE appid = ? AND dimension = ? AND active = 1").bind(job.appid, job.dimension).run();
     if (existing) {
       await db.prepare("UPDATE media_game_embeddings SET overview_input_identity = ?, vector = ?, active = 1 WHERE id = ? AND appid = ? AND dimension = ? AND input_identity = ? AND model = ? AND dimensions = ? AND config_version = ?").bind(overviewInputIdentity, vector, existing.id, job.appid, job.dimension, job.input_identity, GEMINI_EMBEDDING_MODEL, GEMINI_EMBEDDING_DIMENSIONS, GEMINI_EMBEDDING_CONFIG_VERSION).run();
@@ -907,6 +1007,12 @@ async function persistEmbedding(db: AppDatabase, job: JobRow, output: unknown, n
 }
 
 async function reconcileJob(db: AppDatabase, job: JobRow, result: GeminiBatchPoll, now: Date, secret: string | undefined): Promise<"succeeded" | "failed" | "stale" | "uncertain"> {
+  const status = await settleJob(db, job, result, now, secret);
+  if ((status === "failed" || status === "stale") && job.stage !== "explanation") await countOutputs(db, job.run_id, "skipped");
+  return status;
+}
+
+async function settleJob(db: AppDatabase, job: JobRow, result: GeminiBatchPoll, now: Date, secret: string | undefined): Promise<"succeeded" | "failed" | "stale" | "uncertain"> {
   if (result.state === "pending") return "uncertain";
   const usageJson = result.usage ? JSON.stringify(result.usage) : "{}";
   const charge = actualCharge(job, result.usage ?? null) ?? job.reserved_microusd;
@@ -1014,8 +1120,8 @@ async function loadAuthorization(
   submittedRunIds: readonly number[] = [],
 ): Promise<{ auth: AuthorizationRow; selectedGames: number[] } | null> {
   const auth = runId === undefined
-    ? await first<AuthorizationRow & { selected_games: string }>(db, "SELECT a.run_id, a.status, a.stop_reason, a.billing_confirmation, r.selected_games FROM media_processing_authorizations a JOIN media_discovery_runs r ON r.id = a.run_id WHERE a.status IN ('queued', 'waiting') AND r.status NOT IN ('queued', 'running') ORDER BY a.run_id DESC LIMIT 1")
-    : await first<AuthorizationRow & { selected_games: string }>(db, "SELECT a.run_id, a.status, a.stop_reason, a.billing_confirmation, r.selected_games FROM media_processing_authorizations a JOIN media_discovery_runs r ON r.id = a.run_id WHERE a.run_id = ? AND a.status IN ('queued', 'waiting') AND r.status NOT IN ('queued', 'running')", runId);
+    ? await first<AuthorizationRow & { selected_games: string }>(db, "SELECT a.run_id, a.status, a.stop_reason, a.billing_confirmation, a.affected_source_ids, r.selected_games FROM media_processing_authorizations a JOIN media_discovery_runs r ON r.id = a.run_id WHERE a.status IN ('queued', 'waiting') AND r.status NOT IN ('queued', 'running') ORDER BY a.run_id DESC LIMIT 1")
+    : await first<AuthorizationRow & { selected_games: string }>(db, "SELECT a.run_id, a.status, a.stop_reason, a.billing_confirmation, a.affected_source_ids, r.selected_games FROM media_processing_authorizations a JOIN media_discovery_runs r ON r.id = a.run_id WHERE a.run_id = ? AND a.status IN ('queued', 'waiting') AND r.status NOT IN ('queued', 'running')", runId);
   if (!auth) {
     if (runId !== undefined) {
       const terminal = await first<{ run_id: number }>(
@@ -1030,14 +1136,41 @@ async function loadAuthorization(
   return { auth, selectedGames: parseSelectedGames(auth.selected_games) };
 }
 
-async function authorizeMediaProcessingNow(db: AppDatabase, runId: number): Promise<{ runId: number; status: string }> {
+/**
+ * Validates an affected set for `selectedGames`: distinct media source ids,
+ * at most the experiment's total article ceiling, each belonging to an
+ * eligible entity of the selected games.
+ */
+async function validatedAffectedSourceIds(db: AppDatabase, selectedGames: readonly number[], value: readonly number[] | undefined): Promise<number[]> {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.length > MAX_MEDIA_ARTICLES_TOTAL || !value.every((id) => Number.isSafeInteger(id) && id > 0) || new Set(value).size !== value.length) {
+    throw new Error("Affected media sources must be distinct positive ids within the article ceiling");
+  }
+  const ids = [...value].sort((a, b) => a - b);
+  if (ids.length === 0) return ids;
+  const entities = await eligibleProcessingEntities(db, selectedGames);
+  const known = await first<{ count: number }>(
+    db,
+    "SELECT COUNT(*) AS count FROM media_sources WHERE id IN (SELECT value FROM json_each(?)) AND appid IN (SELECT value FROM json_each(?))",
+    JSON.stringify(ids),
+    JSON.stringify(entities),
+  );
+  if (Number(known?.count ?? 0) !== ids.length) throw new Error("Affected media sources must belong to the run's eligible games");
+  return ids;
+}
+
+async function authorizeMediaProcessingNow(db: AppDatabase, runId: number, scope: MediaProcessingScope): Promise<{ runId: number; status: string }> {
   if (!Number.isInteger(runId) || runId <= 0) throw new Error("runId must be a positive integer");
   const run = await first<{ id: number; selected_games: string; status: string }>(db, "SELECT id, selected_games, status FROM media_discovery_runs WHERE id = ?", runId);
   if (!run) throw new Error("Media discovery run not found");
   if (run.status === "queued" || run.status === "running") throw new Error("Media discovery run is still running");
-  parseSelectedGames(run.selected_games);
+  const affected = await validatedAffectedSourceIds(db, parseSelectedGames(run.selected_games), scope.affectedSourceIds);
+  const existing = await first<{ affected_source_ids: string }>(db, "SELECT affected_source_ids FROM media_processing_authorizations WHERE run_id = ?", runId);
+  if (existing && scope.affectedSourceIds !== undefined && JSON.stringify(parseAffectedSourceIds(existing.affected_source_ids)) !== JSON.stringify(affected)) {
+    throw new Error("Media processing run is already authorized with a different affected set");
+  }
   await transaction(db, async () => {
-    await db.prepare("INSERT OR IGNORE INTO media_processing_authorizations (run_id, status) VALUES (?, 'queued')").bind(runId).run();
+    await db.prepare("INSERT OR IGNORE INTO media_processing_authorizations (run_id, status, affected_source_ids) VALUES (?, 'queued', ?)").bind(runId, JSON.stringify(affected)).run();
     await db.prepare("UPDATE media_processing_authorizations SET updated_at = CURRENT_TIMESTAMP WHERE run_id = ?").bind(runId).run();
   });
   const result = await first<{ status: string }>(db, "SELECT status FROM media_processing_authorizations WHERE run_id = ?", runId);
@@ -1046,10 +1179,15 @@ async function authorizeMediaProcessingNow(db: AppDatabase, runId: number): Prom
 
 let mediaProcessingQueue: Promise<unknown> = Promise.resolve();
 
-export function authorizeMediaProcessing(db: AppDatabase, runId: number): Promise<{ runId: number; status: string }> {
+/**
+ * Authorizes paid processing for a completed discovery run. The run processes
+ * sources new to processing plus `scope.affectedSourceIds`, which may be
+ * empty; the set is fixed when the run is first authorized.
+ */
+export function authorizeMediaProcessing(db: AppDatabase, runId: number, scope: MediaProcessingScope = {}): Promise<{ runId: number; status: string }> {
   const next = mediaProcessingQueue
     .catch(() => undefined)
-    .then(() => authorizeMediaProcessingNow(db, runId));
+    .then(() => authorizeMediaProcessingNow(db, runId, scope));
   mediaProcessingQueue = next;
   return next;
 }
@@ -1063,14 +1201,13 @@ async function scheduleEmbeddings(
   transport: GeminiBatchTransport,
   secret: string | undefined,
   now: Date,
-): Promise<{ submitted: number; reused: number; stopReason: string | null }> {
+): Promise<{ submitted: number; stopReason: string | null }> {
   const overviews = await rows<{ appid: number; input_identity: string; output_json: string }>(
     db,
     "SELECT appid, input_identity, output_json FROM media_game_overviews WHERE active = 1 AND appid IN (SELECT value FROM json_each(?)) ORDER BY appid",
     JSON.stringify(processingEntities),
   );
   let submitted = 0;
-  let reused = 0;
   let stopReason: string | null = null;
   for (const overview of overviews) {
     const eligible = await first<{ appid: number }>(db, `SELECT app.appid FROM apps AS app WHERE app.appid = ? AND ${ELIGIBLE_MEDIA_PROCESSING_ENTITY_SQL}`, overview.appid);
@@ -1085,6 +1222,10 @@ async function scheduleEmbeddings(
         await db.prepare("UPDATE media_game_embeddings SET active = 0 WHERE appid = ? AND dimension = ? AND active = 1").bind(overview.appid, dimension).run();
         continue;
       }
+      // A vector linked to this Overview stays current while it embeds the
+      // Overview's input, whatever embedding model or configuration produced it.
+      const linked = await first<{ input_identity: string; model: string; dimensions: number; config_version: string }>(db, "SELECT input_identity, model, dimensions, config_version FROM media_game_embeddings WHERE appid = ? AND dimension = ? AND overview_input_identity = ? AND active = 1 ORDER BY id DESC LIMIT 1", overview.appid, dimension, overview.input_identity);
+      if (linked && similarityInputIdentityFor(dimension, input, linked.model, linked.dimensions, linked.config_version) === linked.input_identity) continue;
       const existing = await first<{ id: number; vector: unknown }>(
         db,
         "SELECT id, vector FROM media_game_embeddings WHERE appid = ? AND dimension = ? AND input_identity = ? AND model = ? AND dimensions = ? AND config_version = ? ORDER BY id DESC LIMIT 1",
@@ -1100,7 +1241,6 @@ async function scheduleEmbeddings(
           await db.prepare("UPDATE media_game_embeddings SET active = 0 WHERE appid = ? AND dimension = ? AND active = 1").bind(overview.appid, dimension).run();
           await db.prepare("UPDATE media_game_embeddings SET overview_input_identity = ?, active = 1 WHERE id = ? AND appid = ? AND dimension = ? AND input_identity = ? AND model = ? AND dimensions = ? AND config_version = ?").bind(overview.input_identity, existing.id, overview.appid, dimension, identity, GEMINI_EMBEDDING_MODEL, GEMINI_EMBEDDING_DIMENSIONS, GEMINI_EMBEDDING_CONFIG_VERSION).run();
         });
-        reused += 1;
         continue;
       }
       const requestKey = `embedding:${overview.appid}:${dimension}:${overview.input_identity}:${identity}`;
@@ -1129,7 +1269,7 @@ async function scheduleEmbeddings(
     }
     if (stopReason === "lifetime_budget") break;
   }
-  return { submitted, reused, stopReason };
+  return { submitted, stopReason };
 }
 
 async function advanceMediaProcessingNow(db: AppDatabase, options: MediaProcessingOptions = {}): Promise<MediaProcessingSummary> {
@@ -1155,7 +1295,7 @@ async function advanceMediaProcessingNow(db: AppDatabase, options: MediaProcessi
       status: transport && Number(unresolved?.count ?? 0) === 0 ? "completed" : "waiting",
       submitted: 0,
       completed: prePoll.succeeded,
-      reused: 0,
+      outputs: await outputCounts(db, reconciliationRunId),
       chargedMicrousd: emptyBudget.charged,
       outstandingReservedMicrousd: emptyBudget.reserved,
       stopReasons: reason,
@@ -1168,21 +1308,21 @@ async function advanceMediaProcessingNow(db: AppDatabase, options: MediaProcessi
   if (!transport) {
     const reason = "missing_gemini_batch_transport";
     await db.prepare("UPDATE media_processing_authorizations SET status = 'waiting', stop_reason = ?, updated_at = ? WHERE run_id = ?").bind(reason, now.toISOString(), auth.run_id).run();
-    return { runId: auth.run_id, status: "waiting", submitted: 0, completed: prePoll.succeeded, reused: 0, chargedMicrousd: emptyBudget.charged, outstandingReservedMicrousd: emptyBudget.reserved, stopReasons: [reason], failed: prePoll.failed, uncertain: prePoll.uncertain, overviewAppids: [] };
+    return { runId: auth.run_id, status: "waiting", submitted: 0, completed: prePoll.succeeded, outputs: await outputCounts(db, auth.run_id), chargedMicrousd: emptyBudget.charged, outstandingReservedMicrousd: emptyBudget.reserved, stopReasons: [reason], failed: prePoll.failed, uncertain: prePoll.uncertain, overviewAppids: [] };
   }
   const pricingConfirmed = options.pricingVersion === GEMINI_BATCH_PRICING_VERSION;
   const capabilityConfirmed = options.capabilityVersion === GEMINI_BATCH_CAPABILITY_VERSION;
   if (!pricingConfirmed || !capabilityConfirmed) {
     const reason = !pricingConfirmed ? "pricing_unconfirmed" : "capability_unconfirmed";
     await db.prepare("UPDATE media_processing_authorizations SET status = 'waiting', stop_reason = ?, updated_at = ? WHERE run_id = ?").bind(reason, now.toISOString(), auth.run_id).run();
-    return { runId: auth.run_id, status: "waiting", submitted: 0, completed: prePoll.succeeded, reused: 0, chargedMicrousd: emptyBudget.charged, outstandingReservedMicrousd: emptyBudget.reserved, stopReasons: [reason], failed: prePoll.failed, uncertain: prePoll.uncertain, overviewAppids: [] };
+    return { runId: auth.run_id, status: "waiting", submitted: 0, completed: prePoll.succeeded, outputs: await outputCounts(db, auth.run_id), chargedMicrousd: emptyBudget.charged, outstandingReservedMicrousd: emptyBudget.reserved, stopReasons: [reason], failed: prePoll.failed, uncertain: prePoll.uncertain, overviewAppids: [] };
   }
   await transaction(db, async () => {
     await db.prepare("UPDATE media_processing_authorizations SET billing_confirmation = ?, updated_at = ? WHERE run_id = ?").bind(GEMINI_BATCH_BILLING_CONFIRMATION, now.toISOString(), auth.run_id).run();
   });
   const processingEntities = await eligibleProcessingEntities(db, selectedGames);
   const articleFetch = options.articleFetch ?? fetch;
-  const allSources = await rows<SourceRow>(db, `SELECT id, appid, original_url, title, outlet, author, published_at, updated_at, retrieved_at, type, hands_on, affiliation, platform, build_context, normalized_content_hash, cleanup_version, processing_content, processing_input_identity FROM media_sources WHERE appid IN (SELECT value FROM json_each(?)) ORDER BY appid, id`, JSON.stringify(processingEntities));
+  const allSources = await rows<SourceRow>(db, `SELECT ${SOURCE_COLUMNS} FROM media_sources WHERE appid IN (SELECT value FROM json_each(?)) ORDER BY appid, id`, JSON.stringify(processingEntities));
   const sourceCountByGame = new Map<number, number>();
   let boundedSourceCount = 0;
   const sources = allSources.filter((source) => {
@@ -1194,87 +1334,107 @@ async function advanceMediaProcessingNow(db: AppDatabase, options: MediaProcessi
     return true;
   });
   const sourceById = new Map(sources.map((source) => [source.id, source]));
+  const affectedSourceIds = new Set(parseAffectedSourceIds(auth.affected_source_ids));
+  /**
+   * A run processes a source that is new to processing, an affected source it
+   * has not taken yet, or a source it took whose cleaned text is still
+   * retained for pending work. Every other source keeps its outputs without
+   * a fetch or paid work.
+   */
+  const inScope = (source: SourceRow) => source.processing_run_id === null
+    || (source.processing_run_id !== auth.run_id && affectedSourceIds.has(source.id))
+    || (source.processing_run_id === auth.run_id && source.processing_content !== null);
   let extractionSubmitted = 0;
   let embeddingSubmitted = 0;
   let synthesisSubmitted = 0;
-  let reused = 0;
   let stopReason: string | null = null;
   const outletStops = new Map<MediaOutlet, string>();
+  const discardText = (sourceId: number) => db.prepare("UPDATE media_sources SET processing_content = NULL WHERE id = ?").bind(sourceId).run();
+  const skipSource = async (sourceId: number) => {
+    await discardText(sourceId);
+    await countOutputs(db, auth.run_id, "skipped");
+  };
 
   for (const source of sources) {
-    if (outletStops.has(source.outlet)) continue;
-    const cachedIdentity = source.processing_input_identity && source.cleanup_version === CLEANUP_VERSION && source.normalized_content_hash
-      ? extractionIdentity(source, source.normalized_content_hash)
-      : null;
-    const sameRunJob = cachedIdentity
-      ? await first<{ status: JobRow["status"] }>(db, "SELECT status FROM media_processing_jobs WHERE run_id = ? AND source_id = ? AND input_identity = ? ORDER BY id DESC LIMIT 1", auth.run_id, source.id, cachedIdentity)
-      : null;
-    let content: string | null = sameRunJob?.status === "reserved" ? source.processing_content : null;
-    let hash: string | null = sameRunJob?.status === "reserved" ? source.normalized_content_hash : null;
-    let identity: string | null = sameRunJob?.status === "reserved" ? cachedIdentity : null;
-    if (sameRunJob && sameRunJob.status !== "reserved") {
-      reused += 1;
-      continue;
-    }
-    if (!content) {
+    if (!inScope(source)) continue;
+    let content = source.processing_run_id === auth.run_id ? source.processing_content : null;
+    let hash = content ? source.normalized_content_hash : null;
+    if (!content || !hash) {
+      if (outletStops.has(source.outlet)) continue;
       const body = await fetchArticle(db, source, auth.run_id, articleFetch, clock);
       if (body && typeof body === "object") {
         outletStops.set(source.outlet, body.outletStop);
         continue;
       }
+      await db.prepare("UPDATE media_sources SET processing_run_id = ? WHERE id = ?").bind(auth.run_id, source.id).run();
+      source.processing_run_id = auth.run_id;
       const cleaned = body ? cleanArticle(body) : null;
-      if (!cleaned) continue;
+      if (!cleaned) {
+        await skipSource(source.id);
+        continue;
+      }
       content = cleaned.content;
       hash = cleaned.hash;
     }
-    if (!hash || !content) continue;
+    let identity: string | null = null;
+    let kept = false;
     await transaction(db, async () => {
       const current = await currentSource(db, source.id);
       if (!current) return;
       identity = extractionIdentity(current, hash!);
       const prior = await first<ExtractionRow>(db, "SELECT id, source_id, input_identity, content_hash, cleanup_version, model, config_version, output_json, active FROM media_article_extractions WHERE source_id = ? AND active = 1 LIMIT 1", source.id);
-      const priorStillSupported = prior
-        ? prior.content_hash === hash
-          && extractionIdentityFor(current, hash!, prior.model, prior.config_version, prior.cleanup_version) === prior.input_identity
-        : false;
-      if (prior && !priorStillSupported) {
-        await db.prepare("UPDATE media_article_extractions SET active = 0 WHERE source_id = ? AND active = 1").bind(source.id).run();
-        await db.prepare("UPDATE media_game_overviews SET active = 0 WHERE appid = ? AND active = 1").bind(current.appid).run();
-        await db.prepare("UPDATE media_game_embeddings SET active = 0 WHERE appid = ? AND active = 1").bind(current.appid).run();
+      // Only changed cleaned content re-extracts. A metadata, model,
+      // configuration or cleanup version change keeps the active extraction.
+      kept = prior !== null && prior.content_hash === hash;
+      if (prior && !kept) {
+        const extractions = await db.prepare("UPDATE media_article_extractions SET active = 0 WHERE source_id = ? AND active = 1").bind(source.id).run();
+        const overviews = await db.prepare("UPDATE media_game_overviews SET active = 0 WHERE appid = ? AND active = 1").bind(current.appid).run();
+        const embeddings = await db.prepare("UPDATE media_game_embeddings SET active = 0 WHERE appid = ? AND active = 1").bind(current.appid).run();
+        await countOutputs(db, auth.run_id, "invalidated", extractions.meta.changes + overviews.meta.changes + embeddings.meta.changes);
       }
-      await db.prepare("UPDATE media_sources SET normalized_content_hash = ?, cleanup_version = ?, processing_content = ?, processing_input_identity = ? WHERE id = ?").bind(hash, CLEANUP_VERSION, content, identity, source.id).run();
-      Object.assign(source, current, { normalized_content_hash: hash, cleanup_version: CLEANUP_VERSION, processing_content: content, processing_input_identity: identity });
+      const retained = kept ? null : content;
+      await db.prepare("UPDATE media_sources SET normalized_content_hash = ?, cleanup_version = ?, processing_content = ?, processing_input_identity = ? WHERE id = ?").bind(hash, CLEANUP_VERSION, retained, identity, source.id).run();
+      Object.assign(source, current, { normalized_content_hash: hash, cleanup_version: CLEANUP_VERSION, processing_content: retained, processing_input_identity: identity, processing_run_id: auth.run_id });
     });
-    if (!identity) continue;
+    if (kept || !identity) continue;
     const knownExtraction = await first<ExtractionRow>(db, "SELECT id, source_id, input_identity, content_hash, cleanup_version, model, config_version, output_json, active FROM media_article_extractions WHERE source_id = ? AND input_identity = ? LIMIT 1", source.id, identity);
     if (knownExtraction) {
       await transaction(db, async () => {
         await db.prepare("UPDATE media_article_extractions SET active = 0 WHERE source_id = ? AND active = 1").bind(source.id).run();
         await db.prepare("UPDATE media_article_extractions SET active = 1 WHERE id = ?").bind(knownExtraction.id).run();
-        await db.prepare("UPDATE media_sources SET processing_content = NULL WHERE id = ?").bind(source.id).run();
+        await discardText(source.id);
       });
-      reused += 1;
+      source.processing_content = null;
       continue;
     }
-    const requestKey = `extraction:${source.id}:${identity}`;
-    const priorJob = await first<{ status: JobRow["status"] }>(db, "SELECT status FROM media_processing_jobs WHERE request_key = ?", requestKey);
+    // A definite earlier failure for this input is retried under a key of
+    // this run's own; only an affected source reaches this point again.
+    const baseKey = `extraction:${source.id}:${identity}`;
+    const baseJob = await first<{ status: JobRow["status"] }>(db, "SELECT status FROM media_processing_jobs WHERE request_key = ?", baseKey);
+    const retrying = baseJob?.status === "failed" || baseJob?.status === "stale";
+    const requestKey = retrying ? `${baseKey}:retry:${auth.run_id}` : baseKey;
+    const priorJob = retrying ? await first<{ status: JobRow["status"] }>(db, "SELECT status FROM media_processing_jobs WHERE request_key = ?", requestKey) : baseJob;
+    source.processing_content = null;
     if (priorJob && priorJob.status !== "reserved") {
-      await db.prepare("UPDATE media_sources SET processing_content = NULL WHERE id = ?").bind(source.id).run();
-      reused += 1;
+      await discardText(source.id);
       continue;
     }
     const request = makeExtractionRequest(source, content, identity);
     let tokenCount: number;
     try { tokenCount = await transport.countTokens(GEMINI_MEDIA_MODEL, request); }
-    catch (error) { stopReason ??= `count_tokens:${boundedError(error, options.geminiApiKey)}`; continue; }
+    catch (error) {
+      await skipSource(source.id);
+      stopReason ??= `count_tokens:${boundedError(error, options.geminiApiKey)}`;
+      continue;
+    }
     if (!Number.isInteger(tokenCount) || tokenCount < 0 || tokenCount > MAX_INPUT_TOKENS) {
-      await db.prepare("UPDATE media_sources SET processing_content = NULL WHERE id = ?").bind(source.id).run();
+      await skipSource(source.id);
       stopReason ??= "input_token_cap";
       continue;
     }
     const reserved = await reserveJob(db, { run_id: auth.run_id, stage: "extraction", appid: source.appid, source_id: source.id, request_key: requestKey, input_identity: identity, model: GEMINI_MEDIA_MODEL, config_version: EXTRACTION_CONFIG_VERSION, max_input_tokens: tokenCount, max_output_tokens: EXTRACTION_MAX_OUTPUT_TOKENS, reserved_microusd: conservativeCharge(tokenCount, EXTRACTION_MAX_OUTPUT_TOKENS, "extraction"), requireEligibleEntity: true });
     if (!reserved) {
-      await db.prepare("UPDATE media_sources SET processing_content = NULL WHERE id = ?").bind(source.id).run();
+      await skipSource(source.id);
       const eligible = await first<{ appid: number }>(db, `SELECT app.appid FROM apps AS app WHERE app.appid = ? AND ${ELIGIBLE_MEDIA_PROCESSING_ENTITY_SQL}`, source.appid);
       if (eligible) {
         stopReason ??= "lifetime_budget";
@@ -1282,7 +1442,7 @@ async function advanceMediaProcessingNow(db: AppDatabase, options: MediaProcessi
       }
       continue;
     }
-    const job = await first<JobRow>(db, "SELECT id, run_id, stage, appid, matched_appid, dimension, source_id, request_key, input_identity, model, config_version, max_input_tokens, max_output_tokens, reserved_microusd, charged_microusd, reservation_active, status, provider_batch_id, output_json, usage_json, error FROM media_processing_jobs WHERE request_key = ?", requestKey);
+    const job = await first<JobRow>(db, `SELECT ${JOB_COLUMNS} FROM media_processing_jobs WHERE request_key = ?`, requestKey);
     if (!job || job.status !== "reserved") continue;
     if (await submitJob(db, job, request, transport, options.geminiApiKey, now, source.id) === "submitted") extractionSubmitted += 1;
   }
@@ -1313,6 +1473,10 @@ async function advanceMediaProcessingNow(db: AppDatabase, options: MediaProcessi
     const appSources = sources.filter((source) => source.appid === appid);
     const appExtractions = activeExtractions.filter((row) => sourceById.get(row.source_id)?.appid === appid);
     if (appExtractions.length === 0) continue;
+    // An Overview stays current while it was built from exactly the game's
+    // current contributions, whatever model or configuration built it.
+    const activeOverview = await first<{ input_identity: string; model: string; config_version: string }>(db, "SELECT input_identity, model, config_version FROM media_game_overviews WHERE appid = ? AND active = 1 ORDER BY id DESC LIMIT 1", appid);
+    if (activeOverview && synthesisIdentityFor(appid, appExtractions, activeOverview.model, activeOverview.config_version) === activeOverview.input_identity) continue;
     const identity = synthesisIdentity(appid, appExtractions);
     const old = await first<{ input_identity: string; id: number; active: number }>(db, "SELECT input_identity, id, active FROM media_game_overviews WHERE appid = ? AND input_identity = ? ORDER BY id DESC LIMIT 1", appid, identity);
     if (old) {
@@ -1320,15 +1484,11 @@ async function advanceMediaProcessingNow(db: AppDatabase, options: MediaProcessi
         await db.prepare("UPDATE media_game_overviews SET active = 0 WHERE appid = ? AND active = 1").bind(appid).run();
         await db.prepare("UPDATE media_game_overviews SET active = 1 WHERE id = ?").bind(old.id).run();
       });
-      reused += 1;
       continue;
     }
     const requestKey = `synthesis:${appid}:${identity}`;
     const existing = await first<JobRow>(db, "SELECT id, run_id, stage, appid, matched_appid, dimension, source_id, request_key, input_identity, model, config_version, max_input_tokens, max_output_tokens, reserved_microusd, charged_microusd, reservation_active, status, provider_batch_id, output_json, usage_json, error FROM media_processing_jobs WHERE request_key = ?", requestKey);
-    if (existing && existing.status !== "reserved") {
-      reused += 1;
-      continue;
-    }
+    if (existing && existing.status !== "reserved") continue;
     const request = makeSynthesisRequest(appid, game?.name ?? "", appExtractions, appSources);
     let tokenCount: number;
     try { tokenCount = await transport.countTokens(GEMINI_MEDIA_MODEL, request); }
@@ -1349,7 +1509,6 @@ async function advanceMediaProcessingNow(db: AppDatabase, options: MediaProcessi
   }
   const embeddingResult = await scheduleEmbeddings(db, auth.run_id, processingEntities, transport, options.geminiApiKey, now);
   embeddingSubmitted += embeddingResult.submitted;
-  reused += embeddingResult.reused;
   if (!stopReason && embeddingResult.stopReason) stopReason = embeddingResult.stopReason;
 
   const aggregate = await first<{ reserved: number; charged: number; succeeded: number; failed: number; uncertain: number }>(db, "SELECT COALESCE(SUM(CASE WHEN reservation_active = 1 THEN reserved_microusd ELSE 0 END), 0) AS reserved, COALESCE(SUM(CASE WHEN reservation_active = 0 THEN COALESCE(charged_microusd, 0) ELSE 0 END), 0) AS charged, COALESCE(SUM(status = 'succeeded'), 0) AS succeeded, COALESCE(SUM(status IN ('failed', 'stale')), 0) AS failed, COALESCE(SUM(status = 'uncertain'), 0) AS uncertain FROM media_processing_jobs");
@@ -1366,10 +1525,14 @@ async function advanceMediaProcessingNow(db: AppDatabase, options: MediaProcessi
   const recoverable = stopReason === "pricing_unconfirmed" || stopReason === "capability_unconfirmed" || stopReason === "missing_gemini_batch_transport" || stopReason?.startsWith("count_tokens:") === true;
   const terminalFailure = pending === 0 && hardFailures > 0;
   if (!stopReason && terminalFailure) stopReason = "terminal_failure";
-  const status: MediaProcessingSummary["status"] = pending > 0 || (stopReason && recoverable) || (!allCovered && !terminalFailure && !stopReason) ? (auth.status === "queued" && !hasJobs && sources.length === 0 ? "queued" : "waiting") : terminalFailure ? "stopped" : allCovered ? "completed" : "stopped";
+  // Sources deferred by an outlet stop stay in scope; once none remain, the
+  // run has done all the work it was authorized for.
+  const remainingInScope = sources.some(inScope);
+  const status: MediaProcessingSummary["status"] = pending > 0 || (stopReason && recoverable) || (!allCovered && !terminalFailure && !stopReason && remainingInScope) ? (auth.status === "queued" && !hasJobs && sources.length === 0 ? "queued" : "waiting") : terminalFailure ? "stopped" : allCovered || !stopReason ? "completed" : "stopped";
   const stopReasons = [...(stopReason ? [stopReason] : []), ...[...outletStops].map(([outlet, reason]) => `${outlet}:${reason}`)];
   await db.prepare("UPDATE media_processing_authorizations SET status = ?, stop_reason = ?, updated_at = ? WHERE run_id = ? AND status <> 'stopped'").bind(status, stopReasons.length > 0 ? stopReasons.join("; ") : null, now.toISOString(), auth.run_id).run();
-  return { runId: auth.run_id, status, submitted: extractionSubmitted + embeddingSubmitted + synthesisSubmitted, completed: Number(runAggregate?.succeeded ?? succeeded), reused, chargedMicrousd: Number(aggregate?.charged ?? 0), outstandingReservedMicrousd: Number(aggregate?.reserved ?? 0), stopReasons, failed: Number(runAggregate?.failed ?? failed), uncertain: Number(runAggregate?.uncertain ?? uncertain), overviewAppids: activeOverview.map((row) => row.appid) };
+  await recordReusedOutputs(db, auth.run_id, sources.map((source) => source.id), currentProcessingEntities);
+  return { runId: auth.run_id, status, submitted: extractionSubmitted + embeddingSubmitted + synthesisSubmitted, completed: Number(runAggregate?.succeeded ?? succeeded), outputs: await outputCounts(db, auth.run_id), chargedMicrousd: Number(aggregate?.charged ?? 0), outstandingReservedMicrousd: Number(aggregate?.reserved ?? 0), stopReasons, failed: Number(runAggregate?.failed ?? failed), uncertain: Number(runAggregate?.uncertain ?? uncertain), overviewAppids: activeOverview.map((row) => row.appid) };
 }
 
 export function advanceMediaProcessing(

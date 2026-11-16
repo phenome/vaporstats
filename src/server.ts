@@ -249,7 +249,7 @@ function safeNonNegativeInteger(value: number): number {
 
 function sanitizeMediaProcessingSummary(summary: MediaProcessingSummary): Pick<
   MediaProcessingSummary,
-  "runId" | "status" | "submitted" | "completed" | "reused" |
+  "runId" | "status" | "submitted" | "completed" | "outputs" |
   "chargedMicrousd" | "outstandingReservedMicrousd" | "stopReasons"
 > {
   return {
@@ -257,7 +257,13 @@ function sanitizeMediaProcessingSummary(summary: MediaProcessingSummary): Pick<
     status: summary.status,
     submitted: safeNonNegativeInteger(summary.submitted),
     completed: safeNonNegativeInteger(summary.completed),
-    reused: safeNonNegativeInteger(summary.reused),
+    outputs: {
+      new: safeNonNegativeInteger(summary.outputs.new),
+      reused: safeNonNegativeInteger(summary.outputs.reused),
+      replaced: safeNonNegativeInteger(summary.outputs.replaced),
+      invalidated: safeNonNegativeInteger(summary.outputs.invalidated),
+      skipped: safeNonNegativeInteger(summary.outputs.skipped),
+    },
     chargedMicrousd: safeNonNegativeInteger(summary.chargedMicrousd),
     outstandingReservedMicrousd: safeNonNegativeInteger(summary.outstandingReservedMicrousd),
     stopReasons: [...new Set(summary.stopReasons.map((reason) =>

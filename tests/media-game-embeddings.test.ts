@@ -86,9 +86,13 @@ async function completeInitial(value: EmbeddingFixture, transport: ControlledGem
   await advance(value, transport);
   await advance(value, transport);
 }
-async function startNextRun(value: EmbeddingFixture, key: string): Promise<void> {
+async function startNextRun(value: EmbeddingFixture, key: string, affectedSourceIds: readonly number[] = []): Promise<void> {
   value.runId = insertCompletedRun(value.native, `initial:${key}`, [APPID]);
-  await authorizeMediaProcessing(value.db, value.runId);
+  await authorizeMediaProcessing(value.db, value.runId, { affectedSourceIds });
+}
+
+function sourceIds(value: EmbeddingFixture): number[] {
+  return value.native.query<{ id: number }, []>("SELECT id FROM media_sources ORDER BY id").all().map(({ id }) => id);
 }
 
 
@@ -189,7 +193,7 @@ describe("game overview aggregate embeddings", () => {
     await completeInitial(value, transport);
     const previous = await value.db.prepare("SELECT input_identity FROM media_game_overviews WHERE appid = ? AND active = 1").bind(APPID).first<{ input_identity: string }>();
     const embeddingSubmissions = transport.embeddingSubmissions.length;
-    await startNextRun(value, "overview-identity");
+    await startNextRun(value, "overview-identity", sourceIds(value));
     transport.nextPolls.push(
       { state: "succeeded", output: extractionOutput(), usage: { inputTokens: 100, outputTokens: 20 } },
       { state: "succeeded", output: overviewOutput(), usage: { inputTokens: 100, outputTokens: 20 } },

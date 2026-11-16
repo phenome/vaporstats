@@ -414,7 +414,7 @@ describe("media trigger network origin", () => {
           status: "waiting",
           submitted: 0,
           completed: 0,
-          reused: 0,
+          outputs: { new: 0, reused: 0, replaced: 0, invalidated: 0, skipped: 0 },
           chargedMicrousd: 0,
           outstandingReservedMicrousd: 0,
           stopReasons: ["missing_gemini_batch_transport"],

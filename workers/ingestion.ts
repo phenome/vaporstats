@@ -197,7 +197,7 @@ function logCompletion(result: IngestionTickResult): void {
       status: result.mediaProcessing.status,
       submitted: result.mediaProcessing.submitted,
       completed: result.mediaProcessing.completed,
-      reused: result.mediaProcessing.reused,
+      outputs: result.mediaProcessing.outputs,
       chargedMicrousd: result.mediaProcessing.chargedMicrousd,
       outstandingReservedMicrousd: result.mediaProcessing.outstandingReservedMicrousd,
       stopReasons: result.mediaProcessing.stopReasons,
