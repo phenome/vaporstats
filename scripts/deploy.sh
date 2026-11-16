@@ -137,6 +137,26 @@ rollback() {
 }
 trap rollback EXIT
 
+if (( migrations_changed )); then
+  # Migrations fail on any foreign-key violation in the database (ADR 0016).
+  # Check read-only while the service still runs, so existing bad references
+  # stop the deploy before any downtime instead of after the service stops.
+  printf 'deploy: checking foreign keys before stopping the service\n'
+  compose run --rm --no-deps -T vaporstats bun -e '
+const { Database } = require("bun:sqlite");
+const dbPath = process.env.DATABASE_PATH;
+if (dbPath && require("node:fs").existsSync(dbPath)) {
+  const db = new Database(dbPath, { readonly: true });
+  const violations = db.query("PRAGMA foreign_key_check").all();
+  db.close();
+  if (violations.length > 0) {
+    console.error("PRAGMA foreign_key_check found " + violations.length + " violations:", violations.slice(0, 10));
+    process.exit(1);
+  }
+}
+'
+fi
+
 rollback_required=1
 
 if (( migrations_changed )); then
