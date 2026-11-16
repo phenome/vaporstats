@@ -1217,6 +1217,14 @@ async function authorizeMediaProcessingNow(db: AppDatabase, runId: number, scope
 
 let mediaProcessingQueue: Promise<unknown> = Promise.resolve();
 
+/** Stop reasons for an unmet precondition of paid work, which no longer apply once it is met. */
+const PRECONDITION_STOPS = new Set(["pricing_unconfirmed", "capability_unconfirmed", "missing_gemini_batch_transport"]);
+
+/** The explicit stop reasons a run recorded about its work, without unmet preconditions. */
+function recordedWorkStops(stopReason: string | null): string[] {
+  return (stopReason ?? "").split("; ").filter((reason) => reason && !PRECONDITION_STOPS.has(reason));
+}
+
 /**
  * Authorizes paid processing for a completed discovery run. The run processes
  * sources new to processing plus `scope.affectedSourceIds`, which may be
@@ -1334,7 +1342,8 @@ async function advanceMediaProcessingNow(db: AppDatabase, options: MediaProcessi
       db,
       "SELECT COUNT(*) AS count FROM media_processing_jobs WHERE status IN ('reserved', 'submitted', 'uncertain')",
     );
-    const reason = transport ? [] : ["missing_gemini_batch_transport"];
+    const recorded = await first<{ stop_reason: string | null }>(db, "SELECT stop_reason FROM media_processing_authorizations WHERE run_id = ?", reconciliationRunId);
+    const reason = transport ? (recorded?.stop_reason ?? "").split("; ").filter(Boolean) : ["missing_gemini_batch_transport"];
     return {
       runId: reconciliationRunId,
       status: transport && Number(unresolved?.count ?? 0) === 0 ? "completed" : "waiting",
@@ -1351,16 +1360,16 @@ async function advanceMediaProcessingNow(db: AppDatabase, options: MediaProcessi
   }
   const { auth, selectedGames } = authorization;
   if (!transport) {
-    const reason = "missing_gemini_batch_transport";
-    await db.prepare("UPDATE media_processing_authorizations SET status = 'waiting', stop_reason = ?, updated_at = ? WHERE run_id = ?").bind(reason, now.toISOString(), auth.run_id).run();
-    return { runId: auth.run_id, status: "waiting", submitted: 0, completed: prePoll.succeeded, outputs: await outputCounts(db, auth.run_id), chargedMicrousd: emptyBudget.charged, outstandingReservedMicrousd: emptyBudget.reserved, stopReasons: [reason], failed: prePoll.failed, uncertain: prePoll.uncertain, overviewAppids: [] };
+    const reasons = ["missing_gemini_batch_transport", ...recordedWorkStops(auth.stop_reason)];
+    await db.prepare("UPDATE media_processing_authorizations SET status = 'waiting', stop_reason = ?, updated_at = ? WHERE run_id = ?").bind(reasons.join("; "), now.toISOString(), auth.run_id).run();
+    return { runId: auth.run_id, status: "waiting", submitted: 0, completed: prePoll.succeeded, outputs: await outputCounts(db, auth.run_id), chargedMicrousd: emptyBudget.charged, outstandingReservedMicrousd: emptyBudget.reserved, stopReasons: reasons, failed: prePoll.failed, uncertain: prePoll.uncertain, overviewAppids: [] };
   }
   const pricingConfirmed = options.pricingVersion === GEMINI_BATCH_PRICING_VERSION;
   const capabilityConfirmed = options.capabilityVersion === GEMINI_BATCH_CAPABILITY_VERSION;
   if (!pricingConfirmed || !capabilityConfirmed) {
-    const reason = !pricingConfirmed ? "pricing_unconfirmed" : "capability_unconfirmed";
-    await db.prepare("UPDATE media_processing_authorizations SET status = 'waiting', stop_reason = ?, updated_at = ? WHERE run_id = ?").bind(reason, now.toISOString(), auth.run_id).run();
-    return { runId: auth.run_id, status: "waiting", submitted: 0, completed: prePoll.succeeded, outputs: await outputCounts(db, auth.run_id), chargedMicrousd: emptyBudget.charged, outstandingReservedMicrousd: emptyBudget.reserved, stopReasons: [reason], failed: prePoll.failed, uncertain: prePoll.uncertain, overviewAppids: [] };
+    const reasons = [!pricingConfirmed ? "pricing_unconfirmed" : "capability_unconfirmed", ...recordedWorkStops(auth.stop_reason)];
+    await db.prepare("UPDATE media_processing_authorizations SET status = 'waiting', stop_reason = ?, updated_at = ? WHERE run_id = ?").bind(reasons.join("; "), now.toISOString(), auth.run_id).run();
+    return { runId: auth.run_id, status: "waiting", submitted: 0, completed: prePoll.succeeded, outputs: await outputCounts(db, auth.run_id), chargedMicrousd: emptyBudget.charged, outstandingReservedMicrousd: emptyBudget.reserved, stopReasons: reasons, failed: prePoll.failed, uncertain: prePoll.uncertain, overviewAppids: [] };
   }
   await transaction(db, async () => {
     await db.prepare("UPDATE media_processing_authorizations SET billing_confirmation = ?, updated_at = ? WHERE run_id = ?").bind(GEMINI_BATCH_BILLING_CONFIRMATION, now.toISOString(), auth.run_id).run();
@@ -1394,6 +1403,8 @@ async function advanceMediaProcessingNow(db: AppDatabase, options: MediaProcessi
   let synthesisSubmitted = 0;
   let stopReason: string | null = null;
   const outletStops = new Map<MediaOutlet, string>();
+  /** Why sources were skipped without output in this advance, as `outlet:reason`. */
+  const sourceSkips = new Set<string>();
   const discardText = (sourceId: number) => db.prepare("UPDATE media_sources SET processing_content = NULL WHERE id = ?").bind(sourceId).run();
   /** Takes a source into this run without output: its text is discarded and it counts as skipped, in one write. */
   const skipSource = (sourceId: number) => transaction(db, async () => {
@@ -1414,6 +1425,7 @@ async function advanceMediaProcessingNow(db: AppDatabase, options: MediaProcessi
       }
       const cleaned = body ? cleanArticle(body) : null;
       if (!cleaned) {
+        sourceSkips.add(`${source.outlet}:${body ? "article_unusable" : "article_unreachable"}`);
         await skipSource(source.id);
         source.processing_run_id = auth.run_id;
         continue;
@@ -1591,7 +1603,11 @@ async function advanceMediaProcessingNow(db: AppDatabase, options: MediaProcessi
   // run has done all the work it was authorized for.
   const remainingInScope = sources.some(inScope);
   const status: MediaProcessingSummary["status"] = pending > 0 || (stopReason && recoverable) || (!allCovered && !terminalFailure && !stopReason && remainingInScope) ? (auth.status === "queued" && !hasJobs && sources.length === 0 ? "queued" : "waiting") : terminalFailure ? "stopped" : allCovered || !stopReason ? "completed" : "stopped";
-  const stopReasons = [...(stopReason ? [stopReason] : []), ...[...outletStops].map(([outlet, reason]) => `${outlet}:${reason}`)];
+  // While a game is left without an Overview, the run keeps every explicit
+  // reason recorded by its earlier advances, except an unmet precondition
+  // that this advance has since met.
+  const earlierReasons = allCovered ? [] : recordedWorkStops(auth.stop_reason);
+  const stopReasons = [...new Set([...(stopReason ? [stopReason] : []), ...[...outletStops].map(([outlet, reason]) => `${outlet}:${reason}`), ...sourceSkips, ...earlierReasons])];
   await db.prepare("UPDATE media_processing_authorizations SET status = ?, stop_reason = ?, updated_at = ? WHERE run_id = ? AND status <> 'stopped'").bind(status, stopReasons.length > 0 ? stopReasons.join("; ") : null, now.toISOString(), auth.run_id).run();
   await recordReusedOutputs(db, auth.run_id, sources.map((source) => source.id), currentProcessingEntities);
   return { runId: auth.run_id, status, submitted: extractionSubmitted + embeddingSubmitted + synthesisSubmitted, completed: Number(runAggregate?.succeeded ?? succeeded), outputs: await outputCounts(db, auth.run_id), chargedMicrousd: Number(aggregate?.charged ?? 0), outstandingReservedMicrousd: Number(aggregate?.reserved ?? 0), stopReasons, failed: Number(runAggregate?.failed ?? failed), uncertain: Number(runAggregate?.uncertain ?? uncertain), overviewAppids: activeOverview.map((row) => row.appid) };

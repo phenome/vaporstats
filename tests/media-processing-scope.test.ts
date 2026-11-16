@@ -372,6 +372,42 @@ describe("processing scope", () => {
     expect(resumed.outputs).toEqual({ new: 1, reused: 0, replaced: 0, invalidated: 0, skipped: 1 });
   });
 
+  test("a run that completes keeps the reason a game was left without an Overview", async () => {
+    const database = unprocessedGame();
+    const runId = await authorizeRun(database, "kept-reason");
+    const transport = new ControlledGeminiTransport();
+    refuseRequests(transport, database.native, () => true, "token count", CYBERPUNK);
+
+    const stopped = await advanceMediaProcessing(database.db, { runId, transport, articleFetch: outletArticles().articleFetch, now: new Date("2026-11-02T00:00:00.000Z"), ...PAID });
+    const unconfirmed = await advanceMediaProcessing(database.db, { runId, transport, articleFetch: outletArticles().articleFetch, now: new Date("2026-11-02T00:01:00.000Z") });
+    const completed = await advanceMediaProcessing(database.db, { runId, transport, articleFetch: outletArticles().articleFetch, now: new Date("2026-11-02T00:02:00.000Z"), ...PAID });
+
+    expect(stopped.status).toBe("waiting");
+    expect(stopped.stopReasons).toEqual(["count_tokens:token counting unavailable"]);
+    expect(unconfirmed.stopReasons).toEqual(["pricing_unconfirmed", "count_tokens:token counting unavailable"]);
+    expect(completed.status).toBe("completed");
+    expect(completed.stopReasons).toEqual(["count_tokens:token counting unavailable"]);
+  });
+
+  test.each([
+    ["unreachable", new Response("unavailable", { status: 503 })],
+    ["unusable", "<!doctype html><html><body><p>Too short.</p></body></html>"],
+  ] as const)("a game left without an Overview by an %s article names that reason, and keeps it", async (kind, page) => {
+    const database = unprocessedGame();
+    const runId = await authorizeRun(database, `${kind}-article`);
+    const transport = new ControlledGeminiTransport();
+    const articleFetch: ArticleFetch = async () => (typeof page === "string" ? page : page.clone());
+
+    const first = await advanceMediaProcessing(database.db, { runId, transport, articleFetch, now: new Date("2026-11-02T00:00:00.000Z"), ...PAID });
+    const settled = await advanceMediaProcessing(database.db, { runId, transport, articleFetch, now: new Date("2026-11-02T00:01:00.000Z"), ...PAID });
+
+    for (const summary of [first, settled]) {
+      expect(summary.status).toBe("completed");
+      expect(summary.stopReasons).toEqual([`${MEDIA_OUTLETS[0].name}:article_${kind}`]);
+    }
+    expect(first.outputs.skipped).toBe(1);
+  });
+
   test("an affected set accepts only distinct sources of the run's games and is fixed once authorized", async () => {
     const database = unprocessedGame();
     const [sourceId] = sourceIds(database);
