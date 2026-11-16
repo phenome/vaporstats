@@ -159,6 +159,8 @@ describe("forced media/deploy remote command", () => {
         "media initial all; echo nope",
         "media initial all\n",
         " MEDIA initial all",
+        "media later all",
+        "media later cyberpunk-2077",
       ];
 
       for (const command of invalidCommands) {
@@ -194,6 +196,7 @@ describe("forced media/deploy remote command", () => {
 
     expect(workflow).toContain("workflow_dispatch:");
     expect(workflow).toContain("options: [initial]");
+    expect(workflow).not.toContain("later");
     for (const game of ["all", "cyberpunk-2077", "baldurs-gate-3", "hades-ii"]) {
       expect(workflow).toContain(game);
     }

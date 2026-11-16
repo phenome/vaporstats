@@ -458,6 +458,7 @@ describe("bounded media discovery", () => {
       expect((await handleRequest(request("http://127.0.0.1/internal/media-discovery", { Authorization: "Bearer test-trigger-token", "Content-Type": "text/plain", Host: "127.0.0.1" }), "127.0.0.1")).status).toBe(415);
       expect((await handleRequest(request("http://127.0.0.1/internal/media-discovery", { Authorization: "Bearer test-trigger-token", "Content-Type": "application/json", "Content-Length": "4097", Host: "127.0.0.1" }, "x".repeat(4097)), "127.0.0.1")).status).toBe(413);
       expect((await handleRequest(request("http://127.0.0.1/internal/media-discovery", { Authorization: "Bearer test-trigger-token", "Content-Type": "application/json", Host: "127.0.0.1" }, "{\"pass\":\"later\",\"game\":\"unknown\"}"), "127.0.0.1")).status).toBe(400);
+      expect((await handleRequest(request("http://127.0.0.1/internal/media-discovery", { Authorization: "Bearer test-trigger-token", "Content-Type": "application/json", Host: "127.0.0.1" }, "{\"pass\":\"later\",\"game\":\"all\"}"), "127.0.0.1")).status).toBe(400);
     } finally {
       if (previousToken === undefined) delete process.env.MEDIA_TRIGGER_TOKEN;
       else process.env.MEDIA_TRIGGER_TOKEN = previousToken;
