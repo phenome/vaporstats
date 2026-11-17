@@ -275,8 +275,9 @@ export interface ProviderState {
   checkedAt: string | null;
   /**
    * What the last daily credit check found: `probe` when it lifted the pause
-   * for the next submission to probe credit, `credit_remaining`, a pause
-   * reason, or `check_failed:<reason>` when the check got no usable answer.
+   * for the next submission to probe credit, `not_paused`, `credit_remaining`,
+   * a pause reason, or `check_failed:<reason>` when the check got no usable
+   * answer.
    */
   checkOutcome: string | null;
 }
@@ -363,7 +364,7 @@ export async function runDailyCreditCheck(db: AppDatabase, now: Date, checks: Cr
         if (probe) lifted.push(provider);
         await writeProviderState(db, probe
           ? { ...state, paused: false, reason: null, pausedAt: null, checkedAt, checkOutcome: "probe" }
-          : { ...state, checkedAt, checkOutcome: state.paused ? state.reason : "probe" });
+          : { ...state, checkedAt, checkOutcome: state.paused ? state.reason : "not_paused" });
         continue;
       }
       if (answer.class === "credit_remaining") {

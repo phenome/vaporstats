@@ -55,8 +55,6 @@ import {
   GEMINI_EMBEDDING_MODEL,
 } from "./media-similarity";
 
-/** The Gemini model of text-generation batches submitted before text generation moved to OpenRouter. */
-export const GEMINI_MEDIA_MODEL = "gemini-3.1-flash-lite";
 /** The model that generates extractions and Overviews, through OpenRouter chat completions. */
 export const OPENROUTER_TEXT_MODEL = "anthropic/claude-haiku-5.5";
 const EXTRACTION_CONFIG_VERSION = "media-extraction-2026-09-13-v3";
@@ -212,9 +210,9 @@ export interface MediaProcessingOptions {
 }
 
 /** `error`'s message on one bounded line, with every configured secret and bearer token redacted. */
-function boundedError(error: unknown, secrets?: string | readonly (string | undefined)[]): string {
+function boundedError(error: unknown, secrets: readonly (string | undefined)[] = []): string {
   let message = error instanceof Error ? error.message : String(error);
-  for (const secret of typeof secrets === "string" ? [secrets] : secrets ?? []) {
+  for (const secret of secrets) {
     if (secret) message = message.split(secret).join("[redacted]");
   }
   return message
@@ -860,7 +858,7 @@ type QueueAdvance = {
   transport: GeminiBatchTransport | null;
   openRouter: OpenRouterTransport | null;
   /** Configured provider keys, redacted from every recorded error. */
-  secret: Array<string | undefined>;
+  secrets: Array<string | undefined>;
   /** Whether this advance has spent its time for taking paid items. */
   outOfTime: () => boolean;
   articleFetch: ArticleFetch;
@@ -961,7 +959,7 @@ async function sendItem(advance: QueueAdvance, job: JobRow, model: string, reque
   } catch (error) {
     outcome = classifyGeminiOutcome("submit", error);
     if (outcome.class === "uncertain") {
-      await db.prepare("UPDATE media_processing_jobs SET error = ? WHERE id = ? AND status = 'uncertain'").bind(boundedError(error, advance.secret), job.id).run();
+      await db.prepare("UPDATE media_processing_jobs SET error = ? WHERE id = ? AND status = 'uncertain'").bind(boundedError(error, advance.secrets), job.id).run();
       noteReason(advance, job.run_id, "uncertain_submission");
       return;
     }
@@ -1279,21 +1277,21 @@ type SettledStatus = "succeeded" | "refused" | "stale";
  * and counts its output, in one transaction, so a restart never leaves a
  * settled job uncounted.
  */
-function reconcileJob(db: AppDatabase, job: JobRow, result: GeminiBatchPoll & { state: "succeeded" | "failed" }, now: Date, secret: readonly (string | undefined)[]): Promise<SettledStatus> {
+function reconcileJob(db: AppDatabase, job: JobRow, result: GeminiBatchPoll & { state: "succeeded" | "failed" }, now: Date, secrets: readonly (string | undefined)[]): Promise<SettledStatus> {
   return writeTransaction(db, async () => {
-    const status = await settleJob(db, job, result, now, secret);
+    const status = await settleJob(db, job, result, now, secrets);
     if ((status === "refused" || status === "stale") && job.stage !== "explanation") await countOutputs(db, job.run_id, "skipped");
     return status;
   });
 }
 
-async function settleJob(db: AppDatabase, job: JobRow, result: GeminiBatchPoll & { state: "succeeded" | "failed" }, now: Date, secret: readonly (string | undefined)[]): Promise<SettledStatus> {
+async function settleJob(db: AppDatabase, job: JobRow, result: GeminiBatchPoll & { state: "succeeded" | "failed" }, now: Date, secrets: readonly (string | undefined)[]): Promise<SettledStatus> {
   const usageJson = result.usage ? JSON.stringify(result.usage) : "{}";
   const charge = settledCharge(job, result.usage ?? null);
   // A retained row keeps its reserved amount and reservation flag as history.
   await db.prepare("UPDATE media_processing_jobs SET usage_json = ?, charged_microusd = ?, cost_source = ?, completed_at = ? WHERE id = ?").bind(usageJson, charge.microusd, charge.source, now.toISOString(), job.id).run();
   if (result.state === "failed") {
-    await db.prepare("UPDATE media_processing_jobs SET status = 'refused', error = ? WHERE id = ?").bind(boundedError(result.error, secret), job.id).run();
+    await db.prepare("UPDATE media_processing_jobs SET status = 'refused', error = ? WHERE id = ?").bind(boundedError(result.error, secrets), job.id).run();
     return "refused";
   }
   if (job.stage === "extraction") return persistExtraction(db, job, result.output, now);
@@ -1336,7 +1334,7 @@ type SubmittedPollSummary = {
  * transient failure.
  */
 async function pollSubmittedJobs(advance: QueueAdvance, jobs: readonly JobRow[]): Promise<SubmittedPollSummary> {
-  const { db, now, transport, secret } = advance;
+  const { db, now, transport, secrets } = advance;
   const summary: SubmittedPollSummary = { polled: new Set(), succeeded: 0, failed: 0, uncertain: 0 };
   if (!transport) return summary;
   for (const job of jobs) {
@@ -1355,7 +1353,7 @@ async function pollSubmittedJobs(advance: QueueAdvance, jobs: readonly JobRow[])
         advance.paused.add(job.provider);
       }
       const status = outcome.class === "uncertain" || outcome.class === "refusal" ? "uncertain" : "submitted";
-      await db.prepare("UPDATE media_processing_jobs SET status = ?, error = ? WHERE id = ? AND status = 'submitted'").bind(status, boundedError(error, secret), job.id).run();
+      await db.prepare("UPDATE media_processing_jobs SET status = ?, error = ? WHERE id = ? AND status = 'submitted'").bind(status, boundedError(error, secrets), job.id).run();
       summary.uncertain += 1;
       continue;
     }
@@ -1364,7 +1362,7 @@ async function pollSubmittedJobs(advance: QueueAdvance, jobs: readonly JobRow[])
       continue;
     }
     if (result.state === "failed") {
-      const outcome = classifyGeminiOutcome("poll", new GeminiBatchFailure(boundedError(result.error ?? "batch failed", secret), result.batchState ?? null));
+      const outcome = classifyGeminiOutcome("poll", new GeminiBatchFailure(boundedError(result.error ?? "batch failed", secrets), result.batchState ?? null));
       if (outcome.class === "credit_pause" || outcome.class === "missing_configuration") {
         // The provider declined the batch for credit or configuration:
         // nothing was produced, so the item waits again, with no attempt
@@ -1387,7 +1385,7 @@ async function pollSubmittedJobs(advance: QueueAdvance, jobs: readonly JobRow[])
         continue;
       }
     }
-    const status = await reconcileJob(db, job, result as GeminiBatchPoll & { state: "succeeded" | "failed" }, now, secret);
+    const status = await reconcileJob(db, job, result as GeminiBatchPoll & { state: "succeeded" | "failed" }, now, secrets);
     if (status === "succeeded") summary.succeeded += 1;
     else summary.failed += 1;
   }
@@ -2006,7 +2004,7 @@ async function advanceMediaProcessingNow(db: AppDatabase, options: MediaProcessi
     clock: () => isoNow(options.now),
     transport,
     openRouter,
-    secret: [options.geminiApiKey, options.openRouterApiKey],
+    secrets: [options.geminiApiKey, options.openRouterApiKey],
     outOfTime: () => elapsed() - startedAt >= timeBudgetMs,
     articleFetch: options.articleFetch ?? fetch,
     remaining: Object.fromEntries(PAID_PROVIDERS.map((provider) => [provider, perTick])) as Record<PaidProvider, number>,
