@@ -4,6 +4,14 @@ import { tmpdir } from "node:os";
 import { Database } from "bun:sqlite";
 import { readMigrationFiles } from "drizzle-orm/migrator";
 import { applyMigrations, DRIZZLE_MIGRATION_TABLE, MIGRATION_TABLE } from "../src/lib/migrations";
+import { openSqliteAppDatabase } from "../src/lib/db";
+import {
+  advanceMediaProcessing,
+  GEMINI_BATCH_CAPABILITY_VERSION,
+  GEMINI_BATCH_PRICING_VERSION,
+  type GeminiBatchPoll,
+  type GeminiBatchTransport,
+} from "../src/lib/media-processing";
 
 const expectedTables = [
   "apps",
@@ -424,6 +432,15 @@ function verifyRetainedMediaRowsSurviveUpgrade(): void {
           (53, 900003, 'IGN', 'initial', '2026-10-01', 'fetch', 'https://www.ign.com/articles/unreachable', 503, 0, 'HTTP 503', '2026-10-01T00:08:00.000Z'),
           (54, 900003, 'IGN', 'initial', '2026-10-01', 'fetch', 'https://www.ign.com/articles/never-taken', 200, 1, NULL, '2026-10-01T00:04:00.000Z'),
           (55, 900003, 'IGN', 'initial', '2026-10-02', 'fetch', 'https://www.ign.com/articles/discovered-later', 200, 1, NULL, '2026-10-02T00:01:00.000Z')`,
+      // Source 56 was discovered before run 41 was authorized. After that, a
+      // later discovery run of its game refetched its URL; no processing run
+      // ever fetched it.
+      `INSERT INTO media_sources (id, appid, pass, original_url, title, outlet, retrieved_at, type)
+        VALUES (56, 900003, 'initial', 'https://www.ign.com/articles/rediscovered', 'Rediscovered review', 'IGN', '2026-10-01T00:04:30.000Z', 'review')`,
+      `INSERT INTO media_discovery_runs (id, pass, identity_key, selected_games, status, started_at, finished_at)
+        VALUES (57, 'initial', 'retained-media-rediscovery', '[900003]', 'completed', '2026-10-03 00:00:00', '2026-10-03 00:10:00')`,
+      `INSERT INTO media_discovery_attempts (id, appid, outlet, pass, day, kind, url, status_code, succeeded, error, attempted_at)
+        VALUES (58, 900003, 'IGN', 'initial', '2026-10-03', 'fetch', 'https://www.ign.com/articles/rediscovered', 200, 1, NULL, '2026-10-03T00:05:00.000Z')`,
     ]);
     retained
       .query(
@@ -495,19 +512,115 @@ function verifyRetainedMediaRowsSurviveUpgrade(): void {
     }
     // A source processed before processing scope existed, including one
     // whose fetch failed, must not count as new to processing, or the next
-    // authorized run would refetch it. A source no run took stays new.
+    // authorized run would refetch it. A source no processing run fetched
+    // stays new, even when a discovery run refetched it after an
+    // authorization. A finished run whose game keeps its Overview and
+    // embeddings leaves no contribution to rebuild.
     const claims = Object.fromEntries(
       retained
-        .query<{ id: number; processing_run_id: number | null }, []>("SELECT id, processing_run_id FROM media_sources WHERE id IN (44, 49, 50, 51) ORDER BY id")
+        .query<{ id: number; processing_run_id: number | null; contribution_run_id: number | null }, []>("SELECT id, processing_run_id, contribution_run_id FROM media_sources ORDER BY id")
         .all()
-        .map((row) => [row.id, row.processing_run_id])
+        .map((row) => [row.id, [row.processing_run_id, row.contribution_run_id]])
     );
-    if (JSON.stringify(claims) !== JSON.stringify({ 44: 41, 49: 41, 50: null, 51: null })) {
+    const expectedClaims = { 44: [41, null], 49: [41, null], 50: [null, null], 51: [null, null], 56: [null, null] };
+    if (JSON.stringify(claims) !== JSON.stringify(expectedClaims)) {
       throw new Error("Migrations misattributed media sources to processing runs: " + JSON.stringify(claims));
     }
     verifyMediaPassesAccepted(retained);
   } finally {
     retained.close(true);
+  }
+}
+
+/**
+ * A run that was queued or waiting at upgrade resumes the work it owes. Run
+ * 61 extracted game 1091500's article but had not built its Overview; its
+ * next advance after the upgrade must build it without refetching the
+ * article. Game 1086940's article was extracted without a recorded job by run
+ * 62, which finished without an Overview. Run 63, authorized last, covers
+ * neither game, so neither source is attributed to it. Processing accepts
+ * only supported media games, so the fixture uses their app ids.
+ */
+async function verifyWaitingRunResumesAfterUpgrade(): Promise<void> {
+  const databasePath = join(temporaryDirectory, "waiting-media.sqlite");
+  const baseline = new Database(databasePath);
+  baseline.exec("PRAGMA foreign_keys = ON");
+  try {
+    migrateBefore(baseline, "0021_media_processing_scope");
+    const extraction = JSON.stringify({ contributions: [{ text: "The combat supports flexible builds", category: "Gameplay & systems" }], traits: ["build experimentation"], qualifications: [], provenance: [] });
+    seed(baseline, [
+      `INSERT INTO apps (appid, name, slug) VALUES (1091500, 'Waiting upgrade', 'waiting-upgrade'), (1086940, 'Finished upgrade', 'finished-upgrade'), (1145350, 'Unrelated upgrade', 'unrelated-upgrade')`,
+      `INSERT INTO media_discovery_runs (id, pass, identity_key, selected_games, status, started_at, finished_at)
+        VALUES (61, 'initial', 'waiting-upgrade-run', '[1091500]', 'completed', '2026-10-05 00:00:00', '2026-10-05 00:05:00'),
+          (62, 'initial', 'finished-upgrade-run', '[1086940]', 'completed', '2026-10-05 00:00:00', '2026-10-05 00:05:00'),
+          (63, 'initial', 'unrelated-upgrade-run', '[1145350]', 'completed', '2026-10-05 00:00:00', '2026-10-05 00:05:00')`,
+      `INSERT INTO media_sources (id, appid, pass, original_url, title, outlet, retrieved_at, type, normalized_content_hash, cleanup_version, processing_input_identity)
+        VALUES (64, 1091500, 'initial', 'https://www.ign.com/articles/waiting-upgrade', 'Waiting review', 'IGN', '2026-10-05T00:01:00.000Z', 'review', 'waiting-hash', 'cleanup-v1', 'waiting-identity'),
+          (65, 1086940, 'initial', 'https://www.ign.com/articles/finished-upgrade', 'Finished review', 'IGN', '2026-10-05T00:01:00.000Z', 'review', 'finished-hash', 'cleanup-v1', 'finished-identity')`,
+      `INSERT INTO media_article_extractions (id, source_id, input_identity, content_hash, cleanup_version, model, config_version, output_json, active)
+        VALUES (66, 64, 'waiting-identity', 'waiting-hash', 'cleanup-v1', 'gemini-3.1-flash-lite', 'extraction-v1', '${extraction}', 1),
+          (67, 65, 'finished-identity', 'finished-hash', 'cleanup-v1', 'gemini-3.1-flash-lite', 'extraction-v1', '${extraction}', 1)`,
+      `INSERT INTO media_processing_authorizations (run_id, status, authorized_at, updated_at)
+        VALUES (61, 'waiting', '2026-10-05 00:06:00', '2026-10-05 00:20:00'),
+          (62, 'completed', '2026-10-05 00:06:00', '2026-10-05 00:20:00'),
+          (63, 'completed', '2026-10-05 00:07:00', '2026-10-05 00:20:00')`,
+      `INSERT INTO media_processing_jobs (id, run_id, stage, appid, source_id, request_key, input_identity, model, config_version, max_input_tokens, max_output_tokens, reserved_microusd, charged_microusd, reservation_active, status, provider_batch_id, output_json, usage_json, submitted_at, completed_at)
+        VALUES (68, 61, 'extraction', 1091500, 64, 'extraction:64:waiting-identity', 'waiting-identity', 'gemini-3.1-flash-lite', 'extraction-v1', 100, 20, 100, 50, 0, 'succeeded', 'waiting-batch', '${extraction}', '{}', '2026-10-05T00:07:00.000Z', '2026-10-05T00:10:00.000Z')`,
+    ]);
+  } finally {
+    baseline.close();
+  }
+
+  const upgraded = openSqliteAppDatabase(databasePath);
+  try {
+    const claims = Object.fromEntries(
+      upgraded.native
+        .query<{ id: number; processing_run_id: number | null; contribution_run_id: number | null }, []>("SELECT id, processing_run_id, contribution_run_id FROM media_sources ORDER BY id")
+        .all()
+        .map((row) => [row.id, [row.processing_run_id, row.contribution_run_id]])
+    );
+    if (JSON.stringify(claims) !== JSON.stringify({ 64: [61, 61], 65: [62, 62] })) {
+      throw new Error("Migrations misattributed sources of unfinished or uncovered work: " + JSON.stringify(claims));
+    }
+
+    const url = "https://www.ign.com/articles/waiting-upgrade";
+    const submitted: string[] = [];
+    const fetched: string[] = [];
+    let overview: GeminiBatchPoll = { state: "pending" };
+    const transport: GeminiBatchTransport = {
+      countTokens: async () => 100,
+      submitBatch: async (_model, requests) => {
+        submitted.push(requests[0]!.key);
+        return { name: "batches/waiting-upgrade-" + submitted.length };
+      },
+      pollBatch: async () => overview,
+    };
+    const advance = (minute: number) => advanceMediaProcessing(upgraded, {
+      runId: 61,
+      transport,
+      articleFetch: async (input) => {
+        fetched.push(input);
+        throw new Error("the upgrade must not refetch a taken article");
+      },
+      now: new Date("2026-10-06T00:0" + minute + ":00.000Z"),
+      pricingVersion: GEMINI_BATCH_PRICING_VERSION,
+      capabilityVersion: GEMINI_BATCH_CAPABILITY_VERSION,
+    });
+    await advance(0);
+    overview = {
+      state: "succeeded",
+      output: { statements: [{ text: "The game presents flexible combat.", sourceUrls: [url] }], tags: [{ label: "Build experimentation", sourceUrls: [url] }] },
+      usage: { inputTokens: 100, outputTokens: 20 },
+    };
+    await advance(1);
+    if (fetched.length !== 0 || submitted.length !== 1 || !submitted[0]!.startsWith("synthesis:1091500:")) {
+      throw new Error("A waiting run did not resume its Overview after upgrade: " + JSON.stringify({ fetched, submitted }));
+    }
+    if (!upgraded.native.query("SELECT 1 FROM media_game_overviews WHERE appid = 1091500 AND active = 1").get()) {
+      throw new Error("A waiting run did not build its Overview after upgrade");
+    }
+  } finally {
+    upgraded.close();
   }
 }
 
@@ -721,6 +834,7 @@ try {
   verifyExistingRowsSurviveUpgrade();
   verifyReceptionRowsSurvivePublicationUpgrade();
   verifyRetainedMediaRowsSurviveUpgrade();
+  await verifyWaitingRunResumesAfterUpgrade();
   if (!existsSync(databasePath)) throw new Error("SQLite database file was not created");
   console.log("SQLite migrations OK (" + appliedMigrations.length + " migrations; existing rows preserved)");
 } finally {
