@@ -464,3 +464,101 @@ describe("input cap", () => {
     expect(database.native.query("SELECT usage_json FROM media_processing_jobs WHERE status = 'succeeded' AND stage = 'extraction'").get()).toEqual({ usage_json: JSON.stringify({ promptTokens: 1_000, completionTokens: 100 }) });
   });
 });
+
+/** A current-key answer: the key's remaining limit and its budgets. */
+function keyAnswer(limitRemaining: number | null, budgets: Array<{ scope: string; remaining_usd: number }> = []): OpenRouterReply {
+  const budget = (entry: { scope: string; remaining_usd: number }) => ({ scope: entry.scope, guardrail_id: null, budget_id: null, limit_usd: 10, spend_usd: 10 - entry.remaining_usd, remaining_usd: entry.remaining_usd, reset_interval: "monthly", resets_at: "2026-12-01T00:00:00.000Z", include_byok: false });
+  return { status: 200, body: { data: { label: "vaporstats", limit: limitRemaining === null ? null : 10, limit_remaining: limitRemaining, limit_reset: null, budgets: budgets.map(budget), effective_budget: budgets.length > 0 ? budget(budgets[0]!) : null, usage: 6 } } };
+}
+
+/** A database whose text work OpenRouter paused for its key limit at 07:00 on 2026-11-18. */
+async function pausedForKeyLimit() {
+  const setup = await authorizedGames();
+  const providers = apis();
+  providers.openRouter.reply("chat", openRouterKeyLimit(402));
+  await tick(setup.database, providers, "2026-11-18T07:00:00.000Z");
+  return { ...setup, providers };
+}
+
+describe("daily OpenRouter credit check", () => {
+  for (const [name, answer] of [
+    ["limit_remaining above zero and no spent budget", keyAnswer(4.2, [{ scope: "member", remaining_usd: 3 }])],
+    ["limit_remaining null, a key without a limit", keyAnswer(null)],
+  ] as const) {
+    test(`lifts the text-generation pause in the first tick at or after 06:00 UTC when the key reports ${name}`, async () => {
+      const { database, providers } = await pausedForKeyLimit();
+
+      // The 18th's check ran in its first tick, at 07:00, before the pause.
+      const keyChecks = () => providers.openRouter.calls.filter((call) => call.kind === "key").length;
+      const before = await tick(database, providers, "2026-11-19T05:45:00.000Z");
+      expect(before.mediaProcessing?.providers.openrouter.paused).toBe(true);
+      expect(keyChecks()).toBe(1);
+
+      providers.openRouter.reply("key", answer);
+      const checked = await tick(database, providers, "2026-11-19T06:00:00.000Z");
+
+      expect(checked.mediaProcessing?.providers.openrouter).toMatchObject({ paused: false, reason: null, checkedAt: "2026-11-19T06:00:00.000Z", checkOutcome: "credit_remaining" });
+      expect(textJobs(database).map(({ status }) => status)).toEqual(["succeeded", "succeeded"]);
+      await tick(database, providers, "2026-11-19T23:45:00.000Z");
+      expect(keyChecks()).toBe(2);
+    });
+  }
+
+  for (const [name, answer, reason] of [
+    ["limit_remaining at zero", keyAnswer(0), "key_limit"],
+    ["a spent workspace budget", keyAnswer(null, [{ scope: "workspace", remaining_usd: 0 }]), "workspace_budget"],
+    ["a spent guardrail budget", keyAnswer(5, [{ scope: "api_key", remaining_usd: -0.5 }]), "guardrail_budget"],
+  ] as const) {
+    test(`keeps text generation paused when the key reports ${name}, and records the check`, async () => {
+      const { database, providers } = await pausedForKeyLimit();
+      providers.openRouter.reply("key", answer);
+
+      const checked = await tick(database, providers, "2026-11-19T06:00:00.000Z");
+
+      expect(checked.mediaProcessing?.providers.openrouter).toMatchObject({ paused: true, reason, checkedAt: "2026-11-19T06:00:00.000Z", checkOutcome: reason });
+      expect(providers.openRouter.requests).toHaveLength(1);
+      expect(textJobs(database).map(({ status, attempt_count }) => ({ status, attempt_count }))).toEqual([{ status: "queued", attempt_count: 0 }]);
+    });
+  }
+
+  test("a check without a usable answer keeps the pause and records its outcome", async () => {
+    const { database, providers } = await pausedForKeyLimit();
+    providers.openRouter.reply("key", { status: 503, body: { error: { code: 503, message: "unavailable" } } });
+
+    const checked = await tick(database, providers, "2026-11-19T06:00:00.000Z");
+
+    expect(checked.mediaProcessing?.providers.openrouter).toMatchObject({ paused: true, reason: "key_limit", pausedAt: "2026-11-18T07:00:00.000Z", checkedAt: "2026-11-19T06:00:00.000Z", checkOutcome: "check_failed:http_503" });
+    expect(providers.openRouter.requests).toHaveLength(1);
+  });
+
+  test("a check whose key is rejected pauses text generation with reason invalid_key", async () => {
+    const { database, providers } = await pausedForKeyLimit();
+    providers.openRouter.reply("key", OPENROUTER_INVALID_KEY);
+
+    const checked = await tick(database, providers, "2026-11-19T06:00:00.000Z");
+
+    expect(checked.mediaProcessing?.providers.openrouter).toMatchObject({ paused: true, reason: "invalid_key", checkOutcome: "invalid_key" });
+  });
+
+  test("runs in a tick without paid work, and a key reported without credit pauses work queued later until a check finds credit", async () => {
+    const database = openTestDatabase("vaporstats-openrouter-");
+    cleanups.push(database.cleanup);
+    seedApps(database.native, [CYBERPUNK]);
+    const providers = apis();
+    providers.openRouter.reply("key", keyAnswer(0));
+
+    const idle = await tick(database, providers, "2026-11-18T06:30:00.000Z");
+    expect(idle.mediaProcessing).toBeUndefined();
+    expect(providers.openRouter.calls).toEqual([{ kind: "key" }]);
+
+    insertSources(database.native, CYBERPUNK, "initial", 1);
+    await authorizeMediaProcessing(database.db, insertCompletedRun(database.native, "initial:openrouter:later", [CYBERPUNK]));
+    const held = await tick(database, providers, "2026-11-18T07:00:00.000Z");
+    expect(held.mediaProcessing?.providers.openrouter).toMatchObject({ paused: true, reason: "key_limit", pausedAt: "2026-11-18T06:30:00.000Z", checkedAt: "2026-11-18T06:30:00.000Z", checkOutcome: "key_limit" });
+    expect(providers.openRouter.requests).toEqual([]);
+
+    const resumed = await tick(database, providers, "2026-11-19T06:00:00.000Z");
+    expect(resumed.mediaProcessing?.providers.openrouter).toMatchObject({ paused: false, checkOutcome: "credit_remaining" });
+    expect(providers.openRouter.requests.map((request) => request.stage)).toEqual(["extraction", "synthesis"]);
+  });
+});
