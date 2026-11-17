@@ -1099,6 +1099,12 @@ export const mediaProcessingJobs = sqliteTable(
      * reported no usage and zero is recorded.
      */
     costSource: text("cost_source"),
+    /** The generation id an OpenRouter chat completion returned. */
+    generationId: text("generation_id"),
+    /** The provider OpenRouter routed the request to, as it reported it. */
+    routedProvider: text("routed_provider"),
+    /** The model that served the request, as OpenRouter reported it. */
+    routedModel: text("routed_model"),
     providerBatchId: text("provider_batch_id"),
     outputJson: text("output_json"),
     usageJson: text("usage_json").notNull().default("{}"),
