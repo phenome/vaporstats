@@ -2,8 +2,8 @@ import type { Database } from "bun:sqlite";
 import { runIngestionTick, type IngestionTickOptions } from "../../workers/ingestion";
 import type { TestDatabase } from "./db";
 import type { GeminiBatchPoll, GeminiBatchTransport } from "../../src/lib/media-processing";
-import type { OpenRouterChatRequest, OpenRouterCompletion, OpenRouterTransport } from "../../src/lib/media-openrouter";
-import { GeminiHttpError, OpenRouterHttpError } from "../../src/lib/media-paid-providers";
+import { createOpenRouterTransport, type OpenRouterTransport } from "../../src/lib/media-openrouter";
+import { GeminiHttpError } from "../../src/lib/media-paid-providers";
 import { MEDIA_OUTLETS, type MediaPass } from "../../src/lib/media-discovery";
 
 export const CYBERPUNK = 1091500;
@@ -59,22 +59,34 @@ export function insertSources(native: Database, appid: number, pass: MediaPass, 
 type InlineRequest = { key: string; request: Record<string, unknown> };
 
 /**
- * Deterministic paid-provider transports for tests that advance processing
- * directly. Every paid answer comes from one ordered queue, `nextPolls`, in
- * the order requests are made: Gemini embedding batches take theirs when
- * submitted and report it when polled, and OpenRouter text requests, served
- * by the `openRouter` companion, take theirs at once. A `pending` answer
- * leaves an embedding batch pending, and makes a text request time out after
- * it was sent. A `failed` answer refuses the request, and an `http` answer
- * makes a text request fail with that status. Scripted usage is charged at
- * Claude Haiku 5.5's listed prices. Request keys of
- * accepted submissions are recorded in `submissions`: an embedding's own key,
- * or `<stage>:chat-<n>` for a text request. Embedding batches exist only with
- * `{ embeddings: true }` and are named `batches/embed-<n>`.
+ * One scripted paid answer, taken from `ControlledGeminiTransport.nextPolls`
+ * in request order. An embedding batch takes it when submitted and reports
+ * it when polled, with its Gemini meaning. A text request, which goes to
+ * OpenRouter, takes it as the controlled OpenRouter API's reply:
+ *
+ * - `succeeded`: a chat completion with the scripted output and usage,
+ *   charged at Claude Haiku 5.5's listed US$0.10/M input and US$0.50/M
+ *   output tokens;
+ * - `pending`: no answer, so the client's request times out after sending;
+ * - `failed`: a 400 invalid request, a definite refusal;
+ * - `http`: an error reply with `status`, carrying it as its error code;
+ * - `reply`: this exact OpenRouter reply.
  */
-/** One scripted paid answer: a Gemini batch result, or an HTTP error status for a text request. */
-export type ControlledAnswer = GeminiBatchPoll | { state: "http"; status: number };
+export type ControlledAnswer = GeminiBatchPoll | { state: "http"; status: number } | { state: "reply"; reply: OpenRouterReply };
 
+/** The OpenRouter key the controlled transports use. */
+const CONTROLLED_OPENROUTER_KEY = "test-openrouter-key";
+
+/**
+ * Deterministic paid-provider transports for tests that advance processing
+ * directly. Every paid answer comes from one ordered queue, `nextPolls` (see
+ * `ControlledAnswer`). Gemini embedding batches exist only with
+ * `{ embeddings: true }` and are named `batches/embed-<n>`. Text requests go
+ * through the real OpenRouter transport, `openRouter`, to a controlled
+ * OpenRouter API, so every answer is read and classified as in production.
+ * Request keys of answered submissions are recorded in `submissions`: an
+ * embedding's own key, or `<stage>:chat-<n>` for a text request.
+ */
 export class ControlledGeminiTransport implements GeminiBatchTransport {
   readonly submissions: string[] = [];
   readonly embeddingSubmissions: string[] = [];
@@ -87,8 +99,12 @@ export class ControlledGeminiTransport implements GeminiBatchTransport {
   inspectDuringSubmit: ((requestKey: string) => void | Promise<void>) | undefined;
   beforePoll: ((name: string) => void | Promise<void>) | undefined;
   submitEmbeddingBatch?: (model: string, requests: readonly InlineRequest[]) => Promise<{ name: string }>;
-  /** The controlled OpenRouter transport for text requests, answered from `nextPolls`. */
-  readonly openRouter: OpenRouterTransport;
+  /** The controlled OpenRouter API behind `openRouter`. */
+  readonly openRouterApi = controlledOpenRouterApi();
+  /** The real OpenRouter transport for text requests, answered from `nextPolls`. */
+  readonly openRouter: OpenRouterTransport = createOpenRouterTransport(CONTROLLED_OPENROUTER_KEY, this.openRouterApi.fetchFn);
+  /** Answers a matching text request with this reply instead of taking one from `nextPolls`; set by `refuseRequests`. */
+  stopChat: ((request: OpenRouterRequestRecord) => OpenRouterReply | null) | undefined;
   private chats = 0;
 
   constructor(options: { embeddings?: boolean } = {}) {
@@ -101,14 +117,12 @@ export class ControlledGeminiTransport implements GeminiBatchTransport {
         const name = `batches/embed-${this.embeddingSubmissions.length}`;
         const answer = this.nextPolls.shift() ?? { state: "pending" };
         if (answer.state === "http") throw new GeminiHttpError(answer.status, `HTTP ${answer.status}`);
+        if (answer.state === "reply") throw new Error("An OpenRouter reply cannot answer a Gemini embedding batch");
         this.polls.set(name, answer);
         return { name };
       };
     }
-    this.openRouter = {
-      complete: (request) => this.complete(request),
-      currentKey: async () => ({ limit: null, limit_remaining: null, budgets: [], effective_budget: null }),
-    };
+    this.openRouterApi.onChat = (request) => this.scriptChat(request);
   }
 
   async countTokens(model: string, request: Record<string, unknown>): Promise<number> {
@@ -116,28 +130,42 @@ export class ControlledGeminiTransport implements GeminiBatchTransport {
     return 100;
   }
 
-  private async complete(request: OpenRouterChatRequest): Promise<OpenRouterCompletion> {
-    const stage = JSON.stringify(request.messages).includes("sourceUrl") ? "synthesis" : "extraction";
-    this.requestBodies.push(request);
+  /** Queues the controlled OpenRouter API's reply to the text request it just received. */
+  private async scriptChat(request: OpenRouterRequestRecord): Promise<void> {
+    const stopped = this.stopChat?.(request);
+    if (stopped) {
+      this.openRouterApi.reply("chat", stopped);
+      return;
+    }
+    this.requestBodies.push(request.body);
     this.chats += 1;
-    const key = `${stage}:chat-${this.chats}`;
+    const key = `${request.stage}:chat-${this.chats}`;
     await this.inspectDuringSubmit?.(key);
-    if (this.throwSubmission) throw new Error("network dropped before the response");
+    if (this.throwSubmission) {
+      this.openRouterApi.reply("chat", { network: "network dropped before the response" });
+      return;
+    }
     this.submissions.push(key);
-    const result = this.nextPolls.shift() ?? { state: "pending" };
-    if (result.state === "pending") throw Object.assign(new Error("The operation timed out."), { name: "TimeoutError" });
-    if (result.state === "failed") throw new OpenRouterHttpError(400);
-    if (result.state === "http") throw new OpenRouterHttpError(result.status);
+    this.openRouterApi.reply("chat", this.chatReply(this.nextPolls.shift() ?? { state: "pending" }, request));
+  }
+
+  private chatReply(answer: ControlledAnswer, request: OpenRouterRequestRecord): OpenRouterReply {
+    if (answer.state === "reply") return answer.reply;
+    if (answer.state === "pending") return { network: "The operation timed out.", name: "TimeoutError" };
+    if (answer.state === "failed") return { status: 400, body: { error: { code: 400, message: "Invalid request" } } };
+    if (answer.state === "http") return { status: answer.status, body: { error: { code: answer.status, message: `HTTP ${answer.status}` } } };
+    const usage = answer.usage
+      ? { prompt_tokens: answer.usage.inputTokens ?? 0, completion_tokens: answer.usage.outputTokens ?? 0, cost: ((answer.usage.inputTokens ?? 0) * 0.1 + (answer.usage.outputTokens ?? 0) * 0.5) / 1_000_000 }
+      : undefined;
     return {
-      generationId: `gen-${this.chats}`,
-      model: request.model,
-      provider: "Anthropic",
-      content: typeof result.output === "string" ? result.output : JSON.stringify(result.output ?? null),
-      // Usage, when scripted, is charged at Claude Haiku 5.5's listed US$0.10/M input and US$0.50/M output tokens.
-      usage: {
-        promptTokens: result.usage?.inputTokens ?? null,
-        completionTokens: result.usage?.outputTokens ?? null,
-        cost: result.usage ? ((result.usage.inputTokens ?? 0) * 0.1 + (result.usage.outputTokens ?? 0) * 0.5) / 1_000_000 : null,
+      status: 200,
+      body: {
+        id: `gen-${this.chats}`,
+        object: "chat.completion",
+        model: request.model,
+        provider: "Anthropic",
+        choices: [{ index: 0, finish_reason: "stop", message: { role: "assistant", content: typeof answer.output === "string" ? answer.output : JSON.stringify(answer.output ?? null) } }],
+        ...(usage ? { usage } : {}),
       },
     };
   }
@@ -178,16 +206,16 @@ export function refuseRequests(
     if (refusal === "token count") throw new Error("token counting unavailable");
     return 1_000_000;
   };
-  const complete = transport.openRouter.complete;
-  transport.openRouter.complete = async (request) => {
-    if (!matches(request.model, request as unknown as Record<string, unknown>)) return complete(request);
+  transport.stopChat = (request) => {
+    if (!matches(request.model, request.body as unknown as Record<string, unknown>)) return null;
     counted += 1;
-    throw new OpenRouterHttpError(refusal === "token count" ? 503 : 400);
+    const status = refusal === "token count" ? 503 : 400;
+    return { status, body: { error: { code: status, message: `HTTP ${status}` } } };
   };
   return Object.assign(() => counted, {
     restore() {
       transport.countTokens = ControlledGeminiTransport.prototype.countTokens.bind(transport);
-      transport.openRouter.complete = complete;
+      transport.stopChat = undefined;
     },
   });
 }

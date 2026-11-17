@@ -414,6 +414,22 @@ describe("bounded Gemini media processing", () => {
     expect(job).toEqual({ status: "uncertain", reservation_active: 0 });
   });
 
+  test("text answers scripted on the controlled transport reach processing through the real OpenRouter transport and classifier", async () => {
+    const value = fixture(); cleanups.push(value.cleanup);
+    await authorizeMediaProcessing(value.db, value.runId);
+    const transport = new ControlledTransport();
+    // A 200 that reports a provider failure after acceptance only means
+    // something to the real transport: it is uncertain, with its charge kept.
+    transport.nextPolls.push({ state: "reply", reply: { status: 200, body: { id: "gen-accepted", usage: { prompt_tokens: 100, completion_tokens: 0, cost: 0.00001 }, error: { code: 502, message: "Provider returned error" } } } });
+
+    const summary = await advanceMediaProcessing(value.db, { runId: value.runId, transport, openRouter: transport.openRouter, articleFetch: async () => articleHtml(APPIDS[0]) });
+
+    expect(summary.uncertain).toBe(1);
+    expect(value.native.query("SELECT status, error, generation_id, charged_microusd FROM media_processing_jobs").all()).toEqual([
+      { status: "uncertain", error: "uncertain:accepted_http_502", generation_id: "gen-accepted", charged_microusd: 10 },
+    ]);
+  });
+
   test("does not refetch or resubmit while a Gemini extraction batch submitted before the move to OpenRouter is polling", async () => {
     const value = fixture(); cleanups.push(value.cleanup);
     await authorizeMediaProcessing(value.db, value.runId);
