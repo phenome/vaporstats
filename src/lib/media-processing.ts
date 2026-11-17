@@ -32,6 +32,7 @@ import {
   GeminiBatchFailure,
   GeminiHttpError,
   GeminiMissingKeyError,
+  OpenRouterHttpError,
   liftProviderPause,
   paidWorkCost,
   pauseProvider,
@@ -995,6 +996,8 @@ async function sendTextItem(advance: QueueAdvance, job: JobRow, request: OpenRou
     outcome = classifyOpenRouterOutcome(null);
   } catch (error) {
     outcome = classifyOpenRouterOutcome(error);
+    // An error answer can still report a generation and a charge.
+    if (error instanceof OpenRouterHttpError && error.answer) await recordAnswer(db, job, error.answer);
   }
   if (outcome.class === "uncertain") {
     await db.prepare(`UPDATE media_processing_jobs SET error = ? WHERE id = ? AND status = 'uncertain' AND error = '${IN_FLIGHT}'`).bind(`uncertain:${outcome.reason}`, job.id).run();
@@ -1016,6 +1019,19 @@ function reportedCharge(completion: OpenRouterCompletion): { microusd: number; s
 }
 
 /**
+ * Records what an OpenRouter answer to `job` reported: its token usage,
+ * generation id, routed provider and model, and its cost, added to the cost
+ * of any earlier answer to the same item, so a retried item keeps every
+ * charge.
+ */
+async function recordAnswer(db: AppDatabase, job: JobRow, answer: OpenRouterCompletion): Promise<void> {
+  const charge = reportedCharge(answer);
+  const usage = { promptTokens: answer.usage.promptTokens, completionTokens: answer.usage.completionTokens };
+  await db.prepare("UPDATE media_processing_jobs SET usage_json = ?, charged_microusd = COALESCE(charged_microusd, 0) + ?, cost_source = CASE WHEN cost_source = 'provider_reported' THEN cost_source ELSE ? END, generation_id = ?, routed_provider = ?, routed_model = ? WHERE id = ?")
+    .bind(JSON.stringify(usage), charge.microusd, charge.source, answer.generationId, answer.provider, answer.model, job.id).run();
+}
+
+/**
  * Applies an OpenRouter answer to text item `job` in one short transaction:
  * its cost, token usage, generation id, routed provider and model, then its
  * output under the current-input and stale-write checks. Output the parsers
@@ -1023,10 +1039,8 @@ function reportedCharge(completion: OpenRouterCompletion): { microusd: number; s
  */
 function settleCompletion(db: AppDatabase, job: JobRow, completion: OpenRouterCompletion, now: Date): Promise<SettledStatus> {
   return writeTransaction(db, async () => {
-    const charge = reportedCharge(completion);
-    const usage = { promptTokens: completion.usage.promptTokens, completionTokens: completion.usage.completionTokens };
-    await db.prepare("UPDATE media_processing_jobs SET usage_json = ?, charged_microusd = ?, cost_source = ?, generation_id = ?, routed_provider = ?, routed_model = ?, error = NULL, completed_at = ? WHERE id = ?")
-      .bind(JSON.stringify(usage), charge.microusd, charge.source, completion.generationId, completion.provider, completion.model, now.toISOString(), job.id).run();
+    await recordAnswer(db, job, completion);
+    await db.prepare("UPDATE media_processing_jobs SET error = NULL, completed_at = ? WHERE id = ?").bind(now.toISOString(), job.id).run();
     const status = job.stage === "extraction"
       ? await persistExtraction(db, job, completion.content, now)
       : await persistOverview(db, job, completion.content, now);

@@ -202,14 +202,53 @@ describe("OpenRouter classifier", () => {
     });
   }
 
-  test("a 200 whose body holds only an error is classified by the error's code", async () => {
-    const { database } = await authorizedGames();
-    const providers = apis();
-    providers.openRouter.reply("chat", { status: 200, body: { id: "gen-error", error: { code: 502, message: "Provider returned error", metadata: { error_type: "provider_unavailable" } } } });
+  /** A 200 that OpenRouter sent once a provider accepted the request, whose body then reports only an error with `code`, the answer's id and its charged usage. */
+  const acceptedError = (code: number, extra: Record<string, unknown> = {}): OpenRouterReply => ({
+    status: 200,
+    body: { id: "gen-accepted", usage: { prompt_tokens: 1_000, completion_tokens: 0, cost: 0.0001 }, error: { code, message: "Provider returned error", ...extra } },
+  });
+  const answerRecord = (database: TestDatabase) => database.native.query<{ status: string; error: string | null; generation_id: string | null; charged_microusd: number | null; cost_source: string | null; usage_json: string }, []>(
+    "SELECT status, error, generation_id, charged_microusd, cost_source, usage_json FROM media_processing_jobs WHERE stage = 'extraction' ORDER BY id LIMIT 1",
+  ).get();
 
-    await tick(database, providers, "2026-11-18T07:00:00.000Z");
+  for (const code of [408, 500, 502, 524]) {
+    test(`a 200 whose body reports a ${code} after the provider accepted the request is uncertain, never resent automatically, and records its generation id, usage and cost`, async () => {
+      const { database } = await authorizedGames();
+      const providers = apis();
+      providers.openRouter.reply("chat", acceptedError(code));
 
-    expect(textJobs(database).map(({ status, attempt_count, error }) => ({ status, attempt_count, error }))).toEqual([{ status: "queued", attempt_count: 1, error: "transient:http_502" }]);
+      const uncertain = await tick(database, providers, "2026-11-18T07:00:00.000Z");
+      await tick(database, providers, "2026-11-19T06:00:00.000Z");
+
+      expect(answerRecord(database)).toEqual({ status: "uncertain", error: `uncertain:accepted_http_${code}`, generation_id: "gen-accepted", charged_microusd: 100, cost_source: "provider_reported", usage_json: JSON.stringify({ promptTokens: 1_000, completionTokens: 0 }) });
+      expect(uncertain.mediaProcessing?.cost.uncertain).toBe(1);
+      expect(uncertain.mediaProcessing?.cost.providers.openrouter.allTimeMicrousd).toBe(100);
+      expect(providers.openRouter.requests.filter((request) => request.stage === "extraction")).toHaveLength(1);
+    });
+  }
+
+  test("a 200 whose body reports another code keeps that code's class, and its generation id and cost are recorded", async () => {
+    const refused = await authorizedGames();
+    const refusing = apis();
+    refusing.openRouter.reply("chat", acceptedError(400));
+    await tick(refused.database, refusing, "2026-11-18T07:00:00.000Z");
+    expect(answerRecord(refused.database)).toMatchObject({ status: "refused", generation_id: "gen-accepted", charged_microusd: 100, cost_source: "provider_reported" });
+
+    const paused = await authorizedGames();
+    const pausing = apis();
+    pausing.openRouter.reply("chat", acceptedError(402, { metadata: { limit_source: "openrouter_credits" } }));
+    const credit = await tick(paused.database, pausing, "2026-11-18T07:00:00.000Z");
+    expect(credit.mediaProcessing?.providers.openrouter).toMatchObject({ paused: true, reason: "credits" });
+    expect(answerRecord(paused.database)).toMatchObject({ status: "queued", error: null, generation_id: "gen-accepted", charged_microusd: 100 });
+
+    // A retried item adds the cost of its later answer to the cost already recorded.
+    const retried = await authorizedGames();
+    const retrying = apis();
+    retrying.openRouter.reply("chat", acceptedError(429));
+    await tick(retried.database, retrying, "2026-11-18T07:00:00.000Z");
+    expect(answerRecord(retried.database)).toMatchObject({ status: "queued", error: "transient:http_429", generation_id: "gen-accepted", charged_microusd: 100 });
+    await tick(retried.database, retrying, "2026-11-18T07:15:00.000Z");
+    expect(answerRecord(retried.database)).toMatchObject({ status: "succeeded", charged_microusd: 250, cost_source: "provider_reported" });
   });
 
   const refusals: Array<[string, OpenRouterReply]> = [

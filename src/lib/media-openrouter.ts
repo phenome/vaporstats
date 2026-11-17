@@ -38,7 +38,10 @@ export interface OpenRouterCompletion {
 }
 
 export interface OpenRouterTransport {
-  /** Sends one chat completion. Throws an `OpenRouterHttpError` for an error answer. */
+  /**
+   * Sends one chat completion. Throws an `OpenRouterHttpError` for an error
+   * answer, carrying whatever generation id and usage the answer reported.
+   */
   complete(request: OpenRouterChatRequest): Promise<OpenRouterCompletion>;
   /** Returns the `data` object of `GET /api/v1/key`. */
   currentKey(): Promise<unknown>;
@@ -67,6 +70,20 @@ function retryAfterMs(response: Response): number | null {
   return Number.isFinite(date) ? Math.max(0, date - Date.now()) : null;
 }
 
+/** The generation id, routing, content and usage an answer reports. */
+function completionFrom(body: Record<string, unknown>): OpenRouterCompletion {
+  const choice = object(Array.isArray(body.choices) ? body.choices[0] : null);
+  const content = object(choice.message).content;
+  const usage = object(body.usage);
+  return {
+    generationId: text(body.id),
+    model: text(body.model),
+    provider: text(body.provider),
+    content: typeof content === "string" ? content : null,
+    usage: { promptTokens: count(usage.prompt_tokens), completionTokens: count(usage.completion_tokens), cost: count(usage.cost) },
+  };
+}
+
 function errorFrom(response: Response, body: Record<string, unknown>): OpenRouterHttpError {
   const error = object(body.error);
   const code = typeof error.code === "number" && Number.isInteger(error.code) && error.code >= 400 ? error.code : null;
@@ -78,6 +95,8 @@ function errorFrom(response: Response, body: Record<string, unknown>): OpenRoute
     // OpenRouter's moderation errors list why the input was flagged.
     moderated: Array.isArray(metadata.reasons) || metadata.flagged_input !== undefined,
     retryAfterMs: retryAfterMs(response),
+    accepted: response.ok,
+    answer: body.id !== undefined || body.usage !== undefined ? completionFrom(body) : null,
   });
 }
 
@@ -110,15 +129,7 @@ export function createOpenRouterTransport(
       // A 200 can still carry only an error, when the provider failed after
       // OpenRouter sent its headers.
       if (!response.ok || (body.error !== undefined && body.choices === undefined)) throw errorFrom(response, body);
-      const choice = object(Array.isArray(body.choices) ? body.choices[0] : null);
-      const usage = object(body.usage);
-      return {
-        generationId: text(body.id),
-        model: text(body.model),
-        provider: text(body.provider),
-        content: typeof object(choice.message).content === "string" ? object(choice.message).content as string : null,
-        usage: { promptTokens: count(usage.prompt_tokens), completionTokens: count(usage.completion_tokens), cost: count(usage.cost) },
-      };
+      return completionFrom(body);
     },
     async currentKey() {
       const response = await fetchFn(`${OPENROUTER_API_BASE}/key`, { headers, signal: AbortSignal.timeout(timeoutMs) });

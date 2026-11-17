@@ -1,5 +1,6 @@
 import type { AppDatabase } from "./db";
 import { writeTransaction } from "./db-transaction";
+import type { OpenRouterCompletion } from "./media-openrouter";
 
 /**
  * Paid providers of media work. Each has one response classifier, one pause
@@ -151,7 +152,9 @@ export function classifyGeminiOutcome(call: PaidProviderCall, error: unknown): P
 /**
  * A non-OK OpenRouter answer, as the chat-completion and key transport
  * receives it: an HTTP error status, or a 200 whose body holds only an
- * `error` object, which carries its code instead.
+ * `error` object, which carries its code instead. OpenRouter sends a 200
+ * once a provider has accepted the request, so such an error comes after
+ * acceptance, when the request may already be charged.
  */
 export class OpenRouterHttpError extends Error {
   readonly status: number;
@@ -163,8 +166,12 @@ export class OpenRouterHttpError extends Error {
   readonly moderated: boolean;
   /** How long the response asks the caller to wait, from `Retry-After`. */
   readonly retryAfterMs: number | null;
+  /** Whether OpenRouter answered 200: a provider accepted the request before it failed. */
+  readonly accepted: boolean;
+  /** The generation id, routing and usage the answer reported, to record whatever its class. */
+  readonly answer: OpenRouterCompletion | null;
 
-  constructor(status: number, details: { limitSource?: string | null; errorType?: string | null; moderated?: boolean; retryAfterMs?: number | null } = {}) {
+  constructor(status: number, details: { limitSource?: string | null; errorType?: string | null; moderated?: boolean; retryAfterMs?: number | null; accepted?: boolean; answer?: OpenRouterCompletion | null } = {}) {
     // The provider's message can quote the request, so only the status is kept.
     super(`OpenRouter HTTP ${status}`);
     this.name = "OpenRouterHttpError";
@@ -173,6 +180,8 @@ export class OpenRouterHttpError extends Error {
     this.errorType = details.errorType ?? null;
     this.moderated = details.moderated ?? false;
     this.retryAfterMs = details.retryAfterMs ?? null;
+    this.accepted = details.accepted ?? false;
+    this.answer = details.answer ?? null;
   }
 }
 
@@ -197,7 +206,8 @@ const OPENROUTER_BUDGET_PAUSES: Record<string, CreditPauseReason> = {
  * Classifies one OpenRouter chat-completion or key request: `null` when it
  * answered, otherwise what it threw. Every chat completion may be charged,
  * so a failure that cannot prove the request was never fully sent is
- * uncertain: a client timeout, or a connection lost after sending.
+ * uncertain: a client timeout, a connection lost after sending, or a
+ * provider failure or timeout reported after a provider accepted it.
  */
 export function classifyOpenRouterOutcome(error: unknown): ProviderOutcome {
   if (error === null || error === undefined) return { class: "success" };
@@ -205,6 +215,9 @@ export function classifyOpenRouterOutcome(error: unknown): ProviderOutcome {
   if (error instanceof OpenRouterHttpError) {
     const { status, limitSource } = error;
     const retryAfterMs = error.retryAfterMs !== null && Number.isFinite(error.retryAfterMs) && error.retryAfterMs >= 0 ? error.retryAfterMs : null;
+    // After acceptance, a provider failure or timeout leaves unknown whether
+    // the request was charged, so it is never resent automatically.
+    if (error.accepted && (status === 408 || status >= 500)) return { class: "uncertain", reason: `accepted_http_${status}` };
     if (status === 402 && limitSource === "openrouter_in_flight_budget") return { class: "transient", reason: "in_flight_budget", retryAfterMs };
     if ((status === 402 || status === 403) && limitSource !== null && OPENROUTER_BUDGET_PAUSES[limitSource]) {
       return { class: "credit_pause", reason: OPENROUTER_BUDGET_PAUSES[limitSource]! };
