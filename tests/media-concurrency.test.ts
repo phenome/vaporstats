@@ -4,8 +4,6 @@ import { authorizeMediaRun, runSerializedMediaDiscovery } from "../src/lib/media
 import {
   advanceMediaProcessing,
   authorizeMediaProcessing,
-  GEMINI_BATCH_CAPABILITY_VERSION,
-  GEMINI_BATCH_PRICING_VERSION,
 } from "../src/lib/media-processing";
 import { openTestDatabase, type TestDatabase } from "./support/db";
 import {
@@ -90,8 +88,6 @@ describe("media writers sharing one connection", () => {
       transport,
       articleFetch: async () => processingArticleHtml(CYBERPUNK),
       now: new Date("2026-09-11T00:00:00.000Z"),
-      pricingVersion: GEMINI_BATCH_PRICING_VERSION,
-      capabilityVersion: GEMINI_BATCH_CAPABILITY_VERSION,
     };
 
     const [discovery, firstAdvance, secondAdvance] = await Promise.all([

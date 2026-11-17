@@ -7,8 +7,6 @@ import { applyMigrations, DRIZZLE_MIGRATION_TABLE, MIGRATION_TABLE } from "../sr
 import { openSqliteAppDatabase } from "../src/lib/db";
 import {
   advanceMediaProcessing,
-  GEMINI_BATCH_CAPABILITY_VERSION,
-  GEMINI_BATCH_PRICING_VERSION,
   type GeminiBatchPoll,
   type GeminiBatchTransport,
 } from "../src/lib/media-processing";
@@ -417,6 +415,10 @@ function verifyRetainedMediaRowsSurviveUpgrade(): void {
         VALUES (41, 'completed', 'retained-confirmation', NULL, '2026-10-01T00:06:00.000Z', '2026-10-01T00:30:00.000Z')`,
       `INSERT INTO media_processing_jobs (id, run_id, stage, appid, matched_appid, dimension, source_id, request_key, input_identity, model, config_version, max_input_tokens, max_output_tokens, reserved_microusd, charged_microusd, reservation_active, status, provider_batch_id, output_json, usage_json, submitted_at, completed_at)
         VALUES (47, 41, 'extraction', 900003, 900004, 'gameplay', 44, 'retained-job', 'retained-extraction-identity', 'gemini-3.1-flash-lite', 'extraction-v1', 1000, 200, 1500, 900, 0, 'succeeded', 'retained-batch', '{"claims":["retained"]}', '{"tokens":1200}', '2026-10-01T00:07:00.000Z', '2026-10-01T00:20:00.000Z')`,
+      // Job 59 was submitted under the lifetime allowance and never answered:
+      // it keeps its uncertain status and active reservation as history.
+      `INSERT INTO media_processing_jobs (id, run_id, stage, appid, source_id, request_key, input_identity, model, config_version, max_input_tokens, max_output_tokens, reserved_microusd, charged_microusd, reservation_active, status, provider_batch_id, usage_json, error, created_at)
+        VALUES (59, 41, 'synthesis', 900003, NULL, 'retained-uncertain-job', 'retained-uncertain-identity', 'gemini-3.1-flash-lite', 'synthesis-v1', 2000, 300, 4900000, NULL, 1, 'uncertain', NULL, '{}', 'network dropped', '2026-10-01 00:21:00')`,
       `INSERT INTO media_tag_memberships (appid, tag_slug, tag_label, source_id, extraction_input_identity)
         VALUES (900003, 'retained-tag', 'Retained tag', 44, 'retained-extraction-identity')`,
       // Source 49 was taken by run 41 but its fetch failed, so its only trace
@@ -526,6 +528,16 @@ function verifyRetainedMediaRowsSurviveUpgrade(): void {
     if (JSON.stringify(claims) !== JSON.stringify(expectedClaims)) {
       throw new Error("Migrations misattributed media sources to processing runs: " + JSON.stringify(claims));
     }
+    // Retained paid jobs become queue entries without changing a stored
+    // value: Gemini work that joined the ledger when it was created, with no
+    // attempt counted and no cost source claimed for its historical charge.
+    const queueFields = retained
+      .query<Record<string, unknown>, []>("SELECT id, provider, enqueued_at = created_at AS enqueued_at_created, attempt_count, next_attempt_at, cost_source FROM media_processing_jobs ORDER BY id")
+      .all();
+    const expectedQueueFields = [47, 59].map((id) => ({ id, provider: "gemini", enqueued_at_created: 1, attempt_count: 0, next_attempt_at: null, cost_source: null }));
+    if (JSON.stringify(queueFields) !== JSON.stringify(expectedQueueFields)) {
+      throw new Error("Migrations misdescribed retained paid jobs as queue entries: " + JSON.stringify(queueFields));
+    }
     verifyMediaPassesAccepted(retained);
   } finally {
     retained.close(true);
@@ -603,8 +615,6 @@ async function verifyWaitingRunResumesAfterUpgrade(): Promise<void> {
         throw new Error("the upgrade must not refetch a taken article");
       },
       now: new Date("2026-10-06T00:0" + minute + ":00.000Z"),
-      pricingVersion: GEMINI_BATCH_PRICING_VERSION,
-      capabilityVersion: GEMINI_BATCH_CAPABILITY_VERSION,
     });
     await advance(0);
     overview = {
@@ -670,6 +680,12 @@ try {
   database = new Database(databasePath);
   applyMigrations(database, migrationDirectory);
   applyMigrations(database, migrationDirectory);
+  // Migrations transform retained rows only: an empty database stays empty
+  // of media state, paid work, provider state and checkpoints.
+  for (const table of [...mediaTables, "checkpoints"]) {
+    const rows = database.query<{ count: number }, []>("SELECT COUNT(*) AS count FROM " + table).get()?.count ?? 0;
+    if (rows !== 0) throw new Error("Migrations seeded " + rows + " rows into " + table);
+  }
 
   const foundTables = new Set(
     database

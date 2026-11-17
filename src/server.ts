@@ -236,11 +236,16 @@ function internalMediaResponse(status: number, body: Record<string, unknown>): R
   });
 }
 const SAFE_MEDIA_PROCESSING_STOP_REASONS: Record<string, true> = {
-  missing_gemini_batch_transport: true,
-  pricing_unconfirmed: true,
-  capability_unconfirmed: true,
   input_token_cap: true,
-  lifetime_budget: true,
+  provider_refusal: true,
+  terminal_failure: true,
+  transient_provider_failure: true,
+  uncertain_submission: true,
+  missing_gemini_embedding_batch: true,
+  "provider_paused:gemini:missing_key": true,
+  "provider_paused:gemini:rejected_key": true,
+  "provider_paused:gemini:prepay_depleted": true,
+  "provider_paused:gemini:spend_cap": true,
 };
 
 function safeNonNegativeInteger(value: number): number {
@@ -249,8 +254,7 @@ function safeNonNegativeInteger(value: number): number {
 
 function sanitizeMediaProcessingSummary(summary: MediaProcessingSummary): Pick<
   MediaProcessingSummary,
-  "runId" | "status" | "submitted" | "completed" | "outputs" |
-  "chargedMicrousd" | "outstandingReservedMicrousd" | "stopReasons"
+  "runId" | "status" | "submitted" | "completed" | "outputs" | "stopReasons" | "queued" | "providers" | "cost"
 > {
   return {
     runId: summary.runId,
@@ -264,11 +268,30 @@ function sanitizeMediaProcessingSummary(summary: MediaProcessingSummary): Pick<
       invalidated: safeNonNegativeInteger(summary.outputs.invalidated),
       skipped: safeNonNegativeInteger(summary.outputs.skipped),
     },
-    chargedMicrousd: safeNonNegativeInteger(summary.chargedMicrousd),
-    outstandingReservedMicrousd: safeNonNegativeInteger(summary.outstandingReservedMicrousd),
     stopReasons: [...new Set(summary.stopReasons.map((reason) =>
       Object.prototype.hasOwnProperty.call(SAFE_MEDIA_PROCESSING_STOP_REASONS, reason) ? reason : "provider_failure"
     ))],
+    queued: { gemini: safeNonNegativeInteger(summary.queued.gemini) },
+    providers: {
+      gemini: {
+        provider: "gemini",
+        paused: summary.providers.gemini.paused,
+        reason: summary.providers.gemini.reason,
+        pausedAt: summary.providers.gemini.pausedAt,
+        checkedAt: summary.providers.gemini.checkedAt,
+      },
+    },
+    cost: {
+      reportingOnly: true,
+      month: summary.cost.month,
+      providers: {
+        gemini: {
+          monthToDateMicrousd: safeNonNegativeInteger(summary.cost.providers.gemini.monthToDateMicrousd),
+          allTimeMicrousd: safeNonNegativeInteger(summary.cost.providers.gemini.allTimeMicrousd),
+        },
+      },
+      uncertain: safeNonNegativeInteger(summary.cost.uncertain),
+    },
   };
 }
 
@@ -317,8 +340,6 @@ async function handleInternalMediaRequest(request: Request, peerAddress?: string
     const processing = await advanceMediaProcessing(db, {
       runId: result.runId,
       geminiApiKey: process.env.GEMINI_API_KEY,
-      pricingVersion: process.env.GEMINI_BATCH_PRICING_VERSION,
-      capabilityVersion: process.env.GEMINI_BATCH_CAPABILITY_VERSION,
     });
     return internalMediaResponse(200, { ...result, processing: sanitizeMediaProcessingSummary(processing) });
   } catch {
@@ -383,8 +404,6 @@ export function startServer(options: StartServerOptions = {}) {
         steamApiKey: process.env.STEAM_API_KEY,
         tavilyApiKey: process.env.TAVILY_API_KEY,
         geminiApiKey: process.env.GEMINI_API_KEY,
-        geminiPricingVersion: process.env.GEMINI_BATCH_PRICING_VERSION,
-        geminiCapabilityVersion: process.env.GEMINI_BATCH_CAPABILITY_VERSION,
         runImmediately: true,
       });
     }

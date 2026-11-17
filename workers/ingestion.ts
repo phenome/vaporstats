@@ -56,8 +56,8 @@ export interface IngestionTickOptions {
   customFetch?: typeof fetch;
   tavilyApiKey?: string;
   geminiApiKey?: string;
-  geminiPricingVersion?: string;
-  geminiCapabilityVersion?: string;
+  /** How many paid media items each provider may take from the queue per tick. */
+  paidSubmissionsPerTick?: number;
   stalePriceDealsOnly?: boolean;
 }
 
@@ -198,9 +198,10 @@ function logCompletion(result: IngestionTickResult): void {
       submitted: result.mediaProcessing.submitted,
       completed: result.mediaProcessing.completed,
       outputs: result.mediaProcessing.outputs,
-      chargedMicrousd: result.mediaProcessing.chargedMicrousd,
-      outstandingReservedMicrousd: result.mediaProcessing.outstandingReservedMicrousd,
       stopReasons: result.mediaProcessing.stopReasons,
+      queued: result.mediaProcessing.queued,
+      providers: Object.fromEntries(Object.entries(result.mediaProcessing.providers).map(([provider, state]) => [provider, { paused: state.paused, reason: state.reason, pausedAt: state.pausedAt, checkedAt: state.checkedAt }])),
+      cost: result.mediaProcessing.cost,
     },
     reviewCompaction: result.reviewCompaction && {
       monthsCompacted: result.reviewCompaction.monthsCompacted,
@@ -249,15 +250,16 @@ async function performIngestionTick(options: IngestionTickOptions): Promise<Inge
   const pendingMediaProcessing = await options.db
     .prepare("SELECT a.run_id FROM media_processing_authorizations AS a JOIN media_discovery_runs AS r ON r.id = a.run_id WHERE a.status IN ('queued', 'waiting') AND r.status NOT IN ('queued', 'running') ORDER BY a.authorized_at LIMIT 1")
     .first<{ run_id: number }>();
-  const submittedMediaProcessing = await options.db
-    .prepare("SELECT run_id FROM media_processing_jobs WHERE status = 'submitted' ORDER BY id LIMIT 1")
+  // Queued paid work advances every tick, including the daily credit check
+  // that resumes a paused provider, without a new authorization.
+  const queuedMediaWork = await options.db
+    .prepare("SELECT run_id FROM media_processing_jobs WHERE status IN ('queued', 'reserved', 'submitted') ORDER BY id LIMIT 1")
     .first<{ run_id: number }>();
-  if (pendingMediaProcessing || submittedMediaProcessing) {
+  if (pendingMediaProcessing || queuedMediaWork) {
     mediaProcessing = await advanceMediaProcessing(options.db, {
       ...(pendingMediaProcessing ? { runId: pendingMediaProcessing.run_id } : {}),
       geminiApiKey: options.geminiApiKey ?? process.env.GEMINI_API_KEY,
-      pricingVersion: options.geminiPricingVersion ?? process.env.GEMINI_BATCH_PRICING_VERSION,
-      capabilityVersion: options.geminiCapabilityVersion ?? process.env.GEMINI_BATCH_CAPABILITY_VERSION,
+      submissionsPerTick: options.paidSubmissionsPerTick,
       articleFetch: customFetch,
       providerFetch: customFetch,
       now: anchorTime,

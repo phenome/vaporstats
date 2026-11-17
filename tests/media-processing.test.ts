@@ -1,8 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import {
-  GEMINI_BATCH_CAPABILITY_VERSION,
-  GEMINI_BATCH_BILLING_CONFIRMATION,
-  GEMINI_BATCH_PRICING_VERSION,
   advanceMediaProcessing,
   authorizeMediaProcessing,
   createGeminiBatchTransport,
@@ -96,9 +93,9 @@ function sourceIds(fixtureValue: ReturnType<typeof fixture>): number[] {
 async function finishSingle(fixtureValue: ReturnType<typeof fixture>, transport: ControlledTransport) {
   transport.nextPolls.push({ state: "succeeded", output: extractionOutput(), usage: { inputTokens: 100, outputTokens: 30, thinkingTokens: 5 } });
   transport.nextPolls.push({ state: "succeeded", output: overviewOutput(URLS[APPIDS[0]]), usage: { inputTokens: 100, outputTokens: 30, thinkingTokens: 5 } });
-  const first = await advanceMediaProcessing(fixtureValue.db, { runId: fixtureValue.runId, transport, articleFetch: async () => articleHtml(APPIDS[0]), now: new Date("2026-09-11T00:00:00.000Z"), pricingVersion: GEMINI_BATCH_PRICING_VERSION, capabilityVersion: GEMINI_BATCH_CAPABILITY_VERSION });
+  const first = await advanceMediaProcessing(fixtureValue.db, { runId: fixtureValue.runId, transport, articleFetch: async () => articleHtml(APPIDS[0]), now: new Date("2026-09-11T00:00:00.000Z") });
   expect(first.submitted).toBe(2);
-  const second = await advanceMediaProcessing(fixtureValue.db, { runId: fixtureValue.runId, transport, articleFetch: async () => articleHtml(APPIDS[0]), now: new Date("2026-09-11T00:01:00.000Z"), pricingVersion: GEMINI_BATCH_PRICING_VERSION, capabilityVersion: GEMINI_BATCH_CAPABILITY_VERSION });
+  const second = await advanceMediaProcessing(fixtureValue.db, { runId: fixtureValue.runId, transport, articleFetch: async () => articleHtml(APPIDS[0]), now: new Date("2026-09-11T00:01:00.000Z") });
   expect(second.completed).toBeGreaterThanOrEqual(2);
   return second;
 }
@@ -179,8 +176,6 @@ describe("bounded Gemini media processing", () => {
     expect(source?.processing_content).toBeNull();
     const persistedExtraction = await value.db.prepare("SELECT output_json FROM media_article_extractions LIMIT 1").first<{ output_json: string }>();
     expect(persistedExtraction?.output_json).not.toContain("secret-not-content");
-    const authorization = await value.db.prepare("SELECT billing_confirmation FROM media_processing_authorizations WHERE run_id = ?").bind(value.runId).first<{ billing_confirmation: string | null }>();
-    expect(authorization?.billing_confirmation).toBe(GEMINI_BATCH_BILLING_CONFIRMATION);
   });
   test("processes an authorized root's eligible child as an independent durable entity", async () => {
     const value = fixture(); cleanups.push(value.cleanup);
@@ -200,16 +195,12 @@ describe("bounded Gemini media processing", () => {
       runId: value.runId,
       transport,
       articleFetch: async (url) => url === childUrl ? articleHtml(APPIDS[0]).replaceAll("Cyberpunk 2077", "Phantom Liberty") : articleHtml(APPIDS[0]),
-      pricingVersion: GEMINI_BATCH_PRICING_VERSION,
-      capabilityVersion: GEMINI_BATCH_CAPABILITY_VERSION,
     });
     expect(first.submitted).toBe(4);
     await advanceMediaProcessing(value.db, {
       runId: value.runId,
       transport,
       articleFetch: async (url) => url === childUrl ? articleHtml(APPIDS[0]).replaceAll("Cyberpunk 2077", "Phantom Liberty") : articleHtml(APPIDS[0]),
-      pricingVersion: GEMINI_BATCH_PRICING_VERSION,
-      capabilityVersion: GEMINI_BATCH_CAPABILITY_VERSION,
     });
     expect(await getMediaOverview(value.db, APPIDS[0], { includeUnpublished: true })).not.toBeNull();
     expect(await getMediaOverview(value.db, childAppid, { includeUnpublished: true })).not.toBeNull();
@@ -251,8 +242,6 @@ describe("bounded Gemini media processing", () => {
       runId: value.runId,
       transport,
       articleFetch: async () => articleHtml(APPIDS[0]),
-      pricingVersion: GEMINI_BATCH_PRICING_VERSION,
-      capabilityVersion: GEMINI_BATCH_CAPABILITY_VERSION,
     });
     expect(result.submitted).toBe(2);
     const jobAppids = await value.db.prepare("SELECT DISTINCT appid FROM media_processing_jobs WHERE run_id = ? ORDER BY appid").bind(value.runId).all<{ appid: number }>();
@@ -277,16 +266,12 @@ describe("bounded Gemini media processing", () => {
       runId: value.runId,
       transport,
       articleFetch: async (url) => articleHtml(url.includes("baldurs") ? APPIDS[1] : APPIDS[0]),
-      pricingVersion: GEMINI_BATCH_PRICING_VERSION,
-      capabilityVersion: GEMINI_BATCH_CAPABILITY_VERSION,
     });
     expect(first.submitted).toBe(5);
     await advanceMediaProcessing(value.db, {
       runId: value.runId,
       transport,
       articleFetch: async (url) => articleHtml(url.includes("baldurs") ? APPIDS[1] : APPIDS[0]),
-      pricingVersion: GEMINI_BATCH_PRICING_VERSION,
-      capabilityVersion: GEMINI_BATCH_CAPABILITY_VERSION,
     });
     const memberships = await value.db.prepare(
       "SELECT appid, source_id, tag_slug FROM media_tag_memberships ORDER BY appid, source_id",
@@ -323,15 +308,11 @@ describe("bounded Gemini media processing", () => {
       runId: nextRunId,
       transport,
       articleFetch: async () => articleHtml(APPIDS[0]).replace("flexible combat", "deliberate combat"),
-      pricingVersion: GEMINI_BATCH_PRICING_VERSION,
-      capabilityVersion: GEMINI_BATCH_CAPABILITY_VERSION,
     });
     await advanceMediaProcessing(value.db, {
       runId: nextRunId,
       transport,
       articleFetch: async () => articleHtml(APPIDS[0]).replace("flexible combat", "deliberate combat"),
-      pricingVersion: GEMINI_BATCH_PRICING_VERSION,
-      capabilityVersion: GEMINI_BATCH_CAPABILITY_VERSION,
     });
     const countAfter = await value.db.prepare("SELECT COUNT(*) AS count FROM media_tag_memberships WHERE appid = ?").bind(APPIDS[0]).first<{ count: number }>();
     expect(countAfter?.count).toBe(0);
@@ -348,7 +329,7 @@ describe("bounded Gemini media processing", () => {
       { state: "succeeded", output: extractionOutput(), usage: { inputTokens: 100, outputTokens: 20 } },
       { state: "pending" },
     );
-    const summary = await advanceMediaProcessing(value.db, { runId: value.runId, transport, articleFetch: async () => articleHtml(APPIDS[0]), pricingVersion: GEMINI_BATCH_PRICING_VERSION, capabilityVersion: GEMINI_BATCH_CAPABILITY_VERSION });
+    const summary = await advanceMediaProcessing(value.db, { runId: value.runId, transport, articleFetch: async () => articleHtml(APPIDS[0]) });
     const extractionJobs = await value.db.prepare("SELECT COUNT(*) AS count FROM media_processing_jobs WHERE stage = 'extraction'").first<{ count: number }>();
     expect(extractionJobs?.count).toBe(2);
     expect(transport.submissions).toHaveLength(3);
@@ -376,8 +357,6 @@ describe("bounded Gemini media processing", () => {
       runId: value.runId,
       transport,
       articleFetch: async () => articleHtml(APPIDS[0]),
-      pricingVersion: GEMINI_BATCH_PRICING_VERSION,
-      capabilityVersion: GEMINI_BATCH_CAPABILITY_VERSION,
     });
     const extractionJobs = await value.db.prepare(
       "SELECT COUNT(*) AS count FROM media_processing_jobs WHERE stage = 'extraction'",
@@ -412,35 +391,6 @@ describe("bounded Gemini media processing", () => {
     expect(transport.submissions).toHaveLength(2);
   });
 
-  test("enforces the lifetime budget across competing reservations", async () => {
-    const value = fixture(); cleanups.push(value.cleanup);
-    await authorizeMediaProcessing(value.db, value.runId);
-    await value.db.prepare("INSERT INTO media_processing_jobs (run_id, stage, appid, request_key, input_identity, model, config_version, max_input_tokens, max_output_tokens, reserved_microusd) VALUES (?, 'extraction', ?, 'other-run', 'other-input', 'other-model', 'other-config', 1, 1, 4999999)").bind(value.runId, APPIDS[0]).run();
-    const transport = new ControlledTransport();
-    const summary = await advanceMediaProcessing(value.db, { runId: value.runId, transport, articleFetch: async () => articleHtml(APPIDS[0]), pricingVersion: GEMINI_BATCH_PRICING_VERSION, capabilityVersion: GEMINI_BATCH_CAPABILITY_VERSION });
-    expect(summary.submitted).toBe(0);
-    expect(summary.outstandingReservedMicrousd).toBeGreaterThanOrEqual(4999999);
-    expect(summary.stopReasons).toContain("lifetime_budget");
-  });
-
-  test("stops before token counting when the paid capability is unconfirmed", async () => {
-    const value = fixture(); cleanups.push(value.cleanup);
-    await authorizeMediaProcessing(value.db, value.runId);
-    const transport = new ControlledTransport();
-    const summary = await advanceMediaProcessing(value.db, {
-      runId: value.runId,
-      transport,
-      articleFetch: async () => articleHtml(APPIDS[0]),
-      pricingVersion: GEMINI_BATCH_PRICING_VERSION,
-      capabilityVersion: "wrong-capability",
-    });
-    expect(summary.submitted).toBe(0);
-    expect(transport.counts).toHaveLength(0);
-    expect(transport.submissions).toHaveLength(0);
-    expect(summary.stopReasons).toEqual(["capability_unconfirmed"]);
-    expect(summary.status).toBe("waiting");
-  });
-
   test("marks submission failures uncertain and does not retry them", async () => {
     const value = fixture(); cleanups.push(value.cleanup);
     await authorizeMediaProcessing(value.db, value.runId);
@@ -451,15 +401,16 @@ describe("bounded Gemini media processing", () => {
       observedDuringSubmit = job?.status ?? null;
     };
     transport.throwSubmission = true;
-    const first = await advanceMediaProcessing(value.db, { runId: value.runId, transport, articleFetch: async () => articleHtml(APPIDS[0]), pricingVersion: GEMINI_BATCH_PRICING_VERSION, capabilityVersion: GEMINI_BATCH_CAPABILITY_VERSION });
+    const first = await advanceMediaProcessing(value.db, { runId: value.runId, transport, articleFetch: async () => articleHtml(APPIDS[0]) });
     expect(String(observedDuringSubmit)).toBe("uncertain");
     expect(first.uncertain).toBe(1);
     transport.throwSubmission = false;
-    const second = await advanceMediaProcessing(value.db, { runId: value.runId, transport, articleFetch: async () => articleHtml(APPIDS[0]), pricingVersion: GEMINI_BATCH_PRICING_VERSION, capabilityVersion: GEMINI_BATCH_CAPABILITY_VERSION });
+    const second = await advanceMediaProcessing(value.db, { runId: value.runId, transport, articleFetch: async () => articleHtml(APPIDS[0]) });
     expect(second.submitted).toBe(0);
     expect(transport.submissions).toHaveLength(0);
     const job = await value.db.prepare("SELECT status, reservation_active FROM media_processing_jobs LIMIT 1").first<{ status: string; reservation_active: number }>();
-    expect(job).toEqual({ status: "uncertain", reservation_active: 1 });
+    // New work reserves nothing: the provider's credit limit bounds spend.
+    expect(job).toEqual({ status: "uncertain", reservation_active: 0 });
   });
 
   test("does not refetch while same-run submitted work is polling", async () => {
@@ -472,8 +423,8 @@ describe("bounded Gemini media processing", () => {
       fetches += 1;
       return articleHtml(APPIDS[0]);
     };
-    const first = await advanceMediaProcessing(value.db, { runId: value.runId, transport, articleFetch, pricingVersion: GEMINI_BATCH_PRICING_VERSION, capabilityVersion: GEMINI_BATCH_CAPABILITY_VERSION });
-    const second = await advanceMediaProcessing(value.db, { runId: value.runId, transport, articleFetch, pricingVersion: GEMINI_BATCH_PRICING_VERSION, capabilityVersion: GEMINI_BATCH_CAPABILITY_VERSION });
+    const first = await advanceMediaProcessing(value.db, { runId: value.runId, transport, articleFetch });
+    const second = await advanceMediaProcessing(value.db, { runId: value.runId, transport, articleFetch });
     expect(first.submitted).toBe(1);
     expect(second.status).toBe("waiting");
     expect(second.submitted).toBe(0);
@@ -481,7 +432,7 @@ describe("bounded Gemini media processing", () => {
     expect(transport.submissions).toHaveLength(1);
     await value.db.prepare("UPDATE media_processing_jobs SET error = 'transient provider lookup failure' WHERE stage = 'extraction'").run();
     transport.polls.set("batches/test-1", { state: "succeeded", output: extractionOutput(), usage: { inputTokens: 100, outputTokens: 20 } });
-    await advanceMediaProcessing(value.db, { runId: value.runId, transport, articleFetch, pricingVersion: GEMINI_BATCH_PRICING_VERSION, capabilityVersion: GEMINI_BATCH_CAPABILITY_VERSION });
+    await advanceMediaProcessing(value.db, { runId: value.runId, transport, articleFetch });
     const recovered = await value.db.prepare("SELECT status, error FROM media_processing_jobs WHERE stage = 'extraction'").first<{ status: string; error: string | null }>();
     expect(recovered).toEqual({ status: "succeeded", error: null });
   });
@@ -505,8 +456,6 @@ describe("bounded Gemini media processing", () => {
         fetches += 1;
         return changedArticle;
       },
-      pricingVersion: GEMINI_BATCH_PRICING_VERSION,
-      capabilityVersion: GEMINI_BATCH_CAPABILITY_VERSION,
     });
     await advanceMediaProcessing(value.db, {
       runId: newRunId,
@@ -515,8 +464,6 @@ describe("bounded Gemini media processing", () => {
         fetches += 1;
         return changedArticle;
       },
-      pricingVersion: GEMINI_BATCH_PRICING_VERSION,
-      capabilityVersion: GEMINI_BATCH_CAPABILITY_VERSION,
     });
     const extractionRows = await value.db.prepare("SELECT input_identity, content_hash, active FROM media_article_extractions ORDER BY id").all<{ input_identity: string; content_hash: string; active: number }>();
     const extractions = extractionRows.results ?? [];
@@ -534,7 +481,7 @@ describe("bounded Gemini media processing", () => {
     await authorizeMediaProcessing(value.db, value.runId);
     const transport = new ControlledTransport();
     transport.nextPolls.push({ state: "succeeded", output: extractionOutputWithUnsupportedCategories(), usage: { inputTokens: 100, outputTokens: 20 } });
-    const summary = await advanceMediaProcessing(value.db, { runId: value.runId, transport, articleFetch: async () => articleHtml(APPIDS[0]), pricingVersion: GEMINI_BATCH_PRICING_VERSION, capabilityVersion: GEMINI_BATCH_CAPABILITY_VERSION });
+    const summary = await advanceMediaProcessing(value.db, { runId: value.runId, transport, articleFetch: async () => articleHtml(APPIDS[0]) });
     expect(summary.submitted).toBe(2);
     const extraction = await value.db.prepare("SELECT output_json FROM media_article_extractions WHERE active = 1").first<{ output_json: string }>();
     const persisted = extraction?.output_json ?? "";
@@ -591,9 +538,9 @@ describe("bounded Gemini media processing", () => {
       if (url === urls.followup) return articleHtml(APPIDS[0]).replace("memorable encounters", "later encounters");
       return articleHtml(APPIDS[0]);
     };
-    const first = await advanceMediaProcessing(value.db, { runId: value.runId, transport, articleFetch, pricingVersion: GEMINI_BATCH_PRICING_VERSION, capabilityVersion: GEMINI_BATCH_CAPABILITY_VERSION });
+    const first = await advanceMediaProcessing(value.db, { runId: value.runId, transport, articleFetch });
     expect(first.submitted).toBe(6);
-    await advanceMediaProcessing(value.db, { runId: value.runId, transport, articleFetch, pricingVersion: GEMINI_BATCH_PRICING_VERSION, capabilityVersion: GEMINI_BATCH_CAPABILITY_VERSION });
+    await advanceMediaProcessing(value.db, { runId: value.runId, transport, articleFetch });
 
     const overview = await getMediaOverview(value.db, APPIDS[0], { includeUnpublished: true });
     expect(overview?.statements.map((finding) => finding.text)).toEqual([
@@ -633,9 +580,9 @@ describe("bounded Gemini media processing", () => {
       fetches += 1;
       return articleHtml(url.includes("baldurs") ? APPIDS[1] : APPIDS[0]);
     };
-    await advanceMediaProcessing(value.db, { runId: value.runId, transport, articleFetch, pricingVersion: GEMINI_BATCH_PRICING_VERSION, capabilityVersion: GEMINI_BATCH_CAPABILITY_VERSION });
+    await advanceMediaProcessing(value.db, { runId: value.runId, transport, articleFetch });
     const { db: reopenedDb } = value.reopen();
-    const reopened = await advanceMediaProcessing(reopenedDb, { runId: value.runId, transport, articleFetch, pricingVersion: GEMINI_BATCH_PRICING_VERSION, capabilityVersion: GEMINI_BATCH_CAPABILITY_VERSION });
+    const reopened = await advanceMediaProcessing(reopenedDb, { runId: value.runId, transport, articleFetch });
     expect(await getMediaOverview(reopenedDb, APPIDS[1], { includeUnpublished: true })).not.toBeNull();
     expect(await getMediaOverview(reopenedDb, APPIDS[0], { includeUnpublished: true })).toBeNull();
     expect(reopened.submitted).toBe(0);
@@ -650,13 +597,13 @@ describe("bounded Gemini media processing", () => {
       { state: "succeeded", output: extractionOutput(), usage: { inputTokens: 100, outputTokens: 20 } },
       { state: "pending" },
     );
-    await advanceMediaProcessing(value.db, { runId: value.runId, transport, articleFetch: async () => articleHtml(APPIDS[0]), pricingVersion: GEMINI_BATCH_PRICING_VERSION, capabilityVersion: GEMINI_BATCH_CAPABILITY_VERSION });
+    await advanceMediaProcessing(value.db, { runId: value.runId, transport, articleFetch: async () => articleHtml(APPIDS[0]) });
 
     const laterRunId = insertCompletedRun(value.native, "initial:later-authorization:test", [APPIDS[0]]);
     await authorizeMediaProcessing(value.db, laterRunId);
     transport.polls.set("batches/test-2", { state: "succeeded", output: overviewOutput(URLS[APPIDS[0]]), usage: { inputTokens: 100, outputTokens: 20 } });
 
-    const result = await advanceMediaProcessing(value.db, { runId: laterRunId, transport, articleFetch: async () => articleHtml(APPIDS[0]), pricingVersion: GEMINI_BATCH_PRICING_VERSION, capabilityVersion: GEMINI_BATCH_CAPABILITY_VERSION });
+    const result = await advanceMediaProcessing(value.db, { runId: laterRunId, transport, articleFetch: async () => articleHtml(APPIDS[0]) });
     expect(result.status).toBe("completed");
     expect(await getMediaOverview(value.db, APPIDS[0], { includeUnpublished: true })).not.toBeNull();
   });
@@ -667,15 +614,15 @@ describe("bounded Gemini media processing", () => {
     await authorizeMediaProcessing(value.db, value.runId);
     const transport = new ControlledTransport();
     transport.nextPolls.push({ state: "pending" });
-    const first = await advanceMediaProcessing(value.db, { runId: value.runId, transport, articleFetch: async () => articleHtml(APPIDS[0]), pricingVersion: GEMINI_BATCH_PRICING_VERSION, capabilityVersion: GEMINI_BATCH_CAPABILITY_VERSION });
+    const first = await advanceMediaProcessing(value.db, { runId: value.runId, transport, articleFetch: async () => articleHtml(APPIDS[0]) });
     expect(first.submitted).toBe(1);
     const correctionRunId = insertCompletedRun(value.native, "initial:correction:test", [APPIDS[0]]);
     await authorizeMediaProcessing(value.db, correctionRunId, { affectedSourceIds: sourceIds(value) });
     transport.nextPolls.push({ state: "pending" });
-    const second = await advanceMediaProcessing(value.db, { runId: correctionRunId, transport, articleFetch: async () => articleHtml(APPIDS[0]).replace("flexible combat", "deliberate combat"), pricingVersion: GEMINI_BATCH_PRICING_VERSION, capabilityVersion: GEMINI_BATCH_CAPABILITY_VERSION });
+    const second = await advanceMediaProcessing(value.db, { runId: correctionRunId, transport, articleFetch: async () => articleHtml(APPIDS[0]).replace("flexible combat", "deliberate combat") });
     expect(second.submitted).toBe(1);
     transport.polls.set("batches/test-1", { state: "succeeded", output: extractionOutput(), usage: { inputTokens: 100, outputTokens: 20 } });
-    await advanceMediaProcessing(value.db, { runId: correctionRunId, transport, articleFetch: async () => articleHtml(APPIDS[0]), pricingVersion: GEMINI_BATCH_PRICING_VERSION, capabilityVersion: GEMINI_BATCH_CAPABILITY_VERSION });
+    await advanceMediaProcessing(value.db, { runId: correctionRunId, transport, articleFetch: async () => articleHtml(APPIDS[0]) });
     const rejected = await value.db.prepare("SELECT status FROM media_processing_jobs WHERE provider_batch_id = 'batches/test-1'").first<{ status: string }>();
     expect(rejected?.status).toBe("stale");
     const active = await value.db.prepare("SELECT COUNT(*) AS count FROM media_article_extractions WHERE active = 1").first<{ count: number }>();
@@ -693,16 +640,12 @@ describe("bounded Gemini media processing", () => {
       runId: value.runId,
       transport,
       articleFetch: async () => articleHtml(APPIDS[0]),
-      pricingVersion: GEMINI_BATCH_PRICING_VERSION,
-      capabilityVersion: GEMINI_BATCH_CAPABILITY_VERSION,
     });
     await value.db.prepare("UPDATE media_processing_authorizations SET status = 'completed' WHERE run_id = ?").bind(value.runId).run();
     transport.polls.set("batches/test-1", { state: "succeeded", output: extractionOutput(), usage: { inputTokens: 100, outputTokens: 20 } });
     const result = await advanceMediaProcessing(value.db, {
       transport,
       articleFetch: async () => articleHtml(APPIDS[0]),
-      pricingVersion: GEMINI_BATCH_PRICING_VERSION,
-      capabilityVersion: GEMINI_BATCH_CAPABILITY_VERSION,
     });
     const job = await value.db.prepare("SELECT status, reservation_active, charged_microusd FROM media_processing_jobs WHERE stage = 'extraction'").first<{ status: string; reservation_active: number; charged_microusd: number | null }>();
     expect(result.runId).toBe(value.runId);
@@ -720,22 +663,18 @@ describe("bounded Gemini media processing", () => {
       runId: value.runId,
       transport,
       articleFetch: async () => articleHtml(APPIDS[0]),
-      pricingVersion: GEMINI_BATCH_PRICING_VERSION,
-      capabilityVersion: GEMINI_BATCH_CAPABILITY_VERSION,
     });
     await value.db.prepare("DELETE FROM media_processing_authorizations WHERE run_id = ?").bind(value.runId).run();
     transport.polls.set("batches/test-1", { state: "succeeded", output: extractionOutput(), usage: { inputTokens: 100, outputTokens: 20 } });
 
     const result = await advanceMediaProcessing(value.db, {
       transport,
-      pricingVersion: GEMINI_BATCH_PRICING_VERSION,
-      capabilityVersion: GEMINI_BATCH_CAPABILITY_VERSION,
     });
     const job = await value.db.prepare("SELECT status, reservation_active FROM media_processing_jobs WHERE stage = 'extraction'").first<{ status: string; reservation_active: number }>();
     expect(result).toMatchObject({ runId: value.runId, status: "completed", completed: 1 });
     expect(job).toEqual({ status: "succeeded", reservation_active: 0 });
   });
-  test("settles terminal jobs conservatively when provider usage is absent", async () => {
+  test("records a conservative estimated cost when provider usage is absent", async () => {
     const value = fixture(); cleanups.push(value.cleanup);
     await authorizeMediaProcessing(value.db, value.runId);
     const transport = new ControlledTransport();
@@ -744,27 +683,18 @@ describe("bounded Gemini media processing", () => {
       runId: value.runId,
       transport,
       articleFetch: async () => articleHtml(APPIDS[0]),
-      pricingVersion: GEMINI_BATCH_PRICING_VERSION,
-      capabilityVersion: GEMINI_BATCH_CAPABILITY_VERSION,
     });
-    const before = await value.db.prepare("SELECT reserved_microusd FROM media_processing_jobs WHERE stage = 'extraction'").first<{ reserved_microusd: number }>();
-    if (!before) throw new Error("Extraction reservation was not created");
     transport.polls.set("batches/test-1", { state: "succeeded", output: extractionOutput() });
     const result = await advanceMediaProcessing(value.db, {
       runId: value.runId,
       transport,
       articleFetch: async () => articleHtml(APPIDS[0]),
-      pricingVersion: GEMINI_BATCH_PRICING_VERSION,
-      capabilityVersion: GEMINI_BATCH_CAPABILITY_VERSION,
     });
-    const settled = await value.db.prepare("SELECT status, reserved_microusd, charged_microusd, reservation_active FROM media_processing_jobs WHERE stage = 'extraction'").first<{ status: string; reserved_microusd: number; charged_microusd: number; reservation_active: number }>();
+    const settled = await value.db.prepare("SELECT status, charged_microusd, cost_source FROM media_processing_jobs WHERE stage = 'extraction'").first<{ status: string; charged_microusd: number; cost_source: string }>();
     expect(result.completed).toBeGreaterThan(0);
-    expect(settled).toEqual({
-      status: "succeeded",
-      reserved_microusd: before.reserved_microusd,
-      charged_microusd: before.reserved_microusd,
-      reservation_active: 0,
-    });
+    // The counted 100 input tokens and the 1,200-token output cap at the
+    // documented batch prices of US$0.125 and US$0.75 per million.
+    expect(settled).toEqual({ status: "succeeded", charged_microusd: 913, cost_source: "estimated" });
   });
 
 
@@ -784,8 +714,6 @@ describe("bounded Gemini media processing", () => {
       runId: value.runId,
       transport,
       articleFetch: async () => articleHtml(APPIDS[0]),
-      pricingVersion: GEMINI_BATCH_PRICING_VERSION,
-      capabilityVersion: GEMINI_BATCH_CAPABILITY_VERSION,
     });
     const authorization = await value.db.prepare(
       "SELECT status, stop_reason FROM media_processing_authorizations WHERE run_id = ?",
@@ -795,13 +723,13 @@ describe("bounded Gemini media processing", () => {
       status: "waiting",
       submitted: 0,
       uncertain: 1,
-      outstandingReservedMicrousd: 1234,
       overviewAppids: [APPIDS[0]],
+      cost: { uncertain: 1, providers: { gemini: { allTimeMicrousd: 0 } } },
     });
     expect(authorization).toEqual({ status: "waiting", stop_reason: null });
     expect(transport.submissions).toHaveLength(0);
   });
-  test("polls existing submitted work before rejecting current pricing or capability", async () => {
+  test("polls existing submitted work without a queued authorization", async () => {
     const value = fixture(); cleanups.push(value.cleanup);
     await authorizeMediaProcessing(value.db, value.runId);
     const transport = new ControlledTransport();
@@ -810,16 +738,10 @@ describe("bounded Gemini media processing", () => {
       runId: value.runId,
       transport,
       articleFetch: async () => articleHtml(APPIDS[0]),
-      pricingVersion: GEMINI_BATCH_PRICING_VERSION,
-      capabilityVersion: GEMINI_BATCH_CAPABILITY_VERSION,
     });
     await value.db.prepare("UPDATE media_processing_authorizations SET status = 'completed' WHERE run_id = ?").bind(value.runId).run();
     transport.polls.set("batches/test-1", { state: "succeeded", output: extractionOutput(), usage: { inputTokens: 100, outputTokens: 20 } });
-    const result = await advanceMediaProcessing(value.db, {
-      transport,
-      pricingVersion: "stale-pricing",
-      capabilityVersion: GEMINI_BATCH_CAPABILITY_VERSION,
-    });
+    const result = await advanceMediaProcessing(value.db, { transport });
     const job = await value.db.prepare("SELECT status, reservation_active FROM media_processing_jobs WHERE stage = 'extraction'").first<{ status: string; reservation_active: number }>();
     expect(result.status).toBe("completed");
     expect(result.stopReasons).toEqual([]);

@@ -2,8 +2,6 @@ import { describe, expect, it } from "bun:test";
 import { handleRequest } from "../src/server";
 import { closeDb, getDb } from "../src/lib/db";
 import {
-  GEMINI_BATCH_CAPABILITY_VERSION,
-  GEMINI_BATCH_PRICING_VERSION,
 } from "../src/lib/media-processing";
 import { chmod, copyFile, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -384,18 +382,14 @@ describe("media trigger network origin", () => {
     }
   });
 
-  it("returns only sanitized processing budget state when provider configuration is missing", async () => {
+  it("returns only sanitized processing, provider, and cost state when the provider key is missing", async () => {
     await withIsolatedTriggerDb(async (discoveryCalls) => {
       const previousToken = process.env.MEDIA_TRIGGER_TOKEN;
       const previousTavilyKey = process.env.TAVILY_API_KEY;
       const previousGeminiKey = process.env.GEMINI_API_KEY;
-      const previousPricingVersion = process.env.GEMINI_BATCH_PRICING_VERSION;
-      const previousCapabilityVersion = process.env.GEMINI_BATCH_CAPABILITY_VERSION;
       process.env.MEDIA_TRIGGER_TOKEN = "test-trigger-token";
       process.env.TAVILY_API_KEY = "tavily-provider-secret";
       delete process.env.GEMINI_API_KEY;
-      process.env.GEMINI_BATCH_PRICING_VERSION = GEMINI_BATCH_PRICING_VERSION;
-      process.env.GEMINI_BATCH_CAPABILITY_VERSION = GEMINI_BATCH_CAPABILITY_VERSION;
       try {
         const response = await handleRequest(
           request({
@@ -409,15 +403,17 @@ describe("media trigger network origin", () => {
           processing?: Record<string, unknown>;
         };
         expect(response.status).toBe(200);
+        // Discovery accepted no article, so the paused provider has nothing to hold.
         expect(body.processing).toEqual({
           runId: body.runId,
-          status: "waiting",
+          status: "completed",
           submitted: 0,
           completed: 0,
           outputs: { new: 0, reused: 0, replaced: 0, invalidated: 0, skipped: 0 },
-          chargedMicrousd: 0,
-          outstandingReservedMicrousd: 0,
-          stopReasons: ["missing_gemini_batch_transport"],
+          stopReasons: [],
+          queued: { gemini: 0 },
+          providers: { gemini: { provider: "gemini", paused: true, reason: "missing_key", pausedAt: expect.any(String), checkedAt: expect.anything() } },
+          cost: { reportingOnly: true, month: expect.any(String), providers: { gemini: { monthToDateMicrousd: 0, allTimeMicrousd: 0 } }, uncertain: 0 },
         });
         expect(discoveryCalls.length).toBeGreaterThan(0);
         expect(discoveryCalls.every((url) => url.startsWith("https://api.tavily.com/"))).toBe(true);
@@ -432,68 +428,6 @@ describe("media trigger network origin", () => {
         else process.env.TAVILY_API_KEY = previousTavilyKey;
         if (previousGeminiKey === undefined) delete process.env.GEMINI_API_KEY;
         else process.env.GEMINI_API_KEY = previousGeminiKey;
-        if (previousPricingVersion === undefined) delete process.env.GEMINI_BATCH_PRICING_VERSION;
-        else process.env.GEMINI_BATCH_PRICING_VERSION = previousPricingVersion;
-        if (previousCapabilityVersion === undefined) delete process.env.GEMINI_BATCH_CAPABILITY_VERSION;
-        else process.env.GEMINI_BATCH_CAPABILITY_VERSION = previousCapabilityVersion;
-      }
-    });
-  });
-
-  it("refuses paid processing without a confirmed capability and sanitizes provider state", async () => {
-    await withIsolatedTriggerDb(async (discoveryCalls) => {
-      const previousToken = process.env.MEDIA_TRIGGER_TOKEN;
-      const previousTavilyKey = process.env.TAVILY_API_KEY;
-      const previousGeminiKey = process.env.GEMINI_API_KEY;
-      const previousPricingVersion = process.env.GEMINI_BATCH_PRICING_VERSION;
-      const previousCapabilityVersion = process.env.GEMINI_BATCH_CAPABILITY_VERSION;
-      process.env.MEDIA_TRIGGER_TOKEN = "test-trigger-token";
-      process.env.TAVILY_API_KEY = "tavily-provider-secret";
-      process.env.GEMINI_API_KEY = "gemini-provider-secret";
-      process.env.GEMINI_BATCH_PRICING_VERSION = GEMINI_BATCH_PRICING_VERSION;
-      delete process.env.GEMINI_BATCH_CAPABILITY_VERSION;
-      try {
-        const response = await handleRequest(
-          request({
-            Authorization: "Bearer test-trigger-token",
-            "Content-Type": "application/json",
-          }, "{\"pass\":\"initial\",\"game\":\"cyberpunk-2077\"}"),
-          "127.0.0.1",
-        );
-        const body = await response.json() as {
-          runId: number;
-          processing?: Record<string, unknown>;
-        };
-        expect(response.status).toBe(200);
-        expect(body.processing).toMatchObject({
-          status: "waiting",
-          submitted: 0,
-          stopReasons: ["capability_unconfirmed"],
-        });
-        const db = await getDb();
-        const jobs = await db
-          .prepare("SELECT COUNT(*) AS count FROM media_processing_jobs WHERE run_id = ?")
-          .bind(body.runId)
-          .first<{ count: number }>();
-        expect(jobs?.count).toBe(0);
-        expect(discoveryCalls.length).toBeGreaterThan(0);
-        expect(discoveryCalls.every((url) => url.startsWith("https://api.tavily.com/"))).toBe(true);
-        expect(discoveryCalls.some((url) => url.includes("generativelanguage.googleapis.com"))).toBe(false);
-        const serialized = JSON.stringify(body);
-        expect(serialized).not.toContain("gemini-provider-secret");
-        expect(serialized).not.toContain("tavily-provider-secret");
-        expect(serialized).not.toContain("test-trigger-token");
-      } finally {
-        if (previousToken === undefined) delete process.env.MEDIA_TRIGGER_TOKEN;
-        else process.env.MEDIA_TRIGGER_TOKEN = previousToken;
-        if (previousTavilyKey === undefined) delete process.env.TAVILY_API_KEY;
-        else process.env.TAVILY_API_KEY = previousTavilyKey;
-        if (previousGeminiKey === undefined) delete process.env.GEMINI_API_KEY;
-        else process.env.GEMINI_API_KEY = previousGeminiKey;
-        if (previousPricingVersion === undefined) delete process.env.GEMINI_BATCH_PRICING_VERSION;
-        else process.env.GEMINI_BATCH_PRICING_VERSION = previousPricingVersion;
-        if (previousCapabilityVersion === undefined) delete process.env.GEMINI_BATCH_CAPABILITY_VERSION;
-        else process.env.GEMINI_BATCH_CAPABILITY_VERSION = previousCapabilityVersion;
       }
     });
   });

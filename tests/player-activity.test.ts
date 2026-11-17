@@ -4,8 +4,6 @@ import type { AppDatabase, AppPreparedStatement } from "../src/lib/db";
 import { applyMigrations } from "../src/lib/migrations";
 import { runIngestionTick, startIngestionScheduler, type IngestionCron } from "../workers/ingestion";
 import {
-  GEMINI_BATCH_CAPABILITY_VERSION,
-  GEMINI_BATCH_PRICING_VERSION,
 } from "../src/lib/media-processing";
 import { runDailyRollupJob } from "../workers/player-rollups";
 import { runPlayerCollectionTick } from "../workers/player-collector";
@@ -148,8 +146,6 @@ describe("Bun ingestion scheduling and player rollups", () => {
       anchorTime,
       customFetch,
       geminiApiKey: "test-gemini-key",
-      geminiPricingVersion: GEMINI_BATCH_PRICING_VERSION,
-      geminiCapabilityVersion: GEMINI_BATCH_CAPABILITY_VERSION,
     });
     const job = await db.prepare(
       "SELECT status FROM media_processing_jobs WHERE request_key = ?",

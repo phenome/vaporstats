@@ -1,8 +1,6 @@
 import { createHash } from "node:crypto";
 import { afterEach, describe, expect, test } from "bun:test";
 import {
-  GEMINI_BATCH_CAPABILITY_VERSION,
-  GEMINI_BATCH_PRICING_VERSION,
   advanceMediaProcessing,
   authorizeMediaProcessing,
   type ArticleFetch,
@@ -28,7 +26,6 @@ import {
   stableJson,
 } from "./support/media";
 
-const PAID = { pricingVersion: GEMINI_BATCH_PRICING_VERSION, capabilityVersion: GEMINI_BATCH_CAPABILITY_VERSION };
 const SUCCEEDED_USAGE = { inputTokens: 100, outputTokens: 20 };
 
 const cleanups: Array<() => void> = [];
@@ -140,8 +137,8 @@ async function processedGame(sourceCount = 1) {
   }
   transport.nextPolls.push({ state: "succeeded", output: overviewOutputForUrls(sourceUrls(database)), usage: SUCCEEDED_USAGE });
   const { articleFetch } = outletArticles();
-  await advanceMediaProcessing(database.db, { runId: firstRun, transport, articleFetch, now: new Date("2026-11-01T00:00:00.000Z"), ...PAID });
-  const settled = await advanceMediaProcessing(database.db, { runId: firstRun, transport, articleFetch, now: new Date("2026-11-01T00:01:00.000Z"), ...PAID });
+  await advanceMediaProcessing(database.db, { runId: firstRun, transport, articleFetch, now: new Date("2026-11-01T00:00:00.000Z") });
+  const settled = await advanceMediaProcessing(database.db, { runId: firstRun, transport, articleFetch, now: new Date("2026-11-01T00:01:00.000Z") });
   expect(settled.status).toBe("completed");
   return { database, transport, firstRun };
 }
@@ -155,7 +152,7 @@ describe("processing scope", () => {
     await authorizeMediaProcessing(database.db, rerun);
     const outlet = outletArticles();
 
-    const summary = await advanceMediaProcessing(database.db, { runId: rerun, transport, articleFetch: outlet.articleFetch, now: new Date("2026-11-02T00:00:00.000Z"), ...PAID });
+    const summary = await advanceMediaProcessing(database.db, { runId: rerun, transport, articleFetch: outlet.articleFetch, now: new Date("2026-11-02T00:00:00.000Z") });
 
     expect(outlet.fetched).toEqual([]);
     expect(transport.submissions.length).toBe(submissionsBefore);
@@ -173,7 +170,7 @@ describe("processing scope", () => {
     const outlet = outletArticles({ [changed!]: processingArticleHtml(CYBERPUNK).replace("flexible combat", "deliberate tactical combat") });
     transport.nextPolls.push({ state: "pending" });
 
-    const pending = await advanceMediaProcessing(database.db, { runId: correction, transport, articleFetch: outlet.articleFetch, now: new Date("2026-11-02T00:00:00.000Z"), ...PAID });
+    const pending = await advanceMediaProcessing(database.db, { runId: correction, transport, articleFetch: outlet.articleFetch, now: new Date("2026-11-02T00:00:00.000Z") });
 
     expect(outlet.fetched).toEqual([changed]);
     expect(pending.outputs.invalidated).toBe(2);
@@ -182,8 +179,8 @@ describe("processing scope", () => {
 
     transport.polls.set(`batches/test-${transport.submissions.length}`, { state: "succeeded", output: extractionOutput(), usage: SUCCEEDED_USAGE });
     transport.nextPolls.push({ state: "succeeded", output: overviewOutputForUrls([unchanged!, changed!]), usage: SUCCEEDED_USAGE });
-    await advanceMediaProcessing(database.db, { runId: correction, transport, articleFetch: outlet.articleFetch, now: new Date("2026-11-02T00:01:00.000Z"), ...PAID });
-    const rebuilt = await advanceMediaProcessing(database.db, { runId: correction, transport, articleFetch: outlet.articleFetch, now: new Date("2026-11-02T00:02:00.000Z"), ...PAID });
+    await advanceMediaProcessing(database.db, { runId: correction, transport, articleFetch: outlet.articleFetch, now: new Date("2026-11-02T00:01:00.000Z") });
+    const rebuilt = await advanceMediaProcessing(database.db, { runId: correction, transport, articleFetch: outlet.articleFetch, now: new Date("2026-11-02T00:02:00.000Z") });
 
     expect(rebuilt.status).toBe("completed");
     expect(rebuilt.outputs).toEqual({ new: 0, reused: 1, replaced: 2, invalidated: 2, skipped: 0 });
@@ -198,9 +195,9 @@ describe("processing scope", () => {
     const submissionsBefore = transport.submissions.length;
 
     const unaffected = outletArticles();
-    const rerun = await advanceMediaProcessing(database.db, { runId: await authorizeRun(database, `${change}-rerun`), transport, articleFetch: unaffected.articleFetch, now: new Date("2026-11-02T00:00:00.000Z"), ...PAID });
+    const rerun = await advanceMediaProcessing(database.db, { runId: await authorizeRun(database, `${change}-rerun`), transport, articleFetch: unaffected.articleFetch, now: new Date("2026-11-02T00:00:00.000Z") });
     const affected = outletArticles();
-    const refetch = await advanceMediaProcessing(database.db, { runId: await authorizeRun(database, `${change}-affected`, sourceIds(database)), transport, articleFetch: affected.articleFetch, now: new Date("2026-11-02T00:01:00.000Z"), ...PAID });
+    const refetch = await advanceMediaProcessing(database.db, { runId: await authorizeRun(database, `${change}-affected`, sourceIds(database)), transport, articleFetch: affected.articleFetch, now: new Date("2026-11-02T00:01:00.000Z") });
 
     expect(unaffected.fetched).toEqual([]);
     expect(affected.fetched).toEqual(sourceUrls(database));
@@ -219,9 +216,9 @@ describe("processing scope", () => {
     database.native.prepare("UPDATE media_sources SET updated_at = '2026-11-01T12:00:00.000Z'").run();
 
     const unaffected = outletArticles();
-    const rerun = await advanceMediaProcessing(database.db, { runId: await authorizeRun(database, "updated-rerun"), transport, articleFetch: unaffected.articleFetch, now: new Date("2026-11-02T00:00:00.000Z"), ...PAID });
+    const rerun = await advanceMediaProcessing(database.db, { runId: await authorizeRun(database, "updated-rerun"), transport, articleFetch: unaffected.articleFetch, now: new Date("2026-11-02T00:00:00.000Z") });
     const affected = outletArticles();
-    const refetch = await advanceMediaProcessing(database.db, { runId: await authorizeRun(database, "updated-affected", sourceIds(database)), transport, articleFetch: affected.articleFetch, now: new Date("2026-11-02T00:01:00.000Z"), ...PAID });
+    const refetch = await advanceMediaProcessing(database.db, { runId: await authorizeRun(database, "updated-affected", sourceIds(database)), transport, articleFetch: affected.articleFetch, now: new Date("2026-11-02T00:01:00.000Z") });
 
     expect(unaffected.fetched).toEqual([]);
     expect(affected.fetched).toEqual(sourceUrls(database));
@@ -245,9 +242,9 @@ describe("processing scope", () => {
       { state: "succeeded", output: overviewOutputForUrls([reusedUrl!, newUrl]), usage: SUCCEEDED_USAGE },
     );
 
-    const first = await advanceMediaProcessing(database.db, { runId, transport, articleFetch: outlet.articleFetch, now: new Date("2026-11-02T00:00:00.000Z"), ...PAID });
+    const first = await advanceMediaProcessing(database.db, { runId, transport, articleFetch: outlet.articleFetch, now: new Date("2026-11-02T00:00:00.000Z") });
     const served = await getMediaOverview(database.db, CYBERPUNK, { includeUnpublished: true });
-    const rebuilt = await advanceMediaProcessing(database.db, { runId, transport, articleFetch: outlet.articleFetch, now: new Date("2026-11-02T00:01:00.000Z"), ...PAID });
+    const rebuilt = await advanceMediaProcessing(database.db, { runId, transport, articleFetch: outlet.articleFetch, now: new Date("2026-11-02T00:01:00.000Z") });
 
     expect(outlet.fetched).toEqual([newUrl]);
     expect(first.status).toBe("waiting");
@@ -258,23 +255,45 @@ describe("processing scope", () => {
     expect((await getMediaOverview(database.db, CYBERPUNK, { includeUnpublished: true }))?.statements[0]?.sourceUrls).toEqual([reusedUrl, newUrl]);
   });
 
-  test("a failed token count discards the article text, and only an affected set retries the source", async () => {
+  test("a token count that throws holds no article text and leaves the extraction queued for the run to retry", async () => {
     const database = unprocessedGame();
+    const runId = await authorizeRun(database, "count-failure");
     const failing = new ControlledGeminiTransport();
     failing.countTokens = async () => { throw new Error("token counting unavailable"); };
-    const first = await advanceMediaProcessing(database.db, { runId: await authorizeRun(database, "count-failure"), transport: failing, articleFetch: outletArticles().articleFetch, now: new Date("2026-11-02T00:00:00.000Z"), ...PAID });
+    const first = await advanceMediaProcessing(database.db, { runId, transport: failing, articleFetch: outletArticles().articleFetch, now: new Date("2026-11-02T00:00:00.000Z") });
     const retained = database.native.query<{ processing_content: string | null }, []>("SELECT processing_content FROM media_sources").get();
 
-    expect(first.stopReasons[0]).toStartWith("count_tokens:");
-    expect(first.outputs.skipped).toBe(1);
+    expect(first.status).toBe("waiting");
+    expect(first.stopReasons).toEqual(["transient_provider_failure"]);
+    expect(first.outputs.skipped).toBe(0);
     expect(retained?.processing_content).toBeNull();
 
     const transport = new ControlledGeminiTransport();
     transport.nextPolls.push({ state: "pending" });
+    const outlet = outletArticles();
+    const early = await advanceMediaProcessing(database.db, { runId, transport, articleFetch: outlet.articleFetch, now: new Date("2026-11-02T00:10:00.000Z") });
+    const retry = await advanceMediaProcessing(database.db, { runId, transport, articleFetch: outlet.articleFetch, now: new Date("2026-11-02T00:15:00.000Z") });
+
+    expect(early.submitted).toBe(0);
+    expect(outlet.fetched).toEqual(sourceUrls(database));
+    expect(retry.submitted).toBe(1);
+  });
+
+  test("an extraction refused by its token cap is retried only within an affected set", async () => {
+    const database = unprocessedGame();
+    const capped = new ControlledGeminiTransport();
+    refuseRequests(capped, () => true, "token cap");
+    const first = await advanceMediaProcessing(database.db, { runId: await authorizeRun(database, "cap-refusal"), transport: capped, articleFetch: outletArticles().articleFetch, now: new Date("2026-11-02T00:00:00.000Z") });
+
+    expect(first.stopReasons).toEqual(["input_token_cap"]);
+    expect(first.outputs.skipped).toBe(1);
+
+    const transport = new ControlledGeminiTransport();
+    transport.nextPolls.push({ state: "pending" });
     const unaffected = outletArticles();
-    await advanceMediaProcessing(database.db, { runId: await authorizeRun(database, "count-rerun"), transport, articleFetch: unaffected.articleFetch, now: new Date("2026-11-02T00:01:00.000Z"), ...PAID });
+    await advanceMediaProcessing(database.db, { runId: await authorizeRun(database, "cap-rerun"), transport, articleFetch: unaffected.articleFetch, now: new Date("2026-11-02T00:01:00.000Z") });
     const affected = outletArticles();
-    const retry = await advanceMediaProcessing(database.db, { runId: await authorizeRun(database, "count-retry", sourceIds(database)), transport, articleFetch: affected.articleFetch, now: new Date("2026-11-02T00:02:00.000Z"), ...PAID });
+    const retry = await advanceMediaProcessing(database.db, { runId: await authorizeRun(database, "cap-retry", sourceIds(database)), transport, articleFetch: affected.articleFetch, now: new Date("2026-11-02T00:02:00.000Z") });
 
     expect(unaffected.fetched).toEqual([]);
     expect(affected.fetched).toEqual(sourceUrls(database));
@@ -290,12 +309,12 @@ describe("processing scope", () => {
       await unavailable.articleFetch(input);
       return new Response("unavailable", { status: 503 });
     };
-    const first = await advanceMediaProcessing(database.db, { runId: await authorizeRun(database, "fetch-failure"), transport, articleFetch: failedFetch, now: new Date("2026-11-02T00:00:00.000Z"), ...PAID });
+    const first = await advanceMediaProcessing(database.db, { runId: await authorizeRun(database, "fetch-failure"), transport, articleFetch: failedFetch, now: new Date("2026-11-02T00:00:00.000Z") });
     const unaffected = outletArticles();
-    const rerun = await advanceMediaProcessing(database.db, { runId: await authorizeRun(database, "fetch-rerun"), transport, articleFetch: unaffected.articleFetch, now: new Date("2026-11-02T00:01:00.000Z"), ...PAID });
+    const rerun = await advanceMediaProcessing(database.db, { runId: await authorizeRun(database, "fetch-rerun"), transport, articleFetch: unaffected.articleFetch, now: new Date("2026-11-02T00:01:00.000Z") });
     transport.nextPolls.push({ state: "pending" });
     const affected = outletArticles();
-    const retry = await advanceMediaProcessing(database.db, { runId: await authorizeRun(database, "fetch-retry", sourceIds(database)), transport, articleFetch: affected.articleFetch, now: new Date("2026-11-02T00:02:00.000Z"), ...PAID });
+    const retry = await advanceMediaProcessing(database.db, { runId: await authorizeRun(database, "fetch-retry", sourceIds(database)), transport, articleFetch: affected.articleFetch, now: new Date("2026-11-02T00:02:00.000Z") });
 
     expect(unavailable.fetched).toEqual([url]);
     expect(first.outputs.skipped).toBe(1);
@@ -311,17 +330,17 @@ describe("processing scope", () => {
     const runId = await authorizeRun(database, "restart");
     const transport = new ControlledGeminiTransport();
     const outlet = outletArticles();
-    await advanceMediaProcessing(database.db, { runId, transport, articleFetch: outlet.articleFetch, now: new Date("2026-11-02T00:00:00.000Z"), ...PAID });
+    await advanceMediaProcessing(database.db, { runId, transport, articleFetch: outlet.articleFetch, now: new Date("2026-11-02T00:00:00.000Z") });
     expect(transport.submissions).toHaveLength(2);
 
     let { db } = database.reopen();
     for (const name of ["batches/test-1", "batches/test-2"]) transport.polls.set(name, { state: "succeeded", output: extractionOutput(), usage: SUCCEEDED_USAGE });
     transport.nextPolls.push({ state: "succeeded", output: overviewOutputForUrls(sourceUrls(database)), usage: SUCCEEDED_USAGE });
-    await advanceMediaProcessing(db, { runId, transport, articleFetch: outlet.articleFetch, now: new Date("2026-11-02T00:01:00.000Z"), ...PAID });
+    await advanceMediaProcessing(db, { runId, transport, articleFetch: outlet.articleFetch, now: new Date("2026-11-02T00:01:00.000Z") });
     ({ db } = database.reopen());
-    const resumed = await advanceMediaProcessing(db, { runId, transport, articleFetch: outlet.articleFetch, now: new Date("2026-11-02T00:02:00.000Z"), ...PAID });
+    const resumed = await advanceMediaProcessing(db, { runId, transport, articleFetch: outlet.articleFetch, now: new Date("2026-11-02T00:02:00.000Z") });
     ({ db } = database.reopen());
-    const recorded = await advanceMediaProcessing(db, { runId, transport, articleFetch: outlet.articleFetch, now: new Date("2026-11-02T00:03:00.000Z"), ...PAID });
+    const recorded = await advanceMediaProcessing(db, { runId, transport, articleFetch: outlet.articleFetch, now: new Date("2026-11-02T00:03:00.000Z") });
 
     expect(outlet.fetched).toEqual(sourceUrls(database));
     expect(transport.submissions).toHaveLength(3);
@@ -336,9 +355,9 @@ describe("processing scope", () => {
     const transport = new ControlledGeminiTransport();
     const outlet = outletArticles();
 
-    await expect(advanceMediaProcessing(crashingOnWrite(database.db, /^UPDATE media_sources SET .*processing_content = \?/), { runId, transport, articleFetch: outlet.articleFetch, now: new Date("2026-11-02T00:00:00.000Z"), ...PAID })).rejects.toThrow("process stopped");
+    await expect(advanceMediaProcessing(crashingOnWrite(database.db, /^UPDATE media_sources SET normalized_content_hash = \?/), { runId, transport, articleFetch: outlet.articleFetch, now: new Date("2026-11-02T00:00:00.000Z") })).rejects.toThrow("process stopped");
     const { db } = database.reopen();
-    const resumed = await advanceMediaProcessing(db, { runId, transport, articleFetch: outlet.articleFetch, now: new Date("2026-11-02T00:01:00.000Z"), ...PAID });
+    const resumed = await advanceMediaProcessing(db, { runId, transport, articleFetch: outlet.articleFetch, now: new Date("2026-11-02T00:01:00.000Z") });
 
     expect(outlet.fetched).toEqual([...sourceUrls(database), ...sourceUrls(database)]);
     expect(resumed.submitted).toBe(1);
@@ -351,9 +370,9 @@ describe("processing scope", () => {
     const transport = new ControlledGeminiTransport();
     transport.nextPolls.push({ state: "failed", error: "extraction failed", usage: SUCCEEDED_USAGE });
 
-    await advanceMediaProcessing(crashingOnWrite(database.db, /^UPDATE media_processing_authorizations SET skipped_outputs/), { runId, transport, articleFetch: outletArticles().articleFetch, now: new Date("2026-11-02T00:00:00.000Z"), ...PAID });
+    await expect(advanceMediaProcessing(crashingOnWrite(database.db, /^UPDATE media_processing_authorizations SET skipped_outputs/), { runId, transport, articleFetch: outletArticles().articleFetch, now: new Date("2026-11-02T00:00:00.000Z") })).rejects.toThrow("process stopped");
     const { db } = database.reopen();
-    const resumed = await advanceMediaProcessing(db, { runId, transport, articleFetch: outletArticles().articleFetch, now: new Date("2026-11-02T00:01:00.000Z"), ...PAID });
+    const resumed = await advanceMediaProcessing(db, { runId, transport, articleFetch: outletArticles().articleFetch, now: new Date("2026-11-02T00:01:00.000Z") });
 
     expect(resumed.outputs).toEqual({ new: 0, reused: 0, replaced: 0, invalidated: 0, skipped: 1 });
   });
@@ -362,58 +381,57 @@ describe("processing scope", () => {
     const database = unprocessedGame();
     const runId = await authorizeRun(database, "overview-refused");
     const transport = new ControlledGeminiTransport();
-    const synthesisCounts = refuseRequests(transport, database.native, (_model, request) => JSON.stringify(request).includes("Synthesize"), refusal, CYBERPUNK);
+    const synthesisCounts = refuseRequests(transport, (_model, request) => JSON.stringify(request).includes("Synthesize"), refusal);
     transport.nextPolls.push({ state: "succeeded", output: extractionOutput(), usage: SUCCEEDED_USAGE });
 
-    const refused = await advanceMediaProcessing(database.db, { runId, transport, articleFetch: outletArticles().articleFetch, now: new Date("2026-11-02T00:00:00.000Z"), ...PAID });
-    const resumed = await advanceMediaProcessing(database.db, { runId, transport, articleFetch: outletArticles().articleFetch, now: new Date("2026-11-02T00:01:00.000Z"), ...PAID });
+    const refused = await advanceMediaProcessing(database.db, { runId, transport, articleFetch: outletArticles().articleFetch, now: new Date("2026-11-02T00:00:00.000Z") });
+    const resumed = await advanceMediaProcessing(database.db, { runId, transport, articleFetch: outletArticles().articleFetch, now: new Date("2026-11-02T00:01:00.000Z") });
 
     expect(refused.outputs).toEqual({ new: 1, reused: 0, replaced: 0, invalidated: 0, skipped: 1 });
     expect(synthesisCounts()).toBe(1);
     expect(resumed.outputs).toEqual({ new: 1, reused: 0, replaced: 0, invalidated: 0, skipped: 1 });
   });
 
-  test("an Overview whose token count throws is retried on the run's next advance, not refused", async () => {
+  test("an Overview whose token count throws stays queued and is retried after its backoff, not refused", async () => {
     const database = unprocessedGame();
     const runId = await authorizeRun(database, "overview-count-throws");
     const transport = new ControlledGeminiTransport();
-    const synthesisCounts = refuseRequests(transport, database.native, (_model, request) => JSON.stringify(request).includes("Synthesize"), "token count", CYBERPUNK);
+    const synthesisCounts = refuseRequests(transport, (_model, request) => JSON.stringify(request).includes("Synthesize"), "token count");
     transport.nextPolls.push({ state: "succeeded", output: extractionOutput(), usage: SUCCEEDED_USAGE });
 
-    const failed = await advanceMediaProcessing(database.db, { runId, transport, articleFetch: outletArticles().articleFetch, now: new Date("2026-11-02T00:00:00.000Z"), ...PAID });
-    const stillFailing = await advanceMediaProcessing(database.db, { runId, transport, articleFetch: outletArticles().articleFetch, now: new Date("2026-11-02T00:01:00.000Z"), ...PAID });
+    const failed = await advanceMediaProcessing(database.db, { runId, transport, articleFetch: outletArticles().articleFetch, now: new Date("2026-11-02T00:00:00.000Z") });
+    const stillFailing = await advanceMediaProcessing(database.db, { runId, transport, articleFetch: outletArticles().articleFetch, now: new Date("2026-11-02T00:15:00.000Z") });
     delete (transport as Partial<ControlledGeminiTransport>).countTokens;
     transport.nextPolls.push({ state: "succeeded", output: overviewOutputForUrls(sourceUrls(database)), usage: SUCCEEDED_USAGE });
-    const retried = await advanceMediaProcessing(database.db, { runId, transport, articleFetch: outletArticles().articleFetch, now: new Date("2026-11-02T00:02:00.000Z"), ...PAID });
-    const settled = await advanceMediaProcessing(database.db, { runId, transport, articleFetch: outletArticles().articleFetch, now: new Date("2026-11-02T00:03:00.000Z"), ...PAID });
+    const backingOff = await advanceMediaProcessing(database.db, { runId, transport, articleFetch: outletArticles().articleFetch, now: new Date("2026-11-02T00:30:00.000Z") });
+    const retried = await advanceMediaProcessing(database.db, { runId, transport, articleFetch: outletArticles().articleFetch, now: new Date("2026-11-02T00:45:00.000Z") });
+    const settled = await advanceMediaProcessing(database.db, { runId, transport, articleFetch: outletArticles().articleFetch, now: new Date("2026-11-02T01:00:00.000Z") });
 
     expect(synthesisCounts()).toBe(2);
     for (const summary of [failed, stillFailing]) {
       expect(summary.status).toBe("waiting");
-      expect(summary.stopReasons).toEqual(["count_tokens:token counting unavailable"]);
+      expect(summary.stopReasons).toEqual(["transient_provider_failure"]);
       expect(summary.outputs.skipped).toBe(0);
     }
+    expect(backingOff.submitted).toBe(0);
     expect(retried.submitted).toBe(1);
     expect(settled.status).toBe("completed");
     expect(settled.outputs).toEqual({ new: 2, reused: 0, replaced: 0, invalidated: 0, skipped: 0 });
     expect(await getMediaOverview(database.db, CYBERPUNK, { includeUnpublished: true })).not.toBeNull();
   });
 
-  test("a run that completes keeps the reason a game was left without an Overview", async () => {
+  test("a run that stops keeps the reason a game was left without an Overview", async () => {
     const database = unprocessedGame();
     const runId = await authorizeRun(database, "kept-reason");
     const transport = new ControlledGeminiTransport();
-    refuseRequests(transport, database.native, () => true, "token count", CYBERPUNK);
+    refuseRequests(transport, () => true, "token cap");
 
-    const stopped = await advanceMediaProcessing(database.db, { runId, transport, articleFetch: outletArticles().articleFetch, now: new Date("2026-11-02T00:00:00.000Z"), ...PAID });
-    const unconfirmed = await advanceMediaProcessing(database.db, { runId, transport, articleFetch: outletArticles().articleFetch, now: new Date("2026-11-02T00:01:00.000Z") });
-    const completed = await advanceMediaProcessing(database.db, { runId, transport, articleFetch: outletArticles().articleFetch, now: new Date("2026-11-02T00:02:00.000Z"), ...PAID });
+    const stopped = await advanceMediaProcessing(database.db, { runId, transport, articleFetch: outletArticles().articleFetch, now: new Date("2026-11-02T00:00:00.000Z") });
+    const later = await advanceMediaProcessing(database.db, { runId, transport, articleFetch: outletArticles().articleFetch, now: new Date("2026-11-02T00:15:00.000Z") });
 
-    expect(stopped.status).toBe("waiting");
-    expect(stopped.stopReasons).toEqual(["count_tokens:token counting unavailable"]);
-    expect(unconfirmed.stopReasons).toEqual(["pricing_unconfirmed", "count_tokens:token counting unavailable"]);
-    expect(completed.status).toBe("completed");
-    expect(completed.stopReasons).toEqual(["count_tokens:token counting unavailable"]);
+    expect(stopped.status).toBe("stopped");
+    expect(stopped.stopReasons).toEqual(["input_token_cap"]);
+    expect(later.stopReasons).toEqual(["input_token_cap"]);
   });
 
   test.each([
@@ -425,8 +443,8 @@ describe("processing scope", () => {
     const transport = new ControlledGeminiTransport();
     const articleFetch: ArticleFetch = async () => (typeof page === "string" ? page : page.clone());
 
-    const first = await advanceMediaProcessing(database.db, { runId, transport, articleFetch, now: new Date("2026-11-02T00:00:00.000Z"), ...PAID });
-    const settled = await advanceMediaProcessing(database.db, { runId, transport, articleFetch, now: new Date("2026-11-02T00:01:00.000Z"), ...PAID });
+    const first = await advanceMediaProcessing(database.db, { runId, transport, articleFetch, now: new Date("2026-11-02T00:00:00.000Z") });
+    const settled = await advanceMediaProcessing(database.db, { runId, transport, articleFetch, now: new Date("2026-11-02T00:01:00.000Z") });
 
     for (const summary of [first, settled]) {
       expect(summary.status).toBe("completed");
@@ -435,24 +453,20 @@ describe("processing scope", () => {
     expect(first.outputs.skipped).toBe(1);
   });
 
-  test("a run that finishes discards text it retained for work it never submitted", async () => {
+  test("article text the retired flow retained is discarded when the run's queue takes the source", async () => {
     const database = unprocessedGame();
-    seedApps(database.native, [BALDURS_GATE]);
-    const runId = insertCompletedRun(database.native, "initial:retained-text:test", [BALDURS_GATE, CYBERPUNK]);
-    await authorizeMediaProcessing(database.db, runId);
-    const transport = new ControlledGeminiTransport();
-    await expect(advanceMediaProcessing(crashingOnWrite(database.db, /^INSERT INTO media_processing_jobs/), { runId, transport, articleFetch: outletArticles().articleFetch, now: new Date("2026-11-02T00:00:00.000Z"), ...PAID })).rejects.toThrow("process stopped");
+    const runId = await authorizeRun(database, "retained-text");
+    database.native.prepare("UPDATE media_sources SET processing_run_id = ?, processing_content = 'text retained before the paid-work queue'").run(runId);
     const retainedText = () => database.native.query<{ count: number }, []>("SELECT COUNT(*) AS count FROM media_sources WHERE processing_content IS NOT NULL").get()?.count;
-    expect(retainedText()).toBe(1);
+    const transport = new ControlledGeminiTransport();
+    transport.nextPolls.push({ state: "pending" });
+    const outlet = outletArticles();
 
-    const { db } = database.reopen();
-    insertSources(database.native, BALDURS_GATE, "initial", 1);
-    refuseRequests(transport, database.native, () => true, "allowance", BALDURS_GATE);
-    const finished = await advanceMediaProcessing(db, { runId, transport, articleFetch: outletArticles().articleFetch, now: new Date("2026-11-02T00:01:00.000Z"), ...PAID });
+    const resumed = await advanceMediaProcessing(database.db, { runId, transport, articleFetch: outlet.articleFetch, now: new Date("2026-11-02T00:00:00.000Z") });
 
-    expect(finished.status).toBe("stopped");
-    expect(finished.stopReasons).toContain("lifetime_budget");
     expect(retainedText()).toBe(0);
+    expect(outlet.fetched).toEqual(sourceUrls(database));
+    expect(resumed.submitted).toBe(1);
   });
 
   test("an affected set accepts only distinct sources of the run's games and is fixed once authorized", async () => {
@@ -470,9 +484,9 @@ describe("processing scope", () => {
   test.each<Refusal>([...DEFINITE_REFUSALS])("a game whose Overview an earlier run refused by its %s gets Overview work only from a run whose affected set covers it", async (refusal) => {
     const database = unprocessedGame();
     const transport = new ControlledGeminiTransport();
-    refuseRequests(transport, database.native, (_model, request) => JSON.stringify(request).includes("Synthesize"), refusal, CYBERPUNK);
+    refuseRequests(transport, (_model, request) => JSON.stringify(request).includes("Synthesize"), refusal);
     transport.nextPolls.push({ state: "succeeded", output: extractionOutput(), usage: SUCCEEDED_USAGE });
-    await advanceMediaProcessing(database.db, { runId: await authorizeRun(database, "unbuilt"), transport, articleFetch: outletArticles().articleFetch, now: new Date("2026-11-02T00:00:00.000Z"), ...PAID });
+    await advanceMediaProcessing(database.db, { runId: await authorizeRun(database, "unbuilt"), transport, articleFetch: outletArticles().articleFetch, now: new Date("2026-11-02T00:00:00.000Z") });
     expect(await getMediaOverview(database.db, CYBERPUNK, { includeUnpublished: true })).toBeNull();
     delete (transport as Partial<ControlledGeminiTransport>).countTokens;
     // The competing reservation that used the allowance has since been released.
@@ -481,7 +495,7 @@ describe("processing scope", () => {
     const submissionsBefore = transport.submissions.length;
 
     const unaffected = outletArticles();
-    const rerun = await advanceMediaProcessing(database.db, { runId: await authorizeRun(database, "unbuilt-rerun"), transport, articleFetch: unaffected.articleFetch, now: new Date("2026-11-02T00:01:00.000Z"), ...PAID });
+    const rerun = await advanceMediaProcessing(database.db, { runId: await authorizeRun(database, "unbuilt-rerun"), transport, articleFetch: unaffected.articleFetch, now: new Date("2026-11-02T00:01:00.000Z") });
 
     expect(unaffected.fetched).toEqual([]);
     expect(transport.counts.length).toBe(countsBefore);
@@ -492,8 +506,8 @@ describe("processing scope", () => {
     const affected = outletArticles();
     const runId = await authorizeRun(database, "unbuilt-affected", sourceIds(database));
     transport.nextPolls.push({ state: "succeeded", output: overviewOutputForUrls(sourceUrls(database)), usage: SUCCEEDED_USAGE });
-    const rebuilt = await advanceMediaProcessing(database.db, { runId, transport, articleFetch: affected.articleFetch, now: new Date("2026-11-02T00:02:00.000Z"), ...PAID });
-    const settled = await advanceMediaProcessing(database.db, { runId, transport, articleFetch: affected.articleFetch, now: new Date("2026-11-02T00:03:00.000Z"), ...PAID });
+    const rebuilt = await advanceMediaProcessing(database.db, { runId, transport, articleFetch: affected.articleFetch, now: new Date("2026-11-02T00:02:00.000Z") });
+    const settled = await advanceMediaProcessing(database.db, { runId, transport, articleFetch: affected.articleFetch, now: new Date("2026-11-02T00:03:00.000Z") });
 
     expect(affected.fetched).toEqual(sourceUrls(database));
     expect(rebuilt.submitted).toBe(1);
@@ -511,19 +525,19 @@ describe("processing scope", () => {
       { state: "failed", error: "synthesis failed", usage: SUCCEEDED_USAGE },
     );
     const firstRun = await authorizeRun(database, "overview-failed");
-    await advanceMediaProcessing(database.db, { runId: firstRun, transport, articleFetch: outletArticles().articleFetch, now: new Date("2026-11-02T00:00:00.000Z"), ...PAID });
-    const failed = await advanceMediaProcessing(database.db, { runId: firstRun, transport, articleFetch: outletArticles().articleFetch, now: new Date("2026-11-02T00:01:00.000Z"), ...PAID });
+    await advanceMediaProcessing(database.db, { runId: firstRun, transport, articleFetch: outletArticles().articleFetch, now: new Date("2026-11-02T00:00:00.000Z") });
+    const failed = await advanceMediaProcessing(database.db, { runId: firstRun, transport, articleFetch: outletArticles().articleFetch, now: new Date("2026-11-02T00:01:00.000Z") });
     expect(failed.failed).toBe(1);
     expect(await getMediaOverview(database.db, CYBERPUNK, { includeUnpublished: true })).toBeNull();
     const submissionsBefore = transport.submissions.length;
 
-    const rerun = await advanceMediaProcessing(database.db, { runId: await authorizeRun(database, "overview-failed-rerun"), transport, articleFetch: outletArticles().articleFetch, now: new Date("2026-11-02T00:02:00.000Z"), ...PAID });
+    const rerun = await advanceMediaProcessing(database.db, { runId: await authorizeRun(database, "overview-failed-rerun"), transport, articleFetch: outletArticles().articleFetch, now: new Date("2026-11-02T00:02:00.000Z") });
     expect(rerun.submitted).toBe(0);
 
     const runId = await authorizeRun(database, "overview-failed-affected", sourceIds(database));
     transport.nextPolls.push({ state: "succeeded", output: overviewOutputForUrls(sourceUrls(database)), usage: SUCCEEDED_USAGE });
-    const retried = await advanceMediaProcessing(database.db, { runId, transport, articleFetch: outletArticles().articleFetch, now: new Date("2026-11-02T00:03:00.000Z"), ...PAID });
-    const settled = await advanceMediaProcessing(database.db, { runId, transport, articleFetch: outletArticles().articleFetch, now: new Date("2026-11-02T00:04:00.000Z"), ...PAID });
+    const retried = await advanceMediaProcessing(database.db, { runId, transport, articleFetch: outletArticles().articleFetch, now: new Date("2026-11-02T00:03:00.000Z") });
+    const settled = await advanceMediaProcessing(database.db, { runId, transport, articleFetch: outletArticles().articleFetch, now: new Date("2026-11-02T00:04:00.000Z") });
 
     expect(retried.submitted).toBe(1);
     expect(transport.submissions.length).toBe(submissionsBefore + 1);
@@ -542,12 +556,12 @@ describe("processing scope", () => {
     );
     const correction = await authorizeRun(database, "tactical", sourceIds(database));
     for (const minute of [0, 1]) {
-      await advanceMediaProcessing(database.db, { runId: correction, transport, articleFetch: outletArticles({ [url!]: corrected }).articleFetch, now: new Date(`2026-11-02T00:0${minute}:00.000Z`), ...PAID });
+      await advanceMediaProcessing(database.db, { runId: correction, transport, articleFetch: outletArticles({ [url!]: corrected }).articleFetch, now: new Date(`2026-11-02T00:0${minute}:00.000Z`) });
     }
     expect(await gamesTagged(database, "tactical depth")).toEqual([CYBERPUNK]);
     const submissionsBefore = transport.submissions.length;
 
-    const reverted = await advanceMediaProcessing(database.db, { runId: await authorizeRun(database, "reverted", sourceIds(database)), transport, articleFetch: outletArticles({ [url!]: original }).articleFetch, now: new Date("2026-11-02T00:02:00.000Z"), ...PAID });
+    const reverted = await advanceMediaProcessing(database.db, { runId: await authorizeRun(database, "reverted", sourceIds(database)), transport, articleFetch: outletArticles({ [url!]: original }).articleFetch, now: new Date("2026-11-02T00:02:00.000Z") });
 
     expect(reverted.status).toBe("completed");
     expect(transport.submissions.length).toBe(submissionsBefore);
@@ -560,10 +574,10 @@ describe("processing scope", () => {
     const database = unprocessedGame();
     const transport = new ControlledGeminiTransport();
     transport.nextPolls.push({ state: "failed", error: "extraction failed", usage: SUCCEEDED_USAGE });
-    const first = await advanceMediaProcessing(database.db, { runId: await authorizeRun(database, "extraction-failure"), transport, articleFetch: outletArticles().articleFetch, now: new Date("2026-11-02T00:00:00.000Z"), ...PAID });
-    const rerun = await advanceMediaProcessing(database.db, { runId: await authorizeRun(database, "extraction-rerun"), transport, articleFetch: outletArticles().articleFetch, now: new Date("2026-11-02T00:01:00.000Z"), ...PAID });
+    const first = await advanceMediaProcessing(database.db, { runId: await authorizeRun(database, "extraction-failure"), transport, articleFetch: outletArticles().articleFetch, now: new Date("2026-11-02T00:00:00.000Z") });
+    const rerun = await advanceMediaProcessing(database.db, { runId: await authorizeRun(database, "extraction-rerun"), transport, articleFetch: outletArticles().articleFetch, now: new Date("2026-11-02T00:01:00.000Z") });
     transport.nextPolls.push({ state: "pending" });
-    const retry = await advanceMediaProcessing(database.db, { runId: await authorizeRun(database, "extraction-retry", sourceIds(database)), transport, articleFetch: outletArticles().articleFetch, now: new Date("2026-11-02T00:02:00.000Z"), ...PAID });
+    const retry = await advanceMediaProcessing(database.db, { runId: await authorizeRun(database, "extraction-retry", sourceIds(database)), transport, articleFetch: outletArticles().articleFetch, now: new Date("2026-11-02T00:02:00.000Z") });
 
     expect(first.outputs.skipped).toBe(1);
     expect(rerun.submitted).toBe(0);

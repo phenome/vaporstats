@@ -3,8 +3,6 @@ import { authorizeMediaRun, MEDIA_OUTLETS, runAuthorizedMediaDiscovery, type Med
 import {
   advanceMediaProcessing,
   authorizeMediaProcessing,
-  GEMINI_BATCH_CAPABILITY_VERSION,
-  GEMINI_BATCH_PRICING_VERSION,
 } from "../src/lib/media-processing";
 import { reserveOutletAttempt } from "../src/lib/media-outlet-access";
 import { openTestDatabase, type TestDatabase } from "./support/db";
@@ -413,8 +411,6 @@ async function processingRunFor(database: TestDatabase, games: readonly number[]
     transport,
     articleFetch: async (url) => { fetched.push(url); return respond(url); },
     now,
-    pricingVersion: GEMINI_BATCH_PRICING_VERSION,
-    capabilityVersion: GEMINI_BATCH_CAPABILITY_VERSION,
   });
   return { runId, fetched, advance };
 }
@@ -531,21 +527,6 @@ describe("processing limits across passes", () => {
     const recorded = database.native.query<{ stop_reason: string | null }, [number]>("SELECT stop_reason FROM media_processing_authorizations WHERE run_id = ?").get(runId)?.stop_reason ?? "";
     expect(recorded).toContain("IGN:fetch_http_403");
     expect(recorded).toContain("Eurogamer:fetch_http_401");
-  });
-
-  test("a later run's processing draws on the lifetime allowance the initial pass already charged", async () => {
-    const database = fixture();
-    const initialRunId = insertCompletedRun(database.native, "initial:charged", [CYBERPUNK]);
-    database.native.prepare("INSERT INTO media_processing_jobs (run_id, stage, appid, request_key, input_identity, model, config_version, max_input_tokens, max_output_tokens, reserved_microusd, charged_microusd, reservation_active, status) VALUES (?, 'extraction', ?, 'initial-charged', 'initial-input', 'model', 'config', 1, 1, 4999999, 4999999, 0, 'succeeded')").run(initialRunId, CYBERPUNK);
-    insertSources(database.native, CYBERPUNK, "later", 1, EUROGAMER);
-    const { fetched, advance } = await processingRun(database);
-
-    const summary = await advance(DAY_ONE);
-
-    expect(fetched).toHaveLength(1);
-    expect(summary.submitted).toBe(0);
-    expect(summary.chargedMicrousd).toBe(4999999);
-    expect(summary.stopReasons).toContain("lifetime_budget");
   });
 
   test("an outlet that denied a discovery fetch is not contacted again by later processing, which keeps the original reason", async () => {

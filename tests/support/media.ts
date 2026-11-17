@@ -107,41 +107,33 @@ export class ControlledGeminiTransport implements GeminiBatchTransport {
   }
 }
 
-/** Key-sorted JSON, matching how processing input identities serialize values. */
-/** Ways a request can be refused before submission. */
-export const REFUSALS = ["token count", "token cap", "allowance"] as const;
+/** Ways a request's token count can stop it before submission. */
+export const REFUSALS = ["token count", "token cap"] as const;
 export type Refusal = (typeof REFUSALS)[number];
 /** Refusals that are final for the run; a token count that throws is transient and retried. */
-export const DEFINITE_REFUSALS = ["token cap", "allowance"] as const satisfies readonly Refusal[];
+export const DEFINITE_REFUSALS = ["token cap"] as const satisfies readonly Refusal[];
 
 /**
- * Makes `transport` refuse every request that `matches` selects with
- * `refusal`: its token count fails, exceeds every input cap, or is answered
- * after another run's reservation for `appid` has used the lifetime allowance.
- * Returns how many matching requests were counted.
+ * Makes `transport` stop every request that `matches` selects with
+ * `refusal`: its token count fails, or exceeds every input cap. Returns how
+ * many matching requests were counted.
  */
 export function refuseRequests(
   transport: ControlledGeminiTransport,
-  native: Database,
   matches: (model: string, request: Record<string, unknown>) => boolean,
   refusal: Refusal,
-  appid: number,
 ): () => number {
   let counted = 0;
   transport.countTokens = async (model, request) => {
     if (!matches(model, request)) return ControlledGeminiTransport.prototype.countTokens.call(transport, model, request);
     counted += 1;
     if (refusal === "token count") throw new Error("token counting unavailable");
-    if (refusal === "token cap") return 1_000_000;
-    if (counted === 1) {
-      const competingRun = insertCompletedRun(native, "initial:competing-reservation", [appid]);
-      native.prepare("INSERT INTO media_processing_jobs (run_id, stage, appid, request_key, input_identity, model, config_version, max_input_tokens, max_output_tokens, reserved_microusd) VALUES (?, 'extraction', ?, 'competing-reservation', 'competing-input', 'competing-model', 'competing-config', 1, 1, 5000000)").run(competingRun, appid);
-    }
-    return 100;
+    return 1_000_000;
   };
   return () => counted;
 }
 
+/** Key-sorted JSON, matching how processing input identities serialize values. */
 export function stableJson(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
   if (value && typeof value === "object") {
@@ -212,3 +204,82 @@ export function overviewOutputForUrls(urls: readonly string[]): Record<string, u
     tags: [{ label: "Build experimentation", sourceUrls: [...urls] }],
   };
 }
+
+/** One answer the controlled Gemini API gives a request: an HTTP reply, or a connection failure. */
+export type GeminiReply =
+  | { status: number; body?: unknown; headers?: Record<string, string> }
+  | { network: string; code?: string };
+
+/** The Gemini request kinds the controlled API serves. */
+export type GeminiCall = "count" | "submit" | "poll";
+
+/**
+ * A controlled Gemini REST API behind a fetch function, so the real batch
+ * transport and its response classification run unchanged. Every request
+ * succeeds unless a reply is queued for its kind with `reply`. A submitted
+ * batch succeeds on its first poll with an output that fits its stage: an
+ * extraction, an Overview citing every article URL in the request, or a
+ * 3,072-dimension vector. Usage is fixed per stage so costs are predictable.
+ */
+export function controlledGeminiApi() {
+  const replies: Record<GeminiCall, GeminiReply[]> = { count: [], submit: [], poll: [] };
+  const batches = new Map<string, { key: string; stage: string; body: unknown }>();
+  /** Request keys of every batch the API accepted, in order. */
+  const submitted: string[] = [];
+  /** Every request the API received, by kind, including refused ones. */
+  const calls: Array<{ kind: GeminiCall; key?: string }> = [];
+  const answer = (reply: GeminiReply): Response => {
+    if ("network" in reply) throw Object.assign(new Error(reply.network), reply.code ? { code: reply.code } : {});
+    return new Response(JSON.stringify(reply.body ?? {}), { status: reply.status, headers: { "Content-Type": "application/json", ...reply.headers } });
+  };
+  const output = (stage: string, body: unknown) => {
+    if (stage === "embedding") {
+      return { embedding: { values: Array.from({ length: 3072 }, (_, index) => (index % 7) / 7) }, usageMetadata: { promptTokenCount: 1_000 } };
+    }
+    const text = stage === "synthesis"
+      ? JSON.stringify({ ...overviewOutputForUrls([...new Set(JSON.stringify(body).match(/https:\/\/[^"\\]+\/articles\/[^"\\]+/g) ?? [])]), similarityInputs: { gameplay: ["Flexible combat builds"] } })
+      : JSON.stringify(extractionOutput());
+    return { candidates: [{ content: { parts: [{ text }] } }], usageMetadata: { promptTokenCount: 1_000, candidatesTokenCount: 100 } };
+  };
+  const fetchFn = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+    const url = String(input);
+    if (url.endsWith(":countTokens")) {
+      calls.push({ kind: "count" });
+      const reply = replies.count.shift();
+      return reply ? answer(reply) : Response.json({ totalTokens: 100 });
+    }
+    if (url.endsWith(":batchGenerateContent") || url.endsWith(":asyncBatchEmbedContent")) {
+      const body = JSON.parse(String(init?.body)) as { batch: { input_config?: { requests: { requests: Array<{ metadata: { key: string }; request: unknown }> } }; inputConfig?: { requests: { requests: Array<{ metadata: { key: string }; request: unknown }> } } } };
+      const item = (body.batch.input_config ?? body.batch.inputConfig)!.requests.requests[0]!;
+      calls.push({ kind: "submit", key: item.metadata.key });
+      const reply = replies.submit.shift();
+      if (reply) return answer(reply);
+      const name = `batches/controlled-${batches.size + 1}`;
+      batches.set(name, { key: item.metadata.key, stage: item.metadata.key.split(":")[0]!, body: item.request });
+      submitted.push(item.metadata.key);
+      return Response.json({ name });
+    }
+    const name = url.slice(url.indexOf("batches/"));
+    const batch = batches.get(name);
+    calls.push({ kind: "poll", key: batch?.key });
+    const reply = replies.poll.shift();
+    if (reply) return answer(reply);
+    if (!batch) return Response.json({ error: { message: "batch not found" } }, { status: 404 });
+    return Response.json({ metadata: { state: "BATCH_STATE_SUCCEEDED" }, response: { inlinedResponses: { inlinedResponses: [{ response: output(batch.stage, batch.body) }] } } });
+  };
+  return {
+    fetchFn,
+    submitted,
+    calls,
+    /** Queues `reply` for the next request of `kind`. */
+    reply(kind: GeminiCall, ...queued: GeminiReply[]) { replies[kind].push(...queued); },
+    isGeminiRequest: (url: string) => url.startsWith("https://generativelanguage.googleapis.com/"),
+  };
+}
+
+/** Gemini's reply when the project's Prepay credits are depleted. */
+export const GEMINI_PREPAY_DEPLETED: GeminiReply = { status: 402, body: { error: { code: 402, status: "RESOURCE_EXHAUSTED", message: "Your prepayment credits are depleted. Please add credits to continue." } } };
+/** Gemini's reply when the project reached the spending cap set in its billing settings. */
+export const GEMINI_SPEND_CAP: GeminiReply = { status: 429, body: { error: { code: 429, status: "RESOURCE_EXHAUSTED", message: "Your project has exceeded its monthly spending cap." } } };
+/** Gemini's reply to a rate limit, which is transient. */
+export const GEMINI_RATE_LIMIT: GeminiReply = { status: 429, body: { error: { code: 429, status: "RESOURCE_EXHAUSTED", message: "Resource has been exhausted (e.g. check quota)." } } };

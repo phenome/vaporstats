@@ -4,8 +4,6 @@ import type { AppDatabase } from "../src/lib/db";
 import {
   advanceMediaProcessing,
   authorizeMediaProcessing,
-  GEMINI_BATCH_CAPABILITY_VERSION,
-  GEMINI_BATCH_PRICING_VERSION,
   type MediaProcessingSummary,
 } from "../src/lib/media-processing";
 import { openTestDatabase } from "./support/db";
@@ -62,14 +60,17 @@ function embeddingOutput(value: number): Record<string, unknown> {
   return { embedding: { values: Array.from({ length: 3072 }, () => value) } };
 }
 
+const advanceCounts = new WeakMap<EmbeddingFixture, number>();
+
+/** Advances the fixture's current run one ingestion tick (15 minutes) after its previous advance. */
 async function advance(value: EmbeddingFixture, transport: ControlledGeminiTransport, article = ARTICLE_HTML): Promise<MediaProcessingSummary> {
+  const ticks = advanceCounts.get(value) ?? 0;
+  advanceCounts.set(value, ticks + 1);
   return advanceMediaProcessing(value.db, {
     runId: value.runId,
     transport,
     articleFetch: async () => article,
-    now: new Date("2026-09-11T00:00:00.000Z"),
-    pricingVersion: GEMINI_BATCH_PRICING_VERSION,
-    capabilityVersion: GEMINI_BATCH_CAPABILITY_VERSION,
+    now: new Date(Date.parse("2026-09-11T00:00:00.000Z") + ticks * 15 * 60 * 1_000),
   });
 }
 
@@ -110,13 +111,13 @@ async function rebuildOverview(
   key: string,
   input: { gameplay?: string[]; storyWorld?: string[] },
   article: string,
-  embeddings: readonly Record<string, unknown>[] = [],
+  embeddings: readonly (Record<string, unknown> | { state: "pending" })[] = [],
 ): Promise<void> {
   await startNextRun(value, key, sourceIds(value));
   transport.nextPolls.push(
     { state: "succeeded", output: extractionOutput(), usage: { inputTokens: 100, outputTokens: 20 } },
     { state: "succeeded", output: overviewOutput(input), usage: { inputTokens: 100, outputTokens: 20 } },
-    ...embeddings.map((output) => ({ state: "succeeded" as const, output, usage: { inputTokens: 100 } })),
+    ...embeddings.map((output) => ("state" in output && output.state === "pending" ? { state: "pending" as const } : { state: "succeeded" as const, output, usage: { inputTokens: 100 } })),
   );
   await advance(value, transport, article);
   await advance(value, transport, article);
@@ -231,15 +232,15 @@ describe("game overview aggregate embeddings", () => {
     const transport = new ControlledGeminiTransport({ embeddings: true });
     await completeInitial(value, transport);
     const before = transport.embeddingSubmissions.length;
-    await rebuildOverview(value, transport, "stale-completion", { gameplay: TACTICAL_GAMEPLAY, storyWorld: CITY_STORY }, ARTICLE_HTML.replace("memorable", "notable"), [embeddingOutput(4)]);
+    // The embedding is still in flight when the next change happens.
+    await rebuildOverview(value, transport, "stale-completion", { gameplay: TACTICAL_GAMEPLAY, storyWorld: CITY_STORY }, ARTICLE_HTML.replace("memorable", "notable"), [{ state: "pending" }]);
     expect(transport.embeddingSubmissions.length).toBe(before + 1);
+    transport.polls.set(`batches/embed-${transport.embeddingSubmissions.length}`, { state: "succeeded", output: embeddingOutput(4), usage: { inputTokens: 100 } });
     await value.db.prepare("UPDATE media_game_overviews SET input_identity = ? WHERE appid = ? AND active = 1").bind("c".repeat(64), APPID).run();
     const result = await advanceMediaProcessing(value.db, {
       runId: value.runId,
       transport,
       articleFetch: async () => "<!doctype html><html><body><article><p>Cyberpunk 2077 has a focused campaign with flexible combat and memorable encounters. This preview was played on PC during Early Access and does not assess the final release.</p></article></body></html>",
-      pricingVersion: GEMINI_BATCH_PRICING_VERSION,
-      capabilityVersion: GEMINI_BATCH_CAPABILITY_VERSION,
     });
     expect(result.failed).toBeGreaterThan(0);
     const stale = await value.db.prepare("SELECT COUNT(*) AS count FROM media_processing_jobs WHERE stage = 'embedding' AND status = 'stale'").first<{ count: number }>();
@@ -250,16 +251,16 @@ describe("game overview aggregate embeddings", () => {
     const transport = new ControlledGeminiTransport({ embeddings: true });
     await completeInitial(value, transport);
     const before = transport.embeddingSubmissions.length;
-    await rebuildOverview(value, transport, "lost-eligibility", { gameplay: TACTICAL_GAMEPLAY, storyWorld: CITY_STORY }, ARTICLE_HTML.replace("memorable", "notable"), [embeddingOutput(4)]);
+    // The embedding is still in flight when the next change happens.
+    await rebuildOverview(value, transport, "lost-eligibility", { gameplay: TACTICAL_GAMEPLAY, storyWorld: CITY_STORY }, ARTICLE_HTML.replace("memorable", "notable"), [{ state: "pending" }]);
     expect(transport.embeddingSubmissions.length).toBe(before + 1);
+    transport.polls.set(`batches/embed-${transport.embeddingSubmissions.length}`, { state: "succeeded", output: embeddingOutput(4), usage: { inputTokens: 100 } });
     await value.db.prepare("UPDATE apps SET is_eligible = 0 WHERE appid = ?").bind(APPID).run();
     const result = await advanceMediaProcessing(value.db, {
       runId: value.runId,
       transport,
       articleFetch: async () => ARTICLE_HTML,
       now: new Date("2026-09-11T00:00:00.000Z"),
-      pricingVersion: GEMINI_BATCH_PRICING_VERSION,
-      capabilityVersion: GEMINI_BATCH_CAPABILITY_VERSION,
     });
     expect(result.failed).toBeGreaterThan(0);
     const stale = await value.db.prepare("SELECT COUNT(*) AS count FROM media_processing_jobs WHERE stage = 'embedding' AND status = 'stale'").first<{ count: number }>();
@@ -288,8 +289,8 @@ describe("game overview aggregate embeddings", () => {
     );
     await advance(value, transport);
     await advance(value, transport);
-    const failed = await value.db.prepare("SELECT status, error FROM media_processing_jobs WHERE stage = 'embedding' AND status = 'failed'").first<{ status: string; error: string }>();
-    expect(failed).toEqual({ status: "failed", error: "Gemini embedding returned an incompatible vector" });
+    const refused = await value.db.prepare("SELECT status, error FROM media_processing_jobs WHERE stage = 'embedding' AND status = 'refused'").first<{ status: string; error: string }>();
+    expect(refused).toEqual({ status: "refused", error: "invalid_output: incompatible vector" });
     const active = await value.db.prepare("SELECT dimension FROM media_game_embeddings WHERE appid = ? AND active = 1 ORDER BY dimension").bind(APPID).all<{ dimension: string }>();
     expect(active.results?.map(({ dimension }) => dimension)).toEqual(["story_world"]);
   });
@@ -305,15 +306,15 @@ describe("game overview aggregate embeddings", () => {
     );
     await advance(value, transport);
     await advance(value, transport);
-    const jobs = await value.db.prepare("SELECT status, reservation_active FROM media_processing_jobs WHERE stage = 'embedding'").all<{ status: string; reservation_active: number }>();
+    const jobs = await value.db.prepare("SELECT status, attempt_count FROM media_processing_jobs WHERE stage = 'embedding'").all<{ status: string; attempt_count: number }>();
     expect(jobs.results?.length).toBeGreaterThan(0);
-    expect(jobs.results?.every((job) => job.status === "reserved" && job.reservation_active === 1)).toBe(true);
+    expect(jobs.results?.every((job) => job.status === "queued" && job.attempt_count === 0)).toBe(true);
   });
 
-  test.each<[Refusal | "failed batch", number]>([["token cap", 2], ["allowance", 2], ["failed batch", 2]])("embeddings an earlier run left undone by a %s get work only from a run whose affected set covers the game", async (undone, undoneCount) => {
+  test.each<[Refusal | "failed batch", number]>([["token cap", 2], ["failed batch", 2]])("embeddings an earlier run left undone by a %s get work only from a run whose affected set covers the game", async (undone, undoneCount) => {
     const value = fixture();
     const transport = new ControlledGeminiTransport({ embeddings: true });
-    if (undone !== "failed batch") refuseRequests(transport, value.native, (model) => model.includes("embedding"), undone, APPID);
+    if (undone !== "failed batch") refuseRequests(transport, (model) => model.includes("embedding"), undone);
     await authorizeMediaProcessing(value.db, value.runId);
     transport.nextPolls.push(
       { state: "succeeded", output: extractionOutput(), usage: { inputTokens: 100, outputTokens: 20 } },
@@ -326,8 +327,6 @@ describe("game overview aggregate embeddings", () => {
     const undoneEmbeddings = await value.db.prepare("SELECT COUNT(*) AS count FROM media_game_embeddings WHERE appid = ? AND active = 1").bind(APPID).first<{ count: number }>();
     expect(undoneEmbeddings?.count).toBe(0);
     delete (transport as Partial<ControlledGeminiTransport>).countTokens;
-    // The competing reservation that used the allowance has since been released.
-    value.native.prepare("UPDATE media_processing_jobs SET reservation_active = 0 WHERE request_key = 'competing-reservation'").run();
     const countsBefore = transport.counts.length;
     const submissionsBefore = transport.embeddingSubmissions.length;
 
@@ -351,10 +350,10 @@ describe("game overview aggregate embeddings", () => {
     expect(active.results?.map(({ dimension }) => dimension)).toEqual(["gameplay", "story_world"]);
   });
 
-  test.each<[Refusal, number]>([["token cap", 2], ["allowance", 1]])("counts each embedding refused by its %s as skipped once and does not retry it in the run", async (refusal, refusals) => {
+  test.each<[Refusal, number]>([["token cap", 2]])("counts each embedding refused by its %s as skipped once and does not retry it in the run", async (refusal, refusals) => {
     const value = fixture();
     const transport = new ControlledGeminiTransport({ embeddings: true });
-    const embeddingCounts = refuseRequests(transport, value.native, (model) => model.includes("embedding"), refusal, APPID);
+    const embeddingCounts = refuseRequests(transport, (model) => model.includes("embedding"), refusal);
     await authorizeMediaProcessing(value.db, value.runId);
     transport.nextPolls.push(
       { state: "succeeded", output: extractionOutput(), usage: { inputTokens: 100, outputTokens: 20 } },
@@ -368,10 +367,10 @@ describe("game overview aggregate embeddings", () => {
     expect(refused.outputs).toEqual({ new: 2, reused: 0, replaced: 0, invalidated: 0, skipped: refusals });
   });
 
-  test("retries an embedding whose token count throws on the run's next advance instead of refusing it", async () => {
+  test("retries an embedding whose token count throws after its backoff instead of refusing it", async () => {
     const value = fixture();
     const transport = new ControlledGeminiTransport({ embeddings: true });
-    const embeddingCounts = refuseRequests(transport, value.native, (model) => model.includes("embedding"), "token count", APPID);
+    const embeddingCounts = refuseRequests(transport, (model) => model.includes("embedding"), "token count");
     await authorizeMediaProcessing(value.db, value.runId);
     transport.nextPolls.push(
       { state: "succeeded", output: extractionOutput(), usage: { inputTokens: 100, outputTokens: 20 } },
@@ -382,22 +381,13 @@ describe("game overview aggregate embeddings", () => {
     delete (transport as Partial<ControlledGeminiTransport>).countTokens;
     const retried = await advance(value, transport);
 
+    // Both dimensions failed their first count and retry at the next tick.
     expect(embeddingCounts()).toBe(2);
     expect(failed.status).toBe("waiting");
-    expect(failed.stopReasons).toEqual(["count_tokens:token counting unavailable"]);
+    expect(failed.stopReasons).toEqual(["transient_provider_failure"]);
     expect(failed.outputs.skipped).toBe(0);
     expect(retried.submitted).toBe(2);
     expect(transport.embeddingSubmissions).toHaveLength(2);
   });
 
-  test("keeps aggregate reservations within the shared five-dollar bound", async () => {
-    const value = fixture();
-    const transport = new ControlledGeminiTransport({ embeddings: true });
-    await authorizeMediaProcessing(value.db, value.runId);
-    transport.nextPolls.push({ state: "pending" });
-    await advance(value, transport);
-    const totals = await value.db.prepare("SELECT COALESCE(SUM(CASE WHEN reservation_active = 1 THEN reserved_microusd ELSE COALESCE(charged_microusd, 0) END), 0) AS total FROM media_processing_jobs").first<{ total: number }>();
-    expect(totals).not.toBeNull();
-    expect(Number(totals?.total ?? 0)).toBeLessThanOrEqual(5_000_000);
-  });
 });
