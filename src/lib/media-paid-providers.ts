@@ -241,6 +241,32 @@ export async function runDailyCreditCheck(db: AppDatabase, now: Date): Promise<P
   return lifted;
 }
 
+/**
+ * When each entity last took a turn in `provider`'s queue: a sequence number
+ * per entity, larger for a later turn. It is durable, so fair selection
+ * continues across ticks and restarts instead of starting over each tick.
+ */
+export interface EntityTurns {
+  next: number;
+  last: Map<number, number>;
+}
+
+const turnsKey = (provider: PaidProvider) => `media:queue-turns:${provider}`;
+
+export async function readEntityTurns(db: AppDatabase, provider: PaidProvider): Promise<EntityTurns> {
+  let stored: { next?: unknown; last?: unknown } = {};
+  try { stored = JSON.parse((await readCheckpoint(db, turnsKey(provider))) ?? "{}") ?? {}; } catch { stored = {}; }
+  const last = new Map<number, number>();
+  for (const [appid, turn] of Object.entries(stored.last && typeof stored.last === "object" ? stored.last : {})) {
+    if (Number.isSafeInteger(Number(appid)) && Number.isSafeInteger(turn)) last.set(Number(appid), turn as number);
+  }
+  return { next: Number.isSafeInteger(stored.next) ? stored.next as number : 0, last };
+}
+
+export async function writeEntityTurns(db: AppDatabase, provider: PaidProvider, turns: EntityTurns): Promise<void> {
+  await writeCheckpoint(db, turnsKey(provider), JSON.stringify({ next: turns.next, last: Object.fromEntries(turns.last) }));
+}
+
 /** Model cost per provider, for reporting only: VaporStats compares it with nothing. */
 export interface PaidWorkCost {
   reportingOnly: true;

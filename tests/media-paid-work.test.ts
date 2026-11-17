@@ -539,6 +539,34 @@ describe("fair selection", () => {
   });
 });
 
+describe("fair selection across ticks", () => {
+  test("with more entities holding ready work than the per-tick cap, every entity takes a turn within a bounded number of ticks", async () => {
+    const { database } = await authorizedGames({ [CYBERPUNK]: 4, [BALDURS_GATE]: 4, [HADES_II]: 4 });
+    const gemini = controlledGeminiApi();
+    const appidOf = (key: string) => database.native.query<{ appid: number }, [string]>("SELECT appid FROM media_processing_jobs WHERE request_key = ?").get(key)!.appid;
+    const turns: number[][] = [];
+
+    for (const at of ["03:00", "03:15", "03:30", "03:45"]) {
+      const before = gemini.submitted.length;
+      await tick(database, gemini, `2026-11-10T${at}:00.000Z`, { paidSubmissionsPerTick: 2 });
+      turns.push(gemini.submitted.slice(before).map(appidOf));
+    }
+
+    // Every item was queued at once, so the first tick orders entities by
+    // entity; later ticks start with the entity whose last turn is oldest.
+    expect(turns).toEqual([
+      [BALDURS_GATE, CYBERPUNK],
+      [HADES_II, BALDURS_GATE],
+      [CYBERPUNK, HADES_II],
+      [BALDURS_GATE, CYBERPUNK],
+    ]);
+    // With three entities and two turns per tick, any two consecutive ticks serve every entity.
+    for (let index = 1; index < turns.length; index += 1) {
+      expect(new Set([...turns[index - 1]!, ...turns[index]!]).size).toBe(3);
+    }
+  });
+});
+
 describe("article text", () => {
   test("an Outlet day stop at the article fetch keeps the extraction waiting, reports it, and the next UTC day fetches it", async () => {
     const { database } = await authorizedGames();

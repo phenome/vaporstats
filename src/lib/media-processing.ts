@@ -28,6 +28,8 @@ import {
   pauseProvider,
   PAID_PROVIDERS,
   providerState,
+  readEntityTurns,
+  writeEntityTurns,
   runDailyCreditCheck,
   transientRetryAt,
   type PaidProvider,
@@ -1693,11 +1695,14 @@ async function takeTurn(advance: QueueAdvance, job: JobRow): Promise<boolean> {
 
 /**
  * Submits ready items of every active provider in fair rounds. Entities are
- * ordered by the enqueue time of their oldest waiting item, then by entity;
- * each round, every entity contributes its oldest ready item. A provider
- * whose pause was just lifted by the daily credit check first submits its
- * oldest ready embedding item as a probe. A Credit pause stops the provider
- * for the rest of the advance and leaves every item queued.
+ * ordered by when they last took a turn, oldest first and never first, then
+ * by the enqueue time of their oldest waiting item, then by entity; each
+ * round, every entity contributes its oldest ready item. Turns are durable,
+ * so whatever the per-tick bound and the number of entities, every entity
+ * with ready work takes a turn within ceil(entities / bound) ticks. A
+ * provider whose pause was just lifted by the daily credit check first
+ * submits its oldest ready embedding item as a probe. A Credit pause stops
+ * the provider for the rest of the advance and leaves every item queued.
  */
 async function submitQueuedWork(advance: QueueAdvance, probing: Set<PaidProvider>): Promise<void> {
   const { db, now } = advance;
@@ -1726,7 +1731,11 @@ async function submitQueuedWork(advance: QueueAdvance, probing: Set<PaidProvider
         byEntity.set(probe.appid, byEntity.get(probe.appid)!.filter((job) => job.id !== probe.id));
       }
     }
-    const entities = entityOrder.map(({ appid }) => appid).filter((appid) => byEntity.has(appid));
+    const entityTurns = await readEntityTurns(db, provider);
+    const lastTurn = (appid: number) => entityTurns.last.get(appid) ?? -1;
+    // Array.prototype.sort is stable, so equal last turns keep the
+    // enqueue-time order.
+    const entities = entityOrder.map(({ appid }) => appid).filter((appid) => byEntity.has(appid)).sort((a, b) => lastTurn(a) - lastTurn(b));
     for (let taken = true; taken;) {
       taken = false;
       for (const appid of entities) {
@@ -1738,8 +1747,16 @@ async function submitQueuedWork(advance: QueueAdvance, probing: Set<PaidProvider
     }
     for (const job of turns) {
       if (advance.paused.has(provider) || advance.remaining[provider] <= 0) break;
-      if (await takeTurn(advance, job)) advance.remaining[provider] -= 1;
+      if (await takeTurn(advance, job)) {
+        advance.remaining[provider] -= 1;
+        entityTurns.last.set(job.appid, entityTurns.next);
+        entityTurns.next += 1;
+      }
     }
+    // Only entities that still have work keep their last turn.
+    const active = new Set((await rows<{ appid: number }>(db, `SELECT DISTINCT appid FROM media_processing_jobs WHERE provider = ? AND (status = 'submitted' OR ${WAITING})`, provider)).map(({ appid }) => appid));
+    for (const appid of entityTurns.last.keys()) if (!active.has(appid)) entityTurns.last.delete(appid);
+    await writeEntityTurns(db, provider, entityTurns);
   }
 }
 

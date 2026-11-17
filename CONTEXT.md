@@ -219,7 +219,7 @@ The media sources, by source id, that a processing run is explicitly authorized 
 _Avoid_: Backfill scope, whole catalog
 
 **Paid-work queue**:
-The durable set of extraction, Overview synthesis, and embedding items waiting for a paid provider, kept in the paid-job ledger. Each item records its entity, stage, input identity, enqueue time, attempt count, next attempt time, provider, and status. Each tick, every active provider takes items in rounds across entities, ordered by each entity's oldest waiting item, so no entity holds another back. A waiting item holds no article text. Spending is limited only by the provider's own credit limit; recorded cost is for reporting. See [ADR 0017](docs/adr/0017-provider-credit-pauses.md).
+The durable set of extraction, Overview synthesis, and embedding items waiting for a paid provider, kept in the paid-job ledger. Each item records its entity, stage, input identity, enqueue time, attempt count, next attempt time, provider, and status. Each tick, every active provider takes items in rounds across entities, ordered by each entity's last turn and then its oldest waiting item, so no entity holds another back and every entity with ready work takes a turn within a bounded number of ticks. A waiting item holds no article text. Spending is limited only by the provider's own credit limit; recorded cost is for reporting. See [ADR 0017](docs/adr/0017-provider-credit-pauses.md).
 _Avoid_: Budget, reservation, job queue service
 
 **Credit pause**:
