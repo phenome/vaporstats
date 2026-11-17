@@ -301,17 +301,17 @@ function verifyReceptionRowsSurvivePublicationUpgrade(): void {
       retained.exec(readFileSync(join(migrationDirectory, entry.tag + ".sql"), "utf8"));
       retained.query("INSERT INTO schema_migrations (name) VALUES (?)").run(entry.tag + ".sql");
     }
-    retained.exec(`
-      INSERT INTO apps (appid, name, slug) VALUES (900002, 'Reception preservation', 'reception-preservation');
-      INSERT INTO review_sources (id, endpoint, request_filter, population, interpretation_version, identity_key)
-        VALUES ('retained-histogram', 'appreviewhistogram', 'none', 'filtered_reviews', 'steam-review-source-v1', 'retained-histogram');
-      INSERT INTO review_sources (id, endpoint, request_filter, language, purchase_type, filter_offtopic_activity, population, interpretation_version, identity_key)
-        VALUES ('retained-summary', 'appreviews', 'filter=all', 'all', 'all', 1, 'filtered_reviews', 'steam-review-source-v1', 'retained-summary');
-      INSERT INTO review_buckets (appid, source_id, granularity, period_start, period_end, positive_count, negative_count, observed_at, provenance)
-        VALUES (900002, 'retained-histogram', 'weekly', '2026-10-01T00:00:00.000Z', '2026-10-08T00:00:00.000Z', 280, 20, '2026-10-09T12:00:00.000Z', '{"retained":"bucket"}');
-      INSERT INTO review_summary_snapshots (appid, source_id, observed_at, lifetime_positive_count, lifetime_total_count)
-        VALUES (900002, 'retained-summary', '2026-10-09T12:00:00.000Z', 900, 1000);
-      INSERT INTO player_score_history
+    seed(retained, [
+      `INSERT INTO apps (appid, name, slug) VALUES (900002, 'Reception preservation', 'reception-preservation')`,
+      `INSERT INTO review_sources (id, endpoint, request_filter, population, interpretation_version, identity_key)
+        VALUES ('retained-histogram', 'appreviewhistogram', 'none', 'filtered_reviews', 'steam-review-source-v1', 'retained-histogram')`,
+      `INSERT INTO review_sources (id, endpoint, request_filter, language, purchase_type, filter_offtopic_activity, population, interpretation_version, identity_key)
+        VALUES ('retained-summary', 'appreviews', 'filter=all', 'all', 'all', 1, 'filtered_reviews', 'steam-review-source-v1', 'retained-summary')`,
+      `INSERT INTO review_buckets (appid, source_id, granularity, period_start, period_end, positive_count, negative_count, observed_at, provenance)
+        VALUES (900002, 'retained-histogram', 'weekly', '2026-10-01T00:00:00.000Z', '2026-10-08T00:00:00.000Z', 280, 20, '2026-10-09T12:00:00.000Z', '{"retained":"bucket"}')`,
+      `INSERT INTO review_summary_snapshots (appid, source_id, observed_at, lifetime_positive_count, lifetime_total_count)
+        VALUES (900002, 'retained-summary', '2026-10-09T12:00:00.000Z', 900, 1000)`,
+      `INSERT INTO player_score_history
         (appid, observed_at, score, formula_version, current_positive_count, current_total_count,
          historical_positive_count, historical_total_count, current_window_start, current_window_end,
          historical_window_start, historical_window_end, current_evidence_intervals, historical_evidence_intervals,
@@ -320,14 +320,17 @@ function verifyReceptionRowsSurvivePublicationUpgrade(): void {
          0, 0, '2026-07-11T12:00:00.000Z', '2026-10-09T12:00:00.000Z',
          '2026-04-12T12:00:00.000Z', '2026-07-11T12:00:00.000Z',
          '[{"start":"2026-10-01T00:00:00.000Z","end":"2026-10-08T00:00:00.000Z","granularity":"week"}]', '[]',
-         'retained-histogram', 'retained-histogram', '2026-10-09T12:00:00.000Z', NULL, '{"retained":"score"}');
-      INSERT INTO player_score_state
+         'retained-histogram', 'retained-histogram', '2026-10-09T12:00:00.000Z', NULL, '{"retained":"score"}')`,
+      `INSERT INTO player_score_state
         (appid, latest_score_history_id, eligibility_review_count, eligibility_source_id, eligibility_observed_at, eligibility_provenance)
         SELECT appid, id, 300, 'retained-histogram', '2026-10-09T12:00:00.000Z', '{"retained":"state"}'
-        FROM player_score_history WHERE appid = 900002;
-    `);
+        FROM player_score_history WHERE appid = 900002`,
+    ]);
     const tables = ["apps", "review_sources", "review_buckets", "review_summary_snapshots", "player_score_history", "player_score_state"];
     const before = tables.map((table) => retained.query(`SELECT * FROM ${table} ORDER BY rowid`).all());
+    for (const [index, table] of tables.entries()) {
+      if (before[index]!.length === 0) throw new Error("Retained reception fixture is missing " + table + " rows");
+    }
     const foreignKeys = tables.map((table) => retained.query(`PRAGMA foreign_key_list(${table})`).all());
     applyMigrations(retained, migrationDirectory);
     for (const [index, table] of tables.entries()) {
@@ -349,6 +352,15 @@ function verifyReceptionRowsSurvivePublicationUpgrade(): void {
   } finally {
     retained.close(true);
   }
+}
+
+/**
+ * Runs each fixture statement on its own, so a seed row that fails to insert
+ * throws. A multi-statement `exec` skips runtime errors in all but its last
+ * statement, and in that one too when a comment or whitespace follows it.
+ */
+function seed(db: Database, statements: readonly string[]): void {
+  for (const statement of statements) db.query(statement).run();
 }
 
 const mediaTables = expectedTables.filter((table) => table.startsWith("media_"));
@@ -378,41 +390,41 @@ function verifyRetainedMediaRowsSurviveUpgrade(): void {
   retained.exec("PRAGMA foreign_keys = ON");
   try {
     migrateBefore(retained, "0015_easy_jasper_sitwell");
-    retained.exec(`
-      INSERT INTO apps (appid, name, slug) VALUES (900003, 'Media preservation', 'media-preservation'),
-        (900004, 'Media preservation match', 'media-preservation-match');
-      INSERT INTO media_discovery_runs (id, pass, identity_key, selected_games, status, query_count, article_count, attempt_count, provider_request_ids, usage, summary, started_at, finished_at)
-        VALUES (41, 'initial', 'retained-media-run', '[900003]', 'completed', 2, 1, 3, '["req-1"]', '{"credits":2}', '{"accepted":1}', '2026-10-01T00:00:00.000Z', '2026-10-01T00:05:00.000Z');
-      INSERT INTO media_discovery_progress (id, run_id, appid, pass, outlet, status, query_attempted_at, candidate_urls, candidate_index, provider_request_id, credits_used, usage, stop_reason)
-        VALUES (42, 41, 900003, 'initial', 'IGN', 'completed', '2026-10-01T00:01:00.000Z', '["https://www.ign.com/articles/retained"]', 1, 'req-1', 2, '{"credits":2}', 'accepted');
-      INSERT INTO media_discovery_attempts (id, appid, outlet, pass, day, kind, url, status_code, succeeded, error, attempted_at)
-        VALUES (43, 900003, 'IGN', 'initial', '2026-10-01', 'fetch', 'https://www.ign.com/articles/retained', 200, 1, NULL, '2026-10-01T00:02:00.000Z');
-      INSERT INTO media_sources (id, appid, pass, original_url, discovery_url, title, outlet, author, published_at, updated_at, retrieved_at, type, hands_on, affiliation, platform, build_context, normalized_content_hash, cleanup_version, processing_content, processing_input_identity)
-        VALUES (44, 900003, 'initial', 'https://www.ign.com/articles/retained', 'https://www.ign.com/search?q=retained', 'Retained review', 'IGN', 'Critic', '2026-09-30', '2026-09-30T12:00:00.000Z', '2026-10-01T00:02:00.000Z', 'review', 1, 'staff', 'PC', 'retail', 'retained-hash', 'cleanup-v1', 'retained processing text', 'retained-processing-identity');
-      INSERT INTO media_article_extractions (id, source_id, input_identity, content_hash, cleanup_version, model, config_version, output_json, active)
-        VALUES (45, 44, 'retained-extraction-identity', 'retained-hash', 'cleanup-v1', 'gemini-3.1-flash-lite', 'extraction-v1', '{"claims":["retained"]}', 1);
-      INSERT INTO media_game_overviews (id, appid, input_identity, model, config_version, output_json, active)
-        VALUES (46, 900003, 'retained-overview-identity', 'gemini-3.1-flash-lite', 'synthesis-v1', '{"overview":"retained"}', 1);
-      INSERT INTO media_processing_authorizations (run_id, status, billing_confirmation, stop_reason, authorized_at, updated_at)
-        VALUES (41, 'completed', 'retained-confirmation', NULL, '2026-10-01T00:06:00.000Z', '2026-10-01T00:30:00.000Z');
-      INSERT INTO media_processing_jobs (id, run_id, stage, appid, matched_appid, dimension, source_id, request_key, input_identity, model, config_version, max_input_tokens, max_output_tokens, reserved_microusd, charged_microusd, reservation_active, status, provider_batch_id, output_json, usage_json, submitted_at, completed_at)
-        VALUES (47, 41, 'extraction', 900003, 900004, 'gameplay', 44, 'retained-job', 'retained-extraction-identity', 'gemini-3.1-flash-lite', 'extraction-v1', 1000, 200, 1500, 900, 0, 'succeeded', 'retained-batch', '{"claims":["retained"]}', '{"tokens":1200}', '2026-10-01T00:07:00.000Z', '2026-10-01T00:20:00.000Z');
-      INSERT INTO media_tag_memberships (appid, tag_slug, tag_label, source_id, extraction_input_identity)
-        VALUES (900003, 'retained-tag', 'Retained tag', 44, 'retained-extraction-identity');
-      -- Source 49 was taken by run 41 but its fetch failed, so its only trace
-      -- is run 41's attempt on its URL. Source 50 was discovered before run 41
-      -- was authorized but only its discovery fetch touched it. Source 51 was
-      -- discovered, and fetched by discovery, after run 41 was authorized.
-      INSERT INTO media_sources (id, appid, pass, original_url, title, outlet, retrieved_at, type)
+    seed(retained, [
+      `INSERT INTO apps (appid, name, slug) VALUES (900003, 'Media preservation', 'media-preservation'),
+        (900004, 'Media preservation match', 'media-preservation-match')`,
+      `INSERT INTO media_discovery_runs (id, pass, identity_key, selected_games, status, query_count, article_count, attempt_count, provider_request_ids, usage, summary, started_at, finished_at)
+        VALUES (41, 'initial', 'retained-media-run', '[900003]', 'completed', 2, 1, 3, '["req-1"]', '{"credits":2}', '{"accepted":1}', '2026-10-01T00:00:00.000Z', '2026-10-01T00:05:00.000Z')`,
+      `INSERT INTO media_discovery_progress (id, run_id, appid, pass, outlet, status, query_attempted_at, candidate_urls, candidate_index, provider_request_id, credits_used, usage, stop_reason)
+        VALUES (42, 41, 900003, 'initial', 'IGN', 'completed', '2026-10-01T00:01:00.000Z', '["https://www.ign.com/articles/retained"]', 1, 'req-1', 2, '{"credits":2}', 'accepted')`,
+      `INSERT INTO media_discovery_attempts (id, appid, outlet, pass, day, kind, url, status_code, succeeded, error, attempted_at)
+        VALUES (43, 900003, 'IGN', 'initial', '2026-10-01', 'fetch', 'https://www.ign.com/articles/retained', 200, 1, NULL, '2026-10-01T00:02:00.000Z')`,
+      `INSERT INTO media_sources (id, appid, pass, original_url, discovery_url, title, outlet, author, published_at, updated_at, retrieved_at, type, hands_on, affiliation, platform, build_context, normalized_content_hash, cleanup_version, processing_content, processing_input_identity)
+        VALUES (44, 900003, 'initial', 'https://www.ign.com/articles/retained', 'https://www.ign.com/search?q=retained', 'Retained review', 'IGN', 'Critic', '2026-09-30', '2026-09-30T12:00:00.000Z', '2026-10-01T00:02:00.000Z', 'review', 1, 'staff', 'PC', 'retail', 'retained-hash', 'cleanup-v1', 'retained processing text', 'retained-processing-identity')`,
+      `INSERT INTO media_article_extractions (id, source_id, input_identity, content_hash, cleanup_version, model, config_version, output_json, active)
+        VALUES (45, 44, 'retained-extraction-identity', 'retained-hash', 'cleanup-v1', 'gemini-3.1-flash-lite', 'extraction-v1', '{"claims":["retained"]}', 1)`,
+      `INSERT INTO media_game_overviews (id, appid, input_identity, model, config_version, output_json, active)
+        VALUES (46, 900003, 'retained-overview-identity', 'gemini-3.1-flash-lite', 'synthesis-v1', '{"overview":"retained"}', 1)`,
+      `INSERT INTO media_processing_authorizations (run_id, status, billing_confirmation, stop_reason, authorized_at, updated_at)
+        VALUES (41, 'completed', 'retained-confirmation', NULL, '2026-10-01T00:06:00.000Z', '2026-10-01T00:30:00.000Z')`,
+      `INSERT INTO media_processing_jobs (id, run_id, stage, appid, matched_appid, dimension, source_id, request_key, input_identity, model, config_version, max_input_tokens, max_output_tokens, reserved_microusd, charged_microusd, reservation_active, status, provider_batch_id, output_json, usage_json, submitted_at, completed_at)
+        VALUES (47, 41, 'extraction', 900003, 900004, 'gameplay', 44, 'retained-job', 'retained-extraction-identity', 'gemini-3.1-flash-lite', 'extraction-v1', 1000, 200, 1500, 900, 0, 'succeeded', 'retained-batch', '{"claims":["retained"]}', '{"tokens":1200}', '2026-10-01T00:07:00.000Z', '2026-10-01T00:20:00.000Z')`,
+      `INSERT INTO media_tag_memberships (appid, tag_slug, tag_label, source_id, extraction_input_identity)
+        VALUES (900003, 'retained-tag', 'Retained tag', 44, 'retained-extraction-identity')`,
+      // Source 49 was taken by run 41 but its fetch failed, so its only trace
+      // is run 41's attempt on its URL. Source 50 was discovered before run 41
+      // was authorized but only its discovery fetch touched it. Source 51 was
+      // discovered, and fetched by discovery, after run 41 was authorized.
+      `INSERT INTO media_sources (id, appid, pass, original_url, title, outlet, retrieved_at, type)
         VALUES (49, 900003, 'initial', 'https://www.ign.com/articles/unreachable', 'Unreachable review', 'IGN', '2026-10-01T00:03:00.000Z', 'review'),
           (50, 900003, 'initial', 'https://www.ign.com/articles/never-taken', 'Never taken review', 'IGN', '2026-10-01T00:04:00.000Z', 'review'),
-          (51, 900003, 'initial', 'https://www.ign.com/articles/discovered-later', 'Later review', 'IGN', '2026-10-02T00:01:00.000Z', 'review');
-      INSERT INTO media_discovery_attempts (id, appid, outlet, pass, day, kind, url, status_code, succeeded, error, attempted_at)
+          (51, 900003, 'initial', 'https://www.ign.com/articles/discovered-later', 'Later review', 'IGN', '2026-10-02T00:01:00.000Z', 'review')`,
+      `INSERT INTO media_discovery_attempts (id, appid, outlet, pass, day, kind, url, status_code, succeeded, error, attempted_at)
         VALUES (52, 900003, 'IGN', 'initial', '2026-10-01', 'fetch', 'https://www.ign.com/articles/unreachable', 200, 1, NULL, '2026-10-01T00:03:00.000Z'),
           (53, 900003, 'IGN', 'initial', '2026-10-01', 'fetch', 'https://www.ign.com/articles/unreachable', 503, 0, 'HTTP 503', '2026-10-01T00:08:00.000Z'),
           (54, 900003, 'IGN', 'initial', '2026-10-01', 'fetch', 'https://www.ign.com/articles/never-taken', 200, 1, NULL, '2026-10-01T00:04:00.000Z'),
-          (55, 900003, 'IGN', 'initial', '2026-10-02', 'fetch', 'https://www.ign.com/articles/discovered-later', 200, 1, NULL, '2026-10-02T00:01:00.000Z');
-    `);
+          (55, 900003, 'IGN', 'initial', '2026-10-02', 'fetch', 'https://www.ign.com/articles/discovered-later', 200, 1, NULL, '2026-10-02T00:01:00.000Z')`,
+    ]);
     retained
       .query(
         "INSERT INTO media_game_embeddings (id, appid, dimension, input_identity, overview_input_identity, model, dimensions, config_version, vector, active) VALUES (48, 900003, 'gameplay', 'retained-embedding-identity', 'retained-overview-identity', 'gemini-embedding-2', 3072, 'embedding-v1', ?, 1)"
