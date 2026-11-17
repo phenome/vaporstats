@@ -876,8 +876,7 @@ async function countItemTokens(advance: QueueAdvance, model: string, request: Ge
     return await advance.transport!.countTokens(model, request);
   } catch (error) {
     const outcome = classifyGeminiOutcome("count", error);
-    if (outcome.class === "success") return { class: "transient", reason: "count_without_result", retryAfterMs: null };
-    return outcome.class === "uncertain" ? { class: "transient", reason: outcome.reason, retryAfterMs: null } : outcome;
+    return outcome.class === "success" ? { class: "transient", reason: "count_without_result", retryAfterMs: null } : outcome;
   }
 }
 
