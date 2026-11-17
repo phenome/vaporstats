@@ -25,8 +25,9 @@ import {
   runMediaTick,
   seedApps,
   stableJson,
-  type MediaTickOptions,
   TLS_FAILURE_CODES,
+  type GeminiReply,
+  type MediaTickOptions,
   type OpenRouterReply,
 } from "./support/media";
 import { MEDIA_OUTLETS } from "../src/lib/media-discovery";
@@ -819,6 +820,84 @@ describe("cutover from Gemini text generation", () => {
     expect(database.native.query("SELECT COUNT(*) AS count FROM media_processing_jobs WHERE status = 'submitted' AND stage IN ('extraction', 'synthesis')").get()).toEqual({ count: 0 });
     expect(drained.mediaProcessing?.outputs.skipped).toBe(1);
     expect((await gameDetail(database, CYBERPUNK)).mediaOverview).not.toBeNull();
+  });
+
+  /** A database holding Cyberpunk 2077's one article, whose extraction Gemini Batch accepted as `batches/pre-1` before the move to OpenRouter. */
+  function submittedGeminiExtraction() {
+    const database = openTestDatabase("vaporstats-openrouter-");
+    cleanups.push(database.cleanup);
+    seedApps(database.native, [CYBERPUNK]);
+    insertSources(database.native, CYBERPUNK, "initial", 1);
+    const runId = insertCompletedRun(database.native, "initial:cutover:returned", [CYBERPUNK]);
+    database.native.prepare("INSERT INTO media_processing_authorizations (run_id, status, affected_source_ids) VALUES (?, 'waiting', '[]')").run(runId);
+    const source = database.native.query<{ id: number }, []>("SELECT id FROM media_sources").get()!;
+    insertSubmittedGeminiExtraction(database.native, { runId, sourceId: source.id, batch: "batches/pre-1" });
+    return database;
+  }
+  const extractionItem = (database: TestDatabase) => database.native.query<{ provider: string; model: string; status: string; attempt_count: number }, []>(
+    "SELECT provider, model, status, attempt_count FROM media_processing_jobs WHERE stage = 'extraction'",
+  ).get();
+
+  const returned: Array<[string, GeminiReply, { attempt_count: number; geminiPause: "prepay_depleted" | null }]> = [
+    ["expired", { status: 200, body: { metadata: { state: "BATCH_STATE_EXPIRED" } } }, { attempt_count: 1, geminiPause: null }],
+    ["ended for depleted Prepay credits", { status: 200, body: { metadata: { state: "BATCH_STATE_FAILED" }, error: { message: "Your prepayment credits are depleted." } } }, { attempt_count: 0, geminiPause: "prepay_depleted" }],
+  ];
+  for (const [name, poll, expected] of returned) {
+    test(`a Gemini text batch ${name} after the move returns its item to the OpenRouter queue for Claude Haiku 5.5, and its cost and model are OpenRouter's`, async () => {
+      const database = submittedGeminiExtraction();
+      const providers = apis();
+      providers.gemini.reply("poll", poll);
+
+      const first = await tick(database, providers, "2026-11-18T03:00:00.000Z");
+
+      expect(first.mediaProcessing?.providers.gemini.reason ?? null).toBe(expected.geminiPause);
+      expect(extractionItem(database)).toMatchObject({ provider: "openrouter", model: HAIKU, attempt_count: expected.attempt_count });
+      await tick(database, providers, "2026-11-18T03:15:00.000Z");
+
+      expect(extractionItem(database)).toMatchObject({ provider: "openrouter", model: HAIKU, status: "succeeded" });
+      expect(database.native.query("SELECT model FROM media_article_extractions WHERE active = 1").all()).toEqual([{ model: HAIKU }]);
+      expect(providers.openRouter.requests.filter((request) => request.stage === "extraction")).toHaveLength(1);
+      expect(providers.gemini.submitted.every((key) => key.startsWith("embedding:"))).toBe(true);
+      const cost = database.native.query<{ provider: string; charged: number }, []>("SELECT provider, SUM(charged_microusd) AS charged FROM media_processing_jobs WHERE stage = 'extraction' GROUP BY provider").all();
+      expect(cost).toEqual([{ provider: "openrouter", charged: 150 }]);
+    });
+  }
+
+  test("a Gemini text batch returned after the move while no OpenRouter key is configured waits paused for missing_key, never uncertain", async () => {
+    const database = submittedGeminiExtraction();
+    const providers = apis();
+    providers.gemini.reply("poll", { status: 200, body: { metadata: { state: "BATCH_STATE_EXPIRED" } } });
+
+    await tick(database, providers, "2026-11-18T03:00:00.000Z", { openRouterApiKey: undefined });
+    const waiting = await tick(database, providers, "2026-11-18T03:15:00.000Z", { openRouterApiKey: undefined });
+
+    expect(extractionItem(database)).toMatchObject({ provider: "openrouter", model: HAIKU, status: "queued" });
+    expect(waiting.mediaProcessing?.providers.openrouter).toMatchObject({ paused: true, reason: "missing_key" });
+    expect(waiting.mediaProcessing?.cost.uncertain).toBe(0);
+    expect(providers.openRouter.requests).toHaveLength(0);
+  });
+
+  test("a Gemini Overview batch expired after the move returns to the OpenRouter queue with its Claude Haiku 5.5 identity, and builds the Overview", async () => {
+    const { database, runId, providers } = await geminiBuiltGame();
+    const overview = database.native.query<{ input_identity: string; config_version: string }, []>("SELECT input_identity, config_version FROM media_game_overviews WHERE active = 1").get()!;
+    database.native.prepare("UPDATE media_game_overviews SET active = 0").run();
+    database.native.prepare(
+      `INSERT INTO media_processing_jobs (run_id, stage, appid, source_id, request_key, input_identity, model, config_version, max_input_tokens, max_output_tokens, reserved_microusd, reservation_active, status, provider, enqueued_at, provider_batch_id, usage_json, submitted_at)
+       VALUES (?, 'synthesis', ?, NULL, 'synthesis:pre-cutover', ?, ?, ?, 100, 3200, 0, 0, 'submitted', 'gemini', '2026-11-10T00:00:00.000Z', 'batches/pre-synthesis', '{}', '2026-11-10T00:00:00.000Z')`,
+    ).run(runId, CYBERPUNK, overview.input_identity, GEMINI_TEXT_MODEL, overview.config_version);
+    const extraction = database.native.query<{ source_id: number; input_identity: string }, []>("SELECT source_id, input_identity FROM media_article_extractions WHERE active = 1").get()!;
+    const haikuIdentity = createHash("sha256").update(stableJson({ stage: "synthesis", appid: CYBERPUNK, model: HAIKU, configVersion: overview.config_version, extractions: [{ sourceId: extraction.source_id, inputIdentity: extraction.input_identity }] })).digest("hex");
+    const synthesisRequestsBefore = providers.openRouter.requests.filter((request) => request.stage === "synthesis").length;
+    providers.gemini.reply("poll", { status: 200, body: { metadata: { state: "BATCH_STATE_EXPIRED" } } });
+
+    await tick(database, providers, "2026-11-18T05:00:00.000Z");
+    const item = () => database.native.query("SELECT provider, model, input_identity, status FROM media_processing_jobs WHERE request_key = 'synthesis:pre-cutover'").get();
+    expect(item()).toEqual({ provider: "openrouter", model: HAIKU, input_identity: haikuIdentity, status: "queued" });
+    await tick(database, providers, "2026-11-18T05:15:00.000Z");
+
+    expect(item()).toEqual({ provider: "openrouter", model: HAIKU, input_identity: haikuIdentity, status: "succeeded" });
+    expect(database.native.query("SELECT model, input_identity FROM media_game_overviews WHERE active = 1").all()).toEqual([{ model: HAIKU, input_identity: haikuIdentity }]);
+    expect(providers.openRouter.requests.filter((request) => request.stage === "synthesis")).toHaveLength(synthesisRequestsBefore + 1);
   });
 
   test("existing Gemini extractions and Overviews stay active, and the model change queues no work, even for a correction set", async () => {

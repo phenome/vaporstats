@@ -932,9 +932,9 @@ async function holdItem(advance: QueueAdvance, job: JobRow, outcome: Exclude<Pro
 }
 
 /** Counts `request`'s input tokens, or returns the classified failure. A count is free and never uncertain. */
-async function countItemTokens(advance: QueueAdvance, model: string, request: GeminiRequest): Promise<number | Exclude<ProviderOutcome, { class: "success" }>> {
+async function countItemTokens(transport: GeminiBatchTransport, model: string, request: GeminiRequest): Promise<number | Exclude<ProviderOutcome, { class: "success" }>> {
   try {
-    return await advance.transport!.countTokens(model, request);
+    return await transport.countTokens(model, request);
   } catch (error) {
     const outcome = classifyGeminiOutcome("count", error);
     return outcome.class === "success" ? { class: "transient", reason: "count_without_result", retryAfterMs: null } : outcome;
@@ -945,11 +945,13 @@ async function countItemTokens(advance: QueueAdvance, model: string, request: Ge
  * Counts and submits the Gemini embedding batch `request` for `job`. Before
  * the request is sent, the item is durably marked in flight with its send
  * time, so a restart never resends a request that may have been received.
- * Every outcome is classified once and acted on here.
+ * Every outcome is classified once and acted on here. Without a transport
+ * that submits embedding batches, Gemini waits paused for its key.
  */
 async function sendItem(advance: QueueAdvance, job: JobRow, model: string, request: GeminiRequest, maxInputTokens: number): Promise<void> {
   const { db, now, transport } = advance;
-  const counted = await countItemTokens(advance, model, request);
+  if (!transport?.submitEmbeddingBatch) return holdItem(advance, job, { class: "missing_configuration", reason: "missing_key" });
+  const counted = await countItemTokens(transport, model, request);
   if (typeof counted !== "number") return holdItem(advance, job, counted);
   if (!Number.isInteger(counted) || counted < 0 || counted > maxInputTokens) {
     return holdItem(advance, job, { class: "refusal", reason: "input_token_cap" });
@@ -959,7 +961,7 @@ async function sendItem(advance: QueueAdvance, job: JobRow, model: string, reque
   let result: { name: string } | null = null;
   let outcome: ProviderOutcome;
   try {
-    result = await transport!.submitEmbeddingBatch!(job.model, [{ key: job.request_key, request }]);
+    result = await transport.submitEmbeddingBatch(job.model, [{ key: job.request_key, request }]);
     outcome = classifyGeminiOutcome("submit", null);
   } catch (error) {
     outcome = classifyGeminiOutcome("submit", error);
@@ -986,9 +988,11 @@ async function sendItem(advance: QueueAdvance, job: JobRow, model: string, reque
  * transaction is open while the request is in flight. A fully sent request
  * whose outcome is unknown leaves the item uncertain, never to be resent
  * automatically; every other outcome is classified once and acted on here.
+ * Without an OpenRouter transport, OpenRouter waits paused for its key.
  */
 async function sendTextItem(advance: QueueAdvance, job: JobRow, request: OpenRouterChatRequest): Promise<void> {
-  const { db, now } = advance;
+  const { db, now, openRouter } = advance;
+  if (!openRouter) return holdItem(advance, job, { class: "missing_configuration", reason: "missing_key" });
   const estimated = estimatedInputTokens(request);
   if (estimated > OPENROUTER_MAX_INPUT_TOKENS) return holdItem(advance, job, { class: "refusal", reason: "input_token_cap" });
   const marked = await db.prepare(`UPDATE media_processing_jobs SET status = 'uncertain', error = '${IN_FLIGHT}', max_input_tokens = ?, submitted_at = ? WHERE id = ? AND ${WAITING}`).bind(estimated, now.toISOString(), job.id).run();
@@ -996,7 +1000,7 @@ async function sendTextItem(advance: QueueAdvance, job: JobRow, request: OpenRou
   let completion: OpenRouterCompletion | null = null;
   let outcome: ProviderOutcome;
   try {
-    completion = await advance.openRouter!.complete(request);
+    completion = await openRouter.complete(request);
     outcome = classifyOpenRouterOutcome(null);
   } catch (error) {
     outcome = classifyOpenRouterOutcome(error);
@@ -1322,16 +1326,39 @@ async function settleJob(db: AppDatabase, job: JobRow, result: GeminiBatchPoll &
 }
 
 /**
+ * The provider, model, configuration and input identity an item returned to
+ * the queue waits with. Text generation runs only on OpenRouter, so an
+ * extraction or Overview item from a Gemini text batch waits as OpenRouter
+ * work for the text model; an Overview item that still describes its game's
+ * current contributions takes the identity of new Overview work for them.
+ * An embedding item keeps its own.
+ */
+async function queuedIdentity(db: AppDatabase, job: JobRow): Promise<Pick<JobRow, "provider" | "model" | "config_version" | "max_output_tokens" | "input_identity">> {
+  if (job.stage === "extraction") {
+    return { provider: "openrouter", model: OPENROUTER_TEXT_MODEL, config_version: EXTRACTION_CONFIG_VERSION, max_output_tokens: EXTRACTION_MAX_OUTPUT_TOKENS, input_identity: job.input_identity };
+  }
+  if (job.stage === "synthesis") {
+    const { extractions } = await currentGameEvidence(db, job.appid);
+    const identity = extractions.length > 0 && synthesisIsCurrent(job, extractions) ? synthesisIdentity(job.appid, extractions) : job.input_identity;
+    return { provider: "openrouter", model: OPENROUTER_TEXT_MODEL, config_version: SYNTHESIS_CONFIG_VERSION, max_output_tokens: SYNTHESIS_MAX_OUTPUT_TOKENS, input_identity: identity };
+  }
+  return { provider: job.provider, model: job.model, config_version: job.config_version, max_output_tokens: job.max_output_tokens, input_identity: job.input_identity };
+}
+
+/**
  * Returns the item of a batch the provider ended without running it to the
- * queue. A retained row is never returned to the queue: it ends `stale` with
- * its recorded values kept, and an authorized run queues its work anew.
+ * queue, under the provider and identity it now waits with. A retained row
+ * is never returned to the queue: it ends `stale` with its recorded values
+ * kept, and an authorized run queues its work anew.
  */
 async function returnUnrunBatch(db: AppDatabase, job: JobRow, retry: { attemptCount: number; nextAttemptAt: string | null; error: string | null }, now: Date): Promise<void> {
   if (job.retained === 1) {
     await db.prepare("UPDATE media_processing_jobs SET status = 'stale', error = ?, completed_at = ? WHERE id = ? AND status = 'submitted'").bind(retry.error ?? "provider ended the batch without output", now.toISOString(), job.id).run();
     return;
   }
-  await db.prepare("UPDATE media_processing_jobs SET status = 'queued', provider_batch_id = NULL, submitted_at = NULL, attempt_count = ?, next_attempt_at = ?, error = ? WHERE id = ? AND status = 'submitted' AND retained = 0").bind(retry.attemptCount, retry.nextAttemptAt, retry.error, job.id).run();
+  const queued = await queuedIdentity(db, job);
+  await db.prepare("UPDATE media_processing_jobs SET status = 'queued', provider = ?, model = ?, config_version = ?, max_output_tokens = ?, input_identity = ?, provider_batch_id = NULL, submitted_at = NULL, attempt_count = ?, next_attempt_at = ?, error = ? WHERE id = ? AND status = 'submitted' AND retained = 0")
+    .bind(queued.provider, queued.model, queued.config_version, queued.max_output_tokens, queued.input_identity, retry.attemptCount, retry.nextAttemptAt, retry.error, job.id).run();
 }
 
 type SubmittedPollSummary = {
