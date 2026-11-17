@@ -1900,6 +1900,21 @@ async function advanceMediaProcessingNow(db: AppDatabase, options: MediaProcessi
   };
 }
 
+/**
+ * Runs the daily credit check in a tick that has no paid work to advance, so
+ * it runs in the first tick at or after 06:00 UTC whether or not work waits.
+ * It records the day and lifts the pauses the check lifts; with no item to
+ * probe, the next submission is the probe. Serialized with every other
+ * queue write.
+ */
+export function runIdleDailyCreditCheck(db: AppDatabase, now: Date): Promise<void> {
+  const next = mediaProcessingQueue
+    .catch(() => undefined)
+    .then(async () => { await runDailyCreditCheck(db, now); });
+  mediaProcessingQueue = next;
+  return next;
+}
+
 export function advanceMediaProcessing(
   db: AppDatabase,
   options: MediaProcessingOptions = {},

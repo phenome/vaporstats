@@ -392,6 +392,33 @@ describe("daily credit check", () => {
   });
 });
 
+describe("daily credit check without paid work", () => {
+  test("runs in the first tick at or after 06:00 UTC even when no paid work waits, so a later day's new work is not held by an old pause", async () => {
+    const { database } = await authorizedGames();
+    const gemini = controlledGeminiApi();
+    // The only batch's first poll rejects the key, pausing Gemini; its next
+    // poll settles it as invalid output, which leaves no paid work at all.
+    gemini.reply("poll", GEMINI_KEY_INVALID, { status: 200, body: { metadata: { state: "BATCH_STATE_SUCCEEDED" }, response: { inlinedResponses: { inlinedResponses: [{ response: { candidates: [{ content: { parts: [{ text: "{}" }] } }] } }] } } } });
+    await tick(database, gemini, "2026-11-10T07:00:00.000Z");
+    const settled = await tick(database, gemini, "2026-11-10T07:15:00.000Z");
+    expect(settled.mediaProcessing?.providers.gemini).toMatchObject({ paused: true, reason: "rejected_key" });
+    expect((await tick(database, gemini, "2026-11-10T07:30:00.000Z")).mediaProcessing).toBeUndefined();
+
+    // The next day's first tick after 06:00 has no paid work, and still checks.
+    await tick(database, gemini, "2026-11-11T06:30:00.000Z");
+
+    // New work authorized the day after, before that day's check, is not
+    // held by the pause the earlier check already lifted.
+    seedApps(database.native, [BALDURS_GATE]);
+    insertSources(database.native, BALDURS_GATE, "initial", 1);
+    await authorizeMediaProcessing(database.db, insertCompletedRun(database.native, "initial:paid-work:later", [BALDURS_GATE]));
+    const resumed = await tick(database, gemini, "2026-11-12T05:00:00.000Z");
+
+    expect(resumed.mediaProcessing?.providers.gemini).toMatchObject({ paused: false, reason: null, checkedAt: "2026-11-11T06:30:00.000Z" });
+    expect(gemini.submitted.filter((key) => key.startsWith("extraction:"))).toHaveLength(2);
+  });
+});
+
 describe("transient failures", () => {
   test("keep the item queued, retry at the next tick, then back off doubling and honoring Retry-After, and never fail it", async () => {
     const { database } = await authorizedGames();

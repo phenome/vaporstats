@@ -32,6 +32,7 @@ import {
 } from "../src/lib/media-discovery";
 import {
   advanceMediaProcessing,
+  runIdleDailyCreditCheck,
   type MediaProcessingSummary,
 } from "../src/lib/media-processing";
 import {
@@ -250,8 +251,9 @@ async function performIngestionTick(options: IngestionTickOptions): Promise<Inge
   const pendingMediaProcessing = await options.db
     .prepare("SELECT a.run_id FROM media_processing_authorizations AS a JOIN media_discovery_runs AS r ON r.id = a.run_id WHERE a.status IN ('queued', 'waiting') AND r.status NOT IN ('queued', 'running') ORDER BY a.authorized_at LIMIT 1")
     .first<{ run_id: number }>();
-  // Queued paid work advances every tick, including the daily credit check
-  // that resumes a paused provider, without a new authorization.
+  // Queued paid work advances every tick without a new authorization. The
+  // daily credit check runs in every tick: within the advance, which probes
+  // with a queued item, or on its own when no paid work waits.
   const queuedMediaWork = await options.db
     .prepare("SELECT run_id FROM media_processing_jobs WHERE status = 'submitted' OR (status = 'queued' AND retained = 0) ORDER BY id LIMIT 1")
     .first<{ run_id: number }>();
@@ -264,6 +266,8 @@ async function performIngestionTick(options: IngestionTickOptions): Promise<Inge
       providerFetch: customFetch,
       now: anchorTime,
     });
+  } else {
+    await runIdleDailyCreditCheck(options.db, anchorTime);
   }
 
   let discovery: DiscoveryResult | undefined;
