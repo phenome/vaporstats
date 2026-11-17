@@ -362,7 +362,8 @@ export const GEMINI_MODEL_NOT_FOUND: GeminiReply = { status: 404, body: { error:
 
 /** One answer the controlled OpenRouter API gives a request: an HTTP reply, or a connection failure. */
 export type OpenRouterReply =
-  | { status: number; body?: unknown; headers?: Record<string, string> }
+  /** An HTTP reply whose `body` is sent as JSON, or `raw` as it is. */
+  | { status: number; body?: unknown; raw?: string; headers?: Record<string, string> }
   | { network: string; code?: string; name?: string }
   /** No answer until the client's request signal aborts it. */
   | { hang: true };
@@ -412,7 +413,7 @@ export function controlledOpenRouterApi() {
       });
     }
     if ("network" in reply) throw Object.assign(new Error(reply.network), reply.code ? { code: reply.code } : {}, reply.name ? { name: reply.name } : {});
-    return new Response(JSON.stringify(reply.body ?? {}), { status: reply.status, headers: { "Content-Type": "application/json", ...reply.headers } });
+    return new Response(reply.raw ?? JSON.stringify(reply.body ?? {}), { status: reply.status, headers: { "Content-Type": "application/json", ...reply.headers } });
   };
   const fetchFn = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
     const url = String(input);

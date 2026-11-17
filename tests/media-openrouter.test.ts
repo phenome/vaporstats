@@ -251,6 +251,44 @@ describe("OpenRouter classifier", () => {
     expect(answerRecord(retried.database)).toMatchObject({ status: "succeeded", charged_microusd: 250, cost_source: "provider_reported" });
   });
 
+  /** A 200 whose first choice ended with an error of `code`, after the provider accepted the request. */
+  const choiceError = (code: number): OpenRouterReply => ({
+    status: 200,
+    body: { id: "gen-accepted", model: HAIKU, provider: "Anthropic", usage: { prompt_tokens: 1_000, completion_tokens: 0, cost: 0.0001 }, choices: [{ index: 0, finish_reason: "error", message: { role: "assistant", content: "" }, error: { code, message: "Provider returned error" } }] },
+  });
+
+  test("an error inside the first choice is classified like a top-level error, and its generation id and cost are recorded", async () => {
+    const failed = await authorizedGames();
+    const failing = apis();
+    failing.openRouter.reply("chat", choiceError(502));
+    await tick(failed.database, failing, "2026-11-18T07:00:00.000Z");
+    expect(answerRecord(failed.database)).toMatchObject({ status: "uncertain", error: "uncertain:accepted_http_502", generation_id: "gen-accepted", charged_microusd: 100 });
+
+    const refused = await authorizedGames();
+    const refusing = apis();
+    refusing.openRouter.reply("chat", choiceError(400));
+    await tick(refused.database, refusing, "2026-11-18T07:00:00.000Z");
+    expect(answerRecord(refused.database)).toMatchObject({ status: "refused", error: "http_400", generation_id: "gen-accepted", charged_microusd: 100 });
+  });
+
+  for (const [name, reply] of [
+    ["a body that is not JSON", { status: 200, raw: "<html><body>upstream reset</body></html>" }],
+    ["a JSON body without choices", { status: 200, body: { id: "gen-empty", object: "chat.completion" } }],
+  ] as Array<[string, OpenRouterReply]>) {
+    test(`a 200 with ${name} came after the provider accepted the request, so the item is uncertain and never resent automatically`, async () => {
+      const { database } = await authorizedGames();
+      const providers = apis();
+      providers.openRouter.reply("chat", reply);
+
+      const uncertain = await tick(database, providers, "2026-11-18T07:00:00.000Z");
+      await tick(database, providers, "2026-11-19T06:00:00.000Z");
+
+      expect(answerRecord(database)).toMatchObject({ status: "uncertain", error: "uncertain:accepted_without_answer" });
+      expect(uncertain.mediaProcessing?.outputs.skipped).toBe(0);
+      expect(providers.openRouter.requests.filter((request) => request.stage === "extraction")).toHaveLength(1);
+    });
+  }
+
   const refusals: Array<[string, OpenRouterReply]> = [
     ["a 400 invalid request", { status: 400, body: { error: { code: 400, message: "Invalid request", metadata: { error_type: "invalid_request" } } } }],
     ["a 403 moderation flag", OPENROUTER_MODERATION],
@@ -621,6 +659,15 @@ describe("daily OpenRouter credit check", () => {
   test("a check whose key is rejected pauses text generation with reason invalid_key", async () => {
     const { database, providers } = await pausedForKeyLimit();
     providers.openRouter.reply("key", OPENROUTER_INVALID_KEY);
+
+    const checked = await tick(database, providers, "2026-11-19T06:00:00.000Z");
+
+    expect(checked.mediaProcessing?.providers.openrouter).toMatchObject({ paused: true, reason: "invalid_key", checkOutcome: "invalid_key" });
+  });
+
+  test("a check answered with a 200 that holds only an error is classified by the error's code", async () => {
+    const { database, providers } = await pausedForKeyLimit();
+    providers.openRouter.reply("key", { status: 200, body: { error: { code: 401, message: "User not found" } } });
 
     const checked = await tick(database, providers, "2026-11-19T06:00:00.000Z");
 

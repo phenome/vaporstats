@@ -84,10 +84,15 @@ function completionFrom(body: Record<string, unknown>): OpenRouterCompletion {
   };
 }
 
-function errorFrom(response: Response, body: Record<string, unknown>): OpenRouterHttpError {
-  const error = object(body.error);
+/**
+ * The error answer of `response`: its HTTP error status, or for a 200 the
+ * code of `failure`, the error the body reports. A 200 without such a code
+ * keeps status 200: it was accepted and carries no answer.
+ */
+function errorFrom(response: Response, body: Record<string, unknown>, failure: unknown = body.error): OpenRouterHttpError {
+  const error = object(failure);
   const code = typeof error.code === "number" && Number.isInteger(error.code) && error.code >= 400 ? error.code : null;
-  const status = response.ok ? code ?? 502 : response.status;
+  const status = response.ok ? code ?? response.status : response.status;
   const metadata = object(error.metadata);
   return new OpenRouterHttpError(status, {
     limitSource: text(metadata.limit_source),
@@ -102,11 +107,28 @@ function errorFrom(response: Response, body: Record<string, unknown>): OpenRoute
 
 /**
  * Reads a whole answer. A failure while reading propagates: the request was
- * sent, so its outcome is unknown. A body that is not JSON is read as empty.
+ * sent, so its outcome is unknown. A body that is not a JSON object is null.
  */
-async function answer(response: Response): Promise<Record<string, unknown>> {
+async function answer(response: Response): Promise<Record<string, unknown> | null> {
   const body = await response.text();
-  try { return object(JSON.parse(body)); } catch { return {}; }
+  try {
+    const parsed: unknown = JSON.parse(body);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, unknown> : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The error a 200 reports instead of an answer: a top-level `error`, or one
+ * on the first choice, which then ends with `finish_reason` `error`.
+ * `undefined` when the body reports none.
+ */
+function acceptedFailure(body: Record<string, unknown>): unknown {
+  if (body.error !== undefined) return body.error;
+  const choice = object(Array.isArray(body.choices) ? body.choices[0] : null);
+  if (choice.error !== undefined) return choice.error;
+  return choice.finish_reason === "error" ? {} : undefined;
 }
 
 export function createOpenRouterTransport(
@@ -126,16 +148,21 @@ export function createOpenRouterTransport(
         signal: AbortSignal.timeout(timeoutMs),
       });
       const body = await answer(response);
-      // A 200 can still carry only an error, when the provider failed after
-      // OpenRouter sent its headers.
-      if (!response.ok || (body.error !== undefined && body.choices === undefined)) throw errorFrom(response, body);
+      if (!response.ok) throw errorFrom(response, body ?? {});
+      // OpenRouter sends a 200 once a provider accepted the request. The
+      // provider can still fail after that, so a 200 may carry only an error,
+      // or no answer at all.
+      if (body === null) throw errorFrom(response, {}, null);
+      const failure = acceptedFailure(body);
+      if (failure !== undefined) throw errorFrom(response, body, failure);
+      if (!Array.isArray(body.choices)) throw errorFrom(response, body, null);
       return completionFrom(body);
     },
     async currentKey() {
       const response = await fetchFn(`${OPENROUTER_API_BASE}/key`, { headers, signal: AbortSignal.timeout(timeoutMs) });
       const body = await answer(response);
-      if (!response.ok) throw errorFrom(response, body);
-      return body.data ?? null;
+      if (!response.ok || body?.error !== undefined) throw errorFrom(response, body ?? {});
+      return body?.data ?? null;
     },
   };
 }
