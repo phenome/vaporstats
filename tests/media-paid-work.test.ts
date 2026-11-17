@@ -1,13 +1,13 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { authorizeMediaProcessing } from "../src/lib/media-processing";
 import { getMediaOverview } from "../src/lib/media-overview";
-import { runIngestionTick, type IngestionTickOptions } from "../workers/ingestion";
 import { openTestDatabase, openUpgradedTestDatabase, type TestDatabase } from "./support/db";
 import {
   BALDURS_GATE,
   CYBERPUNK,
   HADES_II,
   controlledGeminiApi,
+  controlledOpenRouterApi,
   GEMINI_BILLING_DISABLED,
   GEMINI_KEY_INVALID,
   GEMINI_MODEL_NOT_FOUND,
@@ -17,9 +17,11 @@ import {
   insertCompletedRun,
   insertSources,
   processingArticleHtml,
+  runMediaTick,
   seedApps,
   type GeminiCall,
   type GeminiReply,
+  type MediaTickOptions,
 } from "./support/media";
 
 const cleanups: Array<() => void> = [];
@@ -30,7 +32,12 @@ afterEach(() => {
   else process.env.RECEPTION_ARTIFACT_DIR = artifactDirectory;
 });
 
-type Gemini = ReturnType<typeof controlledGeminiApi>;
+/** The controlled paid providers: Gemini for embeddings, OpenRouter for text. */
+type Providers = { gemini: ReturnType<typeof controlledGeminiApi>; openRouter: ReturnType<typeof controlledOpenRouterApi> };
+
+function providers(): Providers {
+  return { gemini: controlledGeminiApi(), openRouter: controlledOpenRouterApi() };
+}
 
 /**
  * A database holding the three media games with `sourcesPerGame` initial
@@ -47,43 +54,25 @@ async function authorizedGames(sourcesPerGame: Partial<Record<number, number>> =
   return { database, runId };
 }
 
-/**
- * Article pages served for every outlet URL unless `outlet` answers first;
- * Gemini requests go to `gemini`; anything else is unavailable.
- */
-function tickFetch(gemini: Gemini, fetched: string[] = [], outlet?: (url: string) => Response | undefined): typeof fetch {
-  return (async (input: RequestInfo | URL, init?: RequestInit) => {
-    const url = String(input);
-    if (gemini.isGeminiRequest(url)) return gemini.fetchFn(input, init);
-    if (url.includes("/articles/")) {
-      fetched.push(url);
-      const answer = outlet?.(url);
-      if (answer) return answer;
-      const appid = [BALDURS_GATE, HADES_II].find((id) => url.includes(String(id))) ?? CYBERPUNK;
-      return new Response(processingArticleHtml(appid));
-    }
-    return new Response(null, { status: 404 });
-  }) as typeof fetch;
-}
-
-/**
- * Runs one ingestion tick at `at` with the controlled Gemini API and outlets.
- * The tick's daily player cycle is marked done, so it writes no snapshot.
- */
-function tick(database: TestDatabase, gemini: Gemini, at: string, options: Partial<IngestionTickOptions> & { fetched?: string[]; outlet?: (url: string) => Response | undefined } = {}) {
-  const { fetched, outlet, ...rest } = options;
-  const anchorTime = new Date(at);
-  const previousDay = new Date(Date.UTC(anchorTime.getUTCFullYear(), anchorTime.getUTCMonth(), anchorTime.getUTCDate() - 1)).toISOString().slice(0, 10);
-  database.native.prepare("INSERT INTO checkpoints (key, value) VALUES ('ingestion:last-daily-cycle', ?1) ON CONFLICT(key) DO UPDATE SET value = ?1").run(previousDay);
-  // Reception artifacts the tick writes stay inside the temporary database directory.
-  process.env.RECEPTION_ARTIFACT_DIR = database.directory;
-  return runIngestionTick({ db: database.db, anchorTime, customFetch: tickFetch(gemini, fetched, outlet), geminiApiKey: "test-gemini-key", ...rest });
+/** Runs one ingestion tick at `at` with the controlled providers and outlets. */
+function tick(database: TestDatabase, apis: Providers, at: string, options: MediaTickOptions = {}) {
+  return runMediaTick(database, apis, at, options);
 }
 
 function jobs(database: TestDatabase) {
   return database.native.query<{ request_key: string; stage: string; status: string; attempt_count: number; next_attempt_at: string | null; error: string | null }, []>(
     "SELECT request_key, stage, status, attempt_count, next_attempt_at, error FROM media_processing_jobs ORDER BY id",
   ).all();
+}
+
+/** Gemini's queue items: embeddings. */
+function embeddingJobs(database: TestDatabase) {
+  return jobs(database).filter((job) => job.stage === "embedding");
+}
+
+/** The stage of every batch Gemini accepted, in order. */
+function geminiStages(apis: Providers): string[] {
+  return apis.gemini.submitted.map((key) => key.split(":")[0]!);
 }
 
 describe("retired lifetime allowance", () => {
@@ -97,11 +86,12 @@ describe("retired lifetime allowance", () => {
     ).run(history, CYBERPUNK);
     const historyRows = () => database.native.query("SELECT * FROM media_processing_jobs WHERE request_key LIKE 'history-%' ORDER BY id").all();
     const before = historyRows();
-    const gemini = controlledGeminiApi();
+    const apis = providers();
 
-    const result = await tick(database, gemini, "2026-11-10T03:00:00.000Z");
+    const result = await tick(database, apis, "2026-11-10T03:00:00.000Z");
 
-    expect(gemini.submitted.map((key) => key.split(":")[0])).toEqual(["extraction", "synthesis"]);
+    expect(apis.openRouter.requests.map((request) => request.stage)).toEqual(["extraction", "synthesis"]);
+    expect(geminiStages(apis)).toEqual(["embedding"]);
     expect(historyRows()).toEqual(before);
     expect(result.mediaProcessing?.cost.uncertain).toBe(1);
     // The old reservation is not spend; the settled historical charge is.
@@ -114,7 +104,7 @@ describe("retained paid-job rows", () => {
   test("rows from before the paid-work queue are never deleted or submitted, whether or not their input still matches, while the run's work is queued anew", async () => {
     // A reference database learns the Overview input that the game's article produces.
     const reference = await authorizedGames();
-    await tick(reference.database, controlledGeminiApi(), "2026-11-10T03:00:00.000Z");
+    await tick(reference.database, providers(), "2026-11-10T03:00:00.000Z");
     const currentSynthesis = reference.database.native.query<{ request_key: string; input_identity: string }, []>("SELECT request_key, input_identity FROM media_processing_jobs WHERE stage = 'synthesis'").get()!;
 
     const database = openUpgradedTestDatabase("0022_paid_work_queue", (native) => {
@@ -134,20 +124,21 @@ describe("retained paid-job rows", () => {
     const retained = () => database.native.query<{ request_key: string }, []>("SELECT * FROM media_processing_jobs WHERE id <= 5 ORDER BY id").all();
     const before = retained();
     expect(before).toHaveLength(5);
-    const gemini = controlledGeminiApi();
+    const apis = providers();
 
-    await tick(database, gemini, "2026-11-10T03:00:00.000Z");
-    const last = await tick(database, gemini, "2026-11-10T03:15:00.000Z");
+    const last = await tick(database, apis, "2026-11-10T03:00:00.000Z");
     // Retained rows are not queue work: a later tick has no paid work to advance.
-    const idle = await tick(database, gemini, "2026-11-10T03:30:00.000Z");
+    const idle = await tick(database, apis, "2026-11-10T03:15:00.000Z");
     expect(idle.mediaProcessing).toBeUndefined();
 
     expect(retained()).toEqual(before);
     const retainedKeys = new Set(before.map((row) => row.request_key));
-    expect(gemini.calls.filter((call) => call.kind === "submit" && retainedKeys.has(call.key!))).toEqual([]);
+    expect(apis.gemini.calls.filter((call) => call.kind === "submit" && retainedKeys.has(call.key!))).toEqual([]);
     // The authorized run still does its work, under queue items of its own.
-    expect(gemini.submitted.map((key) => key.split(":")[0])).toEqual(["extraction", "synthesis", "embedding"]);
-    expect(last.mediaProcessing).toMatchObject({ status: "completed", queued: { gemini: 0 } });
+    expect(apis.openRouter.requests.map((request) => request.stage)).toEqual(["extraction", "synthesis"]);
+    expect(geminiStages(apis)).toEqual(["embedding"]);
+    expect(database.native.query("SELECT COUNT(*) AS count FROM media_processing_jobs WHERE id > 5 AND status = 'succeeded'").get()).toEqual({ count: 3 });
+    expect(last.mediaProcessing).toMatchObject({ queued: { gemini: 0, openrouter: 0 } });
   });
 });
 
@@ -161,16 +152,17 @@ describe("retained submitted batches", () => {
       native.prepare("INSERT INTO media_processing_jobs (run_id, stage, appid, source_id, request_key, input_identity, model, config_version, max_input_tokens, max_output_tokens, reserved_microusd, reservation_active, status, provider_batch_id, usage_json, submitted_at) VALUES (?, 'extraction', ?, 1, 'extraction:1:retired-identity', 'retired-identity', 'gemini-3.1-flash-lite', 'v1', 1000, 100, 1500, 1, 'submitted', 'batches/retired-1', '{}', '2026-10-01T00:00:00.000Z')").run(runId, CYBERPUNK);
     });
     cleanups.push(database.cleanup);
-    const gemini = controlledGeminiApi();
-    gemini.reply("poll", { status: 200, body: { metadata: { state: "BATCH_STATE_EXPIRED" } } });
+    const apis = providers();
+    apis.gemini.reply("poll", { status: 200, body: { metadata: { state: "BATCH_STATE_EXPIRED" } } });
 
-    await tick(database, gemini, "2026-11-10T07:00:00.000Z");
-    await tick(database, gemini, "2026-11-10T07:15:00.000Z");
+    await tick(database, apis, "2026-11-10T07:00:00.000Z");
+    await tick(database, apis, "2026-11-10T07:15:00.000Z");
 
     expect(database.native.query("SELECT status, provider_batch_id, reserved_microusd, reservation_active, attempt_count, next_attempt_at FROM media_processing_jobs").all()).toEqual([
       { status: "stale", provider_batch_id: "batches/retired-1", reserved_microusd: 1500, reservation_active: 1, attempt_count: 0, next_attempt_at: null },
     ]);
-    expect(gemini.calls.filter((call) => call.kind === "submit")).toEqual([]);
+    expect(apis.gemini.calls.filter((call) => call.kind === "submit")).toEqual([]);
+    expect(apis.openRouter.requests).toEqual([]);
   });
 });
 
@@ -178,31 +170,44 @@ function sourceTexts(database: TestDatabase): Array<string | null> {
   return database.native.query<{ processing_content: string | null }, []>("SELECT processing_content FROM media_sources ORDER BY id").all().map((row) => row.processing_content);
 }
 
-/** Processes Cyberpunk's single article to an active Overview whose embedding is queued, at 03:00 and 03:15 on 2026-11-10. */
-async function overviewWithQueuedEmbedding(gemini: Gemini, sourcesPerGame: Partial<Record<number, number>> = { [CYBERPUNK]: 1 }) {
-  const setup = await authorizedGames(sourcesPerGame);
-  await tick(setup.database, gemini, "2026-11-10T03:00:00.000Z");
-  return setup;
-}
-
 describe("missing provider configuration", () => {
-  test("a missing key pauses Gemini with reason missing_key, fetches no article, fails nothing, and a configured key resumes the queue", async () => {
+  test("a missing OpenRouter key pauses OpenRouter with reason missing_key, fetches no article, fails nothing, and a configured key resumes the queue", async () => {
     const { database } = await authorizedGames();
-    const gemini = controlledGeminiApi();
+    const apis = providers();
     const fetched: string[] = [];
 
-    const missing = await tick(database, gemini, "2026-11-10T03:00:00.000Z", { geminiApiKey: "", fetched });
+    const missing = await tick(database, apis, "2026-11-10T03:00:00.000Z", { openRouterApiKey: "", fetched });
 
-    expect(missing.mediaProcessing?.providers.gemini).toMatchObject({ paused: true, reason: "missing_key", pausedAt: "2026-11-10T03:00:00.000Z" });
+    expect(missing.mediaProcessing?.providers.openrouter).toMatchObject({ paused: true, reason: "missing_key", pausedAt: "2026-11-10T03:00:00.000Z" });
+    expect(missing.mediaProcessing?.providers.gemini.paused).toBe(false);
     expect(missing.mediaProcessing?.status).toBe("waiting");
+    expect(missing.mediaProcessing?.stopReasons).toContain("provider_paused:openrouter:missing_key");
     expect(fetched).toEqual([]);
-    expect(gemini.calls).toEqual([]);
+    expect(apis.openRouter.calls).toEqual([]);
     expect(jobs(database).map(({ stage, status, attempt_count, error }) => ({ stage, status, attempt_count, error }))).toEqual([{ stage: "extraction", status: "queued", attempt_count: 0, error: null }]);
 
-    const configured = await tick(database, gemini, "2026-11-10T03:15:00.000Z", { fetched });
+    const configured = await tick(database, apis, "2026-11-10T03:15:00.000Z", { fetched });
+
+    expect(configured.mediaProcessing?.providers.openrouter.paused).toBe(false);
+    expect(apis.openRouter.requests.map((request) => request.stage)).toEqual(["extraction", "synthesis"]);
+  });
+
+  test("a missing Gemini key pauses Gemini with reason missing_key while text generation continues, and a configured key resumes its embeddings", async () => {
+    const { database } = await authorizedGames();
+    const apis = providers();
+
+    const missing = await tick(database, apis, "2026-11-10T03:00:00.000Z", { geminiApiKey: "" });
+
+    expect(missing.mediaProcessing?.providers.gemini).toMatchObject({ paused: true, reason: "missing_key", pausedAt: "2026-11-10T03:00:00.000Z" });
+    expect(missing.mediaProcessing?.providers.openrouter.paused).toBe(false);
+    expect(apis.openRouter.requests.map((request) => request.stage)).toEqual(["extraction", "synthesis"]);
+    expect(apis.gemini.calls).toEqual([]);
+    expect(embeddingJobs(database).map(({ status, attempt_count, error }) => ({ status, attempt_count, error }))).toEqual([{ status: "queued", attempt_count: 0, error: null }]);
+
+    const configured = await tick(database, apis, "2026-11-10T03:15:00.000Z");
 
     expect(configured.mediaProcessing?.providers.gemini.paused).toBe(false);
-    expect(gemini.submitted.map((key) => key.split(":")[0])).toEqual(["extraction", "synthesis"]);
+    expect(geminiStages(apis)).toEqual(["embedding"]);
   });
 });
 
@@ -218,274 +223,272 @@ describe("project-level provider errors", () => {
     for (const kind of calls) {
       test(`${name} at the ${kind} call pauses Gemini with reason ${reason}, refuses and fails nothing, and the daily check resumes the queue`, async () => {
         const { database } = await authorizedGames({ [CYBERPUNK]: 2, [BALDURS_GATE]: 1 });
-        const gemini = controlledGeminiApi();
-        gemini.reply(kind, reply);
+        const apis = providers();
+        apis.gemini.reply(kind, reply);
 
-        const paused = await tick(database, gemini, "2026-11-10T07:00:00.000Z");
+        const paused = await tick(database, apis, "2026-11-10T07:00:00.000Z");
 
         expect(paused.mediaProcessing?.providers.gemini).toMatchObject({ paused: true, reason, pausedAt: "2026-11-10T07:00:00.000Z" });
-        expect(jobs(database).map(({ status, attempt_count, error }) => ({ status, attempt_count, error }))).toEqual(Array(3).fill({ status: "queued", attempt_count: 0, error: null }));
+        expect(embeddingJobs(database).map(({ status, attempt_count, error }) => ({ status, attempt_count, error }))).toEqual(Array(2).fill({ status: "queued", attempt_count: 0, error: null }));
         expect(paused.mediaProcessing?.outputs.skipped).toBe(0);
         expect(paused.mediaProcessing?.status).toBe("waiting");
         expect(paused.mediaProcessing?.stopReasons).toContain(`provider_paused:gemini:${reason}`);
         expect(paused.mediaProcessing?.stopReasons).not.toContain("provider_refusal");
 
-        const callsWhilePaused = gemini.calls.length;
-        const later = await tick(database, gemini, "2026-11-10T07:15:00.000Z");
+        const callsWhilePaused = apis.gemini.calls.length;
+        const later = await tick(database, apis, "2026-11-10T07:15:00.000Z");
         expect(later.mediaProcessing?.providers.gemini.paused).toBe(true);
-        expect(gemini.calls).toHaveLength(callsWhilePaused);
+        expect(apis.gemini.calls).toHaveLength(callsWhilePaused);
 
-        const resumed = await tick(database, gemini, "2026-11-11T06:00:00.000Z");
+        const resumed = await tick(database, apis, "2026-11-11T06:00:00.000Z");
         expect(resumed.mediaProcessing?.providers.gemini.paused).toBe(false);
-        expect(jobs(database).filter((job) => job.stage === "extraction").every((job) => job.status === "succeeded")).toBe(true);
+        expect(embeddingJobs(database).every((job) => job.status === "succeeded")).toBe(true);
       });
     }
   }
 
   test("an invalid API key at a poll pauses Gemini and keeps the batch submitted, not uncertain", async () => {
     const { database } = await authorizedGames();
-    const gemini = controlledGeminiApi();
-    gemini.reply("poll", GEMINI_KEY_INVALID);
+    const apis = providers();
+    apis.gemini.reply("poll", GEMINI_KEY_INVALID);
 
-    const paused = await tick(database, gemini, "2026-11-10T07:00:00.000Z");
+    const paused = await tick(database, apis, "2026-11-10T07:00:00.000Z");
 
     expect(paused.mediaProcessing?.providers.gemini).toMatchObject({ paused: true, reason: "rejected_key" });
-    expect(jobs(database).map(({ stage, status }) => ({ stage, status }))).toEqual([{ stage: "extraction", status: "submitted" }]);
+    expect(embeddingJobs(database).map(({ status }) => status)).toEqual(["submitted"]);
     expect(paused.mediaProcessing?.cost.uncertain).toBe(0);
 
     // Polls are free and continue while paused; the batch settles.
-    await tick(database, gemini, "2026-11-10T07:15:00.000Z");
-    expect(jobs(database)[0]).toMatchObject({ stage: "extraction", status: "succeeded" });
+    await tick(database, apis, "2026-11-10T07:15:00.000Z");
+    expect(embeddingJobs(database).map(({ status }) => status)).toEqual(["succeeded"]);
   });
 
   test("a poll for a batch the provider no longer knows leaves its item uncertain and pauses nothing", async () => {
     const { database } = await authorizedGames();
-    const gemini = controlledGeminiApi();
-    gemini.reply("poll", { status: 404, body: { error: { code: 404, status: "NOT_FOUND", message: "Requested entity was not found." } } });
+    const apis = providers();
+    apis.gemini.reply("poll", { status: 404, body: { error: { code: 404, status: "NOT_FOUND", message: "Requested entity was not found." } } });
 
-    const polled = await tick(database, gemini, "2026-11-10T07:00:00.000Z");
+    const polled = await tick(database, apis, "2026-11-10T07:00:00.000Z");
 
     expect(polled.mediaProcessing?.providers.gemini.paused).toBe(false);
-    expect(jobs(database).map(({ status }) => status)).toEqual(["uncertain"]);
+    expect(embeddingJobs(database).map(({ status }) => status)).toEqual(["uncertain"]);
     expect(polled.mediaProcessing?.cost.uncertain).toBe(1);
   });
 
   for (const state of ["BATCH_STATE_EXPIRED", "BATCH_STATE_CANCELLED"]) {
     test(`a batch the provider reports as ${state} returns its item to the queue, refuses nothing, and is submitted again`, async () => {
       const { database } = await authorizedGames();
-      const gemini = controlledGeminiApi();
-      gemini.reply("poll", { status: 200, body: { metadata: { state } } });
+      const apis = providers();
+      apis.gemini.reply("poll", { status: 200, body: { metadata: { state } } });
 
-      const returned = await tick(database, gemini, "2026-11-10T07:00:00.000Z");
+      const returned = await tick(database, apis, "2026-11-10T07:00:00.000Z");
 
-      expect(jobs(database).map(({ stage, status, attempt_count, next_attempt_at }) => ({ stage, status, attempt_count, next_attempt_at }))).toEqual([
-        { stage: "extraction", status: "queued", attempt_count: 1, next_attempt_at: "2026-11-10T07:15:00.000Z" },
+      expect(embeddingJobs(database).map(({ status, attempt_count, next_attempt_at }) => ({ status, attempt_count, next_attempt_at }))).toEqual([
+        { status: "queued", attempt_count: 1, next_attempt_at: "2026-11-10T07:15:00.000Z" },
       ]);
       expect(returned.mediaProcessing?.outputs.skipped).toBe(0);
       expect(returned.mediaProcessing?.providers.gemini.paused).toBe(false);
 
-      await tick(database, gemini, "2026-11-10T07:15:00.000Z");
-      expect(gemini.calls.filter((call) => call.kind === "submit")).toHaveLength(3);
-      expect(jobs(database)[0]).toMatchObject({ stage: "extraction", status: "succeeded" });
+      await tick(database, apis, "2026-11-10T07:15:00.000Z");
+      expect(apis.gemini.calls.filter((call) => call.kind === "submit")).toHaveLength(2);
+      expect(embeddingJobs(database).map(({ status }) => status)).toEqual(["succeeded"]);
     });
   }
 });
 
 describe("Gemini Credit pause", () => {
-  test("depleted Prepay credits pause Gemini with its reason and time, keep every Gemini item queued without an attempt, and hold no article text", async () => {
+  test("depleted Prepay credits pause Gemini with its reason and time, keep every Gemini item queued without an attempt, and leave OpenRouter running", async () => {
     const { database } = await authorizedGames({ [CYBERPUNK]: 2, [BALDURS_GATE]: 1 });
-    const gemini = controlledGeminiApi();
-    gemini.reply("submit", GEMINI_PREPAY_DEPLETED);
-    const fetched: string[] = [];
+    const apis = providers();
+    apis.gemini.reply("submit", GEMINI_PREPAY_DEPLETED);
 
-    const paused = await tick(database, gemini, "2026-11-10T07:00:00.000Z", { fetched });
+    const paused = await tick(database, apis, "2026-11-10T07:00:00.000Z");
 
     expect(paused.mediaProcessing?.providers.gemini).toMatchObject({ paused: true, reason: "prepay_depleted", pausedAt: "2026-11-10T07:00:00.000Z" });
-    expect(gemini.calls.filter((call) => call.kind === "submit")).toHaveLength(1);
-    expect(fetched).toHaveLength(1);
-    expect(jobs(database).map(({ status, attempt_count, error }) => ({ status, attempt_count, error }))).toEqual(Array(3).fill({ status: "queued", attempt_count: 0, error: null }));
+    expect(paused.mediaProcessing?.providers.openrouter.paused).toBe(false);
+    expect(apis.gemini.calls.filter((call) => call.kind === "submit")).toHaveLength(1);
+    expect(embeddingJobs(database).map(({ status, attempt_count, error }) => ({ status, attempt_count, error }))).toEqual(Array(2).fill({ status: "queued", attempt_count: 0, error: null }));
     expect(paused.mediaProcessing?.outputs.skipped).toBe(0);
     expect(paused.mediaProcessing?.stopReasons).toContain("provider_paused:gemini:prepay_depleted");
     expect(sourceTexts(database)).toEqual([null, null, null]);
 
     // A pause lasts until the next daily credit check, not the next tick.
     for (const at of ["2026-11-10T07:15:00.000Z", "2026-11-10T23:45:00.000Z", "2026-11-11T05:45:00.000Z"]) {
-      const later = await tick(database, gemini, at, { fetched });
+      const later = await tick(database, apis, at);
       expect(later.mediaProcessing?.providers.gemini.paused).toBe(true);
     }
-    expect(gemini.calls.filter((call) => call.kind === "submit")).toHaveLength(1);
-    expect(fetched).toHaveLength(1);
-    expect(jobs(database).every(({ status, attempt_count }) => status === "queued" && attempt_count === 0)).toBe(true);
+    expect(apis.gemini.calls.filter((call) => call.kind === "submit")).toHaveLength(1);
+    expect(embeddingJobs(database).every(({ status, attempt_count }) => status === "queued" && attempt_count === 0)).toBe(true);
   });
 
   test("a 429 that reports an exceeded spending cap pauses Gemini, while a 429 rate limit is transient", async () => {
     const capped = await authorizedGames();
-    const capGemini = controlledGeminiApi();
-    capGemini.reply("submit", GEMINI_SPEND_CAP);
-    const cap = await tick(capped.database, capGemini, "2026-11-10T07:00:00.000Z");
+    const capApis = providers();
+    capApis.gemini.reply("submit", GEMINI_SPEND_CAP);
+    const cap = await tick(capped.database, capApis, "2026-11-10T07:00:00.000Z");
     expect(cap.mediaProcessing?.providers.gemini).toMatchObject({ paused: true, reason: "spend_cap" });
-    expect(jobs(capped.database).map(({ status, attempt_count }) => ({ status, attempt_count }))).toEqual([{ status: "queued", attempt_count: 0 }]);
+    expect(embeddingJobs(capped.database).map(({ status, attempt_count }) => ({ status, attempt_count }))).toEqual([{ status: "queued", attempt_count: 0 }]);
 
     const limited = await authorizedGames();
-    const limitGemini = controlledGeminiApi();
-    limitGemini.reply("submit", GEMINI_RATE_LIMIT);
-    const limit = await tick(limited.database, limitGemini, "2026-11-10T07:00:00.000Z");
+    const limitApis = providers();
+    limitApis.gemini.reply("submit", GEMINI_RATE_LIMIT);
+    const limit = await tick(limited.database, limitApis, "2026-11-10T07:00:00.000Z");
     expect(limit.mediaProcessing?.providers.gemini.paused).toBe(false);
-    expect(jobs(limited.database).map(({ status, attempt_count, next_attempt_at }) => ({ status, attempt_count, next_attempt_at }))).toEqual([{ status: "queued", attempt_count: 1, next_attempt_at: "2026-11-10T07:15:00.000Z" }]);
+    expect(embeddingJobs(limited.database).map(({ status, attempt_count, next_attempt_at }) => ({ status, attempt_count, next_attempt_at }))).toEqual([{ status: "queued", attempt_count: 1, next_attempt_at: "2026-11-10T07:15:00.000Z" }]);
   });
 
   test("a restart with the database reopened while paused keeps the pause and every queued item", async () => {
-    const { database } = await authorizedGames({ [CYBERPUNK]: 2 });
-    const gemini = controlledGeminiApi();
-    gemini.reply("submit", GEMINI_PREPAY_DEPLETED);
-    await tick(database, gemini, "2026-11-10T07:00:00.000Z");
+    const { database } = await authorizedGames({ [CYBERPUNK]: 1, [BALDURS_GATE]: 1 });
+    const apis = providers();
+    apis.gemini.reply("submit", GEMINI_PREPAY_DEPLETED);
+    await tick(database, apis, "2026-11-10T07:00:00.000Z");
     const before = jobs(database);
 
     database.reopen();
-    const restarted = await tick(database, gemini, "2026-11-10T07:15:00.000Z");
+    const restarted = await tick(database, apis, "2026-11-10T07:15:00.000Z");
 
     expect(restarted.mediaProcessing?.providers.gemini).toMatchObject({ paused: true, reason: "prepay_depleted", pausedAt: "2026-11-10T07:00:00.000Z" });
     expect(jobs(database)).toEqual(before);
-    expect(gemini.calls.filter((call) => call.kind === "submit")).toHaveLength(1);
+    expect(apis.gemini.calls.filter((call) => call.kind === "submit")).toHaveLength(1);
   });
 });
 
 describe("daily credit check", () => {
-  test("runs in the first tick at or after 06:00 UTC, once per UTC day, probing with the oldest ready embedding item", async () => {
-    const gemini = controlledGeminiApi();
-    const { database } = await overviewWithQueuedEmbedding(gemini);
-    // The Overview settles; its embedding is refused for credit, which pauses Gemini.
-    gemini.reply("submit", GEMINI_PREPAY_DEPLETED);
-    const paused = await tick(database, gemini, "2026-11-10T03:15:00.000Z");
+  test("runs in the first tick at or after 06:00 UTC, once per UTC day, probing Gemini with the oldest ready embedding item", async () => {
+    const { database } = await authorizedGames();
+    const apis = providers();
+    // The game's Overview settles; its embedding is refused for credit, which pauses Gemini.
+    apis.gemini.reply("submit", GEMINI_PREPAY_DEPLETED);
+    const paused = await tick(database, apis, "2026-11-10T03:00:00.000Z");
     expect(paused.mediaProcessing?.providers.gemini.reason).toBe("prepay_depleted");
-    // New work for another game waits behind the pause.
+    // New work for another game: its text runs on OpenRouter, and its embedding waits behind the pause.
     seedApps(database.native, [BALDURS_GATE]);
     insertSources(database.native, BALDURS_GATE, "initial", 2);
     await authorizeMediaProcessing(database.db, insertCompletedRun(database.native, "initial:paid-work:later", [BALDURS_GATE]));
-    await tick(database, gemini, "2026-11-10T04:00:00.000Z");
-    const submissions = () => gemini.calls.filter((call) => call.kind === "submit").map((call) => call.key!.split(":")[0]);
-    expect(submissions()).toEqual(["extraction", "synthesis", "embedding"]);
+    await tick(database, apis, "2026-11-10T04:00:00.000Z");
+    const appidOf = (key: string) => Number(key.split(":")[1]);
+    const submissions = () => apis.gemini.calls.filter((call) => call.kind === "submit").map((call) => appidOf(call.key!));
+    expect(submissions()).toEqual([CYBERPUNK]);
+    expect(apis.openRouter.requests.map((request) => request.stage)).toEqual(["extraction", "synthesis", "extraction", "extraction", "synthesis"]);
 
     // Before 06:00 nothing is checked. The first tick after 06:00 (here after
-    // downtime) lifts the pause and probes with the embedding first; its
-    // Credit pause answer pauses Gemini again until the next day.
-    await tick(database, gemini, "2026-11-11T05:45:00.000Z");
-    expect(submissions()).toHaveLength(3);
-    gemini.reply("submit", GEMINI_PREPAY_DEPLETED);
-    const probed = await tick(database, gemini, "2026-11-11T09:30:00.000Z");
-    expect(submissions()).toEqual(["extraction", "synthesis", "embedding", "embedding"]);
-    expect(probed.mediaProcessing?.providers.gemini).toMatchObject({ paused: true, reason: "prepay_depleted", pausedAt: "2026-11-11T09:30:00.000Z", checkedAt: "2026-11-11T09:30:00.000Z" });
+    // downtime) lifts the pause and probes with the oldest embedding first;
+    // its Credit pause answer pauses Gemini again until the next day.
+    await tick(database, apis, "2026-11-11T05:45:00.000Z");
+    expect(submissions()).toHaveLength(1);
+    apis.gemini.reply("submit", GEMINI_PREPAY_DEPLETED);
+    const probed = await tick(database, apis, "2026-11-11T09:30:00.000Z");
+    expect(submissions()).toEqual([CYBERPUNK, CYBERPUNK]);
+    expect(probed.mediaProcessing?.providers.gemini).toMatchObject({ paused: true, reason: "prepay_depleted", pausedAt: "2026-11-11T09:30:00.000Z", checkedAt: "2026-11-11T09:30:00.000Z", checkOutcome: "probe" });
 
     // It never runs twice on one UTC day.
-    await tick(database, gemini, "2026-11-11T23:45:00.000Z");
-    expect(submissions()).toHaveLength(4);
+    await tick(database, apis, "2026-11-11T23:45:00.000Z");
+    expect(submissions()).toHaveLength(2);
     // A missed day is not made up: no tick ran on 2026-11-12, and the 13th
     // checks only from 06:00.
-    await tick(database, gemini, "2026-11-13T05:45:00.000Z");
-    expect(submissions()).toHaveLength(4);
+    await tick(database, apis, "2026-11-13T05:45:00.000Z");
+    expect(submissions()).toHaveLength(2);
 
-    const resumed = await tick(database, gemini, "2026-11-13T06:00:00.000Z");
+    const resumed = await tick(database, apis, "2026-11-13T06:00:00.000Z");
     expect(resumed.mediaProcessing?.providers.gemini).toMatchObject({ paused: false, reason: null, checkedAt: "2026-11-13T06:00:00.000Z" });
-    // After the probe succeeds, the waiting work runs; its extractions settle
-    // within the tick, which lets their Overview be queued and submitted.
-    expect(submissions().slice(4)).toEqual(["embedding", "extraction", "extraction", "synthesis"]);
+    // After the probe succeeds, the waiting embedding work runs.
+    expect(submissions().slice(2)).toEqual([CYBERPUNK, BALDURS_GATE]);
   });
 });
 
 describe("daily credit check without paid work", () => {
   test("runs in the first tick at or after 06:00 UTC even when no paid work waits, so a later day's new work is not held by an old pause", async () => {
     const { database } = await authorizedGames();
-    const gemini = controlledGeminiApi();
+    const apis = providers();
     // The only batch's first poll rejects the key, pausing Gemini; its next
     // poll settles it as invalid output, which leaves no paid work at all.
-    gemini.reply("poll", GEMINI_KEY_INVALID, { status: 200, body: { metadata: { state: "BATCH_STATE_SUCCEEDED" }, response: { inlinedResponses: { inlinedResponses: [{ response: { candidates: [{ content: { parts: [{ text: "{}" }] } }] } }] } } } });
-    await tick(database, gemini, "2026-11-10T07:00:00.000Z");
-    const settled = await tick(database, gemini, "2026-11-10T07:15:00.000Z");
+    apis.gemini.reply("poll", GEMINI_KEY_INVALID, { status: 200, body: { metadata: { state: "BATCH_STATE_SUCCEEDED" }, response: { inlinedResponses: { inlinedResponses: [{ response: { embedding: { values: [] } } }] } } } });
+    await tick(database, apis, "2026-11-10T07:00:00.000Z");
+    const settled = await tick(database, apis, "2026-11-10T07:15:00.000Z");
     expect(settled.mediaProcessing?.providers.gemini).toMatchObject({ paused: true, reason: "rejected_key" });
-    expect((await tick(database, gemini, "2026-11-10T07:30:00.000Z")).mediaProcessing).toBeUndefined();
+    expect((await tick(database, apis, "2026-11-10T07:30:00.000Z")).mediaProcessing).toBeUndefined();
 
     // The next day's first tick after 06:00 has no paid work, and still checks.
-    await tick(database, gemini, "2026-11-11T06:30:00.000Z");
+    await tick(database, apis, "2026-11-11T06:30:00.000Z");
 
     // New work authorized the day after, before that day's check, is not
     // held by the pause the earlier check already lifted.
     seedApps(database.native, [BALDURS_GATE]);
     insertSources(database.native, BALDURS_GATE, "initial", 1);
     await authorizeMediaProcessing(database.db, insertCompletedRun(database.native, "initial:paid-work:later", [BALDURS_GATE]));
-    const resumed = await tick(database, gemini, "2026-11-12T05:00:00.000Z");
+    const resumed = await tick(database, apis, "2026-11-12T05:00:00.000Z");
 
     expect(resumed.mediaProcessing?.providers.gemini).toMatchObject({ paused: false, reason: null, checkedAt: "2026-11-11T06:30:00.000Z" });
-    expect(gemini.submitted.filter((key) => key.startsWith("extraction:"))).toHaveLength(2);
+    expect(apis.gemini.submitted.filter((key) => key.startsWith(`embedding:${BALDURS_GATE}:`))).toHaveLength(1);
   });
 });
 
 describe("transient failures", () => {
   test("keep the item queued, retry at the next tick, then back off doubling and honoring Retry-After, and never fail it", async () => {
     const { database } = await authorizedGames();
-    const gemini = controlledGeminiApi();
-    gemini.reply("submit", { status: 503, body: { error: { message: "unavailable" } } }, { status: 503 }, { status: 429, body: { error: { message: "rate limited" } }, headers: { "Retry-After": "7200" } });
-    const extraction = () => jobs(database).find((job) => job.stage === "extraction")!;
-    const submits = () => gemini.calls.filter((call) => call.kind === "submit").length;
+    const apis = providers();
+    apis.gemini.reply("submit", { status: 503, body: { error: { message: "unavailable" } } }, { status: 503 }, { status: 429, body: { error: { message: "rate limited" } }, headers: { "Retry-After": "7200" } });
+    const embedding = () => embeddingJobs(database)[0]!;
+    const submits = () => apis.gemini.calls.filter((call) => call.kind === "submit").length;
 
-    await tick(database, gemini, "2026-11-10T03:00:00.000Z");
-    expect(extraction()).toMatchObject({ status: "queued", attempt_count: 1, next_attempt_at: "2026-11-10T03:15:00.000Z" });
-    await tick(database, gemini, "2026-11-10T03:15:00.000Z");
-    expect(extraction()).toMatchObject({ status: "queued", attempt_count: 2, next_attempt_at: "2026-11-10T03:45:00.000Z" });
-    await tick(database, gemini, "2026-11-10T03:30:00.000Z");
+    await tick(database, apis, "2026-11-10T03:00:00.000Z");
+    expect(embedding()).toMatchObject({ status: "queued", attempt_count: 1, next_attempt_at: "2026-11-10T03:15:00.000Z" });
+    await tick(database, apis, "2026-11-10T03:15:00.000Z");
+    expect(embedding()).toMatchObject({ status: "queued", attempt_count: 2, next_attempt_at: "2026-11-10T03:45:00.000Z" });
+    await tick(database, apis, "2026-11-10T03:30:00.000Z");
     expect(submits()).toBe(2);
-    await tick(database, gemini, "2026-11-10T03:45:00.000Z");
+    await tick(database, apis, "2026-11-10T03:45:00.000Z");
     // Doubling would retry after an hour; the provider asked for two.
-    expect(extraction()).toMatchObject({ status: "queued", attempt_count: 3, next_attempt_at: "2026-11-10T05:45:00.000Z" });
-    await tick(database, gemini, "2026-11-10T05:30:00.000Z");
+    expect(embedding()).toMatchObject({ status: "queued", attempt_count: 3, next_attempt_at: "2026-11-10T05:45:00.000Z" });
+    await tick(database, apis, "2026-11-10T05:30:00.000Z");
     expect(submits()).toBe(3);
 
-    const recovered = await tick(database, gemini, "2026-11-10T05:45:00.000Z");
-    expect(extraction().status).toBe("succeeded");
+    const recovered = await tick(database, apis, "2026-11-10T05:45:00.000Z");
+    expect(embedding().status).toBe("succeeded");
     expect(recovered.mediaProcessing?.outputs.skipped).toBe(0);
     expect(jobs(database).some((job) => job.status === "failed" || job.status === "refused")).toBe(false);
   });
 
   test("backoff is capped at 24 hours", async () => {
     const { database } = await authorizedGames();
-    const gemini = controlledGeminiApi();
-    gemini.reply("submit", { status: 500 });
-    await tick(database, gemini, "2026-11-10T03:00:00.000Z");
-    database.native.prepare("UPDATE media_processing_jobs SET attempt_count = 20, next_attempt_at = NULL").run();
-    gemini.reply("submit", { status: 500 });
-    await tick(database, gemini, "2026-11-10T03:15:00.000Z");
-    expect(jobs(database)[0]).toMatchObject({ status: "queued", attempt_count: 21, next_attempt_at: "2026-11-11T03:15:00.000Z" });
+    const apis = providers();
+    apis.gemini.reply("submit", { status: 500 });
+    await tick(database, apis, "2026-11-10T03:00:00.000Z");
+    database.native.prepare("UPDATE media_processing_jobs SET attempt_count = 20, next_attempt_at = NULL WHERE stage = 'embedding'").run();
+    apis.gemini.reply("submit", { status: 500 });
+    await tick(database, apis, "2026-11-10T03:15:00.000Z");
+    expect(embeddingJobs(database)[0]).toMatchObject({ status: "queued", attempt_count: 21, next_attempt_at: "2026-11-11T03:15:00.000Z" });
   });
 });
 
 describe("definite refusals and uncertain submissions", () => {
   test("an invalid request is refused for its input identity and not retried, unlike a transient failure", async () => {
     const { database } = await authorizedGames();
-    const gemini = controlledGeminiApi();
-    gemini.reply("submit", { status: 400, body: { error: { status: "INVALID_ARGUMENT", message: "invalid request" } } });
+    const apis = providers();
+    apis.gemini.reply("submit", { status: 400, body: { error: { status: "INVALID_ARGUMENT", message: "invalid request" } } });
 
-    const refused = await tick(database, gemini, "2026-11-10T03:00:00.000Z");
-    await tick(database, gemini, "2026-11-10T03:15:00.000Z");
-    await tick(database, gemini, "2026-11-11T06:00:00.000Z");
+    const refused = await tick(database, apis, "2026-11-10T03:00:00.000Z");
+    await tick(database, apis, "2026-11-10T03:15:00.000Z");
+    await tick(database, apis, "2026-11-11T06:00:00.000Z");
 
-    expect(jobs(database).map(({ stage, status }) => ({ stage, status }))).toEqual([{ stage: "extraction", status: "refused" }]);
-    expect(gemini.calls.filter((call) => call.kind === "submit")).toHaveLength(1);
+    expect(embeddingJobs(database).map(({ status }) => status)).toEqual(["refused"]);
+    expect(apis.gemini.calls.filter((call) => call.kind === "submit")).toHaveLength(1);
     expect(refused.mediaProcessing?.outputs.skipped).toBe(1);
     expect(refused.mediaProcessing?.providers.gemini.paused).toBe(false);
   });
 
   test("output that fails validation is refused, and the game's earlier still-supported Overview stays active", async () => {
     const { database } = await authorizedGames();
-    const gemini = controlledGeminiApi();
-    await tick(database, gemini, "2026-11-10T03:00:00.000Z");
-    await tick(database, gemini, "2026-11-10T03:15:00.000Z");
+    const apis = providers();
+    await tick(database, apis, "2026-11-10T03:00:00.000Z");
     expect(await getMediaOverview(database.db, CYBERPUNK, { includeUnpublished: true })).not.toBeNull();
-    // A correction run re-extracts a changed article, then synthesis returns no cited statements.
+    // A correction run re-extracts a changed article, then extraction returns no supported contributions.
     const sourceId = database.native.query<{ id: number }, []>("SELECT id FROM media_sources").get()!.id;
     const correction = insertCompletedRun(database.native, "initial:paid-work:correction", [CYBERPUNK]);
     await authorizeMediaProcessing(database.db, correction, { affectedSourceIds: [sourceId] });
-    gemini.reply("poll", { status: 200, body: { metadata: { state: "BATCH_STATE_SUCCEEDED" }, response: { inlinedResponses: { inlinedResponses: [{ response: { candidates: [{ content: { parts: [{ text: "{}" }] } }] } }] } } } });
+    apis.openRouter.output("extraction", "{}");
 
-    await tick(database, gemini, "2026-11-10T04:00:00.000Z", { outlet: () => new Response(processingArticleHtml(CYBERPUNK).replace("flexible combat", "deliberate tactical combat")) });
+    await tick(database, apis, "2026-11-10T04:00:00.000Z", { outlet: () => new Response(processingArticleHtml(CYBERPUNK).replace("flexible combat", "deliberate tactical combat")) });
 
     const extraction = jobs(database).filter((job) => job.stage === "extraction").at(-1)!;
     expect(extraction).toMatchObject({ status: "refused", error: "invalid_output: no supported contributions" });
@@ -493,40 +496,48 @@ describe("definite refusals and uncertain submissions", () => {
 
   test("a submission sent without a response is uncertain, never resubmitted, and reported in the uncertain count", async () => {
     const { database } = await authorizedGames();
-    const gemini = controlledGeminiApi();
-    gemini.reply("submit", { network: "socket closed before the response" });
+    const apis = providers();
+    apis.gemini.reply("submit", { network: "socket closed before the response" });
 
-    const sent = await tick(database, gemini, "2026-11-10T03:00:00.000Z");
-    const later = await tick(database, gemini, "2026-11-11T06:00:00.000Z");
+    const sent = await tick(database, apis, "2026-11-10T03:00:00.000Z");
+    const later = await tick(database, apis, "2026-11-11T06:00:00.000Z");
 
-    expect(jobs(database).map(({ status }) => status)).toEqual(["uncertain"]);
-    expect(gemini.calls.filter((call) => call.kind === "submit")).toHaveLength(1);
+    expect(embeddingJobs(database).map(({ status }) => status)).toEqual(["uncertain"]);
+    expect(apis.gemini.calls.filter((call) => call.kind === "submit")).toHaveLength(1);
     expect(sent.mediaProcessing?.cost.uncertain).toBe(1);
     expect(later.mediaProcessing?.cost.uncertain).toBe(1);
   });
 
   test("a submission whose connection was refused before sending is transient", async () => {
     const { database } = await authorizedGames();
-    const gemini = controlledGeminiApi();
-    gemini.reply("submit", { network: "connection refused", code: "ECONNREFUSED" });
+    const apis = providers();
+    apis.gemini.reply("submit", { network: "connection refused", code: "ECONNREFUSED" });
 
-    await tick(database, gemini, "2026-11-10T03:00:00.000Z");
+    await tick(database, apis, "2026-11-10T03:00:00.000Z");
 
-    expect(jobs(database)[0]).toMatchObject({ status: "queued", attempt_count: 1 });
+    expect(embeddingJobs(database)[0]).toMatchObject({ status: "queued", attempt_count: 1 });
   });
 });
+
+/** The entity of every OpenRouter extraction request from index `from`, in request order, by the generation id each answer recorded. */
+function extractionAppids(database: TestDatabase, apis: Providers, from = 0): number[] {
+  const byGeneration = new Map(database.native.query<{ generation_id: string; appid: number }, []>("SELECT generation_id, appid FROM media_processing_jobs WHERE stage = 'extraction' AND generation_id IS NOT NULL").all().map((row) => [row.generation_id, row.appid]));
+  return apis.openRouter.requests.map((request, index) => ({ request, generation: `gen-${index + 1}` }))
+    .slice(from)
+    .filter(({ request }) => request.stage === "extraction")
+    .map(({ generation }) => byGeneration.get(generation)!);
+}
 
 describe("fair selection", () => {
   test("every entity with waiting work progresses each round, and the busy entity's items all progress", async () => {
     const { database } = await authorizedGames({ [CYBERPUNK]: 6, [BALDURS_GATE]: 2, [HADES_II]: 2 });
-    const gemini = controlledGeminiApi();
+    const apis = providers();
     const extractionsByTick: number[][] = [];
-    const appidOf = (key: string) => database.native.query<{ appid: number }, [string]>("SELECT appid FROM media_processing_jobs WHERE request_key = ?").get(key)!.appid;
 
     for (let index = 0; index < 6; index += 1) {
-      const before = gemini.submitted.length;
-      await tick(database, gemini, `2026-11-10T0${3 + Math.floor(index / 4)}:${String((index % 4) * 15).padStart(2, "0")}:00.000Z`, { paidSubmissionsPerTick: 3 });
-      extractionsByTick.push(gemini.submitted.slice(before).filter((key) => key.startsWith("extraction:")).map(appidOf));
+      const before = apis.openRouter.requests.length;
+      await tick(database, apis, `2026-11-10T0${3 + Math.floor(index / 4)}:${String((index % 4) * 15).padStart(2, "0")}:00.000Z`, { paidSubmissionsPerTick: 3 });
+      extractionsByTick.push(extractionAppids(database, apis, before));
       // No Overview is queued for a game while its extraction work waits.
       const early = database.native.query<{ count: number }, []>("SELECT COUNT(*) AS count FROM media_processing_jobs AS s WHERE s.stage = 'synthesis' AND EXISTS (SELECT 1 FROM media_processing_jobs AS e WHERE e.appid = s.appid AND e.stage = 'extraction' AND e.status = 'queued' AND e.id < s.id)").get()!;
       expect(early.count).toBe(0);
@@ -542,14 +553,13 @@ describe("fair selection", () => {
 describe("fair selection across ticks", () => {
   test("with more entities holding ready work than the per-tick cap, every entity takes a turn within a bounded number of ticks", async () => {
     const { database } = await authorizedGames({ [CYBERPUNK]: 4, [BALDURS_GATE]: 4, [HADES_II]: 4 });
-    const gemini = controlledGeminiApi();
-    const appidOf = (key: string) => database.native.query<{ appid: number }, [string]>("SELECT appid FROM media_processing_jobs WHERE request_key = ?").get(key)!.appid;
+    const apis = providers();
     const turns: number[][] = [];
 
     for (const at of ["03:00", "03:15", "03:30", "03:45"]) {
-      const before = gemini.submitted.length;
-      await tick(database, gemini, `2026-11-10T${at}:00.000Z`, { paidSubmissionsPerTick: 2 });
-      turns.push(gemini.submitted.slice(before).map(appidOf));
+      const before = apis.openRouter.requests.length;
+      await tick(database, apis, `2026-11-10T${at}:00.000Z`, { paidSubmissionsPerTick: 2 });
+      turns.push(extractionAppids(database, apis, before));
     }
 
     // Every item was queued at once, so the first tick orders entities by
@@ -570,18 +580,18 @@ describe("fair selection across ticks", () => {
 describe("article text", () => {
   test("an Outlet day stop at the article fetch keeps the extraction waiting, reports it, and the next UTC day fetches it", async () => {
     const { database } = await authorizedGames();
-    const gemini = controlledGeminiApi();
+    const apis = providers();
     let limited = true;
     const outlet = () => (limited ? new Response(null, { status: 429 }) : undefined);
 
-    const stopped = await tick(database, gemini, "2026-11-10T03:00:00.000Z", { outlet });
+    const stopped = await tick(database, apis, "2026-11-10T03:00:00.000Z", { outlet });
     expect(stopped.mediaProcessing?.stopReasons).toContain("IGN:fetch_http_429");
     expect(jobs(database)[0]).toMatchObject({ stage: "extraction", status: "queued", attempt_count: 0 });
     limited = false;
-    await tick(database, gemini, "2026-11-10T03:15:00.000Z", { outlet });
+    await tick(database, apis, "2026-11-10T03:15:00.000Z", { outlet });
     expect(jobs(database)[0]).toMatchObject({ status: "queued" });
 
-    await tick(database, gemini, "2026-11-11T00:00:00.000Z", { outlet });
+    await tick(database, apis, "2026-11-11T00:00:00.000Z", { outlet });
     expect(jobs(database)[0]!.status).toBe("succeeded");
     expect(sourceTexts(database)).toEqual([null]);
   });
@@ -590,13 +600,13 @@ describe("article text", () => {
 describe("cost reporting", () => {
   test("a refused batch without provider usage records zero cost marked unknown, not an estimate from its token caps", async () => {
     const { database } = await authorizedGames();
-    const gemini = controlledGeminiApi();
-    gemini.reply("poll", { status: 200, body: { metadata: { state: "BATCH_STATE_FAILED" }, error: { message: "internal batch error" } } });
+    const apis = providers();
+    apis.gemini.reply("poll", { status: 200, body: { metadata: { state: "BATCH_STATE_FAILED" }, error: { message: "internal batch error" } } });
 
-    const refused = await tick(database, gemini, "2026-11-10T07:00:00.000Z");
+    const refused = await tick(database, apis, "2026-11-10T07:00:00.000Z");
 
-    expect(database.native.query("SELECT stage, status, charged_microusd, cost_source FROM media_processing_jobs").all()).toEqual([
-      { stage: "extraction", status: "refused", charged_microusd: 0, cost_source: "unknown" },
+    expect(database.native.query("SELECT stage, status, charged_microusd, cost_source FROM media_processing_jobs WHERE stage = 'embedding'").all()).toEqual([
+      { stage: "embedding", status: "refused", charged_microusd: 0, cost_source: "unknown" },
     ]);
     expect(refused.mediaProcessing?.cost.providers.gemini).toEqual({ monthToDateMicrousd: 0, allTimeMicrousd: 0 });
   });
@@ -609,10 +619,10 @@ describe("cost reporting", () => {
       native.prepare("INSERT INTO media_processing_jobs (run_id, stage, appid, request_key, input_identity, model, config_version, max_input_tokens, max_output_tokens, reserved_microusd, reservation_active, status, provider_batch_id, usage_json, submitted_at) VALUES (?, 'synthesis', ?, 'synthesis:retired', 'retired-identity', 'gemini-3.1-flash-lite', 'v1', 20000, 3200, 4900000, 1, 'submitted', 'batches/retired-1', '{}', '2026-10-01T00:00:00.000Z')").run(runId, CYBERPUNK);
     });
     cleanups.push(database.cleanup);
-    const gemini = controlledGeminiApi();
-    gemini.reply("poll", { status: 200, body: { metadata: { state: "BATCH_STATE_FAILED" }, error: { message: "internal batch error" } } });
+    const apis = providers();
+    apis.gemini.reply("poll", { status: 200, body: { metadata: { state: "BATCH_STATE_FAILED" }, error: { message: "internal batch error" } } });
 
-    const settled = await tick(database, gemini, "2026-11-10T07:00:00.000Z");
+    const settled = await tick(database, apis, "2026-11-10T07:00:00.000Z");
 
     expect(database.native.query("SELECT status, reserved_microusd, reservation_active, charged_microusd, cost_source FROM media_processing_jobs").all()).toEqual([
       { status: "refused", reserved_microusd: 4_900_000, reservation_active: 1, charged_microusd: 0, cost_source: "unknown" },
@@ -620,26 +630,32 @@ describe("cost reporting", () => {
     expect(settled.mediaProcessing?.cost.providers.gemini).toEqual({ monthToDateMicrousd: 0, allTimeMicrousd: 0 });
   });
 
-  test("settled items record estimated cost, reported month-to-date by UTC calendar month and all-time, as reporting-only", async () => {
+  test("settled items record their cost, reported month-to-date by UTC calendar month and all-time per provider, as reporting-only", async () => {
     const { database } = await authorizedGames();
-    const gemini = controlledGeminiApi();
+    const apis = providers();
+    // The embedding batch is still running at its first poll, so it settles in November.
+    apis.gemini.reply("poll", { status: 200, body: { metadata: { state: "BATCH_STATE_RUNNING" } } });
     const logged: string[] = [];
     const log = console.log;
     console.log = (...values: unknown[]) => { logged.push(values.map(String).join(" ")); };
     try {
-      // The extraction settles in October; the Overview and its embedding settle in November.
-      await tick(database, gemini, "2026-10-31T23:45:00.000Z");
-      const november = await tick(database, gemini, "2026-11-01T00:00:00.000Z");
+      await tick(database, apis, "2026-10-31T23:45:00.000Z");
+      const november = await tick(database, apis, "2026-11-01T00:00:00.000Z");
 
       const costs = database.native.query<{ stage: string; charged_microusd: number; cost_source: string; completed_at: string }, []>("SELECT stage, charged_microusd, cost_source, completed_at FROM media_processing_jobs ORDER BY id").all();
-      // Text cost is token usage at the documented batch prices; Gemini
-      // embedding cost is 1,000 tokens at US$0.10 per million.
+      // Text cost is the usage.cost OpenRouter reports (US$0.00015 a request);
+      // Gemini embedding cost is 1,000 tokens at US$0.10 per million, estimated.
       expect(costs).toEqual([
-        { stage: "extraction", charged_microusd: 200, cost_source: "estimated", completed_at: "2026-10-31T23:45:00.000Z" },
-        { stage: "synthesis", charged_microusd: 200, cost_source: "estimated", completed_at: "2026-11-01T00:00:00.000Z" },
+        { stage: "extraction", charged_microusd: 150, cost_source: "provider_reported", completed_at: "2026-10-31T23:45:00.000Z" },
+        { stage: "synthesis", charged_microusd: 150, cost_source: "provider_reported", completed_at: "2026-10-31T23:45:00.000Z" },
         { stage: "embedding", charged_microusd: 100, cost_source: "estimated", completed_at: "2026-11-01T00:00:00.000Z" },
       ]);
-      const expected = { reportingOnly: true as const, month: "2026-11", providers: { gemini: { monthToDateMicrousd: 300, allTimeMicrousd: 500 } }, uncertain: 0 };
+      const expected = {
+        reportingOnly: true as const,
+        month: "2026-11",
+        providers: { gemini: { monthToDateMicrousd: 100, allTimeMicrousd: 100 }, openrouter: { monthToDateMicrousd: 0, allTimeMicrousd: 300 } },
+        uncertain: 0,
+      };
       expect(november.mediaProcessing?.cost).toEqual(expected);
       const lastLog = JSON.parse(logged.filter((line) => line.includes("\"ingestion_completion\"")).at(-1)!) as { mediaProcessing: { cost: unknown } };
       expect(lastLog.mediaProcessing.cost).toEqual(expected);

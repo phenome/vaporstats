@@ -6,7 +6,7 @@ import { writeTransaction } from "./db-transaction";
  * state and its own daily credit check. Spending authority lives with the
  * provider: VaporStats keeps no budget and only reports cost.
  */
-export const PAID_PROVIDERS = ["gemini"] as const;
+export const PAID_PROVIDERS = ["gemini", "openrouter"] as const;
 export type PaidProvider = (typeof PAID_PROVIDERS)[number];
 
 /** A provider request kind. A token count and a poll are free and repeatable; a submission may be charged. */
@@ -36,8 +36,10 @@ export type ProviderOutcome =
   | { class: "uncertain"; reason: string }
   | { class: "missing_configuration"; reason: ConfigurationPauseReason };
 
-export type CreditPauseReason = "prepay_depleted" | "spend_cap";
-export type ConfigurationPauseReason = "missing_key" | "rejected_key" | "failed_precondition" | "model_unavailable";
+export type CreditPauseReason =
+  | "prepay_depleted" | "spend_cap"
+  | "key_limit" | "credits" | "guardrail_budget" | "workspace_budget";
+export type ConfigurationPauseReason = "missing_key" | "rejected_key" | "invalid_key" | "failed_precondition" | "model_unavailable";
 export type ProviderPauseReason = CreditPauseReason | ConfigurationPauseReason;
 
 /** A non-OK Gemini HTTP response, as the batch transport receives it. */
@@ -145,6 +147,111 @@ export function classifyGeminiOutcome(call: PaidProviderCall, error: unknown): P
   return { class: "uncertain", reason: "no_response" };
 }
 
+/**
+ * A non-OK OpenRouter answer, as the chat-completion and key transport
+ * receives it: an HTTP error status, or a 200 whose body holds only an
+ * `error` object, which carries its code instead.
+ */
+export class OpenRouterHttpError extends Error {
+  readonly status: number;
+  /** `error.metadata.limit_source`, such as `openrouter_key_limit`. */
+  readonly limitSource: string | null;
+  /** How long the response asks the caller to wait, from `Retry-After`. */
+  readonly retryAfterMs: number | null;
+
+  constructor(status: number, limitSource: string | null = null, retryAfterMs: number | null = null) {
+    // The provider's message can quote the request, so only the status is kept.
+    super(`OpenRouter HTTP ${status}`);
+    this.name = "OpenRouterHttpError";
+    this.status = status;
+    this.limitSource = limitSource;
+    this.retryAfterMs = retryAfterMs;
+  }
+}
+
+/** The OpenRouter transport cannot be built because no API key is configured. */
+export class OpenRouterMissingKeyError extends Error {
+  constructor() {
+    super("OpenRouter API key is required");
+    this.name = "OpenRouterMissingKeyError";
+  }
+}
+
+const OPENROUTER_BUDGET_PAUSES: Record<string, CreditPauseReason> = {
+  openrouter_key_limit: "key_limit",
+  openrouter_guardrail_budget: "guardrail_budget",
+  openrouter_workspace_budget: "workspace_budget",
+};
+
+/**
+ * Classifies one OpenRouter chat-completion or key request: `null` when it
+ * answered, otherwise what it threw. Every chat completion may be charged,
+ * so a failure that cannot prove the request was never fully sent is
+ * uncertain: a client timeout, or a connection lost after sending.
+ */
+export function classifyOpenRouterOutcome(error: unknown): ProviderOutcome {
+  if (error === null || error === undefined) return { class: "success" };
+  if (error instanceof OpenRouterMissingKeyError) return { class: "missing_configuration", reason: "missing_key" };
+  if (error instanceof OpenRouterHttpError) {
+    const { status, limitSource } = error;
+    const retryAfterMs = error.retryAfterMs !== null && Number.isFinite(error.retryAfterMs) && error.retryAfterMs >= 0 ? error.retryAfterMs : null;
+    if (status === 402 && limitSource === "openrouter_in_flight_budget") return { class: "transient", reason: "in_flight_budget", retryAfterMs };
+    if ((status === 402 || status === 403) && limitSource !== null && OPENROUTER_BUDGET_PAUSES[limitSource]) {
+      return { class: "credit_pause", reason: OPENROUTER_BUDGET_PAUSES[limitSource]! };
+    }
+    // `openrouter_credits`, or a 402 without a limit source: the balance
+    // cannot cover the request, and waiting will not help.
+    if (status === 402) return { class: "credit_pause", reason: "credits" };
+    if (status === 401) return { class: "missing_configuration", reason: "invalid_key" };
+    if (status === 408 || status === 429 || status >= 500) return { class: "transient", reason: `http_${status}`, retryAfterMs };
+    if (status === 404) return { class: "missing_configuration", reason: "model_unavailable" };
+    // 400, and a 403 for moderation or a guardrail's content block.
+    if (status >= 400) return { class: "refusal", reason: `http_${status}` };
+    return { class: "transient", reason: `http_${status}`, retryAfterMs };
+  }
+  const code = typeof (error as { code?: unknown })?.code === "string" ? (error as { code: string }).code : "";
+  if (UNSENT_NETWORK_CODES.has(code)) return { class: "transient", reason: "network", retryAfterMs: null };
+  const name = (error as { name?: unknown })?.name;
+  return { class: "uncertain", reason: name === "TimeoutError" || name === "AbortError" ? "timeout" : "no_response" };
+}
+
+/** What the daily credit check learned about the OpenRouter key. */
+export type OpenRouterKeyCheck =
+  | { class: "credit_remaining" }
+  | { class: "credit_pause"; reason: CreditPauseReason }
+  | { class: "missing_configuration"; reason: ConfigurationPauseReason }
+  | { class: "check_failed"; reason: string };
+
+function budgetSpent(value: unknown): CreditPauseReason | null {
+  if (!value || typeof value !== "object") return null;
+  const budget = value as { remaining_usd?: unknown; scope?: unknown };
+  if (typeof budget.remaining_usd !== "number" || budget.remaining_usd > 0) return null;
+  return budget.scope === "workspace" ? "workspace_budget" : budget.scope === "key_limit" ? "key_limit" : "guardrail_budget";
+}
+
+/**
+ * Classifies the answer of the current-key endpoint (`GET /api/v1/key`):
+ * its `data` object, or what the request threw. Credit remains when
+ * `limit_remaining` is null (no key limit) or above zero and no budget,
+ * `effective_budget` included, is spent.
+ */
+export function classifyOpenRouterKeyCheck(data: unknown, error: unknown = null): OpenRouterKeyCheck {
+  if (error !== null && error !== undefined) {
+    const outcome = classifyOpenRouterOutcome(error);
+    if (outcome.class === "credit_pause" || outcome.class === "missing_configuration") return outcome;
+    return { class: "check_failed", reason: outcome.class === "success" ? "no_answer" : outcome.reason };
+  }
+  if (!data || typeof data !== "object") return { class: "check_failed", reason: "invalid_answer" };
+  const key = data as { limit_remaining?: unknown; budgets?: unknown; effective_budget?: unknown };
+  if (key.limit_remaining !== null && typeof key.limit_remaining !== "number") return { class: "check_failed", reason: "invalid_answer" };
+  if (typeof key.limit_remaining === "number" && key.limit_remaining <= 0) return { class: "credit_pause", reason: "key_limit" };
+  for (const budget of [key.effective_budget, ...(Array.isArray(key.budgets) ? key.budgets : [])]) {
+    const spent = budgetSpent(budget);
+    if (spent) return { class: "credit_pause", reason: spent };
+  }
+  return { class: "credit_remaining" };
+}
+
 const TICK_MS = 15 * 60 * 1_000;
 const MAX_BACKOFF_MS = 24 * 60 * 60 * 1_000;
 
@@ -166,6 +273,12 @@ export interface ProviderState {
   pausedAt: string | null;
   /** When the last daily credit check ran for this provider. */
   checkedAt: string | null;
+  /**
+   * What the last daily credit check found: `probe` when it lifted the pause
+   * for the next submission to probe credit, `credit_remaining`, a pause
+   * reason, or `check_failed:<reason>` when the check got no usable answer.
+   */
+  checkOutcome: string | null;
 }
 
 const providerKey = (provider: PaidProvider) => `media:provider:${provider}`;
@@ -182,7 +295,7 @@ async function writeCheckpoint(db: AppDatabase, key: string, value: string): Pro
 }
 
 export async function providerState(db: AppDatabase, provider: PaidProvider): Promise<ProviderState> {
-  let stored: { reason?: unknown; pausedAt?: unknown; checkedAt?: unknown } = {};
+  let stored: { reason?: unknown; pausedAt?: unknown; checkedAt?: unknown; checkOutcome?: unknown } = {};
   try { stored = JSON.parse((await readCheckpoint(db, providerKey(provider))) ?? "{}") ?? {}; } catch { stored = {}; }
   const reason = typeof stored.reason === "string" ? stored.reason as ProviderPauseReason : null;
   return {
@@ -191,11 +304,12 @@ export async function providerState(db: AppDatabase, provider: PaidProvider): Pr
     reason,
     pausedAt: reason !== null && typeof stored.pausedAt === "string" ? stored.pausedAt : null,
     checkedAt: typeof stored.checkedAt === "string" ? stored.checkedAt : null,
+    checkOutcome: typeof stored.checkOutcome === "string" ? stored.checkOutcome : null,
   };
 }
 
 async function writeProviderState(db: AppDatabase, state: ProviderState): Promise<void> {
-  await writeCheckpoint(db, providerKey(state.provider), JSON.stringify({ reason: state.reason, pausedAt: state.pausedAt, checkedAt: state.checkedAt }));
+  await writeCheckpoint(db, providerKey(state.provider), JSON.stringify({ reason: state.reason, pausedAt: state.pausedAt, checkedAt: state.checkedAt, checkOutcome: state.checkOutcome }));
 }
 
 /** Pauses `provider` for `reason` from `now`; an existing pause keeps its start time. */
@@ -212,30 +326,54 @@ export async function liftProviderPause(db: AppDatabase, provider: PaidProvider)
   await writeProviderState(db, { ...state, paused: false, reason: null, pausedAt: null });
 }
 
+/** The credit checks that providers with a credit endpoint run; a provider without one is probed. */
+export type CreditChecks = Partial<Record<PaidProvider, () => Promise<OpenRouterKeyCheck>>>;
+
 /**
  * Runs the daily credit check when it is due: in the first call at or after
- * 06:00 UTC on a UTC day that has no check yet. It records the day and lifts
- * every provider's Credit pause and configuration pause except a missing
- * key's in one write,
- * so a restart never runs it twice that day; a missed earlier day is never
- * made up. Returns the providers whose pause it lifted, which probe credit
- * with their next submission.
+ * 06:00 UTC on a UTC day that has no check yet. A provider with a credit
+ * endpoint in `checks` is asked first, outside any write transaction: when
+ * credit remains its pause is lifted, when it reports no credit the provider
+ * is paused, and when the check gets no usable answer the state is kept. A
+ * provider without one has its Credit pause and configuration pause, except
+ * a missing key's, lifted so its next submission probes credit. The day,
+ * each provider's check time and its outcome are recorded in one write, so a
+ * restart never runs it twice that day; a missed earlier day is never made
+ * up. Returns the providers whose pause it lifted to probe.
  */
-export async function runDailyCreditCheck(db: AppDatabase, now: Date): Promise<PaidProvider[] | null> {
+export async function runDailyCreditCheck(db: AppDatabase, now: Date, checks: CreditChecks = {}): Promise<PaidProvider[] | null> {
   if (now.getUTCHours() < CREDIT_CHECK_HOUR_UTC) return null;
   const day = now.toISOString().slice(0, 10);
   if (await readCheckpoint(db, CREDIT_CHECK_KEY) === day) return null;
+  const answers = new Map<PaidProvider, OpenRouterKeyCheck>();
+  for (const provider of PAID_PROVIDERS) {
+    const check = checks[provider];
+    if (check) answers.set(provider, await check());
+  }
   const lifted: PaidProvider[] = [];
   await writeTransaction(db, async () => {
     if (await readCheckpoint(db, CREDIT_CHECK_KEY) === day) return;
     await writeCheckpoint(db, CREDIT_CHECK_KEY, day);
+    const checkedAt = now.toISOString();
     for (const provider of PAID_PROVIDERS) {
       const state = await providerState(db, provider);
-      const probe = state.paused && state.reason !== "missing_key";
-      if (probe) lifted.push(provider);
-      await writeProviderState(db, probe
-        ? { ...state, paused: false, reason: null, pausedAt: null, checkedAt: now.toISOString() }
-        : { ...state, checkedAt: now.toISOString() });
+      const answer = answers.get(provider);
+      if (!answer) {
+        const probe = state.paused && state.reason !== "missing_key";
+        if (probe) lifted.push(provider);
+        await writeProviderState(db, probe
+          ? { ...state, paused: false, reason: null, pausedAt: null, checkedAt, checkOutcome: "probe" }
+          : { ...state, checkedAt, checkOutcome: state.paused ? state.reason : "probe" });
+        continue;
+      }
+      if (answer.class === "credit_remaining") {
+        await writeProviderState(db, { ...state, paused: false, reason: null, pausedAt: null, checkedAt, checkOutcome: "credit_remaining" });
+      } else if (answer.class === "check_failed") {
+        await writeProviderState(db, { ...state, checkedAt, checkOutcome: `check_failed:${answer.reason}` });
+      } else {
+        const pausedAt = state.reason === answer.reason ? state.pausedAt : checkedAt;
+        await writeProviderState(db, { ...state, paused: true, reason: answer.reason, pausedAt, checkedAt, checkOutcome: answer.reason });
+      }
     }
   });
   return lifted;

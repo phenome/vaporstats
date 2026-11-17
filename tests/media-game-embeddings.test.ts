@@ -68,7 +68,7 @@ async function advance(value: EmbeddingFixture, transport: ControlledGeminiTrans
   advanceCounts.set(value, ticks + 1);
   return advanceMediaProcessing(value.db, {
     runId: value.runId,
-    transport,
+    transport, openRouter: transport.openRouter,
     articleFetch: async () => article,
     now: new Date(Date.parse("2026-09-11T00:00:00.000Z") + ticks * 15 * 60 * 1_000),
   });
@@ -76,12 +76,11 @@ async function advance(value: EmbeddingFixture, transport: ControlledGeminiTrans
 
 async function completeInitial(value: EmbeddingFixture, transport: ControlledGeminiTransport): Promise<void> {
   await authorizeMediaProcessing(value.db, value.runId);
+  // Text answers settle as they arrive, so one advance extracts, synthesizes
+  // and submits the Overview's embeddings, which settle when polled.
   transport.nextPolls.push(
     { state: "succeeded", output: extractionOutput(), usage: { inputTokens: 100, outputTokens: 20 } },
     { state: "succeeded", output: overviewOutput(), usage: { inputTokens: 100, outputTokens: 20 } },
-  );
-  await advance(value, transport);
-  transport.nextPolls.push(
     { state: "succeeded", output: embeddingOutput(1), usage: { inputTokens: 100 } },
     { state: "succeeded", output: embeddingOutput(2), usage: { inputTokens: 100 } },
   );
@@ -239,7 +238,7 @@ describe("game overview aggregate embeddings", () => {
     await value.db.prepare("UPDATE media_game_overviews SET input_identity = ? WHERE appid = ? AND active = 1").bind("c".repeat(64), APPID).run();
     const result = await advanceMediaProcessing(value.db, {
       runId: value.runId,
-      transport,
+      transport, openRouter: transport.openRouter,
       articleFetch: async () => "<!doctype html><html><body><article><p>Cyberpunk 2077 has a focused campaign with flexible combat and memorable encounters. This preview was played on PC during Early Access and does not assess the final release.</p></article></body></html>",
     });
     expect(result.failed).toBeGreaterThan(0);
@@ -258,7 +257,7 @@ describe("game overview aggregate embeddings", () => {
     await value.db.prepare("UPDATE apps SET is_eligible = 0 WHERE appid = ?").bind(APPID).run();
     const result = await advanceMediaProcessing(value.db, {
       runId: value.runId,
-      transport,
+      transport, openRouter: transport.openRouter,
       articleFetch: async () => ARTICLE_HTML,
       now: new Date("2026-09-11T00:00:00.000Z"),
     });
@@ -281,9 +280,6 @@ describe("game overview aggregate embeddings", () => {
     transport.nextPolls.push(
       { state: "succeeded", output: extractionOutput(), usage: { inputTokens: 100, outputTokens: 20 } },
       { state: "succeeded", output: overviewOutput(), usage: { inputTokens: 100, outputTokens: 20 } },
-    );
-    await advance(value, transport);
-    transport.nextPolls.push(
       { state: "succeeded", output: embeddingOutput(Number.MAX_VALUE), usage: { inputTokens: 100 } },
       { state: "succeeded", output: embeddingOutput(2), usage: { inputTokens: 100 } },
     );
@@ -376,9 +372,9 @@ describe("game overview aggregate embeddings", () => {
       { state: "succeeded", output: extractionOutput(), usage: { inputTokens: 100, outputTokens: 20 } },
       { state: "succeeded", output: overviewOutput(), usage: { inputTokens: 100, outputTokens: 20 } },
     );
-    await advance(value, transport);
+    // One advance extracts, synthesizes, and fails both embeddings' first count.
     const failed = await advance(value, transport);
-    delete (transport as Partial<ControlledGeminiTransport>).countTokens;
+    embeddingCounts.restore();
     const retried = await advance(value, transport);
 
     // Both dimensions failed their first count and retry at the next tick.

@@ -408,7 +408,7 @@ async function processingRunFor(database: TestDatabase, games: readonly number[]
   const transport = new ControlledGeminiTransport();
   const advance = (now: Date) => advanceMediaProcessing(database.db, {
     runId,
-    transport,
+    transport, openRouter: transport.openRouter,
     articleFetch: async (url) => { fetched.push(url); return respond(url); },
     now,
   });

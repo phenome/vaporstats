@@ -7,9 +7,9 @@ import { applyMigrations, DRIZZLE_MIGRATION_TABLE, MIGRATION_TABLE } from "../sr
 import { openSqliteAppDatabase } from "../src/lib/db";
 import {
   advanceMediaProcessing,
-  type GeminiBatchPoll,
   type GeminiBatchTransport,
 } from "../src/lib/media-processing";
+import type { OpenRouterTransport } from "../src/lib/media-openrouter";
 
 const expectedTables = [
   "apps",
@@ -597,35 +597,38 @@ async function verifyWaitingRunResumesAfterUpgrade(): Promise<void> {
     }
 
     const url = "https://www.ign.com/articles/waiting-upgrade";
-    const submitted: string[] = [];
+    const requested: string[] = [];
     const fetched: string[] = [];
-    let overview: GeminiBatchPoll = { state: "pending" };
+    // Gemini serves only embeddings now; the Overview is one OpenRouter chat completion.
     const transport: GeminiBatchTransport = {
       countTokens: async () => 100,
-      submitBatch: async (_model, requests) => {
-        submitted.push(requests[0]!.key);
-        return { name: "batches/waiting-upgrade-" + submitted.length };
-      },
-      pollBatch: async () => overview,
+      pollBatch: async () => ({ state: "pending" }),
     };
-    const advance = (minute: number) => advanceMediaProcessing(upgraded, {
+    const openRouter: OpenRouterTransport = {
+      complete: async (request) => {
+        requested.push(JSON.stringify(request.messages).includes("sourceUrl") ? "synthesis" : "extraction");
+        return {
+          generationId: "gen-upgrade",
+          model: request.model,
+          provider: "Anthropic",
+          content: JSON.stringify({ statements: [{ text: "The game presents flexible combat.", sourceUrls: [url] }], tags: [{ label: "Build experimentation", sourceUrls: [url] }] }),
+          usage: { promptTokens: 100, completionTokens: 20, cost: 0.00002 },
+        };
+      },
+      currentKey: async () => ({ limit_remaining: null, budgets: [], effective_budget: null }),
+    };
+    await advanceMediaProcessing(upgraded, {
       runId: 61,
       transport,
+      openRouter,
       articleFetch: async (input) => {
         fetched.push(input);
         throw new Error("the upgrade must not refetch a taken article");
       },
-      now: new Date("2026-10-06T00:0" + minute + ":00.000Z"),
+      now: new Date("2026-10-06T00:00:00.000Z"),
     });
-    await advance(0);
-    overview = {
-      state: "succeeded",
-      output: { statements: [{ text: "The game presents flexible combat.", sourceUrls: [url] }], tags: [{ label: "Build experimentation", sourceUrls: [url] }] },
-      usage: { inputTokens: 100, outputTokens: 20 },
-    };
-    await advance(1);
-    if (fetched.length !== 0 || submitted.length !== 1 || !submitted[0]!.startsWith("synthesis:1091500:")) {
-      throw new Error("A waiting run did not resume its Overview after upgrade: " + JSON.stringify({ fetched, submitted }));
+    if (fetched.length !== 0 || JSON.stringify(requested) !== JSON.stringify(["synthesis"])) {
+      throw new Error("A waiting run did not resume its Overview after upgrade: " + JSON.stringify({ fetched, requested }));
     }
     if (!upgraded.native.query("SELECT 1 FROM media_game_overviews WHERE appid = 1091500 AND active = 1").get()) {
       throw new Error("A waiting run did not build its Overview after upgrade");

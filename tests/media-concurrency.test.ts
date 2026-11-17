@@ -86,6 +86,7 @@ describe("media writers sharing one connection", () => {
     const processingOptions = {
       runId: value.processingRunId,
       transport,
+      openRouter: transport.openRouter,
       articleFetch: async () => processingArticleHtml(CYBERPUNK),
       now: new Date("2026-09-11T00:00:00.000Z"),
     };
@@ -98,8 +99,9 @@ describe("media writers sharing one connection", () => {
 
     expect(discovery.status).toBe("completed");
     expect(discovery.articles).toBeGreaterThan(0);
-    expect(firstAdvance.submitted).toBe(2);
-    expect(secondAdvance.completed).toBeGreaterThanOrEqual(2);
+    // Text answers settle as they arrive, so the first advance completes the run.
+    expect(firstAdvance).toMatchObject({ status: "completed", submitted: 2, completed: 2 });
+    expect(secondAdvance.submitted).toBe(0);
     expect(count(value, "SELECT COUNT(*) AS count FROM media_sources WHERE appid = 1086940")).toBe(discovery.articles);
     expect(count(value, "SELECT COUNT(*) AS count FROM media_game_overviews WHERE appid = 1091500 AND active = 1")).toBe(1);
     expect(value.native.inTransaction).toBe(false);

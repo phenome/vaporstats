@@ -382,14 +382,16 @@ describe("media trigger network origin", () => {
     }
   });
 
-  it("returns only sanitized processing, provider, and cost state when the provider key is missing", async () => {
+  it("returns only sanitized processing, provider, and cost state when the provider keys are missing", async () => {
     await withIsolatedTriggerDb(async (discoveryCalls) => {
       const previousToken = process.env.MEDIA_TRIGGER_TOKEN;
       const previousTavilyKey = process.env.TAVILY_API_KEY;
       const previousGeminiKey = process.env.GEMINI_API_KEY;
+      const previousOpenRouterKey = process.env.OPENROUTER_API_KEY;
       process.env.MEDIA_TRIGGER_TOKEN = "test-trigger-token";
       process.env.TAVILY_API_KEY = "tavily-provider-secret";
       delete process.env.GEMINI_API_KEY;
+      delete process.env.OPENROUTER_API_KEY;
       try {
         const response = await handleRequest(
           request({
@@ -411,13 +413,16 @@ describe("media trigger network origin", () => {
           completed: 0,
           outputs: { new: 0, reused: 0, replaced: 0, invalidated: 0, skipped: 0 },
           stopReasons: [],
-          queued: { gemini: 0 },
-          providers: { gemini: { provider: "gemini", paused: true, reason: "missing_key", pausedAt: expect.any(String), checkedAt: expect.anything() } },
-          cost: { reportingOnly: true, month: expect.any(String), providers: { gemini: { monthToDateMicrousd: 0, allTimeMicrousd: 0 } }, uncertain: 0 },
+          queued: { gemini: 0, openrouter: 0 },
+          providers: {
+            gemini: { provider: "gemini", paused: true, reason: "missing_key", pausedAt: expect.any(String), checkedAt: expect.anything(), checkOutcome: expect.anything() },
+            openrouter: { provider: "openrouter", paused: true, reason: "missing_key", pausedAt: expect.any(String), checkedAt: expect.anything(), checkOutcome: expect.anything() },
+          },
+          cost: { reportingOnly: true, month: expect.any(String), providers: { gemini: { monthToDateMicrousd: 0, allTimeMicrousd: 0 }, openrouter: { monthToDateMicrousd: 0, allTimeMicrousd: 0 } }, uncertain: 0 },
         });
         expect(discoveryCalls.length).toBeGreaterThan(0);
         expect(discoveryCalls.every((url) => url.startsWith("https://api.tavily.com/"))).toBe(true);
-        expect(discoveryCalls.some((url) => url.includes("generativelanguage.googleapis.com"))).toBe(false);
+        expect(discoveryCalls.some((url) => url.includes("generativelanguage.googleapis.com") || url.includes("openrouter.ai"))).toBe(false);
         const serialized = JSON.stringify(body);
         expect(serialized).not.toContain("test-trigger-token");
         expect(serialized).not.toContain("tavily-provider-secret");
@@ -428,6 +433,8 @@ describe("media trigger network origin", () => {
         else process.env.TAVILY_API_KEY = previousTavilyKey;
         if (previousGeminiKey === undefined) delete process.env.GEMINI_API_KEY;
         else process.env.GEMINI_API_KEY = previousGeminiKey;
+        if (previousOpenRouterKey === undefined) delete process.env.OPENROUTER_API_KEY;
+        else process.env.OPENROUTER_API_KEY = previousOpenRouterKey;
       }
     });
   });

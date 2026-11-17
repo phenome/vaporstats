@@ -57,8 +57,14 @@ export interface IngestionTickOptions {
   customFetch?: typeof fetch;
   tavilyApiKey?: string;
   geminiApiKey?: string;
+  /** The OpenRouter key that text generation (extraction and Overviews) uses. */
+  openRouterApiKey?: string;
   /** How many paid media items each provider may take from the queue per tick. */
   paidSubmissionsPerTick?: number;
+  /** How long one tick may spend taking paid media items from the queue. */
+  paidWorkTimeBudgetMs?: number;
+  /** A monotonic clock in milliseconds that measures `paidWorkTimeBudgetMs`. */
+  paidWorkClock?: () => number;
   stalePriceDealsOnly?: boolean;
 }
 
@@ -201,7 +207,7 @@ function logCompletion(result: IngestionTickResult): void {
       outputs: result.mediaProcessing.outputs,
       stopReasons: result.mediaProcessing.stopReasons,
       queued: result.mediaProcessing.queued,
-      providers: Object.fromEntries(Object.entries(result.mediaProcessing.providers).map(([provider, state]) => [provider, { paused: state.paused, reason: state.reason, pausedAt: state.pausedAt, checkedAt: state.checkedAt }])),
+      providers: Object.fromEntries(Object.entries(result.mediaProcessing.providers).map(([provider, state]) => [provider, { paused: state.paused, reason: state.reason, pausedAt: state.pausedAt, checkedAt: state.checkedAt, checkOutcome: state.checkOutcome }])),
       cost: result.mediaProcessing.cost,
     },
     reviewCompaction: result.reviewCompaction && {
@@ -261,13 +267,19 @@ async function performIngestionTick(options: IngestionTickOptions): Promise<Inge
     mediaProcessing = await advanceMediaProcessing(options.db, {
       ...(pendingMediaProcessing ? { runId: pendingMediaProcessing.run_id } : {}),
       geminiApiKey: options.geminiApiKey ?? process.env.GEMINI_API_KEY,
+      openRouterApiKey: options.openRouterApiKey ?? process.env.OPENROUTER_API_KEY,
       submissionsPerTick: options.paidSubmissionsPerTick,
+      paidWorkTimeBudgetMs: options.paidWorkTimeBudgetMs,
+      paidWorkClock: options.paidWorkClock,
       articleFetch: customFetch,
       providerFetch: customFetch,
       now: anchorTime,
     });
   } else {
-    await runIdleDailyCreditCheck(options.db, anchorTime);
+    await runIdleDailyCreditCheck(options.db, anchorTime, {
+      openRouterApiKey: options.openRouterApiKey ?? process.env.OPENROUTER_API_KEY,
+      providerFetch: customFetch,
+    });
   }
 
   let discovery: DiscoveryResult | undefined;

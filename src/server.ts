@@ -14,6 +14,7 @@ import {
   type MediaProcessingSummary,
 } from "./lib/media-processing";
 import { CACHE_POLICIES } from "./lib/cache";
+import { PAID_PROVIDERS } from "./lib/media-paid-providers";
 import { getDb } from "./lib/db";
 import { ensureReceptionPublicationReady } from "./lib/reception-publication";
 export const API_RATE_LIMIT_MAX_REQUESTS = 30;
@@ -248,6 +249,13 @@ const SAFE_MEDIA_PROCESSING_STOP_REASONS: Record<string, true> = {
   "provider_paused:gemini:model_unavailable": true,
   "provider_paused:gemini:prepay_depleted": true,
   "provider_paused:gemini:spend_cap": true,
+  "provider_paused:openrouter:missing_key": true,
+  "provider_paused:openrouter:invalid_key": true,
+  "provider_paused:openrouter:model_unavailable": true,
+  "provider_paused:openrouter:key_limit": true,
+  "provider_paused:openrouter:credits": true,
+  "provider_paused:openrouter:guardrail_budget": true,
+  "provider_paused:openrouter:workspace_budget": true,
 };
 
 function safeNonNegativeInteger(value: number): number {
@@ -273,25 +281,18 @@ function sanitizeMediaProcessingSummary(summary: MediaProcessingSummary): Pick<
     stopReasons: [...new Set(summary.stopReasons.map((reason) =>
       Object.prototype.hasOwnProperty.call(SAFE_MEDIA_PROCESSING_STOP_REASONS, reason) ? reason : "provider_failure"
     ))],
-    queued: { gemini: safeNonNegativeInteger(summary.queued.gemini) },
-    providers: {
-      gemini: {
-        provider: "gemini",
-        paused: summary.providers.gemini.paused,
-        reason: summary.providers.gemini.reason,
-        pausedAt: summary.providers.gemini.pausedAt,
-        checkedAt: summary.providers.gemini.checkedAt,
-      },
-    },
+    queued: Object.fromEntries(PAID_PROVIDERS.map((provider) => [provider, safeNonNegativeInteger(summary.queued[provider])])) as MediaProcessingSummary["queued"],
+    providers: Object.fromEntries(PAID_PROVIDERS.map((provider) => {
+      const state = summary.providers[provider];
+      return [provider, { provider, paused: state.paused, reason: state.reason, pausedAt: state.pausedAt, checkedAt: state.checkedAt, checkOutcome: state.checkOutcome }];
+    })) as MediaProcessingSummary["providers"],
     cost: {
       reportingOnly: true,
       month: summary.cost.month,
-      providers: {
-        gemini: {
-          monthToDateMicrousd: safeNonNegativeInteger(summary.cost.providers.gemini.monthToDateMicrousd),
-          allTimeMicrousd: safeNonNegativeInteger(summary.cost.providers.gemini.allTimeMicrousd),
-        },
-      },
+      providers: Object.fromEntries(PAID_PROVIDERS.map((provider) => [provider, {
+        monthToDateMicrousd: safeNonNegativeInteger(summary.cost.providers[provider].monthToDateMicrousd),
+        allTimeMicrousd: safeNonNegativeInteger(summary.cost.providers[provider].allTimeMicrousd),
+      }])) as MediaProcessingSummary["cost"]["providers"],
       uncertain: safeNonNegativeInteger(summary.cost.uncertain),
     },
   };
@@ -342,6 +343,7 @@ async function handleInternalMediaRequest(request: Request, peerAddress?: string
     const processing = await advanceMediaProcessing(db, {
       runId: result.runId,
       geminiApiKey: process.env.GEMINI_API_KEY,
+      openRouterApiKey: process.env.OPENROUTER_API_KEY,
     });
     return internalMediaResponse(200, { ...result, processing: sanitizeMediaProcessingSummary(processing) });
   } catch {
@@ -406,6 +408,7 @@ export function startServer(options: StartServerOptions = {}) {
         steamApiKey: process.env.STEAM_API_KEY,
         tavilyApiKey: process.env.TAVILY_API_KEY,
         geminiApiKey: process.env.GEMINI_API_KEY,
+        openRouterApiKey: process.env.OPENROUTER_API_KEY,
         runImmediately: true,
       });
     }

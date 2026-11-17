@@ -1,5 +1,9 @@
 import type { Database } from "bun:sqlite";
+import { runIngestionTick, type IngestionTickOptions } from "../../workers/ingestion";
+import type { TestDatabase } from "./db";
 import type { GeminiBatchPoll, GeminiBatchTransport } from "../../src/lib/media-processing";
+import type { OpenRouterChatRequest, OpenRouterCompletion, OpenRouterTransport } from "../../src/lib/media-openrouter";
+import { GeminiHttpError, OpenRouterHttpError } from "../../src/lib/media-paid-providers";
 import { MEDIA_OUTLETS, type MediaPass } from "../../src/lib/media-discovery";
 
 export const CYBERPUNK = 1091500;
@@ -55,22 +59,37 @@ export function insertSources(native: Database, appid: number, pass: MediaPass, 
 type InlineRequest = { key: string; request: Record<string, unknown> };
 
 /**
- * Deterministic Gemini batch transport. Each submission takes the next queued
- * poll result (or stays pending). Generate batches are named
- * `batches/test-<n>`; embedding batches exist only with `{ embeddings: true }`
- * and are named `batches/embed-<n>`.
+ * Deterministic paid-provider transports for tests that advance processing
+ * directly. Every paid answer comes from one ordered queue, `nextPolls`, in
+ * the order requests are made: Gemini embedding batches take theirs when
+ * submitted and report it when polled, and OpenRouter text requests, served
+ * by the `openRouter` companion, take theirs at once. A `pending` answer
+ * leaves an embedding batch pending, and makes a text request time out after
+ * it was sent. A `failed` answer refuses the request, and an `http` answer
+ * makes a text request fail with that status. Scripted usage is charged at
+ * Claude Haiku 5.5's listed prices. Request keys of
+ * accepted submissions are recorded in `submissions`: an embedding's own key,
+ * or `<stage>:chat-<n>` for a text request. Embedding batches exist only with
+ * `{ embeddings: true }` and are named `batches/embed-<n>`.
  */
+/** One scripted paid answer: a Gemini batch result, or an HTTP error status for a text request. */
+export type ControlledAnswer = GeminiBatchPoll | { state: "http"; status: number };
+
 export class ControlledGeminiTransport implements GeminiBatchTransport {
   readonly submissions: string[] = [];
   readonly embeddingSubmissions: string[] = [];
   readonly counts: string[] = [];
-  readonly requestBodies: Record<string, unknown>[] = [];
+  readonly requestBodies: unknown[] = [];
   readonly polls = new Map<string, GeminiBatchPoll>();
-  nextPolls: GeminiBatchPoll[] = [];
+  nextPolls: ControlledAnswer[] = [];
+  /** Makes the next text request lose its connection after it was sent. */
   throwSubmission = false;
   inspectDuringSubmit: ((requestKey: string) => void | Promise<void>) | undefined;
   beforePoll: ((name: string) => void | Promise<void>) | undefined;
   submitEmbeddingBatch?: (model: string, requests: readonly InlineRequest[]) => Promise<{ name: string }>;
+  /** The controlled OpenRouter transport for text requests, answered from `nextPolls`. */
+  readonly openRouter: OpenRouterTransport;
+  private chats = 0;
 
   constructor(options: { embeddings?: boolean } = {}) {
     if (options.embeddings) {
@@ -78,11 +97,18 @@ export class ControlledGeminiTransport implements GeminiBatchTransport {
         const request = requests[0]!;
         this.requestBodies.push(request.request);
         this.embeddingSubmissions.push(request.key);
+        this.submissions.push(request.key);
         const name = `batches/embed-${this.embeddingSubmissions.length}`;
-        this.polls.set(name, this.nextPolls.shift() ?? { state: "pending" });
+        const answer = this.nextPolls.shift() ?? { state: "pending" };
+        if (answer.state === "http") throw new GeminiHttpError(answer.status, `HTTP ${answer.status}`);
+        this.polls.set(name, answer);
         return { name };
       };
     }
+    this.openRouter = {
+      complete: (request) => this.complete(request),
+      currentKey: async () => ({ limit: null, limit_remaining: null, budgets: [], effective_budget: null }),
+    };
   }
 
   async countTokens(model: string, request: Record<string, unknown>): Promise<number> {
@@ -90,15 +116,30 @@ export class ControlledGeminiTransport implements GeminiBatchTransport {
     return 100;
   }
 
-  async submitBatch(_model: string, requests: readonly InlineRequest[]): Promise<{ name: string }> {
-    const request = requests[0]!;
-    this.requestBodies.push(request.request);
-    await this.inspectDuringSubmit?.(request.key);
-    if (this.throwSubmission) throw new Error("network dropped before batch acknowledgement");
-    const name = `batches/test-${this.submissions.length + 1}`;
-    this.submissions.push(request.key);
-    this.polls.set(name, this.nextPolls.shift() ?? { state: "pending" });
-    return { name };
+  private async complete(request: OpenRouterChatRequest): Promise<OpenRouterCompletion> {
+    const stage = JSON.stringify(request.messages).includes("sourceUrl") ? "synthesis" : "extraction";
+    this.requestBodies.push(request);
+    this.chats += 1;
+    const key = `${stage}:chat-${this.chats}`;
+    await this.inspectDuringSubmit?.(key);
+    if (this.throwSubmission) throw new Error("network dropped before the response");
+    this.submissions.push(key);
+    const result = this.nextPolls.shift() ?? { state: "pending" };
+    if (result.state === "pending") throw Object.assign(new Error("The operation timed out."), { name: "TimeoutError" });
+    if (result.state === "failed") throw new OpenRouterHttpError(400);
+    if (result.state === "http") throw new OpenRouterHttpError(result.status);
+    return {
+      generationId: `gen-${this.chats}`,
+      model: request.model,
+      provider: "Anthropic",
+      content: typeof result.output === "string" ? result.output : JSON.stringify(result.output ?? null),
+      // Usage, when scripted, is charged at Claude Haiku 5.5's listed US$0.10/M input and US$0.50/M output tokens.
+      usage: {
+        promptTokens: result.usage?.inputTokens ?? null,
+        completionTokens: result.usage?.outputTokens ?? null,
+        cost: result.usage ? ((result.usage.inputTokens ?? 0) * 0.1 + (result.usage.outputTokens ?? 0) * 0.5) / 1_000_000 : null,
+      },
+    };
   }
 
   async pollBatch(name: string): Promise<GeminiBatchPoll> {
@@ -107,7 +148,14 @@ export class ControlledGeminiTransport implements GeminiBatchTransport {
   }
 }
 
-/** Ways a request's token count can stop it before submission. */
+/**
+ * Ways a request can be stopped before it produces output. A Gemini request
+ * is stopped by its token count: one that fails is transient, one over every
+ * input cap is a definite refusal. An OpenRouter text request has no remote
+ * token count, so its counterparts are the provider's answers of the same
+ * class: a 503 for "token count" and a 400 for "token cap". A real text
+ * input cap refusal needs an oversized input, such as `oversizedArticleHtml`.
+ */
 export const REFUSALS = ["token count", "token cap"] as const;
 export type Refusal = (typeof REFUSALS)[number];
 /** Refusals that are final for the run; a token count that throws is transient and retried. */
@@ -115,14 +163,14 @@ export const DEFINITE_REFUSALS = ["token cap"] as const satisfies readonly Refus
 
 /**
  * Makes `transport` stop every request that `matches` selects with
- * `refusal`: its token count fails, or exceeds every input cap. Returns how
- * many matching requests were counted.
+ * `refusal`, Gemini and OpenRouter alike. Returns how many matching requests
+ * were stopped, with `restore()` to answer every request normally again.
  */
 export function refuseRequests(
   transport: ControlledGeminiTransport,
   matches: (model: string, request: Record<string, unknown>) => boolean,
   refusal: Refusal,
-): () => number {
+): (() => number) & { restore(): void } {
   let counted = 0;
   transport.countTokens = async (model, request) => {
     if (!matches(model, request)) return ControlledGeminiTransport.prototype.countTokens.call(transport, model, request);
@@ -130,7 +178,27 @@ export function refuseRequests(
     if (refusal === "token count") throw new Error("token counting unavailable");
     return 1_000_000;
   };
-  return () => counted;
+  const complete = transport.openRouter.complete;
+  transport.openRouter.complete = async (request) => {
+    if (!matches(request.model, request as unknown as Record<string, unknown>)) return complete(request);
+    counted += 1;
+    throw new OpenRouterHttpError(refusal === "token count" ? 503 : 400);
+  };
+  return Object.assign(() => counted, {
+    restore() {
+      transport.countTokens = ControlledGeminiTransport.prototype.countTokens.bind(transport);
+      transport.openRouter.complete = complete;
+    },
+  });
+}
+
+/**
+ * An article whose cleaned text is too large for one text request by the
+ * conservative local token estimate: 120,000 characters of CJK text, three
+ * UTF-8 bytes each.
+ */
+export function oversizedArticleHtml(appid: number): string {
+  return `<!doctype html><html><body><article><h1>${GAME_NAMES[appid]} Review</h1><p>${"戦闘".repeat(60_000)}</p></article></body></html>`;
 }
 
 /** Key-sorted JSON, matching how processing input identities serialize values. */
@@ -289,3 +357,169 @@ export const GEMINI_KEY_INVALID: GeminiReply = { status: 400, body: { error: { c
 export const GEMINI_BILLING_DISABLED: GeminiReply = { status: 400, body: { error: { code: 400, status: "FAILED_PRECONDITION", message: "Billing is not enabled for this project. Enable billing to use the Batch API." } } };
 /** Gemini's reply when the requested model is retired or unknown. */
 export const GEMINI_MODEL_NOT_FOUND: GeminiReply = { status: 404, body: { error: { code: 404, status: "NOT_FOUND", message: "models/gemini-3.1-flash-lite is not found for API version v1beta." } } };
+
+/** One answer the controlled OpenRouter API gives a request: an HTTP reply, or a connection failure. */
+export type OpenRouterReply =
+  | { status: number; body?: unknown; headers?: Record<string, string> }
+  | { network: string; code?: string; name?: string };
+
+/** The OpenRouter request kinds the controlled API serves. */
+export type OpenRouterCall = "chat" | "key";
+
+/** One chat completion the controlled OpenRouter API received. */
+export interface OpenRouterRequestRecord {
+  /** `extraction` or `synthesis`, by whether the request cites article URLs. */
+  stage: "extraction" | "synthesis";
+  model: string;
+  body: { model: string; messages: Array<{ role: string; content: string }>; response_format?: unknown; max_tokens?: number };
+  authorization: string | null;
+  /** Article URLs the request cites, for a synthesis. */
+  urls: string[];
+}
+
+/** The usage the controlled API reports on every successful chat completion: 1,000 input and 100 output tokens at US$0.00015. */
+export const OPENROUTER_USAGE = { prompt_tokens: 1_000, completion_tokens: 100, cost: 0.00015 } as const;
+
+/**
+ * A controlled OpenRouter REST API behind a fetch function, so the real
+ * chat-completion transport and its response classification run unchanged.
+ * Every chat completion succeeds unless a reply is queued with `reply`, with
+ * an output that fits its stage: an extraction, or an Overview citing every
+ * article URL in the request. The key endpoint reports a key with no limit
+ * and no budget unless a reply is queued.
+ */
+export function controlledOpenRouterApi() {
+  const replies: Record<OpenRouterCall, OpenRouterReply[]> = { chat: [], key: [] };
+  const outputs: { extraction: unknown[]; synthesis: unknown[] } = { extraction: [], synthesis: [] };
+  /** Every chat completion the API received, including refused ones. */
+  const requests: OpenRouterRequestRecord[] = [];
+  /** Every request the API received, by kind. */
+  const calls: Array<{ kind: OpenRouterCall; stage?: string }> = [];
+  const api = {
+    /** Runs when a chat completion arrives, before it is answered. */
+    onChat: undefined as ((request: OpenRouterRequestRecord) => void | Promise<void>) | undefined,
+  };
+  const answer = (reply: OpenRouterReply): Response => {
+    if ("network" in reply) throw Object.assign(new Error(reply.network), reply.code ? { code: reply.code } : {}, reply.name ? { name: reply.name } : {});
+    return new Response(JSON.stringify(reply.body ?? {}), { status: reply.status, headers: { "Content-Type": "application/json", ...reply.headers } });
+  };
+  const fetchFn = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+    const url = String(input);
+    const authorization = new Headers(init?.headers).get("authorization");
+    if (url === "https://openrouter.ai/api/v1/key") {
+      calls.push({ kind: "key" });
+      const reply = replies.key.shift();
+      return reply ? answer(reply) : Response.json({ data: { label: "test", limit: null, limit_remaining: null, budgets: [], effective_budget: null, usage: 0 } });
+    }
+    if (url !== "https://openrouter.ai/api/v1/chat/completions") return Response.json({ error: { code: 404, message: "Not Found" } }, { status: 404 });
+    const body = JSON.parse(String(init?.body)) as OpenRouterRequestRecord["body"];
+    const urls = [...new Set(JSON.stringify(body.messages).match(/https:\/\/[^"\\]+\/articles\/[^"\\]+/g) ?? [])];
+    const record: OpenRouterRequestRecord = { stage: urls.length > 0 ? "synthesis" : "extraction", model: body.model, body, authorization, urls };
+    requests.push(record);
+    calls.push({ kind: "chat", stage: record.stage });
+    await api.onChat?.(record);
+    const reply = replies.chat.shift();
+    if (reply) return answer(reply);
+    const output = outputs[record.stage].shift()
+      ?? (record.stage === "synthesis" ? { ...overviewOutputForUrls(urls), similarityInputs: { gameplay: ["Flexible combat builds"] } } : extractionOutput());
+    return Response.json({
+      id: `gen-${requests.length}`,
+      object: "chat.completion",
+      model: body.model,
+      provider: "Anthropic",
+      choices: [{ index: 0, finish_reason: "stop", message: { role: "assistant", content: typeof output === "string" ? output : JSON.stringify(output) } }],
+      usage: OPENROUTER_USAGE,
+    });
+  };
+  return Object.assign(api, {
+    fetchFn,
+    requests,
+    calls,
+    /** Queues `reply` for the next request of `kind`. */
+    reply(kind: OpenRouterCall, ...queued: OpenRouterReply[]) { replies[kind].push(...queued); },
+    /** Queues the model output of the next successful request of `stage`. */
+    output(stage: "extraction" | "synthesis", ...queued: unknown[]) { outputs[stage].push(...queued); },
+    isOpenRouterRequest: (url: string) => url.startsWith("https://openrouter.ai/"),
+  });
+}
+
+/** OpenRouter's reply when the API key's credit limit is exhausted, as a 402 or a 403. */
+export const openRouterKeyLimit = (status: 402 | 403): OpenRouterReply => ({ status, body: { error: { code: status, message: "Key limit exceeded", metadata: { limit_source: "openrouter_key_limit", remedy_hint: "Raise the key's limit." } } } });
+/** OpenRouter's reply when the account balance cannot cover the request. */
+export const OPENROUTER_CREDITS: OpenRouterReply = { status: 402, body: { error: { code: 402, message: "Insufficient credits", metadata: { reason: "weight_exceeds_budget", limit_source: "openrouter_credits" } } } };
+/** OpenRouter's reply when running and recently completed requests fill the in-flight budget: transient. */
+export const OPENROUTER_IN_FLIGHT_BUDGET: OpenRouterReply = { status: 402, headers: { "Retry-After": "3600" }, body: { error: { code: 402, message: "This request would exceed your available credits given your current in-flight requests.", metadata: { reason: "in_flight_budget_exhausted", limit_source: "openrouter_in_flight_budget" } } } };
+/** OpenRouter's reply when a guardrail budget is spent. */
+export const OPENROUTER_GUARDRAIL_BUDGET: OpenRouterReply = { status: 403, body: { error: { code: 403, message: "Org member budget limit exceeded (weekly limit). $52.00 of $50.00 used.", metadata: { limit_source: "openrouter_guardrail_budget", scope: "member", limit_usd: 50, spend_usd: 52, resets_at: "2026-11-16T00:00:00.000Z" } } } };
+/** OpenRouter's reply when a workspace budget is spent. */
+export const OPENROUTER_WORKSPACE_BUDGET: OpenRouterReply = { status: 403, body: { error: { code: 403, message: "Workspace budget limit exceeded.", metadata: { limit_source: "openrouter_workspace_budget", scope: "workspace", limit_usd: 10, spend_usd: 10, resets_at: null } } } };
+/** OpenRouter's reply when moderation flags the input: a definite refusal. */
+export const OPENROUTER_MODERATION: OpenRouterReply = { status: 403, body: { error: { code: 403, message: "Input was flagged", metadata: { reasons: ["violence"], flagged_input: "...", provider_name: "Anthropic", model_slug: "anthropic/claude-haiku-5.5" } } } };
+/** OpenRouter's reply to an invalid or disabled API key. */
+export const OPENROUTER_INVALID_KEY: OpenRouterReply = { status: 401, body: { error: { code: 401, message: "No auth credentials found" } } };
+
+type MediaTickApis = { gemini?: ReturnType<typeof controlledGeminiApi>; openRouter?: ReturnType<typeof controlledOpenRouterApi> };
+
+/**
+ * The tick's fetch: Gemini and OpenRouter requests go to their controlled
+ * APIs, article pages are served for every outlet URL unless `outlet`
+ * answers first, and anything else is unavailable.
+ */
+export function mediaTickFetch(apis: MediaTickApis, fetched: string[] = [], outlet?: (url: string) => Response | undefined): typeof fetch {
+  return (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    if (apis.gemini?.isGeminiRequest(url)) return apis.gemini.fetchFn(input, init);
+    if (apis.openRouter?.isOpenRouterRequest(url)) return apis.openRouter.fetchFn(input, init);
+    if (url.includes("/articles/")) {
+      fetched.push(url);
+      const answer = outlet?.(url);
+      if (answer) return answer;
+      const appid = [BALDURS_GATE, HADES_II].find((id) => url.includes(String(id))) ?? CYBERPUNK;
+      return new Response(processingArticleHtml(appid));
+    }
+    return new Response(null, { status: 404 });
+  }) as typeof fetch;
+}
+
+/** Options of `runMediaTick`: tick options plus the outlets' controlled answers. */
+export type MediaTickOptions = Partial<IngestionTickOptions> & { fetched?: string[]; outlet?: (url: string) => Response | undefined };
+
+/**
+ * Runs one ingestion tick at `at` with the controlled provider APIs and
+ * outlets, and test keys for Gemini and OpenRouter. The tick's daily player
+ * cycle is marked done, so it writes no snapshot, and reception artifacts
+ * stay inside the temporary database directory.
+ */
+export function runMediaTick(database: TestDatabase, apis: MediaTickApis, at: string, options: MediaTickOptions = {}) {
+  const { fetched, outlet, ...rest } = options;
+  const anchorTime = new Date(at);
+  const previousDay = new Date(Date.UTC(anchorTime.getUTCFullYear(), anchorTime.getUTCMonth(), anchorTime.getUTCDate() - 1)).toISOString().slice(0, 10);
+  database.native.prepare("INSERT INTO checkpoints (key, value) VALUES ('ingestion:last-daily-cycle', ?1) ON CONFLICT(key) DO UPDATE SET value = ?1").run(previousDay);
+  process.env.RECEPTION_ARTIFACT_DIR = database.directory;
+  return runIngestionTick({
+    db: database.db,
+    anchorTime,
+    customFetch: mediaTickFetch(apis, fetched, outlet),
+    geminiApiKey: "test-gemini-key",
+    openRouterApiKey: "test-openrouter-key",
+    ...rest,
+  });
+}
+
+/**
+ * Records an extraction that Gemini Batch accepted before text generation
+ * moved to OpenRouter: `sourceId`'s article was taken by `runId` with input
+ * `identity`, and its batch `batch` is still submitted. Returns the job id.
+ */
+export function insertSubmittedGeminiExtraction(native: Database, options: { runId: number; sourceId: number; batch?: string; identity?: string }): number {
+  const identity = options.identity ?? `pre-cutover-extraction-${options.sourceId}`;
+  const source = native.query<{ appid: number }, [number]>("SELECT appid FROM media_sources WHERE id = ?").get(options.sourceId);
+  if (!source) throw new Error(`No media source ${options.sourceId}`);
+  native.prepare("UPDATE media_sources SET processing_run_id = ?, processing_input_identity = ?, normalized_content_hash = ?, cleanup_version = 'media-cleanup-2026-09-11-v1', processing_content = NULL WHERE id = ?")
+    .run(options.runId, identity, `pre-cutover-hash-${options.sourceId}`, options.sourceId);
+  native.prepare(
+    `INSERT INTO media_processing_jobs (run_id, stage, appid, source_id, request_key, input_identity, model, config_version, max_input_tokens, max_output_tokens, reserved_microusd, reservation_active, status, provider, enqueued_at, provider_batch_id, usage_json, submitted_at)
+     VALUES (?, 'extraction', ?, ?, ?, ?, 'gemini-3.1-flash-lite', 'media-extraction-2026-09-13-v3', 100, 1200, 0, 0, 'submitted', 'gemini', '2026-09-10T00:00:00.000Z', ?, '{}', '2026-09-10T00:00:00.000Z')`,
+  ).run(options.runId, source.appid, options.sourceId, `extraction:${options.sourceId}:run:${options.runId}`, identity, options.batch ?? "batches/test-1");
+  return native.query<{ id: number }, []>("SELECT id FROM media_processing_jobs ORDER BY id DESC LIMIT 1").get()!.id;
+}

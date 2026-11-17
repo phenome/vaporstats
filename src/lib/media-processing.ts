@@ -19,7 +19,16 @@ import {
 } from "./media-discovery";
 import { finishOutletAttempt, reserveOutletAttempt } from "./media-outlet-access";
 import {
+  createOpenRouterTransport,
+  type OpenRouterChatRequest,
+  type OpenRouterCompletion,
+  type OpenRouterFetch,
+  type OpenRouterTransport,
+} from "./media-openrouter";
+import {
   classifyGeminiOutcome,
+  classifyOpenRouterKeyCheck,
+  classifyOpenRouterOutcome,
   GeminiBatchFailure,
   GeminiHttpError,
   GeminiMissingKeyError,
@@ -32,6 +41,8 @@ import {
   writeEntityTurns,
   runDailyCreditCheck,
   transientRetryAt,
+  type CreditChecks,
+  type OpenRouterKeyCheck,
   type PaidProvider,
   type PaidWorkCost,
   type ProviderOutcome,
@@ -44,21 +55,38 @@ import {
   GEMINI_EMBEDDING_MODEL,
 } from "./media-similarity";
 
+/** The Gemini model of text-generation batches submitted before text generation moved to OpenRouter. */
 export const GEMINI_MEDIA_MODEL = "gemini-3.1-flash-lite";
+/** The model that generates extractions and Overviews, through OpenRouter chat completions. */
+export const OPENROUTER_TEXT_MODEL = "anthropic/claude-haiku-5.5";
 const EXTRACTION_CONFIG_VERSION = "media-extraction-2026-09-13-v3";
 const SYNTHESIS_CONFIG_VERSION = "media-synthesis-2026-09-13-v5";
 const CLEANUP_VERSION = "media-cleanup-2026-09-11-v1";
 // Documented Gemini Batch prices, used only to estimate the cost of settled
-// work for reporting. They never decide whether work is submitted.
+// work for reporting. They never decide whether work is submitted. Text
+// batches submitted to Gemini before the move to OpenRouter still settle.
 const INPUT_PRICE_MICRO_USD_PER_TOKEN = 0.125;
 const OUTPUT_PRICE_MICRO_USD_PER_TOKEN = 0.75;
 const EMBEDDING_INPUT_PRICE_MICRO_USD_PER_TOKEN = 0.1;
 /** How many paid items each provider may take from the queue in one ingestion tick. */
 export const DEFAULT_PAID_SUBMISSIONS_PER_TICK = 60;
+/** How long one advance may spend taking paid items from the queue before the rest wait for the next tick. */
+export const DEFAULT_PAID_WORK_TIME_BUDGET_MS = 5 * 60 * 1_000;
 const EXTRACTION_MAX_OUTPUT_TOKENS = 1_200;
 const SYNTHESIS_MAX_OUTPUT_TOKENS = 3_200;
 const EMBEDDING_MAX_OUTPUT_TOKENS = 1;
-const MAX_INPUT_TOKENS = 24_000;
+/**
+ * The input cap of one OpenRouter request, in locally estimated tokens. It
+ * keeps every request well below the 100K-token prompt size up to which the
+ * documented price applies.
+ */
+const OPENROUTER_MAX_INPUT_TOKENS = 60_000;
+/**
+ * Bytes per token of the local input estimate. No OpenRouter token count
+ * exists for Anthropic models; tokenizers average more than three bytes of
+ * text per token, so this overestimates.
+ */
+const ESTIMATE_BYTES_PER_TOKEN = 3;
 const MAX_EMBEDDING_INPUT_TOKENS = 8_192;
 const MAX_ARTICLE_CHARS = 120_000;
 const MAX_REDIRECTS = 5;
@@ -150,9 +178,12 @@ export interface GeminiBatchPoll {
   batchState?: string | null;
 }
 
+/**
+ * Gemini Batch: embeddings, and polls of batches already submitted. Text
+ * generation is no longer submitted to Gemini.
+ */
 export interface GeminiBatchTransport {
   countTokens(model: string, request: GeminiRequest): Promise<number>;
-  submitBatch(model: string, requests: readonly GeminiInlineRequest[]): Promise<{ name: string }>;
   submitEmbeddingBatch?(model: string, requests: readonly GeminiInlineRequest[]): Promise<{ name: string }>;
   pollBatch(name: string): Promise<GeminiBatchPoll>;
 }
@@ -164,16 +195,28 @@ export interface MediaProcessingOptions {
   runId?: number;
   transport?: GeminiBatchTransport;
   geminiApiKey?: string;
+  /** The OpenRouter transport; built from `openRouterApiKey` when absent. */
+  openRouter?: OpenRouterTransport;
+  openRouterApiKey?: string;
+  /** How long one OpenRouter request may take before its outcome becomes unknown. */
+  openRouterTimeoutMs?: number;
   providerFetch?: MediaFetch;
   articleFetch?: ArticleFetch;
   now?: Date | (() => Date);
   /** How many paid items each provider may take from the queue in this advance. */
   submissionsPerTick?: number;
+  /** How long this advance may spend taking paid items from the queue. */
+  paidWorkTimeBudgetMs?: number;
+  /** A monotonic clock in milliseconds that measures `paidWorkTimeBudgetMs`. */
+  paidWorkClock?: () => number;
 }
 
-function boundedError(error: unknown, secret?: string): string {
+/** `error`'s message on one bounded line, with every configured secret and bearer token redacted. */
+function boundedError(error: unknown, secrets?: string | readonly (string | undefined)[]): string {
   let message = error instanceof Error ? error.message : String(error);
-  if (secret) message = message.split(secret).join("[redacted]");
+  for (const secret of typeof secrets === "string" ? [secrets] : secrets ?? []) {
+    if (secret) message = message.split(secret).join("[redacted]");
+  }
   return message
     .replace(/[\r\n]+/g, " ")
     .replace(/Bearer\s+\S+/gi, "Bearer [redacted]")
@@ -277,28 +320,6 @@ export function createGeminiBatchTransport(apiKey: string, fetchFn: MediaFetch =
       const count = root.totalTokens ?? root.total_tokens;
       if (typeof count !== "number" || !Number.isInteger(count) || count < 0) throw new Error("Gemini countTokens returned no bounded token count");
       return count;
-    },
-    async submitBatch(model, requests) {
-      const body = await request(`${base}/models/${encodeURIComponent(model)}:batchGenerateContent`, {
-        method: "POST",
-        body: JSON.stringify({
-          batch: {
-            display_name: requests[0]?.key ?? "vaporstats-media",
-            input_config: {
-              requests: {
-                requests: requests.map(({ key, request: item }) => ({
-                  request: item,
-                  metadata: { key },
-                })),
-              },
-            },
-          },
-        }),
-      });
-      const root = jsonObject(body);
-      const name = root.name ?? jsonObject(root.batch).name ?? jsonObject(root.operation).name;
-      if (typeof name !== "string" || !name) throw new Error("Gemini batch submission returned no batch name");
-      return { name };
     },
     async submitEmbeddingBatch(model, requests) {
       const body = await request(`${base}/models/${encodeURIComponent(model)}:asyncBatchEmbedContent`, {
@@ -472,25 +493,38 @@ function extractionIdentityFor(
 }
 
 function extractionIdentity(source: SourceRow, hash: string): string {
-  return extractionIdentityFor(source, hash, GEMINI_MEDIA_MODEL, EXTRACTION_CONFIG_VERSION, CLEANUP_VERSION);
+  return extractionIdentityFor(source, hash, OPENROUTER_TEXT_MODEL, EXTRACTION_CONFIG_VERSION, CLEANUP_VERSION);
 }
 
+/** The input identity of new Overview work for `appid`'s current extractions. */
 function synthesisIdentity(appid: number, extractions: ExtractionRow[]): string {
-  return synthesisIdentityFor(appid, extractions, GEMINI_MEDIA_MODEL, SYNTHESIS_CONFIG_VERSION);
+  return synthesisIdentityFor(appid, extractions, OPENROUTER_TEXT_MODEL, SYNTHESIS_CONFIG_VERSION);
+}
+
+/** Whether Overview work `job` still describes `extractions`, under the model and configuration it was queued with. */
+function synthesisIsCurrent(job: JobRow, extractions: ExtractionRow[]): boolean {
+  return synthesisIdentityFor(job.appid, extractions, job.model, job.config_version) === job.input_identity;
 }
 
 function synthesisIdentityFor(appid: number, extractions: ExtractionRow[], model: string, configVersion: string): string {
   return sha256(stableJson({ stage: "synthesis", appid, model, configVersion, extractions: extractions.map((row) => ({ sourceId: row.source_id, inputIdentity: row.input_identity })).sort((a, b) => a.sourceId - b.sourceId) }));
 }
 
-function makeExtractionRequest(source: SourceRow, content: string, identity: string): GeminiRequest {
-  return {
-    contents: [{ role: "user", parts: [{ text: `Analyze only this article about Steam app ${source.appid}. Return JSON only. Keep wording grounded in article evidence. Use these optional category names inside categories and contribution.category: ${MEDIA_CATEGORY_NAMES.join("; ")}. Top-level keys must be categories, contributions, traits, qualifications, provenance, and optional originatingAssessment and similarityInputs. similarityInputs may contain gameplay and storyWorld arrays of direct descriptive evidence about game mechanics or story/world themes. Do not use quality, ratings, popularity, praise, criticism, or technical complaints as similarity inputs. Do not invent unsupported dimensions. Contributions are objects with text and category; traits and qualifications are arrays of strings. Traits must be concise, factual game descriptors sourced only from the article.` }, { text: content }] }],
-    generationConfig: { responseMimeType: "application/json", maxOutputTokens: EXTRACTION_MAX_OUTPUT_TOKENS },
-  };
+/** One OpenRouter chat completion for the text model that asks for JSON output. */
+function chatRequest(maxTokens: number, ...messages: OpenRouterChatRequest["messages"]): OpenRouterChatRequest {
+  return { model: OPENROUTER_TEXT_MODEL, messages, response_format: { type: "json_object" }, max_tokens: maxTokens };
 }
 
-function makeSynthesisRequest(appid: number, name: string, extractions: ExtractionRow[], sources: SourceRow[]): GeminiRequest {
+/** A conservative local estimate of `request`'s input tokens. */
+function estimatedInputTokens(request: OpenRouterChatRequest): number {
+  return Math.ceil(Buffer.byteLength(JSON.stringify(request.messages), "utf8") / ESTIMATE_BYTES_PER_TOKEN);
+}
+
+function makeExtractionRequest(source: SourceRow, content: string): OpenRouterChatRequest {
+  return chatRequest(EXTRACTION_MAX_OUTPUT_TOKENS, { role: "system", content: `Analyze only this article about Steam app ${source.appid}. Return JSON only. Keep wording grounded in article evidence. Use these optional category names inside categories and contribution.category: ${MEDIA_CATEGORY_NAMES.join("; ")}. Top-level keys must be categories, contributions, traits, qualifications, provenance, and optional originatingAssessment and similarityInputs. similarityInputs may contain gameplay and storyWorld arrays of direct descriptive evidence about game mechanics or story/world themes. Do not use quality, ratings, popularity, praise, criticism, or technical complaints as similarity inputs. Do not invent unsupported dimensions. Contributions are objects with text and category; traits and qualifications are arrays of strings. Traits must be concise, factual game descriptors sourced only from the article.` }, { role: "user", content });
+}
+
+function makeSynthesisRequest(appid: number, name: string, extractions: ExtractionRow[], sources: SourceRow[]): OpenRouterChatRequest {
   const sourceById = new Map(sources.map((source) => [source.id, source]));
   const evidence = extractions.map((row) => {
     const source = sourceById.get(row.source_id);
@@ -503,10 +537,7 @@ function makeSynthesisRequest(appid: number, name: string, extractions: Extracti
       extraction: parseExtraction(row.output_json),
     } : null;
   }).filter((item) => item !== null);
-  return {
-    contents: [{ role: "user", parts: [{ text: `Synthesize the current initial assessments for ${name || `game ${appid}`}. Return JSON only as {"statements":[{"text":"...","sourceUrls":["..."]}],"categories":[{"name":"...","findings":[{"text":"...","sourceUrls":["..."],"contested":true}]}],"prosCons":{"pros":[{"text":"...","sourceUrls":["..."]}],"cons":[...]},"tags":[{"label":"...","sourceUrls":["..."]}],"similarityInputs":{"gameplay":["..."],"storyWorld":["..."]}}. Write flowing, concise, game-first Overview statements. Write every Overview text field as a direct game observation; never mention coverage, critics, reviewers, reviews, outlets, publications, sources, assessments, agreement, consensus, or frequency. Multiple citation URLs communicate repeated support. Include only supported sections named ${MEDIA_CATEGORY_NAMES.join("; ")}; omit unsupported sections. Provide one global pros/cons overview, omit unsupported sides, and do not force neutral characteristics into pros or cons. Every entry must cite every supporting article URL. Tags are concise factual game descriptors and must be derived only from the supplied extraction.traits arrays, never from statements, categories, pros/cons, or summary wording. Cite every current extraction that supports each tag. Normalize semantically equivalent supported trait descriptions to one meaningful label without merging distinct characteristics or inventing missing traits. Preserve disputed traits when a supplied extraction supports them; do not include quality judgments, rankings, scores, reception, popularity, praise, performance, bugs, or technical complaints as tags. Return similarityInputs as the canonical aggregate of all supplied current extraction.contributions and any directly supported mechanics or story/world themes. Use gameplay for mechanics, systems, controls, combat, progression, and player-facing structure; use storyWorld for setting, narrative, characters, factions, and world themes. Keep each item a concise direct game description and omit a dimension when no supported evidence exists. Never put quality, praise, popularity, ratings, reception, criticism, performance, bugs, optimization, framerate, or other technical complaints in similarityInputs. Do not use Overview prose, tags, pros, or cons as similarityInputs. Evidence belongs only to app ${appid}; do not transfer incidental comparisons, DLC, expansion, bundle, or focused edition evidence.\n${JSON.stringify(evidence)}` }] }],
-    generationConfig: { responseMimeType: "application/json", maxOutputTokens: SYNTHESIS_MAX_OUTPUT_TOKENS },
-  };
+  return chatRequest(SYNTHESIS_MAX_OUTPUT_TOKENS, { role: "user", content: `Synthesize the current initial assessments for ${name || `game ${appid}`}. Return JSON only as {"statements":[{"text":"...","sourceUrls":["..."]}],"categories":[{"name":"...","findings":[{"text":"...","sourceUrls":["..."],"contested":true}]}],"prosCons":{"pros":[{"text":"...","sourceUrls":["..."]}],"cons":[...]},"tags":[{"label":"...","sourceUrls":["..."]}],"similarityInputs":{"gameplay":["..."],"storyWorld":["..."]}}. Write flowing, concise, game-first Overview statements. Write every Overview text field as a direct game observation; never mention coverage, critics, reviewers, reviews, outlets, publications, sources, assessments, agreement, consensus, or frequency. Multiple citation URLs communicate repeated support. Include only supported sections named ${MEDIA_CATEGORY_NAMES.join("; ")}; omit unsupported sections. Provide one global pros/cons overview, omit unsupported sides, and do not force neutral characteristics into pros or cons. Every entry must cite every supporting article URL. Tags are concise factual game descriptors and must be derived only from the supplied extraction.traits arrays, never from statements, categories, pros/cons, or summary wording. Cite every current extraction that supports each tag. Normalize semantically equivalent supported trait descriptions to one meaningful label without merging distinct characteristics or inventing missing traits. Preserve disputed traits when a supplied extraction supports them; do not include quality judgments, rankings, scores, reception, popularity, praise, performance, bugs, or technical complaints as tags. Return similarityInputs as the canonical aggregate of all supplied current extraction.contributions and any directly supported mechanics or story/world themes. Use gameplay for mechanics, systems, controls, combat, progression, and player-facing structure; use storyWorld for setting, narrative, characters, factions, and world themes. Keep each item a concise direct game description and omit a dimension when no supported evidence exists. Never put quality, praise, popularity, ratings, reception, criticism, performance, bugs, optimization, framerate, or other technical complaints in similarityInputs. Do not use Overview prose, tags, pros, or cons as similarityInputs. Evidence belongs only to app ${appid}; do not transfer incidental comparisons, DLC, expansion, bundle, or focused edition evidence.\n${JSON.stringify(evidence)}` });
 }
 
 const CATEGORY_NAMES = new Set<string>(MEDIA_CATEGORY_NAMES);
@@ -724,6 +755,7 @@ const JOB_COLUMNS = "id, retained, run_id, stage, appid, matched_appid, dimensio
  */
 const WAITING = "(status = 'queued' AND retained = 0)";
 type QueueInput = {
+  provider: PaidProvider;
   run_id: number;
   stage: Exclude<JobStage, "explanation">;
   appid: number;
@@ -737,14 +769,14 @@ type QueueInput = {
 };
 
 /**
- * Adds `item` to the paid-work queue for Gemini, once per request key. It
+ * Adds `item` to the paid-work queue for its provider, once per request key. It
  * holds no article text and reserves no money: the provider's credit limit is
  * the only spending limit. Returns whether it was added.
  */
 async function enqueueItem(db: AppDatabase, item: QueueInput, now: Date): Promise<boolean> {
   const inserted = await db.prepare(
-    "INSERT OR IGNORE INTO media_processing_jobs (run_id, stage, appid, dimension, source_id, request_key, input_identity, model, config_version, max_input_tokens, max_output_tokens, reserved_microusd, reservation_active, status, provider, enqueued_at, usage_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, 0, 0, 'queued', 'gemini', ?, '{}')",
-  ).bind(item.run_id, item.stage, item.appid, item.dimension ?? null, item.source_id, item.request_key, item.input_identity, item.model, item.config_version, item.max_output_tokens, now.toISOString()).run();
+    "INSERT OR IGNORE INTO media_processing_jobs (run_id, stage, appid, dimension, source_id, request_key, input_identity, model, config_version, max_input_tokens, max_output_tokens, reserved_microusd, reservation_active, status, provider, enqueued_at, usage_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, 0, 0, 'queued', ?, ?, '{}')",
+  ).bind(item.run_id, item.stage, item.appid, item.dimension ?? null, item.source_id, item.request_key, item.input_identity, item.model, item.config_version, item.max_output_tokens, item.provider, now.toISOString()).run();
   return inserted.meta.changes === 1;
 }
 
@@ -826,7 +858,11 @@ type QueueAdvance = {
   now: Date;
   clock: () => Date;
   transport: GeminiBatchTransport | null;
-  secret: string | undefined;
+  openRouter: OpenRouterTransport | null;
+  /** Configured provider keys, redacted from every recorded error. */
+  secret: Array<string | undefined>;
+  /** Whether this advance has spent its time for taking paid items. */
+  outOfTime: () => boolean;
   articleFetch: ArticleFetch;
   remaining: Record<PaidProvider, number>;
   paused: Set<PaidProvider>;
@@ -841,10 +877,20 @@ function noteReason(advance: QueueAdvance, runId: number, reason: string): void 
   advance.reasons.set(runId, reasons);
 }
 
+/**
+ * The mark of an item whose request is in flight. It is written, with the
+ * send time and the item's input identity already recorded, in a committed
+ * write before the request is sent, so an item found with it after a restart
+ * is uncertain: its request may have reached the provider.
+ */
+const IN_FLIGHT = "submission in progress";
+/** The error an item in flight when the application stopped is left with. */
+const IN_FLIGHT_AT_STARTUP = "uncertain:in_flight_at_startup";
+
 /** Refuses `job` for its input identity with `reason`, counting it skipped once. */
 async function refuseItem(db: AppDatabase, job: JobRow, reason: string, now: Date): Promise<void> {
   await transaction(db, async () => {
-    const refused = await db.prepare(`UPDATE media_processing_jobs SET status = 'refused', error = ?, next_attempt_at = NULL, completed_at = ? WHERE id = ? AND ${WAITING} OR (id = ? AND status = 'uncertain' AND error = 'submission in progress')`).bind(reason, now.toISOString(), job.id, job.id).run();
+    const refused = await db.prepare(`UPDATE media_processing_jobs SET status = 'refused', error = ?, next_attempt_at = NULL, completed_at = ? WHERE id = ? AND ${WAITING} OR (id = ? AND status = 'uncertain' AND error = '${IN_FLIGHT}')`).bind(reason, now.toISOString(), job.id, job.id).run();
     if (refused.meta.changes === 1) await countOutputs(db, job.run_id, "skipped");
   });
 }
@@ -869,7 +915,7 @@ async function holdItem(advance: QueueAdvance, job: JobRow, outcome: Exclude<Pro
   }
   if (outcome.class === "credit_pause" || outcome.class === "missing_configuration") {
     await transaction(db, async () => {
-      await db.prepare("UPDATE media_processing_jobs SET status = 'queued', error = NULL, submitted_at = NULL WHERE id = ? AND status = 'uncertain' AND error = 'submission in progress'").bind(job.id).run();
+      await db.prepare(`UPDATE media_processing_jobs SET status = 'queued', error = NULL, submitted_at = NULL WHERE id = ? AND status = 'uncertain' AND error = '${IN_FLIGHT}'`).bind(job.id).run();
       await pauseProvider(db, job.provider, outcome.reason, now);
     });
     advance.paused.add(job.provider);
@@ -878,7 +924,7 @@ async function holdItem(advance: QueueAdvance, job: JobRow, outcome: Exclude<Pro
   // A transient failure, or a free request that may simply be retried.
   const failures = job.attempt_count + 1;
   const retryAt = transientRetryAt(failures, now, outcome.class === "transient" ? outcome.retryAfterMs : null);
-  await db.prepare(`UPDATE media_processing_jobs SET status = 'queued', attempt_count = ?, next_attempt_at = ?, error = ?, submitted_at = NULL WHERE id = ? AND (${WAITING} OR (status = 'uncertain' AND error = 'submission in progress'))`).bind(failures, retryAt.toISOString(), `transient:${outcome.reason}`, job.id).run();
+  await db.prepare(`UPDATE media_processing_jobs SET status = 'queued', attempt_count = ?, next_attempt_at = ?, error = ?, submitted_at = NULL WHERE id = ? AND (${WAITING} OR (status = 'uncertain' AND error = '${IN_FLIGHT}'))`).bind(failures, retryAt.toISOString(), `transient:${outcome.reason}`, job.id).run();
   noteReason(advance, job.run_id, "transient_provider_failure");
 }
 
@@ -893,10 +939,10 @@ async function countItemTokens(advance: QueueAdvance, model: string, request: Ge
 }
 
 /**
- * Counts and submits `request` for `job`. Before the request is sent, the
- * item is durably marked in flight with its send time, so a restart never
- * resends a request that may have been received. Every outcome is
- * classified once and acted on here.
+ * Counts and submits the Gemini embedding batch `request` for `job`. Before
+ * the request is sent, the item is durably marked in flight with its send
+ * time, so a restart never resends a request that may have been received.
+ * Every outcome is classified once and acted on here.
  */
 async function sendItem(advance: QueueAdvance, job: JobRow, model: string, request: GeminiRequest, maxInputTokens: number): Promise<void> {
   const { db, now, transport } = advance;
@@ -905,14 +951,12 @@ async function sendItem(advance: QueueAdvance, job: JobRow, model: string, reque
   if (!Number.isInteger(counted) || counted < 0 || counted > maxInputTokens) {
     return holdItem(advance, job, { class: "refusal", reason: "input_token_cap" });
   }
-  const marked = await db.prepare(`UPDATE media_processing_jobs SET status = 'uncertain', error = 'submission in progress', max_input_tokens = ?, submitted_at = ? WHERE id = ? AND ${WAITING}`).bind(counted, now.toISOString(), job.id).run();
+  const marked = await db.prepare(`UPDATE media_processing_jobs SET status = 'uncertain', error = '${IN_FLIGHT}', max_input_tokens = ?, submitted_at = ? WHERE id = ? AND ${WAITING}`).bind(counted, now.toISOString(), job.id).run();
   if (marked.meta.changes !== 1) return;
   let result: { name: string } | null = null;
   let outcome: ProviderOutcome;
   try {
-    result = job.stage === "embedding"
-      ? await transport!.submitEmbeddingBatch!(job.model, [{ key: job.request_key, request }])
-      : await transport!.submitBatch(job.model, [{ key: job.request_key, request }]);
+    result = await transport!.submitEmbeddingBatch!(job.model, [{ key: job.request_key, request }]);
     outcome = classifyGeminiOutcome("submit", null);
   } catch (error) {
     outcome = classifyGeminiOutcome("submit", error);
@@ -929,6 +973,68 @@ async function sendItem(advance: QueueAdvance, job: JobRow, model: string, reque
   }
   const update = await db.prepare("UPDATE media_processing_jobs SET status = 'submitted', provider_batch_id = ?, error = NULL WHERE id = ? AND status = 'uncertain' AND provider_batch_id IS NULL").bind(result.name, job.id).run();
   if (update.meta.changes === 1) advance.submitted.set(job.run_id, (advance.submitted.get(job.run_id) ?? 0) + 1);
+}
+
+/**
+ * Sends `request` for text item `job` as one OpenRouter chat completion.
+ * Input over the cap, by a conservative local estimate, is refused unsent.
+ * Before sending, the item is recorded in flight with its send time in a
+ * committed write; its input identity is already recorded. No write
+ * transaction is open while the request is in flight. A fully sent request
+ * whose outcome is unknown leaves the item uncertain, never to be resent
+ * automatically; every other outcome is classified once and acted on here.
+ */
+async function sendTextItem(advance: QueueAdvance, job: JobRow, request: OpenRouterChatRequest): Promise<void> {
+  const { db, now } = advance;
+  const estimated = estimatedInputTokens(request);
+  if (estimated > OPENROUTER_MAX_INPUT_TOKENS) return holdItem(advance, job, { class: "refusal", reason: "input_token_cap" });
+  const marked = await db.prepare(`UPDATE media_processing_jobs SET status = 'uncertain', error = '${IN_FLIGHT}', max_input_tokens = ?, submitted_at = ? WHERE id = ? AND ${WAITING}`).bind(estimated, now.toISOString(), job.id).run();
+  if (marked.meta.changes !== 1) return;
+  let completion: OpenRouterCompletion | null = null;
+  let outcome: ProviderOutcome;
+  try {
+    completion = await advance.openRouter!.complete(request);
+    outcome = classifyOpenRouterOutcome(null);
+  } catch (error) {
+    outcome = classifyOpenRouterOutcome(error);
+  }
+  if (outcome.class === "uncertain") {
+    await db.prepare(`UPDATE media_processing_jobs SET error = ? WHERE id = ? AND status = 'uncertain' AND error = '${IN_FLIGHT}'`).bind(`uncertain:${outcome.reason}`, job.id).run();
+    noteReason(advance, job.run_id, "uncertain_submission");
+    return;
+  }
+  if (outcome.class !== "success") return holdItem(advance, job, outcome);
+  advance.submitted.set(job.run_id, (advance.submitted.get(job.run_id) ?? 0) + 1);
+  await settleCompletion(db, job, completion!, now);
+}
+
+/**
+ * The cost an OpenRouter answer reports, for reporting only: `usage.cost`,
+ * in credits, taken as US dollars. Without it the cost is zero, marked unknown.
+ */
+function reportedCharge(completion: OpenRouterCompletion): { microusd: number; source: "provider_reported" | "unknown" } {
+  const cost = completion.usage.cost;
+  return cost === null ? { microusd: 0, source: "unknown" } : { microusd: Math.round(cost * 1_000_000), source: "provider_reported" };
+}
+
+/**
+ * Applies an OpenRouter answer to text item `job` in one short transaction:
+ * its cost, token usage, generation id, routed provider and model, then its
+ * output under the current-input and stale-write checks. Output the parsers
+ * reject is a definite refusal.
+ */
+function settleCompletion(db: AppDatabase, job: JobRow, completion: OpenRouterCompletion, now: Date): Promise<SettledStatus> {
+  return writeTransaction(db, async () => {
+    const charge = reportedCharge(completion);
+    const usage = { promptTokens: completion.usage.promptTokens, completionTokens: completion.usage.completionTokens };
+    await db.prepare("UPDATE media_processing_jobs SET usage_json = ?, charged_microusd = ?, cost_source = ?, generation_id = ?, routed_provider = ?, routed_model = ?, error = NULL, completed_at = ? WHERE id = ?")
+      .bind(JSON.stringify(usage), charge.microusd, charge.source, completion.generationId, completion.provider, completion.model, now.toISOString(), job.id).run();
+    const status = job.stage === "extraction"
+      ? await persistExtraction(db, job, completion.content, now)
+      : await persistOverview(db, job, completion.content, now);
+    if (status === "refused" || status === "stale") await countOutputs(db, job.run_id, "skipped");
+    return status;
+  });
 }
 
 async function currentSource(db: AppDatabase, sourceId: number): Promise<SourceRow | null> {
@@ -1049,7 +1155,7 @@ async function persistOverview(db: AppDatabase, job: JobRow, output: unknown, no
   }
   const evidence = await currentGameEvidence(db, job.appid);
   const { evidenceSources } = evidence;
-  if (synthesisIdentity(job.appid, evidence.extractions) !== job.input_identity) {
+  if (!synthesisIsCurrent(job, evidence.extractions)) {
     await db.prepare("UPDATE media_processing_jobs SET status = 'stale', completed_at = ? WHERE id = ?").bind(now.toISOString(), job.id).run();
     return "stale";
   }
@@ -1173,7 +1279,7 @@ type SettledStatus = "succeeded" | "refused" | "stale";
  * and counts its output, in one transaction, so a restart never leaves a
  * settled job uncounted.
  */
-function reconcileJob(db: AppDatabase, job: JobRow, result: GeminiBatchPoll & { state: "succeeded" | "failed" }, now: Date, secret: string | undefined): Promise<SettledStatus> {
+function reconcileJob(db: AppDatabase, job: JobRow, result: GeminiBatchPoll & { state: "succeeded" | "failed" }, now: Date, secret: readonly (string | undefined)[]): Promise<SettledStatus> {
   return writeTransaction(db, async () => {
     const status = await settleJob(db, job, result, now, secret);
     if ((status === "refused" || status === "stale") && job.stage !== "explanation") await countOutputs(db, job.run_id, "skipped");
@@ -1181,7 +1287,7 @@ function reconcileJob(db: AppDatabase, job: JobRow, result: GeminiBatchPoll & { 
   });
 }
 
-async function settleJob(db: AppDatabase, job: JobRow, result: GeminiBatchPoll & { state: "succeeded" | "failed" }, now: Date, secret: string | undefined): Promise<SettledStatus> {
+async function settleJob(db: AppDatabase, job: JobRow, result: GeminiBatchPoll & { state: "succeeded" | "failed" }, now: Date, secret: readonly (string | undefined)[]): Promise<SettledStatus> {
   const usageJson = result.usage ? JSON.stringify(result.usage) : "{}";
   const charge = settledCharge(job, result.usage ?? null);
   // A retained row keeps its reserved amount and reservation flag as history.
@@ -1481,7 +1587,7 @@ async function enqueueExtractions(advance: QueueAdvance, run: OpenAuthorization,
       if (!current || !inScope(current, runId, affected)) return;
       const open = await first<{ open: number }>(db, `SELECT 1 AS open FROM media_processing_jobs WHERE run_id = ? AND source_id = ? AND stage = 'extraction' AND (status IN ('submitted', 'uncertain') OR ${WAITING}) LIMIT 1`, runId, current.id);
       if (!open) {
-        await enqueueItem(db, { run_id: runId, stage: "extraction", appid: current.appid, source_id: current.id, request_key: `extraction:${current.id}:run:${runId}`, input_identity: `source:${current.id}`, model: GEMINI_MEDIA_MODEL, config_version: EXTRACTION_CONFIG_VERSION, max_output_tokens: EXTRACTION_MAX_OUTPUT_TOKENS }, now);
+        await enqueueItem(db, { provider: "openrouter", run_id: runId, stage: "extraction", appid: current.appid, source_id: current.id, request_key: `extraction:${current.id}:run:${runId}`, input_identity: `source:${current.id}`, model: OPENROUTER_TEXT_MODEL, config_version: EXTRACTION_CONFIG_VERSION, max_output_tokens: EXTRACTION_MAX_OUTPUT_TOKENS }, now);
       }
       await db.prepare("UPDATE media_sources SET processing_run_id = ?, processing_content = NULL WHERE id = ?").bind(runId, current.id).run();
     });
@@ -1518,7 +1624,7 @@ async function enqueueOverviewWork(advance: QueueAdvance, runId: number, entitie
     }
     const requestKey = await runRequestKey(db, `synthesis:${appid}:${identity}`, runId);
     if (await first<{ id: number }>(db, "SELECT id FROM media_processing_jobs WHERE request_key = ?", requestKey)) continue;
-    await enqueueItem(db, { run_id: runId, stage: "synthesis", appid, source_id: null, request_key: requestKey, input_identity: identity, model: GEMINI_MEDIA_MODEL, config_version: SYNTHESIS_CONFIG_VERSION, max_output_tokens: SYNTHESIS_MAX_OUTPUT_TOKENS }, now);
+    await enqueueItem(db, { provider: "openrouter", run_id: runId, stage: "synthesis", appid, source_id: null, request_key: requestKey, input_identity: identity, model: OPENROUTER_TEXT_MODEL, config_version: SYNTHESIS_CONFIG_VERSION, max_output_tokens: SYNTHESIS_MAX_OUTPUT_TOKENS }, now);
   }
   await enqueueEmbeddings(advance, runId, scopeGames);
 }
@@ -1566,7 +1672,7 @@ async function enqueueEmbeddings(advance: QueueAdvance, runId: number, scopeGame
       }
       const requestKey = await runRequestKey(db, `embedding:${overview.appid}:${dimension}:${overview.input_identity}:${identity}`, runId);
       if (await first<{ id: number }>(db, "SELECT id FROM media_processing_jobs WHERE request_key = ?", requestKey)) continue;
-      await enqueueItem(db, { run_id: runId, stage: "embedding", appid: overview.appid, dimension, source_id: null, request_key: requestKey, input_identity: identity, model: GEMINI_EMBEDDING_MODEL, config_version: GEMINI_EMBEDDING_CONFIG_VERSION, max_output_tokens: EMBEDDING_MAX_OUTPUT_TOKENS }, now);
+      await enqueueItem(db, { provider: "gemini", run_id: runId, stage: "embedding", appid: overview.appid, dimension, source_id: null, request_key: requestKey, input_identity: identity, model: GEMINI_EMBEDDING_MODEL, config_version: GEMINI_EMBEDDING_CONFIG_VERSION, max_output_tokens: EMBEDDING_MAX_OUTPUT_TOKENS }, now);
     }
   }
 }
@@ -1643,7 +1749,7 @@ async function takeExtractionTurn(advance: QueueAdvance, job: JobRow): Promise<b
     return true;
   }
   await db.prepare("UPDATE media_processing_jobs SET input_identity = ? WHERE id = ?").bind(identity, job.id).run();
-  await sendItem(advance, { ...job, input_identity: identity }, GEMINI_MEDIA_MODEL, makeExtractionRequest(current, cleaned.content, identity), MAX_INPUT_TOKENS);
+  await sendTextItem(advance, { ...job, input_identity: identity }, makeExtractionRequest(current, cleaned.content));
   return true;
 }
 
@@ -1658,12 +1764,12 @@ async function takeSynthesisTurn(advance: QueueAdvance, job: JobRow): Promise<bo
   // Overview waits for it.
   if (await hasPendingExtractions(db, job.appid)) return false;
   const evidence = await currentGameEvidence(db, job.appid);
-  if (evidence.extractions.length === 0 || synthesisIdentity(job.appid, evidence.extractions) !== job.input_identity) {
+  if (evidence.extractions.length === 0 || !synthesisIsCurrent(job, evidence.extractions)) {
     await resolveItemWithoutProvider(db, job);
     return false;
   }
   const game = await first<{ name: string }>(db, "SELECT name FROM apps WHERE appid = ?", job.appid);
-  await sendItem(advance, job, GEMINI_MEDIA_MODEL, makeSynthesisRequest(job.appid, game?.name ?? "", evidence.extractions, evidence.sources), MAX_INPUT_TOKENS);
+  await sendTextItem(advance, job, makeSynthesisRequest(job.appid, game?.name ?? "", evidence.extractions, evidence.sources));
   return true;
 }
 
@@ -1703,11 +1809,14 @@ async function takeTurn(advance: QueueAdvance, job: JobRow): Promise<boolean> {
  * provider whose pause was just lifted by the daily credit check first
  * submits its oldest ready embedding item as a probe. A Credit pause stops
  * the provider for the rest of the advance and leaves every item queued.
+ * Taking stops at the per-tick bound on items or elapsed time; the items
+ * left keep their place for the next tick.
  */
 async function submitQueuedWork(advance: QueueAdvance, probing: Set<PaidProvider>): Promise<void> {
   const { db, now } = advance;
   for (const provider of PAID_PROVIDERS) {
-    if (!advance.transport || advance.paused.has(provider) || advance.remaining[provider] <= 0) continue;
+    const configured = provider === "openrouter" ? advance.openRouter !== null : advance.transport !== null;
+    if (!configured || advance.paused.has(provider) || advance.remaining[provider] <= 0 || advance.outOfTime()) continue;
     const ready = await rows<JobRow>(
       db,
       `SELECT ${JOB_COLUMNS} FROM media_processing_jobs WHERE provider = ? AND ${WAITING} AND (next_attempt_at IS NULL OR julianday(next_attempt_at) <= julianday(?)) ORDER BY julianday(enqueued_at), id`,
@@ -1746,7 +1855,7 @@ async function submitQueuedWork(advance: QueueAdvance, probing: Set<PaidProvider
       }
     }
     for (const job of turns) {
-      if (advance.paused.has(provider) || advance.remaining[provider] <= 0) break;
+      if (advance.paused.has(provider) || advance.remaining[provider] <= 0 || advance.outOfTime()) break;
       if (await takeTurn(advance, job)) {
         advance.remaining[provider] -= 1;
         entityTurns.last.set(job.appid, entityTurns.next);
@@ -1839,6 +1948,43 @@ async function queueReport(db: AppDatabase, now: Date): Promise<Pick<MediaProces
   return { queued, providers, cost: await paidWorkCost(db, now) };
 }
 
+type ProviderTransports = { transport: GeminiBatchTransport | null; openRouter: OpenRouterTransport | null };
+
+/**
+ * Builds each paid provider's transport from its configured key. A missing
+ * key pauses the provider for as long as it is missing; a key configured
+ * again lifts that pause at once.
+ */
+async function configureProviders(db: AppDatabase, options: MediaProcessingOptions, now: Date): Promise<ProviderTransports> {
+  const configured: ProviderTransports = { transport: options.transport ?? null, openRouter: options.openRouter ?? null };
+  const outcomes: Record<PaidProvider, ProviderOutcome> = { gemini: { class: "success" }, openrouter: { class: "success" } };
+  if (!configured.transport) {
+    try { configured.transport = createGeminiBatchTransport(options.geminiApiKey ?? "", options.providerFetch); }
+    catch (error) { outcomes.gemini = classifyGeminiOutcome("submit", error); }
+  }
+  if (!configured.openRouter) {
+    try { configured.openRouter = createOpenRouterTransport(options.openRouterApiKey, options.providerFetch as OpenRouterFetch | undefined, { timeoutMs: options.openRouterTimeoutMs }); }
+    catch (error) { outcomes.openrouter = classifyOpenRouterOutcome(error); }
+  }
+  for (const provider of PAID_PROVIDERS) {
+    const outcome = outcomes[provider];
+    if (outcome.class === "missing_configuration") await pauseProvider(db, provider, outcome.reason, now);
+    else if ((await providerState(db, provider)).reason === "missing_key") await liftProviderPause(db, provider);
+  }
+  return configured;
+}
+
+/** The daily credit checks of providers with a credit endpoint: OpenRouter's current-key check. */
+function creditChecks(openRouter: OpenRouterTransport | null): CreditChecks {
+  return {
+    openrouter: async (): Promise<OpenRouterKeyCheck> => {
+      if (!openRouter) return { class: "missing_configuration", reason: "missing_key" };
+      try { return classifyOpenRouterKeyCheck(await openRouter.currentKey()); }
+      catch (error) { return classifyOpenRouterKeyCheck(null, error); }
+    },
+  };
+}
+
 /**
  * One advance of the paid-work queue, run inside the ingestion tick: it
  * settles the provider configuration, runs the daily credit check when due,
@@ -1848,19 +1994,19 @@ async function queueReport(db: AppDatabase, now: Date): Promise<Pick<MediaProces
  */
 async function advanceMediaProcessingNow(db: AppDatabase, options: MediaProcessingOptions = {}): Promise<MediaProcessingSummary> {
   const now = isoNow(options.now);
-  let transport: GeminiBatchTransport | null = options.transport ?? null;
-  let configuration: ProviderOutcome = { class: "success" };
-  if (!transport) {
-    try { transport = createGeminiBatchTransport(options.geminiApiKey ?? "", options.providerFetch); }
-    catch (error) { configuration = classifyGeminiOutcome("submit", error); }
-  }
+  const { transport, openRouter } = await configureProviders(db, options, now);
   const perTick = options.submissionsPerTick ?? DEFAULT_PAID_SUBMISSIONS_PER_TICK;
+  const elapsed = options.paidWorkClock ?? (() => performance.now());
+  const startedAt = elapsed();
+  const timeBudgetMs = options.paidWorkTimeBudgetMs ?? DEFAULT_PAID_WORK_TIME_BUDGET_MS;
   const advance: QueueAdvance = {
     db,
     now,
     clock: () => isoNow(options.now),
     transport,
-    secret: options.geminiApiKey,
+    openRouter,
+    secret: [options.geminiApiKey, options.openRouterApiKey],
+    outOfTime: () => elapsed() - startedAt >= timeBudgetMs,
     articleFetch: options.articleFetch ?? fetch,
     remaining: Object.fromEntries(PAID_PROVIDERS.map((provider) => [provider, perTick])) as Record<PaidProvider, number>,
     paused: new Set(),
@@ -1868,11 +2014,10 @@ async function advanceMediaProcessingNow(db: AppDatabase, options: MediaProcessi
     reasons: new Map(),
     submitted: new Map(),
   };
-  // A missing key pauses the provider for as long as it is missing; a key
-  // configured again lifts that pause at once.
-  if (configuration.class === "missing_configuration") await pauseProvider(db, "gemini", configuration.reason, now);
-  else if ((await providerState(db, "gemini")).reason === "missing_key") await liftProviderPause(db, "gemini");
-  const probing = new Set(await runDailyCreditCheck(db, now) ?? []);
+  // Advances never overlap, so an item still marked in flight was sent by a
+  // process that stopped before recording its answer.
+  await db.prepare(`UPDATE media_processing_jobs SET error = ? WHERE status = 'uncertain' AND error = '${IN_FLIGHT}'`).bind(IN_FLIGHT_AT_STARTUP).run();
+  const probing = new Set(await runDailyCreditCheck(db, now, creditChecks(openRouter)) ?? []);
   for (const provider of PAID_PROVIDERS) if ((await providerState(db, provider)).paused) advance.paused.add(provider);
 
   const globallySubmitted = await rows<JobRow>(db, `SELECT ${JOB_COLUMNS} FROM media_processing_jobs WHERE status = 'submitted' ORDER BY id`);
@@ -1887,10 +2032,25 @@ async function advanceMediaProcessingNow(db: AppDatabase, options: MediaProcessi
     await enqueueOverviewWork(advance, run.auth.run_id, entities);
   }
   await submitQueuedWork(advance, probing);
-  const laterSubmitted = await rows<JobRow>(db, `SELECT ${JOB_COLUMNS} FROM media_processing_jobs WHERE status = 'submitted' ORDER BY id`);
-  const currentPoll = await pollSubmittedJobs(advance, laterSubmitted.filter((job) => !prePoll.polled.has(job.id)));
-  for (const run of open) await enqueueOverviewWork(advance, run.auth.run_id, entitiesByRun.get(run.auth.run_id)!);
-  await submitQueuedWork(advance, probing);
+  // Stages chain within one advance: text answers settle as they arrive, so
+  // their Overview work, and then the embeddings of Overviews built here,
+  // are queued and taken in the same advance. Each batch submitted in this
+  // advance is polled once.
+  const currentPoll: SubmittedPollSummary = { polled: new Set(prePoll.polled), succeeded: 0, failed: 0, uncertain: 0 };
+  const pollNewBatches = async () => {
+    const submitted = await rows<JobRow>(db, `SELECT ${JOB_COLUMNS} FROM media_processing_jobs WHERE status = 'submitted' ORDER BY id`);
+    const polled = await pollSubmittedJobs(advance, submitted.filter((job) => !currentPoll.polled.has(job.id)));
+    for (const id of polled.polled) currentPoll.polled.add(id);
+    currentPoll.succeeded += polled.succeeded;
+    currentPoll.failed += polled.failed;
+    currentPoll.uncertain += polled.uncertain;
+  };
+  for (let stage = 0; stage < 2; stage += 1) {
+    await pollNewBatches();
+    for (const run of open) await enqueueOverviewWork(advance, run.auth.run_id, entitiesByRun.get(run.auth.run_id)!);
+    await submitQueuedWork(advance, probing);
+  }
+  await pollNewBatches();
 
   const outcomes = new Map<number, RunOutcome>();
   for (const run of open) outcomes.set(run.auth.run_id, await finishRun(advance, run));
@@ -1924,10 +2084,21 @@ async function advanceMediaProcessingNow(db: AppDatabase, options: MediaProcessi
  * probe, the next submission is the probe. Serialized with every other
  * queue write.
  */
-export function runIdleDailyCreditCheck(db: AppDatabase, now: Date): Promise<void> {
+export function runIdleDailyCreditCheck(
+  db: AppDatabase,
+  now: Date,
+  options: Pick<MediaProcessingOptions, "openRouter" | "openRouterApiKey" | "openRouterTimeoutMs" | "providerFetch"> = {},
+): Promise<void> {
   const next = mediaProcessingQueue
     .catch(() => undefined)
-    .then(async () => { await runDailyCreditCheck(db, now); });
+    .then(async () => {
+      let openRouter = options.openRouter ?? null;
+      if (!openRouter) {
+        try { openRouter = createOpenRouterTransport(options.openRouterApiKey, options.providerFetch as OpenRouterFetch | undefined, { timeoutMs: options.openRouterTimeoutMs }); }
+        catch { openRouter = null; }
+      }
+      await runDailyCreditCheck(db, now, creditChecks(openRouter));
+    });
   mediaProcessingQueue = next;
   return next;
 }
