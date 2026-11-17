@@ -244,6 +244,8 @@ const SAFE_MEDIA_PROCESSING_STOP_REASONS: Record<string, true> = {
   missing_gemini_embedding_batch: true,
   "provider_paused:gemini:missing_key": true,
   "provider_paused:gemini:rejected_key": true,
+  "provider_paused:gemini:failed_precondition": true,
+  "provider_paused:gemini:model_unavailable": true,
   "provider_paused:gemini:prepay_depleted": true,
   "provider_paused:gemini:spend_cap": true,
 };

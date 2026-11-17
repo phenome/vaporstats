@@ -144,6 +144,8 @@ export interface GeminiBatchPoll {
   output?: unknown;
   usage?: GeminiBatchUsage | null;
   error?: string | null;
+  /** The provider's state of a batch that ended without output, such as `BATCH_STATE_EXPIRED`. */
+  batchState?: string | null;
 }
 
 export interface GeminiBatchTransport {
@@ -244,6 +246,7 @@ function providerError(response: Response, body: unknown): GeminiHttpError {
     typeof message === "string" ? message : `Gemini HTTP ${response.status}`,
     typeof nested.status === "string" ? nested.status : null,
     retryAfterMs(response, nested.details),
+    (Array.isArray(nested.details) ? nested.details : []).map((detail) => jsonObject(detail).reason).filter((reason): reason is string => typeof reason === "string"),
   );
 }
 
@@ -343,7 +346,7 @@ export function createGeminiBatchTransport(apiKey: string, fetchFn: MediaFetch =
           ?? inlineResponse.usage,
       );
       if (!stateValue || /PENDING|RUNNING|QUEUED|PROCESSING|ACTIVE/.test(stateValue)) return { state: "pending" };
-      if (/FAIL|CANCEL|EXPIRE|ERROR/.test(stateValue)) return { state: "failed", error: boundedError(jsonObject(root.error).message ?? root.error ?? stateValue), usage };
+      if (/FAIL|CANCEL|EXPIRE|ERROR/.test(stateValue)) return { state: "failed", error: boundedError(jsonObject(root.error).message ?? root.error ?? stateValue), usage, batchState: stateValue };
       if (!/SUCCEED|COMPLETE|DONE/.test(stateValue)) return { state: "pending" };
       const inlineError = inline.error ?? inlineResponse.error;
       if (inlineError) {
@@ -1194,9 +1197,12 @@ type SubmittedPollSummary = {
 /**
  * Polls submitted batches. A poll is free, so polling continues while its
  * provider is paused. Every answer is classified once: a transient failure
- * keeps the batch submitted for the next poll, a Credit pause or rejected key
- * pauses the provider, a refused poll leaves the batch uncertain, and a batch
- * the provider failed for exhausted credit returns its item to the queue.
+ * keeps the batch submitted for the next poll; a Credit pause or
+ * configuration error pauses the provider and keeps the batch submitted; an
+ * error about the batch itself leaves it uncertain. A batch the provider
+ * ended for exhausted credit returns its item to the queue with no attempt
+ * counted; one it expired or cancelled returns it with backoff, like a
+ * transient failure.
  */
 async function pollSubmittedJobs(advance: QueueAdvance, jobs: readonly JobRow[]): Promise<SubmittedPollSummary> {
   const { db, now, transport, secret } = advance;
@@ -1217,7 +1223,7 @@ async function pollSubmittedJobs(advance: QueueAdvance, jobs: readonly JobRow[])
         await pauseProvider(db, job.provider, outcome.reason, now);
         advance.paused.add(job.provider);
       }
-      const status = outcome.class === "refusal" ? "uncertain" : "submitted";
+      const status = outcome.class === "uncertain" || outcome.class === "refusal" ? "uncertain" : "submitted";
       await db.prepare("UPDATE media_processing_jobs SET status = ?, error = ? WHERE id = ? AND status = 'submitted'").bind(status, boundedError(error, secret), job.id).run();
       summary.uncertain += 1;
       continue;
@@ -1227,15 +1233,25 @@ async function pollSubmittedJobs(advance: QueueAdvance, jobs: readonly JobRow[])
       continue;
     }
     if (result.state === "failed") {
-      const outcome = classifyGeminiOutcome("poll", new GeminiBatchFailure(boundedError(result.error ?? "batch failed", secret)));
-      if (outcome.class === "credit_pause") {
-        // The provider declined the batch for credit: nothing was produced,
-        // so the item waits again, with no attempt counted.
+      const outcome = classifyGeminiOutcome("poll", new GeminiBatchFailure(boundedError(result.error ?? "batch failed", secret), result.batchState ?? null));
+      if (outcome.class === "credit_pause" || outcome.class === "missing_configuration") {
+        // The provider declined the batch for credit or configuration:
+        // nothing was produced, so the item waits again, with no attempt
+        // counted.
         await transaction(db, async () => {
           await db.prepare("UPDATE media_processing_jobs SET status = 'queued', provider_batch_id = NULL, submitted_at = NULL, error = NULL WHERE id = ? AND status = 'submitted'").bind(job.id).run();
           await pauseProvider(db, job.provider, outcome.reason, now);
         });
         advance.paused.add(job.provider);
+        summary.uncertain += 1;
+        continue;
+      }
+      if (outcome.class === "transient") {
+        // The provider ended the batch without running it: the item waits
+        // again and retries with backoff.
+        const failures = job.attempt_count + 1;
+        await db.prepare("UPDATE media_processing_jobs SET status = 'queued', provider_batch_id = NULL, submitted_at = NULL, attempt_count = ?, next_attempt_at = ?, error = ? WHERE id = ? AND status = 'submitted'").bind(failures, transientRetryAt(failures, now, null).toISOString(), `transient:${outcome.reason}`, job.id).run();
+        noteReason(advance, job.run_id, "transient_provider_failure");
         summary.uncertain += 1;
         continue;
       }

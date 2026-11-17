@@ -8,6 +8,9 @@ import {
   CYBERPUNK,
   HADES_II,
   controlledGeminiApi,
+  GEMINI_BILLING_DISABLED,
+  GEMINI_KEY_INVALID,
+  GEMINI_MODEL_NOT_FOUND,
   GEMINI_PREPAY_DEPLETED,
   GEMINI_RATE_LIMIT,
   GEMINI_SPEND_CAP,
@@ -15,6 +18,8 @@ import {
   insertSources,
   processingArticleHtml,
   seedApps,
+  type GeminiCall,
+  type GeminiReply,
 } from "./support/media";
 
 const cleanups: Array<() => void> = [];
@@ -135,6 +140,91 @@ describe("missing provider configuration", () => {
     expect(configured.mediaProcessing?.providers.gemini.paused).toBe(false);
     expect(gemini.submitted.map((key) => key.split(":")[0])).toEqual(["extraction", "synthesis"]);
   });
+});
+
+describe("project-level provider errors", () => {
+  const projectErrors: Array<[string, GeminiReply, string]> = [
+    ["an invalid API key", GEMINI_KEY_INVALID, "rejected_key"],
+    ["billing that is not enabled", GEMINI_BILLING_DISABLED, "failed_precondition"],
+    ["a retired or unknown model", GEMINI_MODEL_NOT_FOUND, "model_unavailable"],
+  ];
+  const calls: GeminiCall[] = ["count", "submit"];
+
+  for (const [name, reply, reason] of projectErrors) {
+    for (const kind of calls) {
+      test(`${name} at the ${kind} call pauses Gemini with reason ${reason}, refuses and fails nothing, and the daily check resumes the queue`, async () => {
+        const { database } = await authorizedGames({ [CYBERPUNK]: 2, [BALDURS_GATE]: 1 });
+        const gemini = controlledGeminiApi();
+        gemini.reply(kind, reply);
+
+        const paused = await tick(database, gemini, "2026-11-10T07:00:00.000Z");
+
+        expect(paused.mediaProcessing?.providers.gemini).toMatchObject({ paused: true, reason, pausedAt: "2026-11-10T07:00:00.000Z" });
+        expect(jobs(database).map(({ status, attempt_count, error }) => ({ status, attempt_count, error }))).toEqual(Array(3).fill({ status: "queued", attempt_count: 0, error: null }));
+        expect(paused.mediaProcessing?.outputs.skipped).toBe(0);
+        expect(paused.mediaProcessing?.status).toBe("waiting");
+        expect(paused.mediaProcessing?.stopReasons).toContain(`provider_paused:gemini:${reason}`);
+        expect(paused.mediaProcessing?.stopReasons).not.toContain("provider_refusal");
+
+        const callsWhilePaused = gemini.calls.length;
+        const later = await tick(database, gemini, "2026-11-10T07:15:00.000Z");
+        expect(later.mediaProcessing?.providers.gemini.paused).toBe(true);
+        expect(gemini.calls).toHaveLength(callsWhilePaused);
+
+        const resumed = await tick(database, gemini, "2026-11-11T06:00:00.000Z");
+        expect(resumed.mediaProcessing?.providers.gemini.paused).toBe(false);
+        expect(jobs(database).filter((job) => job.stage === "extraction").every((job) => job.status === "succeeded")).toBe(true);
+      });
+    }
+  }
+
+  test("an invalid API key at a poll pauses Gemini and keeps the batch submitted, not uncertain", async () => {
+    const { database } = await authorizedGames();
+    const gemini = controlledGeminiApi();
+    gemini.reply("poll", GEMINI_KEY_INVALID);
+
+    const paused = await tick(database, gemini, "2026-11-10T07:00:00.000Z");
+
+    expect(paused.mediaProcessing?.providers.gemini).toMatchObject({ paused: true, reason: "rejected_key" });
+    expect(jobs(database).map(({ stage, status }) => ({ stage, status }))).toEqual([{ stage: "extraction", status: "submitted" }]);
+    expect(paused.mediaProcessing?.cost.uncertain).toBe(0);
+
+    // Polls are free and continue while paused; the batch settles.
+    await tick(database, gemini, "2026-11-10T07:15:00.000Z");
+    expect(jobs(database)[0]).toMatchObject({ stage: "extraction", status: "succeeded" });
+  });
+
+  test("a poll for a batch the provider no longer knows leaves its item uncertain and pauses nothing", async () => {
+    const { database } = await authorizedGames();
+    const gemini = controlledGeminiApi();
+    gemini.reply("poll", { status: 404, body: { error: { code: 404, status: "NOT_FOUND", message: "Requested entity was not found." } } });
+
+    const polled = await tick(database, gemini, "2026-11-10T07:00:00.000Z");
+
+    expect(polled.mediaProcessing?.providers.gemini.paused).toBe(false);
+    expect(jobs(database).map(({ status }) => status)).toEqual(["uncertain"]);
+    expect(polled.mediaProcessing?.cost.uncertain).toBe(1);
+  });
+
+  for (const state of ["BATCH_STATE_EXPIRED", "BATCH_STATE_CANCELLED"]) {
+    test(`a batch the provider reports as ${state} returns its item to the queue, refuses nothing, and is submitted again`, async () => {
+      const { database } = await authorizedGames();
+      const gemini = controlledGeminiApi();
+      gemini.reply("poll", { status: 200, body: { metadata: { state } } });
+
+      const returned = await tick(database, gemini, "2026-11-10T07:00:00.000Z");
+
+      expect(jobs(database).map(({ stage, status, attempt_count, next_attempt_at }) => ({ stage, status, attempt_count, next_attempt_at }))).toEqual([
+        { stage: "extraction", status: "queued", attempt_count: 1, next_attempt_at: "2026-11-10T07:15:00.000Z" },
+      ]);
+      expect(returned.mediaProcessing?.outputs.skipped).toBe(0);
+      expect(returned.mediaProcessing?.providers.gemini.paused).toBe(false);
+
+      await tick(database, gemini, "2026-11-10T07:15:00.000Z");
+      expect(gemini.calls.filter((call) => call.kind === "submit")).toHaveLength(3);
+      expect(jobs(database)[0]).toMatchObject({ stage: "extraction", status: "succeeded" });
+    });
+  }
 });
 
 describe("Gemini Credit pause", () => {

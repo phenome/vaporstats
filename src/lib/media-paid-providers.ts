@@ -24,8 +24,9 @@ export type PaidProviderCall = "count" | "submit" | "poll";
  *   its input identity and retried only within a correction set.
  * - `uncertain`: the request may have been charged without an answer; it is
  *   never resubmitted blindly.
- * - `missing_configuration`: the provider cannot be used as configured; it
- *   pauses and nothing fails.
+ * - `missing_configuration`: the provider cannot be used as configured (no
+ *   key, a rejected key, a project precondition such as billing, or a model
+ *   it no longer serves); it pauses and nothing fails or is refused.
  */
 export type ProviderOutcome =
   | { class: "success" }
@@ -36,7 +37,7 @@ export type ProviderOutcome =
   | { class: "missing_configuration"; reason: ConfigurationPauseReason };
 
 export type CreditPauseReason = "prepay_depleted" | "spend_cap";
-export type ConfigurationPauseReason = "missing_key" | "rejected_key";
+export type ConfigurationPauseReason = "missing_key" | "rejected_key" | "failed_precondition" | "model_unavailable";
 export type ProviderPauseReason = CreditPauseReason | ConfigurationPauseReason;
 
 /** A non-OK Gemini HTTP response, as the batch transport receives it. */
@@ -46,21 +47,28 @@ export class GeminiHttpError extends Error {
   readonly apiStatus: string | null;
   /** How long the response asks the caller to wait, from `Retry-After` or a `RetryInfo` detail. */
   readonly retryAfterMs: number | null;
+  /** The `ErrorInfo` reasons Google returns, such as `API_KEY_INVALID`. */
+  readonly reasons: readonly string[];
 
-  constructor(status: number, message: string, apiStatus: string | null = null, retryAfterMs: number | null = null) {
+  constructor(status: number, message: string, apiStatus: string | null = null, retryAfterMs: number | null = null, reasons: readonly string[] = []) {
     super(message);
     this.name = "GeminiHttpError";
     this.status = status;
     this.apiStatus = apiStatus;
     this.retryAfterMs = retryAfterMs;
+    this.reasons = reasons;
   }
 }
 
-/** A Gemini batch that the provider reports as failed, with its bounded error message. */
+/** A Gemini batch that the provider reports as ended without output, with its bounded error message and batch state. */
 export class GeminiBatchFailure extends Error {
-  constructor(message: string) {
+  /** The batch state Google reported, such as `BATCH_STATE_EXPIRED`. */
+  readonly batchState: string | null;
+
+  constructor(message: string, batchState: string | null = null) {
     super(message);
     this.name = "GeminiBatchFailure";
+    this.batchState = batchState;
   }
 }
 
@@ -81,6 +89,10 @@ const UNSENT_NETWORK_CODES = new Set([
   "UND_ERR_CONNECT_TIMEOUT", "ERR_TLS_CERT_ALTNAME_INVALID", "UNABLE_TO_VERIFY_LEAF_SIGNATURE",
 ]);
 const SPEND_CAP = /spend(?:ing)?[\s_-]*(?:cap|limit)/i;
+const REJECTED_KEY_REASONS = new Set(["API_KEY_INVALID", "API_KEY_EXPIRED", "API_KEY_SERVICE_BLOCKED"]);
+const REJECTED_KEY = /api[\s_-]*key\s+(?:not\s+valid|invalid|expired)/i;
+/** Batches the provider ended without running them: their items wait again. */
+const ENDED_UNRUN_BATCH = /EXPIRE|CANCEL/i;
 const CREDIT_DEPLETED = /prepay|credits?\s+(?:are\s+|is\s+)?(?:depleted|exhausted)|spend(?:ing)?[\s_-]*(?:cap|limit)/i;
 
 function retryAfterFrom(error: GeminiHttpError): number | null {
@@ -89,16 +101,23 @@ function retryAfterFrom(error: GeminiHttpError): number | null {
 
 /**
  * Classifies one Gemini outcome of `call`: `null` when the call returned,
- * otherwise what it threw. A failed batch reported by a poll is passed as a
- * `GeminiBatchFailure`.
+ * otherwise what it threw. A batch that a poll reports as ended without
+ * output is passed as a `GeminiBatchFailure`.
+ *
+ * An error about the project rather than the request (a rejected key, a
+ * failed project precondition such as billing, or a model the provider no
+ * longer serves) pauses the provider, so queued work waits instead of being
+ * refused. Only a request that is itself unacceptable is refused. A poll
+ * asks about one batch, so an error the provider gives a poll about that
+ * batch leaves its item uncertain rather than refused.
  */
 export function classifyGeminiOutcome(call: PaidProviderCall, error: unknown): ProviderOutcome {
   if (error === null || error === undefined) return { class: "success" };
   if (error instanceof GeminiMissingKeyError) return { class: "missing_configuration", reason: "missing_key" };
   if (error instanceof GeminiBatchFailure) {
-    return CREDIT_DEPLETED.test(error.message)
-      ? { class: "credit_pause", reason: SPEND_CAP.test(error.message) ? "spend_cap" : "prepay_depleted" }
-      : { class: "refusal", reason: "batch_failed" };
+    if (CREDIT_DEPLETED.test(error.message)) return { class: "credit_pause", reason: SPEND_CAP.test(error.message) ? "spend_cap" : "prepay_depleted" };
+    if (error.batchState !== null && ENDED_UNRUN_BATCH.test(error.batchState)) return { class: "transient", reason: `batch_${error.batchState.replace(/^(?:BATCH|JOB)_STATE_/i, "").toLowerCase()}`, retryAfterMs: null };
+    return { class: "refusal", reason: "batch_failed" };
   }
   if (error instanceof GeminiHttpError) {
     const status = error.status;
@@ -108,8 +127,13 @@ export function classifyGeminiOutcome(call: PaidProviderCall, error: unknown): P
         ? { class: "credit_pause", reason: "spend_cap" }
         : { class: "transient", reason: "http_429", retryAfterMs: retryAfterFrom(error) };
     }
-    if (status === 401 || status === 403) return { class: "missing_configuration", reason: "rejected_key" };
     if (status === 408 || status >= 500) return { class: "transient", reason: `http_${status}`, retryAfterMs: retryAfterFrom(error) };
+    if (status === 401 || status === 403 || error.reasons.some((reason) => REJECTED_KEY_REASONS.has(reason)) || REJECTED_KEY.test(error.message)) {
+      return { class: "missing_configuration", reason: "rejected_key" };
+    }
+    if (error.apiStatus === "FAILED_PRECONDITION") return { class: "missing_configuration", reason: "failed_precondition" };
+    if (call === "poll" && status >= 400) return { class: "uncertain", reason: `http_${status}` };
+    if (status === 404) return { class: "missing_configuration", reason: "model_unavailable" };
     if (status >= 400) return { class: "refusal", reason: `http_${status}` };
     return { class: "transient", reason: `http_${status}`, retryAfterMs: null };
   }
@@ -191,7 +215,8 @@ export async function liftProviderPause(db: AppDatabase, provider: PaidProvider)
 /**
  * Runs the daily credit check when it is due: in the first call at or after
  * 06:00 UTC on a UTC day that has no check yet. It records the day and lifts
- * every provider's Credit pause (and a rejected key's pause) in one write,
+ * every provider's Credit pause and configuration pause except a missing
+ * key's in one write,
  * so a restart never runs it twice that day; a missed earlier day is never
  * made up. Returns the providers whose pause it lifted, which probe credit
  * with their next submission.

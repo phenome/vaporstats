@@ -283,3 +283,9 @@ export const GEMINI_PREPAY_DEPLETED: GeminiReply = { status: 402, body: { error:
 export const GEMINI_SPEND_CAP: GeminiReply = { status: 429, body: { error: { code: 429, status: "RESOURCE_EXHAUSTED", message: "Your project has exceeded its monthly spending cap." } } };
 /** Gemini's reply to a rate limit, which is transient. */
 export const GEMINI_RATE_LIMIT: GeminiReply = { status: 429, body: { error: { code: 429, status: "RESOURCE_EXHAUSTED", message: "Resource has been exhausted (e.g. check quota)." } } };
+/** Gemini's reply to a request made with an invalid API key. */
+export const GEMINI_KEY_INVALID: GeminiReply = { status: 400, body: { error: { code: 400, status: "INVALID_ARGUMENT", message: "API key not valid. Please pass a valid API key.", details: [{ "@type": "type.googleapis.com/google.rpc.ErrorInfo", reason: "API_KEY_INVALID", domain: "googleapis.com" }] } } };
+/** Gemini's reply when the key's project has no billing enabled for the requested tier. */
+export const GEMINI_BILLING_DISABLED: GeminiReply = { status: 400, body: { error: { code: 400, status: "FAILED_PRECONDITION", message: "Billing is not enabled for this project. Enable billing to use the Batch API." } } };
+/** Gemini's reply when the requested model is retired or unknown. */
+export const GEMINI_MODEL_NOT_FOUND: GeminiReply = { status: 404, body: { error: { code: 404, status: "NOT_FOUND", message: "models/gemini-3.1-flash-lite is not found for API version v1beta." } } };
