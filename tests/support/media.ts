@@ -466,6 +466,8 @@ export const OPENROUTER_GUARDRAIL_BUDGET: OpenRouterReply = { status: 403, body:
 export const OPENROUTER_WORKSPACE_BUDGET: OpenRouterReply = { status: 403, body: { error: { code: 403, message: "Workspace budget limit exceeded.", metadata: { limit_source: "openrouter_workspace_budget", scope: "workspace", limit_usd: 10, spend_usd: 10, resets_at: null } } } };
 /** OpenRouter's reply when moderation flags the input: a definite refusal. */
 export const OPENROUTER_MODERATION: OpenRouterReply = { status: 403, body: { error: { code: 403, message: "Input was flagged", metadata: { reasons: ["violence"], flagged_input: "...", provider_name: "Anthropic", model_slug: "anthropic/claude-haiku-5.5" } } } };
+/** OpenRouter's reply when the key lacks permission for the request: a configuration problem, never a refusal. */
+export const OPENROUTER_PERMISSION_DENIED: OpenRouterReply = { status: 403, body: { error: { code: 403, message: "This key does not have permission to use this model", metadata: { error_type: "permission_denied" } } } };
 /** OpenRouter's reply to an invalid or disabled API key. */
 export const OPENROUTER_INVALID_KEY: OpenRouterReply = { status: 401, body: { error: { code: 401, message: "No auth credentials found" } } };
 

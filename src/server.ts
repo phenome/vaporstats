@@ -251,6 +251,8 @@ const SAFE_MEDIA_PROCESSING_STOP_REASONS: Record<string, true> = {
   "provider_paused:gemini:spend_cap": true,
   "provider_paused:openrouter:missing_key": true,
   "provider_paused:openrouter:invalid_key": true,
+  "provider_paused:openrouter:permission_denied": true,
+  "provider_paused:openrouter:forbidden": true,
   "provider_paused:openrouter:model_unavailable": true,
   "provider_paused:openrouter:key_limit": true,
   "provider_paused:openrouter:credits": true,

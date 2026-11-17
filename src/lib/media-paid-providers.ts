@@ -25,8 +25,9 @@ export type PaidProviderCall = "count" | "submit" | "poll";
  * - `uncertain`: the request may have been charged without an answer; it is
  *   never resubmitted blindly.
  * - `missing_configuration`: the provider cannot be used as configured (no
- *   key, a rejected key, a project precondition such as billing, or a model
- *   it no longer serves); it pauses and nothing fails or is refused.
+ *   key, a rejected key, a key without permission, a project precondition
+ *   such as billing, or a model it no longer serves); it pauses and nothing
+ *   fails or is refused.
  */
 export type ProviderOutcome =
   | { class: "success" }
@@ -39,7 +40,7 @@ export type ProviderOutcome =
 export type CreditPauseReason =
   | "prepay_depleted" | "spend_cap"
   | "key_limit" | "credits" | "guardrail_budget" | "workspace_budget";
-export type ConfigurationPauseReason = "missing_key" | "rejected_key" | "invalid_key" | "failed_precondition" | "model_unavailable";
+export type ConfigurationPauseReason = "missing_key" | "rejected_key" | "invalid_key" | "permission_denied" | "forbidden" | "failed_precondition" | "model_unavailable";
 export type ProviderPauseReason = CreditPauseReason | ConfigurationPauseReason;
 
 /** A non-OK Gemini HTTP response, as the batch transport receives it. */
@@ -156,16 +157,22 @@ export class OpenRouterHttpError extends Error {
   readonly status: number;
   /** `error.metadata.limit_source`, such as `openrouter_key_limit`. */
   readonly limitSource: string | null;
+  /** `error.metadata.error_type`, such as `permission_denied`. */
+  readonly errorType: string | null;
+  /** Whether the error carries moderation metadata: the input was flagged. */
+  readonly moderated: boolean;
   /** How long the response asks the caller to wait, from `Retry-After`. */
   readonly retryAfterMs: number | null;
 
-  constructor(status: number, limitSource: string | null = null, retryAfterMs: number | null = null) {
+  constructor(status: number, details: { limitSource?: string | null; errorType?: string | null; moderated?: boolean; retryAfterMs?: number | null } = {}) {
     // The provider's message can quote the request, so only the status is kept.
     super(`OpenRouter HTTP ${status}`);
     this.name = "OpenRouterHttpError";
     this.status = status;
-    this.limitSource = limitSource;
-    this.retryAfterMs = retryAfterMs;
+    this.limitSource = details.limitSource ?? null;
+    this.errorType = details.errorType ?? null;
+    this.moderated = details.moderated ?? false;
+    this.retryAfterMs = details.retryAfterMs ?? null;
   }
 }
 
@@ -176,6 +183,9 @@ export class OpenRouterMissingKeyError extends Error {
     this.name = "OpenRouterMissingKeyError";
   }
 }
+
+/** `error_type`s of a 403 that refuse the request's content: a content policy, a refusal, or moderation. */
+const OPENROUTER_CONTENT_REFUSAL = /content[\s_-]*polic|refus|moderat/i;
 
 const OPENROUTER_BUDGET_PAUSES: Record<string, CreditPauseReason> = {
   openrouter_key_limit: "key_limit",
@@ -205,7 +215,12 @@ export function classifyOpenRouterOutcome(error: unknown): ProviderOutcome {
     if (status === 401) return { class: "missing_configuration", reason: "invalid_key" };
     if (status === 408 || status === 429 || status >= 500) return { class: "transient", reason: `http_${status}`, retryAfterMs };
     if (status === 404) return { class: "missing_configuration", reason: "model_unavailable" };
-    // 400, and a 403 for moderation or a guardrail's content block.
+    // A 403 without a budget source refuses the request only for its
+    // content. Any other 403, a key without permission included, is about the
+    // configuration: it pauses, and never refuses an item.
+    if (status === 403 && !error.moderated && !(error.errorType !== null && OPENROUTER_CONTENT_REFUSAL.test(error.errorType))) {
+      return { class: "missing_configuration", reason: error.errorType === "permission_denied" ? "permission_denied" : "forbidden" };
+    }
     if (status >= 400) return { class: "refusal", reason: `http_${status}` };
     return { class: "transient", reason: `http_${status}`, retryAfterMs };
   }

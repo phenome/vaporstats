@@ -18,6 +18,7 @@ import {
   OPENROUTER_IN_FLIGHT_BUDGET,
   OPENROUTER_INVALID_KEY,
   OPENROUTER_MODERATION,
+  OPENROUTER_PERMISSION_DENIED,
   OPENROUTER_WORKSPACE_BUDGET,
   openRouterKeyLimit,
   oversizedArticleHtml,
@@ -214,7 +215,8 @@ describe("OpenRouter classifier", () => {
   const refusals: Array<[string, OpenRouterReply]> = [
     ["a 400 invalid request", { status: 400, body: { error: { code: 400, message: "Invalid request", metadata: { error_type: "invalid_request" } } } }],
     ["a 403 moderation flag", OPENROUTER_MODERATION],
-    ["a 403 guardrail content block", { status: 403, body: { error: { code: 403, message: "Request blocked: prompt injection patterns detected", metadata: { patterns: ["ignore all previous instructions"] } } } }],
+    ["a 403 guardrail content block", { status: 403, body: { error: { code: 403, message: "Request blocked: prompt injection patterns detected", metadata: { error_type: "content_policy", patterns: ["ignore all previous instructions"] } } } }],
+    ["a 403 provider refusal", { status: 403, body: { error: { code: 403, message: "The provider refused the request", metadata: { error_type: "refusal" } } } }],
   ];
   for (const [name, reply] of refusals) {
     test(`${name} is a definite refusal for the item's input identity, never retried outside a correction set, and leaves other items' results`, async () => {
@@ -236,6 +238,29 @@ describe("OpenRouter classifier", () => {
       // The Overview is built from the article that succeeded.
       const urls = database.native.query<{ original_url: string }, []>("SELECT original_url FROM media_sources ORDER BY id").all().map((row) => row.original_url);
       expect((await detailOverview(database, CYBERPUNK))?.statements[0]?.sourceUrls).toEqual([urls[1]]);
+    });
+  }
+
+  const forbidden: Array<[string, OpenRouterReply, string]> = [
+    ["a 403 for a key without permission", OPENROUTER_PERMISSION_DENIED, "permission_denied"],
+    ["a 403 without a budget source, moderation or a content type", { status: 403, body: { error: { code: 403, message: "Forbidden" } } }, "forbidden"],
+  ];
+  for (const [name, reply, reason] of forbidden) {
+    test(`${name} is a configuration pause with reason ${reason}: no item is refused or charged an attempt, and the daily key check lifts it`, async () => {
+      const { database } = await authorizedGames({ [CYBERPUNK]: 2 });
+      const providers = apis();
+      providers.openRouter.reply("chat", reply);
+
+      const paused = await tick(database, providers, "2026-11-18T07:00:00.000Z");
+
+      expect(paused.mediaProcessing?.providers.openrouter).toMatchObject({ paused: true, reason });
+      expect(paused.mediaProcessing?.outputs.skipped).toBe(0);
+      expect(textJobs(database).map(({ status, attempt_count, error }) => ({ status, attempt_count, error }))).toEqual(Array(2).fill({ status: "queued", attempt_count: 0, error: null }));
+      expect(providers.openRouter.requests).toHaveLength(1);
+
+      const resumed = await tick(database, providers, "2026-11-19T06:00:00.000Z");
+      expect(resumed.mediaProcessing?.providers.openrouter).toMatchObject({ paused: false, checkOutcome: "credit_remaining" });
+      expect(textJobs(database).map(({ status }) => status)).toEqual(["succeeded", "succeeded", "succeeded"]);
     });
   }
 

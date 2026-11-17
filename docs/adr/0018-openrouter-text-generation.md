@@ -24,14 +24,16 @@ An ordinary chat completion is answered while the request is open. A request tha
 |---|---|
 | 402 with `limit_source` `openrouter_in_flight_budget` | Transient, honoring `Retry-After` |
 | 402 or 403 with `openrouter_key_limit`; 402 with `openrouter_credits` or without a limit source; 403 with `openrouter_guardrail_budget` or `openrouter_workspace_budget` | Credit pause |
-| 400; 403 without a budget limit source (moderation or a guardrail's content block) | Definite refusal |
+| 400; 403 with moderation metadata, or with an `error_type` for a content policy, a refusal, or moderation | Definite refusal |
+| 403 with `error_type` `permission_denied` | Configuration pause `permission_denied` |
+| Any other 403 without a budget limit source | Configuration pause `forbidden` |
 | 408, 429, 5xx | Transient |
 | 401 | Configuration pause `invalid_key` |
 | 404 | Configuration pause `model_unavailable` |
 | No answer after the request was sent | Uncertain |
 | No key configured | Configuration pause `missing_key` |
 
-A 200 whose body holds only an `error` object is classified by that error's code.
+A 200 whose body holds only an `error` object is classified by that error's code. OpenRouter uses the same 403 for a guardrail's content block and for a key that lacks permission, so a 403 refuses the item only when its metadata says the content was refused; a configuration problem never refuses an item, and the daily key check lifts its pause.
 
 **Daily key check.** The daily credit check calls `GET /api/v1/key`. Credit remains when `limit_remaining` is null or above zero and no budget, `effective_budget` included, has `remaining_usd` at or below zero; text generation then resumes. Otherwise text generation is paused with the matching reason. A check without a usable answer keeps the current state. Each provider records the check time and its outcome. The account balance is not visible to an inference key, so a key without a limit on an empty balance pauses again at its next request.
 

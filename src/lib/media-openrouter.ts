@@ -71,8 +71,14 @@ function errorFrom(response: Response, body: Record<string, unknown>): OpenRoute
   const error = object(body.error);
   const code = typeof error.code === "number" && Number.isInteger(error.code) && error.code >= 400 ? error.code : null;
   const status = response.ok ? code ?? 502 : response.status;
-  const limitSource = object(error.metadata).limit_source;
-  return new OpenRouterHttpError(status, typeof limitSource === "string" ? limitSource : null, retryAfterMs(response));
+  const metadata = object(error.metadata);
+  return new OpenRouterHttpError(status, {
+    limitSource: text(metadata.limit_source),
+    errorType: text(metadata.error_type),
+    // OpenRouter's moderation errors list why the input was flagged.
+    moderated: Array.isArray(metadata.reasons) || metadata.flagged_input !== undefined,
+    retryAfterMs: retryAfterMs(response),
+  });
 }
 
 /**
