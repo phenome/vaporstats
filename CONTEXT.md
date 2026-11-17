@@ -227,5 +227,5 @@ A paid provider's stop after it reports exhausted credit or quota, such as Gemin
 _Avoid_: Budget stop, allowance refusal, Provider stop
 
 **Uncertain item**:
-A Paid-work queue item whose request reached, or may have reached, its provider without a recorded answer: a request that timed out or lost its connection after it was sent, or one found in flight after a restart. It may have been charged, so it is never resent automatically; it is reported in the uncertain count, and only a correction set that covers it queues the work again. A request that failed before it was fully sent is transient instead.
+A Paid-work queue item whose request reached, or may have reached, its provider without a recorded answer: a request that timed out or lost its connection after it was sent, one whose provider accepted it and then failed or timed out, or one found in flight after a restart. It may have been charged, so it is never resent automatically; it is reported in the uncertain count, and only a correction set that covers it queues the work again. A request that failed before it was fully sent is transient instead.
 _Avoid_: Failed item, lost item
