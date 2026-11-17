@@ -273,6 +273,21 @@ export function overviewOutputForUrls(urls: readonly string[]): Record<string, u
   };
 }
 
+/**
+ * The error codes Bun 1.4's `fetch` throws for a TLS failure, each observed
+ * against a local TLS server: a self-signed certificate, an expired one, one
+ * for another host, an untrusted chain, a leaf without its issuer, and a
+ * server that does not speak TLS. The request was never sent.
+ */
+export const TLS_FAILURE_CODES = [
+  "DEPTH_ZERO_SELF_SIGNED_CERT",
+  "CERT_HAS_EXPIRED",
+  "ERR_TLS_CERT_ALTNAME_INVALID",
+  "SELF_SIGNED_CERT_IN_CHAIN",
+  "UNABLE_TO_VERIFY_LEAF_SIGNATURE",
+  "UNKNOWN_CERTIFICATE_VERIFICATION_ERROR",
+] as const;
+
 /** One answer the controlled Gemini API gives a request: an HTTP reply, or a connection failure. */
 export type GeminiReply =
   | { status: number; body?: unknown; headers?: Record<string, string> }

@@ -26,6 +26,7 @@ import {
   seedApps,
   stableJson,
   type MediaTickOptions,
+  TLS_FAILURE_CODES,
   type OpenRouterReply,
 } from "./support/media";
 import { MEDIA_OUTLETS } from "../src/lib/media-discovery";
@@ -465,7 +466,7 @@ describe("request lifecycle", () => {
     expect(providers.openRouter.requests).toHaveLength(1);
   });
 
-  for (const [name, code] of [["DNS", "ENOTFOUND"], ["connect", "ECONNREFUSED"], ["TLS", "ERR_TLS_CERT_ALTNAME_INVALID"]] as const) {
+  for (const [name, code] of [["DNS", "ENOTFOUND"], ["connect", "ECONNREFUSED"], ...TLS_FAILURE_CODES.map((tls) => [`TLS ${tls}`, tls] as const)]) {
     test(`a ${name} failure before the request was fully sent is transient and retried`, async () => {
       const { database } = await authorizedGames();
       const providers = apis();

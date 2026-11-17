@@ -19,6 +19,7 @@ import {
   processingArticleHtml,
   runMediaTick,
   seedApps,
+  TLS_FAILURE_CODES,
   type GeminiCall,
   type GeminiReply,
   type MediaTickOptions,
@@ -508,15 +509,17 @@ describe("definite refusals and uncertain submissions", () => {
     expect(later.mediaProcessing?.cost.uncertain).toBe(1);
   });
 
-  test("a submission whose connection was refused before sending is transient", async () => {
-    const { database } = await authorizedGames();
-    const apis = providers();
-    apis.gemini.reply("submit", { network: "connection refused", code: "ECONNREFUSED" });
+  for (const code of ["ECONNREFUSED", ...TLS_FAILURE_CODES]) {
+    test(`a submission that failed with ${code} before sending is transient`, async () => {
+      const { database } = await authorizedGames();
+      const apis = providers();
+      apis.gemini.reply("submit", { network: "failed before sending", code });
 
-    await tick(database, apis, "2026-11-10T03:00:00.000Z");
+      await tick(database, apis, "2026-11-10T03:00:00.000Z");
 
-    expect(embeddingJobs(database)[0]).toMatchObject({ status: "queued", attempt_count: 1 });
-  });
+      expect(embeddingJobs(database)[0]).toMatchObject({ status: "queued", attempt_count: 1 });
+    });
+  }
 });
 
 /** The entity of every OpenRouter extraction request from index `from`, in request order, by the generation id each answer recorded. */

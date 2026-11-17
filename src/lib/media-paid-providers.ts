@@ -86,11 +86,14 @@ export class GeminiMissingKeyError extends Error {
 
 /**
  * Connection failures that happen before any request byte reaches the
- * provider, so a submission that failed with one was certainly not received.
+ * provider, so a submission that failed with one was certainly not received:
+ * DNS and connect failures, and the TLS certificate failures Bun's `fetch`
+ * reports before the handshake completes.
  */
 const UNSENT_NETWORK_CODES = new Set([
-  "ConnectionRefused", "ECONNREFUSED", "ENOTFOUND", "EAI_AGAIN", "FailedToOpenSocket",
-  "UND_ERR_CONNECT_TIMEOUT", "ERR_TLS_CERT_ALTNAME_INVALID", "UNABLE_TO_VERIFY_LEAF_SIGNATURE",
+  "ConnectionRefused", "ECONNREFUSED", "ENOTFOUND", "EAI_AGAIN", "FailedToOpenSocket", "UND_ERR_CONNECT_TIMEOUT",
+  "DEPTH_ZERO_SELF_SIGNED_CERT", "CERT_HAS_EXPIRED", "ERR_TLS_CERT_ALTNAME_INVALID", "SELF_SIGNED_CERT_IN_CHAIN",
+  "UNABLE_TO_VERIFY_LEAF_SIGNATURE", "UNKNOWN_CERTIFICATE_VERIFICATION_ERROR",
 ]);
 const SPEND_CAP = /spend(?:ing)?[\s_-]*(?:cap|limit)/i;
 const REJECTED_KEY_REASONS = new Set(["API_KEY_INVALID", "API_KEY_EXPIRED", "API_KEY_SERVICE_BLOCKED"]);
