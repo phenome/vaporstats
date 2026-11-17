@@ -111,6 +111,24 @@ describe("text generation through OpenRouter", () => {
   });
 });
 
+describe("applying answers", () => {
+  test("an answer is applied under the current-input and stale-write checks: one whose input stopped being current while in flight is recorded stale, with its cost", async () => {
+    const { database } = await authorizedGames();
+    const providers = apis();
+    // While the extraction is in flight, the article's processing input changes.
+    providers.openRouter.onChat = (request) => {
+      if (request.stage === "extraction") database.native.prepare("UPDATE media_sources SET processing_input_identity = 'changed-while-in-flight'").run();
+    };
+
+    const result = await tick(database, providers, "2026-11-18T07:00:00.000Z");
+
+    expect(textJobs(database).map(({ stage, status }) => ({ stage, status }))).toEqual([{ stage: "extraction", status: "stale" }]);
+    expect(database.native.query("SELECT COUNT(*) AS count FROM media_article_extractions").get()).toEqual({ count: 0 });
+    expect(database.native.query("SELECT charged_microusd, cost_source, generation_id FROM media_processing_jobs").get()).toEqual({ charged_microusd: 150, cost_source: "provider_reported", generation_id: "gen-1" });
+    expect(result.mediaProcessing?.outputs.skipped).toBe(1);
+  });
+});
+
 describe("OpenRouter classifier", () => {
   const creditPauses: Array<[string, OpenRouterReply, string]> = [
     ["a 402 for the key limit", openRouterKeyLimit(402), "key_limit"],
