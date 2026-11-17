@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "d5434021-d539-4451-992d-d035029469f6",
+  "id": "b9a6cea6-f4c6-4f21-81d3-12fbea7f8f4c",
   "prevId": "55f4b2b6-4c1c-4e78-9a6d-47676e8f849f",
   "tables": {
     "app_facet_memberships": {
@@ -2384,7 +2384,7 @@
         },
         "media_processing_jobs_cost_source_check": {
           "name": "media_processing_jobs_cost_source_check",
-          "value": "\"media_processing_jobs\".\"cost_source\" IS NULL OR \"media_processing_jobs\".\"cost_source\" IN ('estimated', 'provider_reported')"
+          "value": "\"media_processing_jobs\".\"cost_source\" IS NULL OR \"media_processing_jobs\".\"cost_source\" IN ('estimated', 'provider_reported', 'unknown')"
         },
         "media_processing_jobs_dimension_check": {
           "name": "media_processing_jobs_dimension_check",

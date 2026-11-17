@@ -38,7 +38,7 @@ CREATE TABLE `__new_media_processing_jobs` (
 	CONSTRAINT "media_processing_jobs_status_check" CHECK("__new_media_processing_jobs"."status" IN ('queued', 'reserved', 'submitted', 'succeeded', 'failed', 'refused', 'uncertain', 'stale')),
 	CONSTRAINT "media_processing_jobs_attempt_check" CHECK("__new_media_processing_jobs"."attempt_count" >= 0),
 	CONSTRAINT "media_processing_jobs_retained_check" CHECK("__new_media_processing_jobs"."retained" IN (0, 1)),
-	CONSTRAINT "media_processing_jobs_cost_source_check" CHECK("__new_media_processing_jobs"."cost_source" IS NULL OR "__new_media_processing_jobs"."cost_source" IN ('estimated', 'provider_reported')),
+	CONSTRAINT "media_processing_jobs_cost_source_check" CHECK("__new_media_processing_jobs"."cost_source" IS NULL OR "__new_media_processing_jobs"."cost_source" IN ('estimated', 'provider_reported', 'unknown')),
 	CONSTRAINT "media_processing_jobs_dimension_check" CHECK("__new_media_processing_jobs"."dimension" IS NULL OR "__new_media_processing_jobs"."dimension" IN ('gameplay', 'story_world')),
 	CONSTRAINT "media_processing_jobs_reservation_check" CHECK("__new_media_processing_jobs"."reservation_active" IN (0, 1)),
 	CONSTRAINT "media_processing_jobs_token_check" CHECK("__new_media_processing_jobs"."max_input_tokens" >= 0 AND "__new_media_processing_jobs"."max_output_tokens" > 0),

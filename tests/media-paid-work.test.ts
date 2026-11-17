@@ -533,6 +533,38 @@ describe("article text", () => {
 });
 
 describe("cost reporting", () => {
+  test("a refused batch without provider usage records zero cost marked unknown, not an estimate from its token caps", async () => {
+    const { database } = await authorizedGames();
+    const gemini = controlledGeminiApi();
+    gemini.reply("poll", { status: 200, body: { metadata: { state: "BATCH_STATE_FAILED" }, error: { message: "internal batch error" } } });
+
+    const refused = await tick(database, gemini, "2026-11-10T07:00:00.000Z");
+
+    expect(database.native.query("SELECT stage, status, charged_microusd, cost_source FROM media_processing_jobs").all()).toEqual([
+      { stage: "extraction", status: "refused", charged_microusd: 0, cost_source: "unknown" },
+    ]);
+    expect(refused.mediaProcessing?.cost.providers.gemini).toEqual({ monthToDateMicrousd: 0, allTimeMicrousd: 0 });
+  });
+
+  test("a retained batch settled without provider usage keeps its reservation as history and reports no spend", async () => {
+    const database = openUpgradedTestDatabase("0022_paid_work_queue", (native) => {
+      seedApps(native, [CYBERPUNK]);
+      const runId = insertCompletedRun(native, "initial:paid-work:test", [CYBERPUNK]);
+      native.prepare("INSERT INTO media_processing_authorizations (run_id, status, affected_source_ids) VALUES (?, 'completed', '[]')").run(runId);
+      native.prepare("INSERT INTO media_processing_jobs (run_id, stage, appid, request_key, input_identity, model, config_version, max_input_tokens, max_output_tokens, reserved_microusd, reservation_active, status, provider_batch_id, usage_json, submitted_at) VALUES (?, 'synthesis', ?, 'synthesis:retired', 'retired-identity', 'gemini-3.1-flash-lite', 'v1', 20000, 3200, 4900000, 1, 'submitted', 'batches/retired-1', '{}', '2026-10-01T00:00:00.000Z')").run(runId, CYBERPUNK);
+    });
+    cleanups.push(database.cleanup);
+    const gemini = controlledGeminiApi();
+    gemini.reply("poll", { status: 200, body: { metadata: { state: "BATCH_STATE_FAILED" }, error: { message: "internal batch error" } } });
+
+    const settled = await tick(database, gemini, "2026-11-10T07:00:00.000Z");
+
+    expect(database.native.query("SELECT status, reserved_microusd, reservation_active, charged_microusd, cost_source FROM media_processing_jobs").all()).toEqual([
+      { status: "refused", reserved_microusd: 4_900_000, reservation_active: 1, charged_microusd: 0, cost_source: "unknown" },
+    ]);
+    expect(settled.mediaProcessing?.cost.providers.gemini).toEqual({ monthToDateMicrousd: 0, allTimeMicrousd: 0 });
+  });
+
   test("settled items record estimated cost, reported month-to-date by UTC calendar month and all-time, as reporting-only", async () => {
     const { database } = await authorizedGames();
     const gemini = controlledGeminiApi();

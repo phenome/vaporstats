@@ -674,7 +674,7 @@ describe("bounded Gemini media processing", () => {
     expect(result).toMatchObject({ runId: value.runId, status: "completed", completed: 1 });
     expect(job).toEqual({ status: "succeeded", reservation_active: 0 });
   });
-  test("records a conservative estimated cost when provider usage is absent", async () => {
+  test("records zero cost marked unknown, not a token-cap estimate, when provider usage is absent", async () => {
     const value = fixture(); cleanups.push(value.cleanup);
     await authorizeMediaProcessing(value.db, value.runId);
     const transport = new ControlledTransport();
@@ -692,9 +692,7 @@ describe("bounded Gemini media processing", () => {
     });
     const settled = await value.db.prepare("SELECT status, charged_microusd, cost_source FROM media_processing_jobs WHERE stage = 'extraction'").first<{ status: string; charged_microusd: number; cost_source: string }>();
     expect(result.completed).toBeGreaterThan(0);
-    // The counted 100 input tokens and the 1,200-token output cap at the
-    // documented batch prices of US$0.125 and US$0.75 per million.
-    expect(settled).toEqual({ status: "succeeded", charged_microusd: 913, cost_source: "estimated" });
+    expect(settled).toEqual({ status: "succeeded", charged_microusd: 0, cost_source: "unknown" });
   });
 
 

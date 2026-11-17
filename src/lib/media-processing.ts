@@ -805,12 +805,13 @@ function actualCharge(job: JobRow, usage: GeminiBatchUsage | null): number | nul
 
 /**
  * The cost recorded when `job` settles, for reporting only: its token usage
- * at the documented batch price, else its counted input and output cap, else
- * the reservation a retained row was written with.
+ * at the documented batch price, marked estimated. Without provider usage it
+ * is zero, marked unknown: neither token caps nor a retained row's
+ * reservation are ever presented as spend.
  */
-function settledCharge(job: JobRow, usage: GeminiBatchUsage | null): number {
-  return actualCharge(job, usage)
-    ?? (job.max_input_tokens > 0 ? estimatedCharge(job.max_input_tokens, job.max_output_tokens, job.stage) : job.reserved_microusd);
+function settledCharge(job: JobRow, usage: GeminiBatchUsage | null): { microusd: number; source: "estimated" | "unknown" } {
+  const charge = actualCharge(job, usage);
+  return charge === null ? { microusd: 0, source: "unknown" } : { microusd: charge, source: "estimated" };
 }
 
 /**
@@ -904,7 +905,6 @@ async function sendItem(advance: QueueAdvance, job: JobRow, model: string, reque
   }
   const marked = await db.prepare(`UPDATE media_processing_jobs SET status = 'uncertain', error = 'submission in progress', max_input_tokens = ?, submitted_at = ? WHERE id = ? AND ${WAITING}`).bind(counted, now.toISOString(), job.id).run();
   if (marked.meta.changes !== 1) return;
-  const sending: JobRow = { ...job, max_input_tokens: counted };
   let result: { name: string } | null = null;
   let outcome: ProviderOutcome;
   try {
@@ -920,7 +920,7 @@ async function sendItem(advance: QueueAdvance, job: JobRow, model: string, reque
       return;
     }
   }
-  if (outcome.class !== "success") return holdItem(advance, sending, outcome);
+  if (outcome.class !== "success") return holdItem(advance, job, outcome);
   if (!result?.name) {
     await db.prepare("UPDATE media_processing_jobs SET error = ? WHERE id = ? AND status = 'uncertain'").bind("Gemini submission returned no batch identifier", job.id).run();
     return;
@@ -1181,7 +1181,9 @@ function reconcileJob(db: AppDatabase, job: JobRow, result: GeminiBatchPoll & { 
 
 async function settleJob(db: AppDatabase, job: JobRow, result: GeminiBatchPoll & { state: "succeeded" | "failed" }, now: Date, secret: string | undefined): Promise<SettledStatus> {
   const usageJson = result.usage ? JSON.stringify(result.usage) : "{}";
-  await db.prepare("UPDATE media_processing_jobs SET usage_json = ?, charged_microusd = ?, cost_source = 'estimated', reservation_active = 0, completed_at = ? WHERE id = ?").bind(usageJson, settledCharge(job, result.usage ?? null), now.toISOString(), job.id).run();
+  const charge = settledCharge(job, result.usage ?? null);
+  // A retained row keeps its reserved amount and reservation flag as history.
+  await db.prepare("UPDATE media_processing_jobs SET usage_json = ?, charged_microusd = ?, cost_source = ?, completed_at = ? WHERE id = ?").bind(usageJson, charge.microusd, charge.source, now.toISOString(), job.id).run();
   if (result.state === "failed") {
     await db.prepare("UPDATE media_processing_jobs SET status = 'refused', error = ? WHERE id = ?").bind(boundedError(result.error, secret), job.id).run();
     return "refused";

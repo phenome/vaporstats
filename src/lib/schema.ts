@@ -1093,7 +1093,11 @@ export const mediaProcessingJobs = sqliteTable(
      * the queue; only a batch it already submitted is still polled.
      */
     retained: integer("retained").notNull().default(0),
-    /** How `charged_microusd` was obtained, for reporting only: `estimated` from token usage or `provider_reported`. */
+    /**
+     * How `charged_microusd` was obtained, for reporting only: `estimated`
+     * from token usage, `provider_reported`, or `unknown` when the provider
+     * reported no usage and zero is recorded.
+     */
     costSource: text("cost_source"),
     providerBatchId: text("provider_batch_id"),
     outputJson: text("output_json"),
@@ -1115,7 +1119,7 @@ export const mediaProcessingJobs = sqliteTable(
     check("media_processing_jobs_status_check", sql`${table.status} IN ('queued', 'reserved', 'submitted', 'succeeded', 'failed', 'refused', 'uncertain', 'stale')`),
     check("media_processing_jobs_attempt_check", sql`${table.attemptCount} >= 0`),
     check("media_processing_jobs_retained_check", sql`${table.retained} IN (0, 1)`),
-    check("media_processing_jobs_cost_source_check", sql`${table.costSource} IS NULL OR ${table.costSource} IN ('estimated', 'provider_reported')`),
+    check("media_processing_jobs_cost_source_check", sql`${table.costSource} IS NULL OR ${table.costSource} IN ('estimated', 'provider_reported', 'unknown')`),
     check("media_processing_jobs_dimension_check", sql`${table.dimension} IS NULL OR ${table.dimension} IN ('gameplay', 'story_world')`),
     check("media_processing_jobs_reservation_check", sql`${table.reservationActive} IN (0, 1)`),
     check(
