@@ -1,3 +1,4 @@
+import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, test } from "bun:test";
 import { authorizeMediaProcessing } from "../src/lib/media-processing";
 import { handleGameDetailRequest } from "../src/routes/api.games.$appid.detail";
@@ -241,5 +242,156 @@ describe("OpenRouter classifier", () => {
     const resumed = await tick(database, providers, "2026-11-19T06:00:00.000Z");
     expect(resumed.mediaProcessing?.providers.openrouter).toMatchObject({ paused: false, checkOutcome: "credit_remaining" });
     expect(textJobs(database).map(({ status }) => status)).toEqual(["succeeded", "succeeded"]);
+  });
+});
+
+/** The row of the item whose request is in flight, read through a second connection, so only committed writes are visible. */
+function committedInFlight(database: TestDatabase) {
+  const reader = new Database(database.databasePath, { readonly: true });
+  try {
+    return reader.query<{ stage: string; status: string; error: string | null; submitted_at: string | null; input_identity: string }, []>(
+      "SELECT stage, status, error, submitted_at, input_identity FROM media_processing_jobs WHERE status = 'uncertain'",
+    ).all();
+  } finally {
+    reader.close();
+  }
+}
+
+function sourceUrls(database: TestDatabase): string[] {
+  return database.native.query<{ original_url: string }, []>("SELECT original_url FROM media_sources ORDER BY id").all().map((row) => row.original_url);
+}
+
+describe("request lifecycle", () => {
+  test("each item is recorded in flight with its input identity and send time in a committed write before it is sent, and no write transaction is open during the request", async () => {
+    const { database } = await authorizedGames();
+    const providers = apis();
+    const observed: Array<{ inTransaction: boolean; rows: ReturnType<typeof committedInFlight> }> = [];
+    providers.openRouter.onChat = () => { observed.push({ inTransaction: database.native.inTransaction, rows: committedInFlight(database) }); };
+
+    await tick(database, providers, "2026-11-18T07:00:00.000Z");
+
+    expect(observed.map(({ inTransaction }) => inTransaction)).toEqual([false, false]);
+    expect(observed.map(({ rows }) => rows.map(({ stage, status, error, submitted_at }) => ({ stage, status, error, submitted_at })))).toEqual([
+      [{ stage: "extraction", status: "uncertain", error: "submission in progress", submitted_at: "2026-11-18T07:00:00.000Z" }],
+      [{ stage: "synthesis", status: "uncertain", error: "submission in progress", submitted_at: "2026-11-18T07:00:00.000Z" }],
+    ]);
+    for (const { rows } of observed) expect(rows[0]!.input_identity).toMatch(/^[0-9a-f]{64}$/);
+    expect(textJobs(database).map(({ status }) => status)).toEqual(["succeeded", "succeeded"]);
+  });
+
+  test("a client timeout after the request was sent leaves the item uncertain: reported, never resent automatically, and resent through a correction set", async () => {
+    const { database } = await authorizedGames();
+    const providers = apis();
+    providers.openRouter.reply("chat", { hang: true });
+
+    const sent = await tick(database, providers, "2026-11-18T07:00:00.000Z", { openRouterTimeoutMs: 20 });
+
+    expect(textJobs(database).map(({ stage, status, error }) => ({ stage, status, error }))).toEqual([{ stage: "extraction", status: "uncertain", error: "uncertain:timeout" }]);
+    expect(sent.mediaProcessing?.cost.uncertain).toBe(1);
+    expect(sent.mediaProcessing?.stopReasons).toContain("uncertain_submission");
+    for (const at of ["2026-11-18T07:15:00.000Z", "2026-11-19T06:00:00.000Z"]) {
+      const later = await tick(database, providers, at);
+      expect(later.mediaProcessing?.cost.uncertain).toBe(1);
+    }
+    expect(providers.openRouter.requests).toHaveLength(1);
+
+    // An authorized correction set covering the article resends it.
+    const sourceId = database.native.query<{ id: number }, []>("SELECT id FROM media_sources").get()!.id;
+    await authorizeMediaProcessing(database.db, insertCompletedRun(database.native, "initial:openrouter:correction", [CYBERPUNK]), { affectedSourceIds: [sourceId] });
+    await tick(database, providers, "2026-11-19T07:00:00.000Z");
+    expect(providers.openRouter.requests.map((request) => request.stage)).toEqual(["extraction", "extraction", "synthesis"]);
+    expect(textJobs(database).map(({ status }) => status)).toEqual(["uncertain", "succeeded", "succeeded"]);
+  });
+
+  test("an uncertain Overview request is never resent automatically, and is resent through a correction set covering its game", async () => {
+    const { database } = await authorizedGames();
+    const providers = apis();
+    providers.openRouter.reply("chat", { status: 200, body: { id: "gen-ok", provider: "Anthropic", model: HAIKU, choices: [{ message: { content: JSON.stringify({ contributions: [{ text: "The combat supports flexible builds", category: "Gameplay & systems" }], traits: ["build experimentation"], qualifications: [], provenance: [] }) } }], usage: { cost: 0.0001 } } }, { hang: true });
+
+    await tick(database, providers, "2026-11-18T07:00:00.000Z", { openRouterTimeoutMs: 20 });
+    await tick(database, providers, "2026-11-19T06:00:00.000Z");
+    expect(textJobs(database).map(({ stage, status }) => ({ stage, status }))).toEqual([{ stage: "extraction", status: "succeeded" }, { stage: "synthesis", status: "uncertain" }]);
+    expect(providers.openRouter.requests).toHaveLength(2);
+
+    const sourceId = database.native.query<{ id: number }, []>("SELECT id FROM media_sources").get()!.id;
+    await authorizeMediaProcessing(database.db, insertCompletedRun(database.native, "initial:openrouter:correction", [CYBERPUNK]), { affectedSourceIds: [sourceId] });
+    await tick(database, providers, "2026-11-19T07:00:00.000Z");
+
+    // The unchanged article keeps its extraction; only the Overview is resent.
+    expect(providers.openRouter.requests.map((request) => request.stage)).toEqual(["extraction", "synthesis", "synthesis"]);
+    expect(textJobs(database).map(({ stage, status }) => ({ stage, status }))).toEqual([
+      { stage: "extraction", status: "succeeded" },
+      { stage: "synthesis", status: "uncertain" },
+      { stage: "synthesis", status: "succeeded" },
+    ]);
+    expect(await detailOverview(database, CYBERPUNK)).not.toBeNull();
+  });
+
+  test("a connection lost after the request was sent leaves the item uncertain", async () => {
+    const { database } = await authorizedGames();
+    const providers = apis();
+    providers.openRouter.reply("chat", { network: "socket closed before the response" });
+
+    await tick(database, providers, "2026-11-18T07:00:00.000Z");
+    await tick(database, providers, "2026-11-18T07:15:00.000Z");
+
+    expect(textJobs(database).map(({ status, error }) => ({ status, error }))).toEqual([{ status: "uncertain", error: "uncertain:no_response" }]);
+    expect(providers.openRouter.requests).toHaveLength(1);
+  });
+
+  for (const [name, code] of [["DNS", "ENOTFOUND"], ["connect", "ECONNREFUSED"], ["TLS", "ERR_TLS_CERT_ALTNAME_INVALID"]] as const) {
+    test(`a ${name} failure before the request was fully sent is transient and retried`, async () => {
+      const { database } = await authorizedGames();
+      const providers = apis();
+      providers.openRouter.reply("chat", { network: `${name} failure`, code });
+
+      const failed = await tick(database, providers, "2026-11-18T07:00:00.000Z");
+
+      expect(textJobs(database).map(({ status, attempt_count, error }) => ({ status, attempt_count, error }))).toEqual([{ status: "queued", attempt_count: 1, error: "transient:network" }]);
+      expect(failed.mediaProcessing?.cost.uncertain).toBe(0);
+      await tick(database, providers, "2026-11-18T07:15:00.000Z");
+      expect(textJobs(database).map(({ status }) => status)).toEqual(["succeeded", "succeeded"]);
+    });
+  }
+
+  test("a restart with the database reopened while a request is in flight leaves the item uncertain and sends no second request", async () => {
+    const { database } = await authorizedGames();
+    const providers = apis();
+    // The process stops while the request is in flight: its database handle closes before any answer is recorded.
+    providers.openRouter.onChat = () => {
+      expect(committedInFlight(database).map(({ stage }) => stage)).toEqual(["extraction"]);
+      database.reopen();
+      throw new Error("process stopped");
+    };
+    const stopped = await tick(database, providers, "2026-11-18T07:00:00.000Z");
+    expect(stopped.status).toBe("error");
+    providers.openRouter.onChat = undefined;
+
+    const restarted = await tick(database, providers, "2026-11-18T07:15:00.000Z");
+    await tick(database, providers, "2026-11-19T06:00:00.000Z");
+
+    expect(providers.openRouter.requests).toHaveLength(1);
+    expect(textJobs(database).map(({ status, error }) => ({ status, error }))).toEqual([{ status: "uncertain", error: "uncertain:in_flight_at_startup" }]);
+    expect(restarted.mediaProcessing?.cost.uncertain).toBe(1);
+  });
+
+  test("an uncertain extraction does not block its game's Overview, which is built from the other current articles", async () => {
+    const { database } = await authorizedGames({ [CYBERPUNK]: 2 });
+    const providers = apis();
+    providers.openRouter.reply("chat", { network: "socket closed before the response" });
+    const [uncertainUrl, settledUrl] = sourceUrls(database);
+
+    const result = await tick(database, providers, "2026-11-18T07:00:00.000Z");
+
+    expect(textJobs(database).map(({ stage, status }) => ({ stage, status }))).toEqual([
+      { stage: "extraction", status: "uncertain" },
+      { stage: "extraction", status: "succeeded" },
+      { stage: "synthesis", status: "succeeded" },
+    ]);
+    const synthesis = providers.openRouter.requests.find((request) => request.stage === "synthesis")!;
+    expect(synthesis.urls).toEqual([settledUrl]);
+    expect(JSON.stringify(synthesis.body)).not.toContain(uncertainUrl);
+    expect((await detailOverview(database, CYBERPUNK))?.statements[0]?.sourceUrls).toEqual([settledUrl]);
+    expect(result.mediaProcessing?.cost.uncertain).toBe(1);
   });
 });

@@ -361,7 +361,9 @@ export const GEMINI_MODEL_NOT_FOUND: GeminiReply = { status: 404, body: { error:
 /** One answer the controlled OpenRouter API gives a request: an HTTP reply, or a connection failure. */
 export type OpenRouterReply =
   | { status: number; body?: unknown; headers?: Record<string, string> }
-  | { network: string; code?: string; name?: string };
+  | { network: string; code?: string; name?: string }
+  /** No answer until the client's request signal aborts it. */
+  | { hang: true };
 
 /** The OpenRouter request kinds the controlled API serves. */
 export type OpenRouterCall = "chat" | "key";
@@ -399,7 +401,14 @@ export function controlledOpenRouterApi() {
     /** Runs when a chat completion arrives, before it is answered. */
     onChat: undefined as ((request: OpenRouterRequestRecord) => void | Promise<void>) | undefined,
   };
-  const answer = (reply: OpenRouterReply): Response => {
+  const answer = async (reply: OpenRouterReply, signal?: AbortSignal | null): Promise<Response> => {
+    if ("hang" in reply) {
+      return new Promise<Response>((_resolve, reject) => {
+        if (!signal) return;
+        if (signal.aborted) reject(signal.reason);
+        signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+      });
+    }
     if ("network" in reply) throw Object.assign(new Error(reply.network), reply.code ? { code: reply.code } : {}, reply.name ? { name: reply.name } : {});
     return new Response(JSON.stringify(reply.body ?? {}), { status: reply.status, headers: { "Content-Type": "application/json", ...reply.headers } });
   };
@@ -409,7 +418,7 @@ export function controlledOpenRouterApi() {
     if (url === "https://openrouter.ai/api/v1/key") {
       calls.push({ kind: "key" });
       const reply = replies.key.shift();
-      return reply ? answer(reply) : Response.json({ data: { label: "test", limit: null, limit_remaining: null, budgets: [], effective_budget: null, usage: 0 } });
+      return reply ? answer(reply, init?.signal) : Response.json({ data: { label: "test", limit: null, limit_remaining: null, budgets: [], effective_budget: null, usage: 0 } });
     }
     if (url !== "https://openrouter.ai/api/v1/chat/completions") return Response.json({ error: { code: 404, message: "Not Found" } }, { status: 404 });
     const body = JSON.parse(String(init?.body)) as OpenRouterRequestRecord["body"];
@@ -419,7 +428,7 @@ export function controlledOpenRouterApi() {
     calls.push({ kind: "chat", stage: record.stage });
     await api.onChat?.(record);
     const reply = replies.chat.shift();
-    if (reply) return answer(reply);
+    if (reply) return answer(reply, init?.signal);
     const output = outputs[record.stage].shift()
       ?? (record.stage === "synthesis" ? { ...overviewOutputForUrls(urls), similarityInputs: { gameplay: ["Flexible combat builds"] } } : extractionOutput());
     return Response.json({

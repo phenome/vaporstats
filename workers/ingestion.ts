@@ -59,6 +59,8 @@ export interface IngestionTickOptions {
   geminiApiKey?: string;
   /** The OpenRouter key that text generation (extraction and Overviews) uses. */
   openRouterApiKey?: string;
+  /** How long one OpenRouter request may take before its outcome becomes unknown. */
+  openRouterTimeoutMs?: number;
   /** How many paid media items each provider may take from the queue per tick. */
   paidSubmissionsPerTick?: number;
   /** How long one tick may spend taking paid media items from the queue. */
@@ -268,6 +270,7 @@ async function performIngestionTick(options: IngestionTickOptions): Promise<Inge
       ...(pendingMediaProcessing ? { runId: pendingMediaProcessing.run_id } : {}),
       geminiApiKey: options.geminiApiKey ?? process.env.GEMINI_API_KEY,
       openRouterApiKey: options.openRouterApiKey ?? process.env.OPENROUTER_API_KEY,
+      openRouterTimeoutMs: options.openRouterTimeoutMs,
       submissionsPerTick: options.paidSubmissionsPerTick,
       paidWorkTimeBudgetMs: options.paidWorkTimeBudgetMs,
       paidWorkClock: options.paidWorkClock,
@@ -278,6 +281,7 @@ async function performIngestionTick(options: IngestionTickOptions): Promise<Inge
   } else {
     await runIdleDailyCreditCheck(options.db, anchorTime, {
       openRouterApiKey: options.openRouterApiKey ?? process.env.OPENROUTER_API_KEY,
+      openRouterTimeoutMs: options.openRouterTimeoutMs,
       providerFetch: customFetch,
     });
   }

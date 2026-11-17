@@ -651,16 +651,16 @@ async function countOutputs(db: AppDatabase, runId: number, outcome: keyof typeo
 
 /**
  * The request key `runId` queues the work identified by `baseKey` under.
- * Work that was refused, failed, or went stale under an earlier run is
- * retried under a key of this run's own; such an outcome in this run is
- * final for the run, so only a later correction run re-attempts it. Work a
- * retained row reserved but never submitted is also queued under a key of
- * this run's own, so the retained row stays history.
+ * Work that was refused, failed, went stale, or became uncertain under an
+ * earlier run is retried under a key of this run's own; such an outcome in
+ * this run is final for the run, so only a later correction run re-attempts
+ * it. Work a retained row reserved but never submitted is also queued under
+ * a key of this run's own, so the retained row stays history.
  */
 async function runRequestKey(db: AppDatabase, baseKey: string, runId: number): Promise<string> {
   const base = await first<{ run_id: number; status: JobRow["status"]; retained: number }>(db, "SELECT run_id, status, retained FROM media_processing_jobs WHERE request_key = ?", baseKey);
   const unsubmittedHistory = base?.retained === 1 && base.status === "reserved";
-  const endedEarlier = base !== null && base.run_id !== runId && (base.status === "failed" || base.status === "stale" || base.status === "refused");
+  const endedEarlier = base !== null && base.run_id !== runId && (base.status === "failed" || base.status === "stale" || base.status === "refused" || base.status === "uncertain");
   return unsubmittedHistory || endedEarlier ? `${baseKey}:retry:${runId}` : baseKey;
 }
 
@@ -1741,9 +1741,10 @@ async function takeExtractionTurn(advance: QueueAdvance, job: JobRow): Promise<b
     });
     return true;
   }
-  // The same input already in flight or extracted under another item needs
-  // no second request.
-  const duplicate = await first<{ id: number }>(db, "SELECT id FROM media_processing_jobs WHERE id <> ? AND stage = 'extraction' AND source_id = ? AND input_identity = ? AND status IN ('submitted', 'uncertain', 'succeeded') LIMIT 1", job.id, source.id, identity);
+  // The same input in a submitted batch or extracted under another item
+  // needs no second request. An uncertain request of the same input does not
+  // count: only a correction set takes its source again, to resend it.
+  const duplicate = await first<{ id: number }>(db, "SELECT id FROM media_processing_jobs WHERE id <> ? AND stage = 'extraction' AND source_id = ? AND input_identity = ? AND status IN ('submitted', 'succeeded') LIMIT 1", job.id, source.id, identity);
   if (duplicate) {
     await resolveItemWithoutProvider(db, job);
     return true;
