@@ -341,6 +341,8 @@ export function controlledGeminiApi() {
     calls,
     /** Queues `reply` for the next request of `kind`. */
     reply(kind: GeminiCall, ...queued: GeminiReply[]) { replies[kind].push(...queued); },
+    /** Makes the API know batch `name`, accepted before the test began, of `stage`. */
+    batch(name: string, stage: "extraction" | "synthesis" | "embedding", body: unknown = {}) { batches.set(name, { key: `${stage}:${name}`, stage, body }); },
     isGeminiRequest: (url: string) => url.startsWith("https://generativelanguage.googleapis.com/"),
   };
 }

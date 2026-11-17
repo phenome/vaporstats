@@ -2,14 +2,17 @@ import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, test } from "bun:test";
 import { authorizeMediaProcessing } from "../src/lib/media-processing";
 import { handleGameDetailRequest } from "../src/routes/api.games.$appid.detail";
-import { openTestDatabase, type TestDatabase } from "./support/db";
+import { createHash } from "node:crypto";
+import { openTestDatabase, openUpgradedTestDatabase, type TestDatabase } from "./support/db";
 import {
   BALDURS_GATE,
   CYBERPUNK,
   controlledGeminiApi,
   controlledOpenRouterApi,
+  HADES_II,
   insertCompletedRun,
   insertSources,
+  insertSubmittedGeminiExtraction,
   OPENROUTER_CREDITS,
   OPENROUTER_GUARDRAIL_BUDGET,
   OPENROUTER_IN_FLIGHT_BUDGET,
@@ -20,9 +23,11 @@ import {
   oversizedArticleHtml,
   runMediaTick,
   seedApps,
+  stableJson,
   type MediaTickOptions,
   type OpenRouterReply,
 } from "./support/media";
+import { MEDIA_OUTLETS } from "../src/lib/media-discovery";
 
 const HAIKU = "anthropic/claude-haiku-5.5";
 const cleanups: Array<() => void> = [];
@@ -560,5 +565,153 @@ describe("daily OpenRouter credit check", () => {
     const resumed = await tick(database, providers, "2026-11-19T06:00:00.000Z");
     expect(resumed.mediaProcessing?.providers.openrouter).toMatchObject({ paused: false, checkOutcome: "credit_remaining" });
     expect(providers.openRouter.requests.map((request) => request.stage)).toEqual(["extraction", "synthesis"]);
+  });
+});
+
+/** The game detail the Internal website API serves for `appid`, with Media Discovery public. */
+async function gameDetail(database: TestDatabase, appid: number) {
+  process.env.MEDIA_OVERVIEW_PUBLIC = "true";
+  const response = await handleGameDetailRequest(new Request(`https://vaporstats.test/api/games/${appid}/detail`), database.db, appid);
+  expect(response.status).toBe(200);
+  return (await response.json() as { data: { mediaOverview: { statements: Array<{ sourceUrls: string[] }> } | null; mediaMatches: Array<{ dimension: string; matchedGame: { appid: number } }> } }).data;
+}
+
+const GEMINI_TEXT_MODEL = "gemini-3.1-flash-lite";
+
+/**
+ * Rewrites `appid`'s active extractions and Overview, and the links of its
+ * embeddings, as Gemini built them before text generation moved to
+ * OpenRouter: the Gemini model, with every stored identity consistent with it.
+ */
+function builtByGemini(database: TestDatabase, appid: number): void {
+  const extractions = database.native.query<{ id: number; source_id: number }, [number]>("SELECT e.id, e.source_id FROM media_article_extractions AS e JOIN media_sources AS s ON s.id = e.source_id WHERE s.appid = ? AND e.active = 1 ORDER BY e.source_id").all(appid);
+  for (const extraction of extractions) {
+    const identity = `gemini-extraction-${extraction.source_id}`;
+    database.native.prepare("UPDATE media_article_extractions SET model = ?, input_identity = ? WHERE id = ?").run(GEMINI_TEXT_MODEL, identity, extraction.id);
+    database.native.prepare("UPDATE media_sources SET processing_input_identity = ? WHERE id = ?").run(identity, extraction.source_id);
+    database.native.prepare("UPDATE media_tag_memberships SET extraction_input_identity = ? WHERE source_id = ?").run(identity, extraction.source_id);
+  }
+  const overview = database.native.query<{ id: number; input_identity: string; config_version: string }, [number]>("SELECT id, input_identity, config_version FROM media_game_overviews WHERE appid = ? AND active = 1").get(appid)!;
+  const overviewIdentity = createHash("sha256").update(stableJson({
+    stage: "synthesis",
+    appid,
+    model: GEMINI_TEXT_MODEL,
+    configVersion: overview.config_version,
+    extractions: extractions.map((extraction) => ({ sourceId: extraction.source_id, inputIdentity: `gemini-extraction-${extraction.source_id}` })),
+  })).digest("hex");
+  database.native.prepare("UPDATE media_game_overviews SET model = ?, input_identity = ? WHERE id = ?").run(GEMINI_TEXT_MODEL, overviewIdentity, overview.id);
+  database.native.prepare("UPDATE media_game_embeddings SET overview_input_identity = ? WHERE appid = ? AND overview_input_identity = ?").run(overviewIdentity, appid, overview.input_identity);
+  database.native.prepare("UPDATE media_processing_jobs SET model = ? WHERE appid = ? AND stage IN ('extraction', 'synthesis')").run(GEMINI_TEXT_MODEL, appid);
+}
+
+/** A database where Gemini built Cyberpunk 2077's extraction, Overview and embedding before the move to OpenRouter. */
+async function geminiBuiltGame() {
+  const setup = await authorizedGames();
+  const providers = apis();
+  await tick(setup.database, providers, "2026-11-18T03:00:00.000Z");
+  builtByGemini(setup.database, CYBERPUNK);
+  return { ...setup, providers, requestsBefore: providers.openRouter.requests.length, submissionsBefore: providers.gemini.submitted.length };
+}
+
+describe("cutover from Gemini text generation", () => {
+  test("Gemini text batches submitted before the move keep being polled and applied, or rejected as stale, while waiting Gemini text items move to OpenRouter", async () => {
+    const database = openUpgradedTestDatabase("0023_openrouter_text_generation", (native) => {
+      seedApps(native, [CYBERPUNK, BALDURS_GATE, HADES_II]);
+      for (const appid of [CYBERPUNK, BALDURS_GATE, HADES_II]) insertSources(native, appid, "initial", 1);
+      const runId = insertCompletedRun(native, "initial:cutover:test", [CYBERPUNK, BALDURS_GATE, HADES_II]);
+      native.prepare("INSERT INTO media_processing_authorizations (run_id, status, affected_source_ids) VALUES (?, 'waiting', '[]')").run(runId);
+      const [cyberpunk, baldursGate, hades] = native.query<{ id: number }, []>("SELECT id FROM media_sources ORDER BY id").all().map(({ id }) => id);
+      // Cyberpunk's batch still describes its article; Baldur's Gate's article changed after its batch was submitted.
+      insertSubmittedGeminiExtraction(native, { runId, sourceId: cyberpunk!, batch: "batches/pre-1" });
+      insertSubmittedGeminiExtraction(native, { runId, sourceId: baldursGate!, batch: "batches/pre-2" });
+      native.prepare("UPDATE media_sources SET processing_input_identity = 'changed-since-submission' WHERE id = ?").run(baldursGate!);
+      // Hades II's extraction waited in the Gemini queue, with Gemini backoff.
+      native.prepare(
+        `INSERT INTO media_processing_jobs (run_id, stage, appid, source_id, request_key, input_identity, model, config_version, max_input_tokens, max_output_tokens, reserved_microusd, reservation_active, status, provider, enqueued_at, attempt_count, next_attempt_at, error, usage_json)
+         VALUES (?, 'extraction', ?, ?, ?, ?, 'gemini-3.1-flash-lite', 'media-extraction-2026-09-13-v3', 0, 1200, 0, 0, 'queued', 'gemini', '2026-11-10T00:00:00.000Z', 3, '2026-11-30T00:00:00.000Z', 'transient:http_503', '{}')`,
+      ).run(runId, HADES_II, hades!, `extraction:${hades}:run:${runId}`, `source:${hades}`);
+      native.prepare("UPDATE media_sources SET processing_run_id = ? WHERE id = ?").run(runId, hades!);
+    });
+    cleanups.push(database.cleanup);
+    expect(database.native.query("SELECT stage, provider, model, status, attempt_count, next_attempt_at, error FROM media_processing_jobs ORDER BY id").all()).toEqual([
+      { stage: "extraction", provider: "gemini", model: GEMINI_TEXT_MODEL, status: "submitted", attempt_count: 0, next_attempt_at: null, error: null },
+      { stage: "extraction", provider: "gemini", model: GEMINI_TEXT_MODEL, status: "submitted", attempt_count: 0, next_attempt_at: null, error: null },
+      { stage: "extraction", provider: "openrouter", model: HAIKU, status: "queued", attempt_count: 0, next_attempt_at: null, error: null },
+    ]);
+    const providers = apis();
+    providers.gemini.batch("batches/pre-1", "extraction");
+    providers.gemini.batch("batches/pre-2", "extraction");
+
+    const drained = await tick(database, providers, "2026-11-18T03:00:00.000Z");
+
+    expect(database.native.query("SELECT appid, stage, provider, model, status FROM media_processing_jobs WHERE stage IN ('extraction', 'synthesis') ORDER BY id").all()).toEqual([
+      { appid: CYBERPUNK, stage: "extraction", provider: "gemini", model: GEMINI_TEXT_MODEL, status: "succeeded" },
+      { appid: BALDURS_GATE, stage: "extraction", provider: "gemini", model: GEMINI_TEXT_MODEL, status: "stale" },
+      { appid: HADES_II, stage: "extraction", provider: "openrouter", model: HAIKU, status: "succeeded" },
+      { appid: CYBERPUNK, stage: "synthesis", provider: "openrouter", model: HAIKU, status: "succeeded" },
+      { appid: HADES_II, stage: "synthesis", provider: "openrouter", model: HAIKU, status: "succeeded" },
+    ]);
+    expect(database.native.query("SELECT s.appid, e.model FROM media_article_extractions AS e JOIN media_sources AS s ON s.id = e.source_id WHERE e.active = 1 ORDER BY s.appid").all()).toEqual([
+      { appid: CYBERPUNK, model: GEMINI_TEXT_MODEL },
+      { appid: HADES_II, model: HAIKU },
+    ]);
+    // No text is submitted to Gemini; only embeddings are.
+    expect(providers.gemini.submitted.every((key) => key.startsWith("embedding:"))).toBe(true);
+    expect(providers.openRouter.requests.map((request) => request.stage).sort()).toEqual(["extraction", "synthesis", "synthesis"]);
+    expect(database.native.query("SELECT COUNT(*) AS count FROM media_processing_jobs WHERE status = 'submitted' AND stage IN ('extraction', 'synthesis')").get()).toEqual({ count: 0 });
+    expect(drained.mediaProcessing?.outputs.skipped).toBe(1);
+    expect((await gameDetail(database, CYBERPUNK)).mediaOverview).not.toBeNull();
+  });
+
+  test("existing Gemini extractions and Overviews stay active, and the model change queues no work, even for a correction set", async () => {
+    const { database, providers, requestsBefore, submissionsBefore } = await geminiBuiltGame();
+    const overviewBefore = database.native.query("SELECT id, model, input_identity FROM media_game_overviews WHERE active = 1").all();
+
+    await authorizeMediaProcessing(database.db, insertCompletedRun(database.native, "initial:openrouter:rerun", [CYBERPUNK]));
+    await tick(database, providers, "2026-11-18T04:00:00.000Z");
+    const sourceIds = database.native.query<{ id: number }, []>("SELECT id FROM media_sources").all().map(({ id }) => id);
+    await authorizeMediaProcessing(database.db, insertCompletedRun(database.native, "initial:openrouter:correction", [CYBERPUNK]), { affectedSourceIds: sourceIds });
+    const corrected = await tick(database, providers, "2026-11-18T04:15:00.000Z");
+
+    expect(providers.openRouter.requests).toHaveLength(requestsBefore);
+    expect(providers.gemini.submitted).toHaveLength(submissionsBefore);
+    expect(corrected.mediaProcessing?.queued).toEqual({ gemini: 0, openrouter: 0 });
+    expect(database.native.query("SELECT id, model, input_identity FROM media_game_overviews WHERE active = 1").all()).toEqual(overviewBefore);
+    expect(database.native.query("SELECT model FROM media_article_extractions WHERE active = 1").all()).toEqual([{ model: GEMINI_TEXT_MODEL }]);
+    expect((await gameDetail(database, CYBERPUNK)).mediaOverview?.statements[0]?.sourceUrls).toEqual(sourceUrls(database));
+  });
+
+  test("an Overview built from a mix of Gemini and Haiku extractions synthesizes and serves correctly", async () => {
+    const { database, providers, requestsBefore } = await geminiBuiltGame();
+    insertSources(database.native, CYBERPUNK, "initial", 1, MEDIA_OUTLETS[1]);
+    const [geminiUrl, haikuUrl] = sourceUrls(database);
+    await authorizeMediaProcessing(database.db, insertCompletedRun(database.native, "initial:openrouter:new-source", [CYBERPUNK]));
+
+    await tick(database, providers, "2026-11-18T04:00:00.000Z");
+
+    expect(providers.openRouter.requests.slice(requestsBefore).map((request) => request.stage)).toEqual(["extraction", "synthesis"]);
+    expect(providers.openRouter.requests.at(-1)!.urls.sort()).toEqual([geminiUrl!, haikuUrl!].sort());
+    expect(database.native.query("SELECT s.original_url, e.model FROM media_article_extractions AS e JOIN media_sources AS s ON s.id = e.source_id WHERE e.active = 1 ORDER BY s.id").all()).toEqual([
+      { original_url: geminiUrl, model: GEMINI_TEXT_MODEL },
+      { original_url: haikuUrl, model: HAIKU },
+    ]);
+    expect(database.native.query("SELECT model FROM media_game_overviews WHERE active = 1").all()).toEqual([{ model: HAIKU }]);
+    expect((await gameDetail(database, CYBERPUNK)).mediaOverview?.statements[0]?.sourceUrls.sort()).toEqual([geminiUrl!, haikuUrl!].sort());
+  });
+
+  test("embeddings stay on gemini-embedding-2 at 3,072 dimensions, and a vector stored before the move and a new one match in live matching", async () => {
+    const { database, providers } = await geminiBuiltGame();
+    seedApps(database.native, [BALDURS_GATE]);
+    insertSources(database.native, BALDURS_GATE, "initial", 1);
+    await authorizeMediaProcessing(database.db, insertCompletedRun(database.native, "initial:openrouter:second-game", [BALDURS_GATE]));
+
+    await tick(database, providers, "2026-11-18T04:00:00.000Z");
+
+    expect(database.native.query("SELECT appid, model, dimensions, length(vector) AS bytes FROM media_game_embeddings WHERE active = 1 ORDER BY appid").all()).toEqual([
+      { appid: BALDURS_GATE, model: "gemini-embedding-2", dimensions: 3072, bytes: 3072 * 4 },
+      { appid: CYBERPUNK, model: "gemini-embedding-2", dimensions: 3072, bytes: 3072 * 4 },
+    ]);
+    expect((await gameDetail(database, BALDURS_GATE)).mediaMatches.map((match) => match.matchedGame.appid)).toEqual([CYBERPUNK]);
+    expect((await gameDetail(database, CYBERPUNK)).mediaMatches.map((match) => match.matchedGame.appid)).toEqual([BALDURS_GATE]);
   });
 });
