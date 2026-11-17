@@ -16,7 +16,7 @@ An ordinary chat completion is answered while the request is open. A request tha
 
 **Request lifecycle.** Before sending, the item is marked in flight, with its input identity and send time, in a committed write. No write transaction is open while a request is in flight. The answer is applied in one short transaction that records the result, `usage.cost` as provider-reported cost (one credit taken as US$1), token usage, the generation id, and the routed provider and model. A request whose outcome is unknown leaves its item **uncertain**: a client timeout, a connection lost after sending, or an item found in flight when an advance starts, since advances never overlap and so only a stopped process leaves one. An uncertain item is reported in the uncertain count and is never resent automatically; a correction set that covers it queues it again. A connection failure before the request was fully sent (DNS, connect, or TLS) is transient. An uncertain extraction does not hold back its game's Overview, which is built from the other current extractions.
 
-**Input cap.** No OpenRouter token count exists for Anthropic models, so input is capped by a conservative local estimate: a request's UTF-8 message bytes divided by three, at most 60,000, well below the 100K-token prompt size up to which the documented price applies. Over the cap is a definite refusal, made before sending.
+**Input cap.** No OpenRouter token count exists for Anthropic models, so input is capped by a conservative local estimate: a request's UTF-8 message bytes divided by three, at most 60,000, well below the 100K-token prompt size up to which the documented price applies. Over the cap is a definite refusal, made before sending and recorded as `input_token_cap`. The cleaned article is never shortened to fit, so no extraction is made from part of an article.
 
 **One OpenRouter classifier.** Every OpenRouter answer, including the key check, is classified in one place:
 
@@ -44,4 +44,5 @@ OpenRouter answers 200 once a provider has accepted the request, and prompt proc
 - A lost answer costs at most one request and is visible in the uncertain count; resending it is a deliberate correction.
 - Text results settle within the tick that sends them, so a game's extractions, Overview and embedding submission can all happen in one tick.
 - The local estimate refuses some inputs a real count would accept, mainly long non-Latin articles; such articles are reported as `input_token_cap`.
+- Cleanup used to cut an article's text at 120,000 characters. An article longer than that now has a different content hash, so a run that takes its source again extracts it from its whole text, or refuses it as `input_token_cap`.
 - OpenRouter's key limit and budgets are the spending authority for text generation, as the Google project's billing is for embeddings.

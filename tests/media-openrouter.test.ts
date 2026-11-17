@@ -589,6 +589,34 @@ describe("input cap", () => {
     // Actual token usage comes from the provider.
     expect(database.native.query("SELECT usage_json FROM media_processing_jobs WHERE status = 'succeeded' AND stage = 'extraction'").get()).toEqual({ usage_json: JSON.stringify({ promptTokens: 1_000, completionTokens: 100 }) });
   });
+
+  /** An article of `characters` characters of plain text, whose last words are `ending`. */
+  const longArticle = (characters: number, ending: string) => {
+    const sentence = "The campaign rewards careful build experimentation across its systems. ";
+    const body = sentence.repeat(Math.ceil(characters / sentence.length)).slice(0, characters - ending.length) + ending;
+    return `<!doctype html><html><body><article><h1>Cyberpunk 2077 Review</h1><p>${body}</p></article></body></html>`;
+  };
+
+  test("a long article under the cap is sent whole, never cut short", async () => {
+    const { database } = await authorizedGames();
+    const providers = apis();
+
+    await tick(database, providers, "2026-11-18T07:00:00.000Z", { outlet: () => new Response(longArticle(150_000, "Closing verdict marker.")) });
+
+    expect(textJobs(database).map(({ stage, status }) => ({ stage, status }))).toEqual([{ stage: "extraction", status: "succeeded" }, { stage: "synthesis", status: "succeeded" }]);
+    expect(JSON.stringify(providers.openRouter.requests[0]!.body.messages)).toContain("Closing verdict marker.");
+  });
+
+  test("an article over the cap is refused as input_token_cap with the reason recorded, never sent cut short", async () => {
+    const { database } = await authorizedGames();
+    const providers = apis();
+
+    const result = await tick(database, providers, "2026-11-18T07:00:00.000Z", { outlet: () => new Response(longArticle(200_000, "Closing verdict marker.")) });
+
+    expect(textJobs(database).map(({ stage, status, error }) => ({ stage, status, error }))).toEqual([{ stage: "extraction", status: "refused", error: "input_token_cap" }]);
+    expect(result.mediaProcessing?.stopReasons).toContain("input_token_cap");
+    expect(providers.openRouter.requests).toHaveLength(0);
+  });
 });
 
 /** A current-key answer: the key's remaining limit and its budgets. */

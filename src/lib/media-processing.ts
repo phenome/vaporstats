@@ -87,7 +87,6 @@ const OPENROUTER_MAX_INPUT_TOKENS = 60_000;
  */
 const ESTIMATE_BYTES_PER_TOKEN = 3;
 const MAX_EMBEDDING_INPUT_TOKENS = 8_192;
-const MAX_ARTICLE_CHARS = 120_000;
 const MAX_REDIRECTS = 5;
 const MAX_ERROR_LENGTH = 256;
 const SIMILARITY_DIMENSIONS = ["gameplay", "story_world"] as const;
@@ -437,6 +436,11 @@ function cleanLine(value: string): string {
   return value.replace(/[\t ]+/g, " ").replace(/\s+([,.;!?])/g, "$1").trim();
 }
 
+/**
+ * The article's readable text and its hash. The whole text is kept: the
+ * per-request input cap alone decides whether it can be sent, so an article
+ * is never extracted from a silently shortened text.
+ */
 function cleanArticle(html: string): { content: string; hash: string } | null {
   let document: Document;
   try { document = parseHTML(html).document as unknown as Document; } catch { return null; }
@@ -446,7 +450,7 @@ function cleanArticle(html: string): { content: string; hash: string } | null {
     const readable = new Readability(document).parse() as { content?: string; textContent?: string } | null;
     if (readable?.content) root = parseHTML(`<!doctype html><html><body>${readable.content}</body></html>`).document.body;
     if (!root && readable?.textContent) {
-      const text = readable.textContent.split(/\n+/).map(cleanLine).filter(Boolean).join("\n").slice(0, MAX_ARTICLE_CHARS);
+      const text = readable.textContent.split(/\n+/).map(cleanLine).filter(Boolean).join("\n");
       return text.length >= 120 ? { content: text, hash: sha256(text) } : null;
     }
   } catch { /* article fallback below */ }
@@ -460,7 +464,7 @@ function cleanArticle(html: string): { content: string; hash: string } | null {
     if (lines[lines.length - 1] !== line) lines.push(line);
   }
   if (lines.length === 0) lines.push(...(root.textContent ?? "").split(/\n+/).map(cleanLine).filter(Boolean));
-  const content = lines.join("\n").slice(0, MAX_ARTICLE_CHARS);
+  const content = lines.join("\n");
   return content.length >= 120 ? { content, hash: sha256(content) } : null;
 }
 
