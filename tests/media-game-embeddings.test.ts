@@ -337,7 +337,7 @@ describe("game overview aggregate embeddings", () => {
     expect(transport.embeddingSubmissions).toEqual([]);
   });
 
-  test.each<[Refusal, number]>([["token count", 2], ["token cap", 2], ["allowance", 1]])("counts each embedding refused by its %s as skipped once and does not retry it in the run", async (refusal, refusals) => {
+  test.each<[Refusal, number]>([["token cap", 2], ["allowance", 1]])("counts each embedding refused by its %s as skipped once and does not retry it in the run", async (refusal, refusals) => {
     const value = fixture();
     const transport = new ControlledGeminiTransport({ embeddings: true });
     const embeddingCounts = refuseRequests(transport, value.native, (model) => model.includes("embedding"), refusal, APPID);
@@ -352,6 +352,28 @@ describe("game overview aggregate embeddings", () => {
 
     expect(embeddingCounts()).toBe(refusals);
     expect(refused.outputs).toEqual({ new: 2, reused: 0, replaced: 0, invalidated: 0, skipped: refusals });
+  });
+
+  test("retries an embedding whose token count throws on the run's next advance instead of refusing it", async () => {
+    const value = fixture();
+    const transport = new ControlledGeminiTransport({ embeddings: true });
+    const embeddingCounts = refuseRequests(transport, value.native, (model) => model.includes("embedding"), "token count", APPID);
+    await authorizeMediaProcessing(value.db, value.runId);
+    transport.nextPolls.push(
+      { state: "succeeded", output: extractionOutput(), usage: { inputTokens: 100, outputTokens: 20 } },
+      { state: "succeeded", output: overviewOutput(), usage: { inputTokens: 100, outputTokens: 20 } },
+    );
+    await advance(value, transport);
+    const failed = await advance(value, transport);
+    delete (transport as Partial<ControlledGeminiTransport>).countTokens;
+    const retried = await advance(value, transport);
+
+    expect(embeddingCounts()).toBe(2);
+    expect(failed.status).toBe("waiting");
+    expect(failed.stopReasons).toEqual(["count_tokens:token counting unavailable"]);
+    expect(failed.outputs.skipped).toBe(0);
+    expect(retried.submitted).toBe(2);
+    expect(transport.embeddingSubmissions).toHaveLength(2);
   });
 
   test("keeps aggregate reservations within the shared five-dollar bound", async () => {

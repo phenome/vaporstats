@@ -21,7 +21,7 @@ import {
   insertSources,
   overviewOutputForUrls,
   processingArticleHtml,
-  REFUSALS,
+  DEFINITE_REFUSALS,
   refuseRequests,
   type Refusal,
   seedApps,
@@ -358,7 +358,7 @@ describe("processing scope", () => {
     expect(resumed.outputs).toEqual({ new: 0, reused: 0, replaced: 0, invalidated: 0, skipped: 1 });
   });
 
-  test.each<Refusal>([...REFUSALS])("an Overview refused by its %s counts as skipped once and is not retried by the run", async (refusal) => {
+  test.each<Refusal>([...DEFINITE_REFUSALS])("an Overview refused by its %s counts as skipped once and is not retried by the run", async (refusal) => {
     const database = unprocessedGame();
     const runId = await authorizeRun(database, "overview-refused");
     const transport = new ControlledGeminiTransport();
@@ -371,6 +371,32 @@ describe("processing scope", () => {
     expect(refused.outputs).toEqual({ new: 1, reused: 0, replaced: 0, invalidated: 0, skipped: 1 });
     expect(synthesisCounts()).toBe(1);
     expect(resumed.outputs).toEqual({ new: 1, reused: 0, replaced: 0, invalidated: 0, skipped: 1 });
+  });
+
+  test("an Overview whose token count throws is retried on the run's next advance, not refused", async () => {
+    const database = unprocessedGame();
+    const runId = await authorizeRun(database, "overview-count-throws");
+    const transport = new ControlledGeminiTransport();
+    const synthesisCounts = refuseRequests(transport, database.native, (_model, request) => JSON.stringify(request).includes("Synthesize"), "token count", CYBERPUNK);
+    transport.nextPolls.push({ state: "succeeded", output: extractionOutput(), usage: SUCCEEDED_USAGE });
+
+    const failed = await advanceMediaProcessing(database.db, { runId, transport, articleFetch: outletArticles().articleFetch, now: new Date("2026-11-02T00:00:00.000Z"), ...PAID });
+    const stillFailing = await advanceMediaProcessing(database.db, { runId, transport, articleFetch: outletArticles().articleFetch, now: new Date("2026-11-02T00:01:00.000Z"), ...PAID });
+    delete (transport as Partial<ControlledGeminiTransport>).countTokens;
+    transport.nextPolls.push({ state: "succeeded", output: overviewOutputForUrls(sourceUrls(database)), usage: SUCCEEDED_USAGE });
+    const retried = await advanceMediaProcessing(database.db, { runId, transport, articleFetch: outletArticles().articleFetch, now: new Date("2026-11-02T00:02:00.000Z"), ...PAID });
+    const settled = await advanceMediaProcessing(database.db, { runId, transport, articleFetch: outletArticles().articleFetch, now: new Date("2026-11-02T00:03:00.000Z"), ...PAID });
+
+    expect(synthesisCounts()).toBe(2);
+    for (const summary of [failed, stillFailing]) {
+      expect(summary.status).toBe("waiting");
+      expect(summary.stopReasons).toEqual(["count_tokens:token counting unavailable"]);
+      expect(summary.outputs.skipped).toBe(0);
+    }
+    expect(retried.submitted).toBe(1);
+    expect(settled.status).toBe("completed");
+    expect(settled.outputs).toEqual({ new: 2, reused: 0, replaced: 0, invalidated: 0, skipped: 0 });
+    expect(await getMediaOverview(database.db, CYBERPUNK, { includeUnpublished: true })).not.toBeNull();
   });
 
   test("a run that completes keeps the reason a game was left without an Overview", async () => {

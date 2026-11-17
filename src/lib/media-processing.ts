@@ -580,9 +580,10 @@ async function countOutputs(db: AppDatabase, runId: number, outcome: keyof typeo
 }
 
 /**
- * Records that `runId` refused `requestKey` before submission (a failed token
- * count, the input-token cap or the allowance) and counts it skipped, once. A
- * refused request is final for the run.
+ * Records that `runId` definitely refused `requestKey` before submission (the
+ * input-token cap or the allowance) and counts it skipped, once. A refused
+ * request is final for the run only; a later run whose scope covers it tries
+ * it again.
  */
 async function refuseRequest(db: AppDatabase, runId: number, requestKey: string): Promise<void> {
   await transaction(db, async () => {
@@ -1295,9 +1296,10 @@ async function scheduleEmbeddings(
       if ((priorJob && priorJob.status !== "reserved") || await refusedInRun(db, runId, requestKey)) continue;
       const request = makeEmbeddingRequest(input);
       let tokenCount: number;
+      // A token count that throws is transient: the run retries it on its
+      // next advance instead of refusing the request.
       try { tokenCount = await transport.countTokens(GEMINI_EMBEDDING_MODEL, request); }
       catch (error) {
-        await refuseRequest(db, runId, requestKey);
         stopReason ??= `count_tokens:${boundedError(error, secret)}`;
         continue;
       }
@@ -1554,9 +1556,10 @@ async function advanceMediaProcessingNow(db: AppDatabase, options: MediaProcessi
     if ((existing && existing.status !== "reserved") || await refusedInRun(db, auth.run_id, requestKey)) continue;
     const request = makeSynthesisRequest(appid, game?.name ?? "", appExtractions, appSources);
     let tokenCount: number;
+    // A token count that throws is transient: the run retries it on its next
+    // advance instead of refusing the request.
     try { tokenCount = await transport.countTokens(GEMINI_MEDIA_MODEL, request); }
     catch (error) {
-      await refuseRequest(db, auth.run_id, requestKey);
       stopReason ??= `count_tokens:${boundedError(error, options.geminiApiKey)}`;
       continue;
     }

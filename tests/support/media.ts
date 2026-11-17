@@ -111,6 +111,8 @@ export class ControlledGeminiTransport implements GeminiBatchTransport {
 /** Ways a request can be refused before submission. */
 export const REFUSALS = ["token count", "token cap", "allowance"] as const;
 export type Refusal = (typeof REFUSALS)[number];
+/** Refusals that are final for the run; a token count that throws is transient and retried. */
+export const DEFINITE_REFUSALS = ["token cap", "allowance"] as const satisfies readonly Refusal[];
 
 /**
  * Makes `transport` refuse every request that `matches` selects with
