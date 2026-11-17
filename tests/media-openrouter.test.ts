@@ -715,3 +715,44 @@ describe("cutover from Gemini text generation", () => {
     expect((await gameDetail(database, CYBERPUNK)).mediaMatches.map((match) => match.matchedGame.appid)).toEqual([BALDURS_GATE]);
   });
 });
+
+describe("credentials and private details", () => {
+  test("the OpenRouter key, host addresses and article bodies stay out of logs, summaries and recorded errors", async () => {
+    const { database } = await authorizedGames({ [CYBERPUNK]: 3 });
+    const providers = apis();
+    const leak = "for key test-openrouter-key at openrouter.ai (104.18.2.115)";
+    providers.openRouter.reply(
+      "chat",
+      { network: `connect ECONNREFUSED ${leak}`, code: "ECONNREFUSED" },
+      { network: `socket hang up ${leak}` },
+      { status: 400, body: { error: { code: 400, message: `Invalid request ${leak}` } } },
+      { status: 401, body: { error: { code: 401, message: `User not found ${leak}` } } },
+    );
+    providers.openRouter.reply("key", { status: 503, body: { error: { code: 503, message: `unavailable ${leak}` } } });
+    const logged: string[] = [];
+    const log = console.log;
+    const error = console.error;
+    console.log = (...values: unknown[]) => { logged.push(values.map(String).join(" ")); };
+    console.error = (...values: unknown[]) => { logged.push(values.map(String).join(" ")); };
+    const results: unknown[] = [];
+    try {
+      for (const at of ["2026-11-18T07:00:00.000Z", "2026-11-18T07:15:00.000Z"]) results.push(await tick(database, providers, at));
+    } finally {
+      console.log = log;
+      console.error = error;
+    }
+
+    // Every failure class above was recorded.
+    expect(textJobs(database).map(({ status }) => status).sort()).toEqual(["queued", "refused", "uncertain"]);
+    expect((results[1] as { mediaProcessing: { providers: { openrouter: { reason: string } } } }).mediaProcessing.providers.openrouter.reason).toBe("invalid_key");
+    const recorded = JSON.stringify([
+      logged,
+      results,
+      database.native.query("SELECT error, usage_json, output_json FROM media_processing_jobs").all(),
+      database.native.query("SELECT value FROM checkpoints WHERE key LIKE 'media:%'").all(),
+    ]);
+    for (const secret of ["test-openrouter-key", "openrouter.ai", "104.18.2.115", "flexible combat and memorable encounters"]) {
+      expect(recorded).not.toContain(secret);
+    }
+  });
+});
