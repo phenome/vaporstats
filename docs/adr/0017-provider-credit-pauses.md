@@ -26,7 +26,7 @@ Paid media work (article extraction, Overview synthesis and embeddings) ran unde
 
 **Cost is reported, never enforced.** Each settled item records its cost and its source. Gemini cost is returned token usage at the documented batch price, marked as estimated. Processing summaries and the tick log report month-to-date (UTC calendar month) and all-time cost per provider, labeled reporting-only, plus the uncertain count.
 
-**Retired accounting is kept as history.** Existing paid-job rows keep their reserved amounts, reservation flags, settled charges and statuses. Retained uncertain jobs stay uncertain, and their reservations do not count as cost. Retained `reserved` rows wait in the queue like new items.
+**Retired accounting is kept as history.** Existing paid-job rows keep their reserved amounts, reservation flags, settled charges and statuses. Retained uncertain jobs stay uncertain, and their reservations do not count as cost. The queue migration marks every row it carries over as retained, and the queue never deletes, submits or requeues a retained row, whether or not its input still matches current work: a retained `reserved` row was never authorized under the queue. An open authorization queues that work as a new item of its own. A batch a retained row already submitted is still polled and settled; if the provider ended it without output, the row ends `stale` rather than returning to the queue.
 
 ## Consequences
 

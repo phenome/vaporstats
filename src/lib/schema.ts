@@ -1087,6 +1087,12 @@ export const mediaProcessingJobs = sqliteTable(
     attemptCount: integer("attempt_count").notNull().default(0),
     /** The earliest time a waiting item may be submitted again; null while it is ready. */
     nextAttemptAt: text("next_attempt_at"),
+    /**
+     * 1 for a row written before the paid-work queue existed. Such a row is
+     * history: it is never deleted, never submitted, and never returned to
+     * the queue; only a batch it already submitted is still polled.
+     */
+    retained: integer("retained").notNull().default(0),
     /** How `charged_microusd` was obtained, for reporting only: `estimated` from token usage or `provider_reported`. */
     costSource: text("cost_source"),
     providerBatchId: text("provider_batch_id"),
@@ -1103,10 +1109,12 @@ export const mediaProcessingJobs = sqliteTable(
     uniqueIndex("uq_media_processing_jobs_provider_batch").on(table.providerBatchId),
     index("idx_media_processing_jobs_authorization").on(table.runId, table.status),
     index("idx_media_processing_jobs_queue").on(table.provider, table.status, table.appid, table.enqueuedAt),
-    // `reserved` and `failed` are kept for rows written under the retired
-    // lifetime allowance; new work is `queued` and ends `refused`, never failed.
+    // `reserved` and `failed` are kept for retained rows written under the
+    // retired lifetime allowance; new work is `queued` and ends `refused`,
+    // never failed.
     check("media_processing_jobs_status_check", sql`${table.status} IN ('queued', 'reserved', 'submitted', 'succeeded', 'failed', 'refused', 'uncertain', 'stale')`),
     check("media_processing_jobs_attempt_check", sql`${table.attemptCount} >= 0`),
+    check("media_processing_jobs_retained_check", sql`${table.retained} IN (0, 1)`),
     check("media_processing_jobs_cost_source_check", sql`${table.costSource} IS NULL OR ${table.costSource} IN ('estimated', 'provider_reported')`),
     check("media_processing_jobs_dimension_check", sql`${table.dimension} IS NULL OR ${table.dimension} IN ('gameplay', 'story_world')`),
     check("media_processing_jobs_reservation_check", sql`${table.reservationActive} IN (0, 1)`),

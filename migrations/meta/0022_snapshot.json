@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "a361f303-5749-4ccf-b70c-a272a2badb2a",
+  "id": "d5434021-d539-4451-992d-d035029469f6",
   "prevId": "55f4b2b6-4c1c-4e78-9a6d-47676e8f849f",
   "tables": {
     "app_facet_memberships": {
@@ -2208,6 +2208,14 @@
           "notNull": false,
           "autoincrement": false
         },
+        "retained": {
+          "name": "retained",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 0
+        },
         "cost_source": {
           "name": "cost_source",
           "type": "text",
@@ -2369,6 +2377,10 @@
         "media_processing_jobs_attempt_check": {
           "name": "media_processing_jobs_attempt_check",
           "value": "\"media_processing_jobs\".\"attempt_count\" >= 0"
+        },
+        "media_processing_jobs_retained_check": {
+          "name": "media_processing_jobs_retained_check",
+          "value": "\"media_processing_jobs\".\"retained\" IN (0, 1)"
         },
         "media_processing_jobs_cost_source_check": {
           "name": "media_processing_jobs_cost_source_check",

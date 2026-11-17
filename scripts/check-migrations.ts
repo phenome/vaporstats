@@ -528,13 +528,14 @@ function verifyRetainedMediaRowsSurviveUpgrade(): void {
     if (JSON.stringify(claims) !== JSON.stringify(expectedClaims)) {
       throw new Error("Migrations misattributed media sources to processing runs: " + JSON.stringify(claims));
     }
-    // Retained paid jobs become queue entries without changing a stored
-    // value: Gemini work that joined the ledger when it was created, with no
-    // attempt counted and no cost source claimed for its historical charge.
+    // Retained paid jobs are described without changing a stored value:
+    // Gemini work that joined the ledger when it was created, with no
+    // attempt counted and no cost source claimed for its historical charge,
+    // marked retained so the queue never deletes, submits or requeues it.
     const queueFields = retained
-      .query<Record<string, unknown>, []>("SELECT id, provider, enqueued_at = created_at AS enqueued_at_created, attempt_count, next_attempt_at, cost_source FROM media_processing_jobs ORDER BY id")
+      .query<Record<string, unknown>, []>("SELECT id, provider, enqueued_at = created_at AS enqueued_at_created, attempt_count, next_attempt_at, cost_source, retained FROM media_processing_jobs ORDER BY id")
       .all();
-    const expectedQueueFields = [47, 59].map((id) => ({ id, provider: "gemini", enqueued_at_created: 1, attempt_count: 0, next_attempt_at: null, cost_source: null }));
+    const expectedQueueFields = [47, 59].map((id) => ({ id, provider: "gemini", enqueued_at_created: 1, attempt_count: 0, next_attempt_at: null, cost_source: null, retained: 1 }));
     if (JSON.stringify(queueFields) !== JSON.stringify(expectedQueueFields)) {
       throw new Error("Migrations misdescribed retained paid jobs as queue entries: " + JSON.stringify(queueFields));
     }

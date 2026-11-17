@@ -1,8 +1,9 @@
-import { mkdtempSync, rmSync } from "node:fs";
-import { join } from "node:path";
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
-import type { Database } from "bun:sqlite";
+import { Database } from "bun:sqlite";
 import { openSqliteAppDatabase, type AppDatabase } from "../../src/lib/db";
+import { applyMigrations } from "../../src/lib/migrations";
 
 export interface TestDatabaseHandle {
   native: Database;
@@ -25,6 +26,37 @@ export interface TestDatabase extends TestDatabaseHandle {
  */
 export function openTestDatabase(prefix = "vaporstats-test-"): TestDatabase {
   const directory = mkdtempSync(join(tmpdir(), prefix));
+  return openTestDatabaseIn(directory);
+}
+
+/**
+ * A temporary file database that held the schema before migration `tag`,
+ * was seeded there by `seed`, and was then opened through the production
+ * path, which applies `tag` and every later migration as an upgrade does.
+ */
+export function openUpgradedTestDatabase(tag: string, seed: (native: Database) => void, prefix = "vaporstats-upgrade-"): TestDatabase {
+  const directory = mkdtempSync(join(tmpdir(), prefix));
+  const migrations = resolve(import.meta.dir, "../../migrations");
+  const journal = JSON.parse(readFileSync(join(migrations, "meta", "_journal.json"), "utf8")) as { entries: Array<{ tag: string }> };
+  const index = journal.entries.findIndex((entry) => entry.tag === tag);
+  if (index < 1) throw new Error(`Migration ${tag} is missing`);
+  const baseline = join(directory, "baseline");
+  mkdirSync(join(baseline, "meta"), { recursive: true });
+  const entries = journal.entries.slice(0, index);
+  for (const entry of entries) copyFileSync(join(migrations, `${entry.tag}.sql`), join(baseline, `${entry.tag}.sql`));
+  writeFileSync(join(baseline, "meta", "_journal.json"), JSON.stringify({ ...journal, entries }));
+  const native = new Database(join(directory, "test.sqlite"));
+  try {
+    native.exec("PRAGMA foreign_keys = ON");
+    applyMigrations(native, baseline);
+    seed(native);
+  } finally {
+    native.close();
+  }
+  return openTestDatabaseIn(directory);
+}
+
+function openTestDatabaseIn(directory: string): TestDatabase {
   const databasePath = join(directory, "test.sqlite");
   const handles = [openSqliteAppDatabase(databasePath)];
   const current = () => handles[handles.length - 1]!;

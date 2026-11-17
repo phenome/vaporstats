@@ -253,7 +253,7 @@ async function performIngestionTick(options: IngestionTickOptions): Promise<Inge
   // Queued paid work advances every tick, including the daily credit check
   // that resumes a paused provider, without a new authorization.
   const queuedMediaWork = await options.db
-    .prepare("SELECT run_id FROM media_processing_jobs WHERE status IN ('queued', 'reserved', 'submitted') ORDER BY id LIMIT 1")
+    .prepare("SELECT run_id FROM media_processing_jobs WHERE status = 'submitted' OR (status = 'queued' AND retained = 0) ORDER BY id LIMIT 1")
     .first<{ run_id: number }>();
   if (pendingMediaProcessing || queuedMediaWork) {
     mediaProcessing = await advanceMediaProcessing(options.db, {

@@ -620,11 +620,15 @@ async function countOutputs(db: AppDatabase, runId: number, outcome: keyof typeo
  * The request key `runId` queues the work identified by `baseKey` under.
  * Work that was refused, failed, or went stale under an earlier run is
  * retried under a key of this run's own; such an outcome in this run is
- * final for the run, so only a later correction run re-attempts it.
+ * final for the run, so only a later correction run re-attempts it. Work a
+ * retained row reserved but never submitted is also queued under a key of
+ * this run's own, so the retained row stays history.
  */
 async function runRequestKey(db: AppDatabase, baseKey: string, runId: number): Promise<string> {
-  const base = await first<{ run_id: number; status: JobRow["status"] }>(db, "SELECT run_id, status FROM media_processing_jobs WHERE request_key = ?", baseKey);
-  return base && base.run_id !== runId && (base.status === "failed" || base.status === "stale" || base.status === "refused") ? `${baseKey}:retry:${runId}` : baseKey;
+  const base = await first<{ run_id: number; status: JobRow["status"]; retained: number }>(db, "SELECT run_id, status, retained FROM media_processing_jobs WHERE request_key = ?", baseKey);
+  const unsubmittedHistory = base?.retained === 1 && base.status === "reserved";
+  const endedEarlier = base !== null && base.run_id !== runId && (base.status === "failed" || base.status === "stale" || base.status === "refused");
+  return unsubmittedHistory || endedEarlier ? `${baseKey}:retry:${runId}` : baseKey;
 }
 
 /**
@@ -702,16 +706,21 @@ async function rebuildScopeGames(db: AppDatabase, runId: number, entities: reado
 type ExtractionRow = { id: number; source_id: number; input_identity: string; content_hash: string; cleanup_version: string; model: string; config_version: string; output_json: string; active: number };
 type JobStage = "extraction" | "embedding" | "synthesis" | "explanation";
 /**
- * A paid-work queue item. `queued` items wait for their provider; `reserved`
- * items were written under the retired lifetime allowance and wait the same
- * way. `failed` is kept only on retained rows: new work that a provider or
+ * A paid-work queue item. `queued` items wait for their provider. `reserved`
+ * and `failed` appear only on retained rows, written under the retired
+ * lifetime allowance before the queue existed: new work that a provider or
  * validation definitely refuses is `refused`.
  */
 type JobStatus = "queued" | "reserved" | "submitted" | "succeeded" | "failed" | "refused" | "uncertain" | "stale";
-type JobRow = { id: number; run_id: number; stage: JobStage; appid: number; matched_appid: number | null; dimension: SimilarityDimension | null; source_id: number | null; request_key: string; input_identity: string; model: string; config_version: string; max_input_tokens: number; max_output_tokens: number; reserved_microusd: number; charged_microusd: number | null; reservation_active: number; status: JobStatus; provider: PaidProvider; enqueued_at: string; attempt_count: number; provider_batch_id: string | null; output_json: string | null; usage_json: string; error: string | null };
-const JOB_COLUMNS = "id, run_id, stage, appid, matched_appid, dimension, source_id, request_key, input_identity, model, config_version, max_input_tokens, max_output_tokens, reserved_microusd, charged_microusd, reservation_active, status, provider, enqueued_at, attempt_count, provider_batch_id, output_json, usage_json, error";
-/** Statuses of items that wait in the queue for their provider. */
-const WAITING_STATUSES = "('queued', 'reserved')";
+type JobRow = { id: number; retained: number; run_id: number; stage: JobStage; appid: number; matched_appid: number | null; dimension: SimilarityDimension | null; source_id: number | null; request_key: string; input_identity: string; model: string; config_version: string; max_input_tokens: number; max_output_tokens: number; reserved_microusd: number; charged_microusd: number | null; reservation_active: number; status: JobStatus; provider: PaidProvider; enqueued_at: string; attempt_count: number; provider_batch_id: string | null; output_json: string | null; usage_json: string; error: string | null };
+const JOB_COLUMNS = "id, retained, run_id, stage, appid, matched_appid, dimension, source_id, request_key, input_identity, model, config_version, max_input_tokens, max_output_tokens, reserved_microusd, charged_microusd, reservation_active, status, provider, enqueued_at, attempt_count, provider_batch_id, output_json, usage_json, error";
+/**
+ * Items that wait in the queue for their provider. A retained row is history
+ * and never waits: it is never deleted, submitted or returned to the queue,
+ * whether or not its input still matches current work, and an authorized
+ * run queues that work as an item of its own.
+ */
+const WAITING = "(status = 'queued' AND retained = 0)";
 type QueueInput = {
   run_id: number;
   stage: Exclude<JobStage, "explanation">;
@@ -832,14 +841,14 @@ function noteReason(advance: QueueAdvance, runId: number, reason: string): void 
 /** Refuses `job` for its input identity with `reason`, counting it skipped once. */
 async function refuseItem(db: AppDatabase, job: JobRow, reason: string, now: Date): Promise<void> {
   await transaction(db, async () => {
-    const refused = await db.prepare(`UPDATE media_processing_jobs SET status = 'refused', error = ?, next_attempt_at = NULL, completed_at = ? WHERE id = ? AND status IN ${WAITING_STATUSES} OR (id = ? AND status = 'uncertain' AND error = 'submission in progress')`).bind(reason, now.toISOString(), job.id, job.id).run();
+    const refused = await db.prepare(`UPDATE media_processing_jobs SET status = 'refused', error = ?, next_attempt_at = NULL, completed_at = ? WHERE id = ? AND ${WAITING} OR (id = ? AND status = 'uncertain' AND error = 'submission in progress')`).bind(reason, now.toISOString(), job.id, job.id).run();
     if (refused.meta.changes === 1) await countOutputs(db, job.run_id, "skipped");
   });
 }
 
 /** Removes a waiting item whose work turned out to need no provider: it never cost anything. */
 async function resolveItemWithoutProvider(db: AppDatabase, job: JobRow): Promise<void> {
-  await db.prepare(`DELETE FROM media_processing_jobs WHERE id = ? AND status IN ${WAITING_STATUSES}`).bind(job.id).run();
+  await db.prepare(`DELETE FROM media_processing_jobs WHERE id = ? AND ${WAITING}`).bind(job.id).run();
 }
 
 /**
@@ -866,7 +875,7 @@ async function holdItem(advance: QueueAdvance, job: JobRow, outcome: Exclude<Pro
   // A transient failure, or a free request that may simply be retried.
   const failures = job.attempt_count + 1;
   const retryAt = transientRetryAt(failures, now, outcome.class === "transient" ? outcome.retryAfterMs : null);
-  await db.prepare(`UPDATE media_processing_jobs SET status = 'queued', attempt_count = ?, next_attempt_at = ?, error = ?, submitted_at = NULL WHERE id = ? AND (status IN ${WAITING_STATUSES} OR (status = 'uncertain' AND error = 'submission in progress'))`).bind(failures, retryAt.toISOString(), `transient:${outcome.reason}`, job.id).run();
+  await db.prepare(`UPDATE media_processing_jobs SET status = 'queued', attempt_count = ?, next_attempt_at = ?, error = ?, submitted_at = NULL WHERE id = ? AND (${WAITING} OR (status = 'uncertain' AND error = 'submission in progress'))`).bind(failures, retryAt.toISOString(), `transient:${outcome.reason}`, job.id).run();
   noteReason(advance, job.run_id, "transient_provider_failure");
 }
 
@@ -893,7 +902,7 @@ async function sendItem(advance: QueueAdvance, job: JobRow, model: string, reque
   if (!Number.isInteger(counted) || counted < 0 || counted > maxInputTokens) {
     return holdItem(advance, job, { class: "refusal", reason: "input_token_cap" });
   }
-  const marked = await db.prepare(`UPDATE media_processing_jobs SET status = 'uncertain', error = 'submission in progress', max_input_tokens = ?, submitted_at = ? WHERE id = ? AND status IN ${WAITING_STATUSES}`).bind(counted, now.toISOString(), job.id).run();
+  const marked = await db.prepare(`UPDATE media_processing_jobs SET status = 'uncertain', error = 'submission in progress', max_input_tokens = ?, submitted_at = ? WHERE id = ? AND ${WAITING}`).bind(counted, now.toISOString(), job.id).run();
   if (marked.meta.changes !== 1) return;
   const sending: JobRow = { ...job, max_input_tokens: counted };
   let result: { name: string } | null = null;
@@ -1186,6 +1195,19 @@ async function settleJob(db: AppDatabase, job: JobRow, result: GeminiBatchPoll &
   return persistOverview(db, job, result.output, now);
 }
 
+/**
+ * Returns the item of a batch the provider ended without running it to the
+ * queue. A retained row is never returned to the queue: it ends `stale` with
+ * its recorded values kept, and an authorized run queues its work anew.
+ */
+async function returnUnrunBatch(db: AppDatabase, job: JobRow, retry: { attemptCount: number; nextAttemptAt: string | null; error: string | null }, now: Date): Promise<void> {
+  if (job.retained === 1) {
+    await db.prepare("UPDATE media_processing_jobs SET status = 'stale', error = ?, completed_at = ? WHERE id = ? AND status = 'submitted'").bind(retry.error ?? "provider ended the batch without output", now.toISOString(), job.id).run();
+    return;
+  }
+  await db.prepare("UPDATE media_processing_jobs SET status = 'queued', provider_batch_id = NULL, submitted_at = NULL, attempt_count = ?, next_attempt_at = ?, error = ? WHERE id = ? AND status = 'submitted' AND retained = 0").bind(retry.attemptCount, retry.nextAttemptAt, retry.error, job.id).run();
+}
+
 type SubmittedPollSummary = {
   polled: Set<number>;
   succeeded: number;
@@ -1238,7 +1260,7 @@ async function pollSubmittedJobs(advance: QueueAdvance, jobs: readonly JobRow[])
         // nothing was produced, so the item waits again, with no attempt
         // counted.
         await transaction(db, async () => {
-          await db.prepare("UPDATE media_processing_jobs SET status = 'queued', provider_batch_id = NULL, submitted_at = NULL, error = NULL WHERE id = ? AND status = 'submitted'").bind(job.id).run();
+          await returnUnrunBatch(db, job, { attemptCount: job.attempt_count, nextAttemptAt: null, error: null }, now);
           await pauseProvider(db, job.provider, outcome.reason, now);
         });
         advance.paused.add(job.provider);
@@ -1249,7 +1271,7 @@ async function pollSubmittedJobs(advance: QueueAdvance, jobs: readonly JobRow[])
         // The provider ended the batch without running it: the item waits
         // again and retries with backoff.
         const failures = job.attempt_count + 1;
-        await db.prepare("UPDATE media_processing_jobs SET status = 'queued', provider_batch_id = NULL, submitted_at = NULL, attempt_count = ?, next_attempt_at = ?, error = ? WHERE id = ? AND status = 'submitted'").bind(failures, transientRetryAt(failures, now, null).toISOString(), `transient:${outcome.reason}`, job.id).run();
+        await returnUnrunBatch(db, job, { attemptCount: failures, nextAttemptAt: transientRetryAt(failures, now, null).toISOString(), error: `transient:${outcome.reason}` }, now);
         noteReason(advance, job.run_id, "transient_provider_failure");
         summary.uncertain += 1;
         continue;
@@ -1436,7 +1458,7 @@ async function isEligibleEntity(db: AppDatabase, appid: number): Promise<boolean
 }
 
 async function hasPendingExtractions(db: AppDatabase, appid: number): Promise<boolean> {
-  return (await first<{ pending: number }>(db, `SELECT 1 AS pending FROM media_processing_jobs WHERE appid = ? AND stage = 'extraction' AND status IN ('queued', 'reserved', 'submitted') LIMIT 1`, appid)) !== null;
+  return (await first<{ pending: number }>(db, `SELECT 1 AS pending FROM media_processing_jobs WHERE appid = ? AND stage = 'extraction' AND (status = 'submitted' OR ${WAITING}) LIMIT 1`, appid)) !== null;
 }
 
 /**
@@ -1453,7 +1475,7 @@ async function enqueueExtractions(advance: QueueAdvance, run: OpenAuthorization,
     await transaction(db, async () => {
       const current = await currentSource(db, source.id);
       if (!current || !inScope(current, runId, affected)) return;
-      const open = await first<{ open: number }>(db, "SELECT 1 AS open FROM media_processing_jobs WHERE run_id = ? AND source_id = ? AND stage = 'extraction' AND status IN ('queued', 'reserved', 'submitted', 'uncertain') LIMIT 1", runId, current.id);
+      const open = await first<{ open: number }>(db, `SELECT 1 AS open FROM media_processing_jobs WHERE run_id = ? AND source_id = ? AND stage = 'extraction' AND (status IN ('submitted', 'uncertain') OR ${WAITING}) LIMIT 1`, runId, current.id);
       if (!open) {
         await enqueueItem(db, { run_id: runId, stage: "extraction", appid: current.appid, source_id: current.id, request_key: `extraction:${current.id}:run:${runId}`, input_identity: `source:${current.id}`, model: GEMINI_MEDIA_MODEL, config_version: EXTRACTION_CONFIG_VERSION, max_output_tokens: EXTRACTION_MAX_OUTPUT_TOKENS }, now);
       }
@@ -1681,14 +1703,14 @@ async function submitQueuedWork(advance: QueueAdvance, probing: Set<PaidProvider
     if (!advance.transport || advance.paused.has(provider) || advance.remaining[provider] <= 0) continue;
     const ready = await rows<JobRow>(
       db,
-      `SELECT ${JOB_COLUMNS} FROM media_processing_jobs WHERE provider = ? AND status IN ${WAITING_STATUSES} AND (next_attempt_at IS NULL OR julianday(next_attempt_at) <= julianday(?)) ORDER BY julianday(enqueued_at), id`,
+      `SELECT ${JOB_COLUMNS} FROM media_processing_jobs WHERE provider = ? AND ${WAITING} AND (next_attempt_at IS NULL OR julianday(next_attempt_at) <= julianday(?)) ORDER BY julianday(enqueued_at), id`,
       provider,
       now.toISOString(),
     );
     if (ready.length === 0) continue;
     const entityOrder = await rows<{ appid: number }>(
       db,
-      `SELECT appid FROM media_processing_jobs WHERE provider = ? AND status IN ${WAITING_STATUSES} GROUP BY appid ORDER BY MIN(julianday(enqueued_at)), appid`,
+      `SELECT appid FROM media_processing_jobs WHERE provider = ? AND ${WAITING} GROUP BY appid ORDER BY MIN(julianday(enqueued_at)), appid`,
       provider,
     );
     const byEntity = new Map<number, JobRow[]>();
@@ -1733,10 +1755,10 @@ async function finishRun(advance: QueueAdvance, run: OpenAuthorization): Promise
     `SELECT COALESCE(SUM(status = 'succeeded'), 0) AS succeeded,
        COALESCE(SUM(status IN ('failed', 'refused', 'stale')), 0) AS failed,
        COALESCE(SUM(status = 'uncertain'), 0) AS uncertain,
-       COALESCE(SUM(status IN ('queued', 'reserved', 'submitted', 'uncertain')), 0) AS pending,
+       COALESCE(SUM(status IN ('submitted', 'uncertain') OR ${WAITING}), 0) AS pending,
        COUNT(*) AS jobs,
        COALESCE(SUM(status = 'failed' OR (status = 'refused' AND submitted_at IS NOT NULL)), 0) AS hard,
-       COALESCE(SUM(status IN ${WAITING_STATUSES}), 0) AS waiting
+       COALESCE(SUM(${WAITING}), 0) AS waiting
      FROM media_processing_jobs WHERE run_id = ?`,
     auth.run_id,
   );
@@ -1791,7 +1813,7 @@ async function queueReport(db: AppDatabase, now: Date): Promise<Pick<MediaProces
   const queued = {} as MediaProcessingSummary["queued"];
   const providers = {} as MediaProcessingSummary["providers"];
   for (const provider of PAID_PROVIDERS) {
-    const count = await first<{ count: number }>(db, `SELECT COUNT(*) AS count FROM media_processing_jobs WHERE provider = ? AND status IN ${WAITING_STATUSES}`, provider);
+    const count = await first<{ count: number }>(db, `SELECT COUNT(*) AS count FROM media_processing_jobs WHERE provider = ? AND ${WAITING}`, provider);
     queued[provider] = Number(count?.count ?? 0);
     providers[provider] = await providerState(db, provider);
   }
@@ -1860,7 +1882,7 @@ async function advanceMediaProcessingNow(db: AppDatabase, options: MediaProcessi
   const latestJob = await first<{ run_id: number }>(db, "SELECT run_id FROM media_processing_jobs ORDER BY id DESC LIMIT 1");
   const reconciliationRunId = globallySubmitted.at(-1)?.run_id ?? options.runId ?? latestJob?.run_id;
   if (reconciliationRunId === undefined) throw new Error("Media processing authorization not found");
-  const unresolved = await first<{ count: number }>(db, "SELECT COUNT(*) AS count FROM media_processing_jobs WHERE status IN ('queued', 'reserved', 'submitted', 'uncertain')");
+  const unresolved = await first<{ count: number }>(db, `SELECT COUNT(*) AS count FROM media_processing_jobs WHERE status IN ('submitted', 'uncertain') OR ${WAITING}`);
   const recorded = await first<{ stop_reason: string | null }>(db, "SELECT stop_reason FROM media_processing_authorizations WHERE run_id = ?", reconciliationRunId);
   return {
     runId: reconciliationRunId,

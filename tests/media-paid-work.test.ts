@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { authorizeMediaProcessing } from "../src/lib/media-processing";
 import { getMediaOverview } from "../src/lib/media-overview";
 import { runIngestionTick, type IngestionTickOptions } from "../workers/ingestion";
-import { openTestDatabase, type TestDatabase } from "./support/db";
+import { openTestDatabase, openUpgradedTestDatabase, type TestDatabase } from "./support/db";
 import {
   BALDURS_GATE,
   CYBERPUNK,
@@ -107,6 +107,70 @@ describe("retired lifetime allowance", () => {
     // The old reservation is not spend; the settled historical charge is.
     expect(result.mediaProcessing?.cost.providers.gemini.allTimeMicrousd).toBeGreaterThanOrEqual(3_000_000);
     expect(result.mediaProcessing?.cost.providers.gemini.allTimeMicrousd).toBeLessThan(5_500_000);
+  });
+});
+
+describe("retained paid-job rows", () => {
+  test("rows from before the paid-work queue are never deleted or submitted, whether or not their input still matches, while the run's work is queued anew", async () => {
+    // A reference database learns the Overview input that the game's article produces.
+    const reference = await authorizedGames();
+    await tick(reference.database, controlledGeminiApi(), "2026-11-10T03:00:00.000Z");
+    const currentSynthesis = reference.database.native.query<{ request_key: string; input_identity: string }, []>("SELECT request_key, input_identity FROM media_processing_jobs WHERE stage = 'synthesis'").get()!;
+
+    const database = openUpgradedTestDatabase("0022_paid_work_queue", (native) => {
+      seedApps(native, [CYBERPUNK]);
+      insertSources(native, CYBERPUNK, "initial", 1);
+      const runId = insertCompletedRun(native, "initial:paid-work:test", [CYBERPUNK]);
+      native.prepare("INSERT INTO media_processing_authorizations (run_id, status, affected_source_ids) VALUES (?, 'waiting', '[]')").run(runId);
+      // Reservations the retired allowance wrote and never submitted, for every stage.
+      const reserve = native.prepare("INSERT INTO media_processing_jobs (run_id, stage, appid, dimension, source_id, request_key, input_identity, model, config_version, max_input_tokens, max_output_tokens, reserved_microusd, reservation_active, status, usage_json) VALUES (?, ?, ?, ?, ?, ?, ?, 'gemini-3.1-flash-lite', 'v1', 1000, 100, ?, 1, 'reserved', '{}')");
+      reserve.run(runId, "extraction", CYBERPUNK, null, 1, "extraction:1:retired-identity", "retired-identity", 1_000);
+      reserve.run(runId, "synthesis", CYBERPUNK, null, null, `synthesis:${CYBERPUNK}:retired-identity`, "retired-identity", 2_000);
+      reserve.run(runId, "synthesis", CYBERPUNK, null, null, currentSynthesis.request_key, currentSynthesis.input_identity, 3_000);
+      reserve.run(runId, "embedding", CYBERPUNK, "gameplay", null, `embedding:${CYBERPUNK}:gameplay:${"a".repeat(64)}:retired-identity`, "retired-identity", 4_000);
+      reserve.run(runId, "explanation", CYBERPUNK, "gameplay", null, "explanation:retired", "retired-identity", 5_000);
+    });
+    cleanups.push(database.cleanup);
+    const retained = () => database.native.query<{ request_key: string }, []>("SELECT * FROM media_processing_jobs WHERE id <= 5 ORDER BY id").all();
+    const before = retained();
+    expect(before).toHaveLength(5);
+    const gemini = controlledGeminiApi();
+
+    await tick(database, gemini, "2026-11-10T03:00:00.000Z");
+    const last = await tick(database, gemini, "2026-11-10T03:15:00.000Z");
+    // Retained rows are not queue work: a later tick has no paid work to advance.
+    const idle = await tick(database, gemini, "2026-11-10T03:30:00.000Z");
+    expect(idle.mediaProcessing).toBeUndefined();
+
+    expect(retained()).toEqual(before);
+    const retainedKeys = new Set(before.map((row) => row.request_key));
+    expect(gemini.calls.filter((call) => call.kind === "submit" && retainedKeys.has(call.key!))).toEqual([]);
+    // The authorized run still does its work, under queue items of its own.
+    expect(gemini.submitted.map((key) => key.split(":")[0])).toEqual(["extraction", "synthesis", "embedding"]);
+    expect(last.mediaProcessing).toMatchObject({ status: "completed", queued: { gemini: 0 } });
+  });
+});
+
+describe("retained submitted batches", () => {
+  test("a retained batch the provider expired ends stale with its recorded values kept, and is never returned to the queue or submitted", async () => {
+    const database = openUpgradedTestDatabase("0022_paid_work_queue", (native) => {
+      seedApps(native, [CYBERPUNK]);
+      insertSources(native, CYBERPUNK, "initial", 1);
+      const runId = insertCompletedRun(native, "initial:paid-work:test", [CYBERPUNK]);
+      native.prepare("INSERT INTO media_processing_authorizations (run_id, status, affected_source_ids) VALUES (?, 'completed', '[]')").run(runId);
+      native.prepare("INSERT INTO media_processing_jobs (run_id, stage, appid, source_id, request_key, input_identity, model, config_version, max_input_tokens, max_output_tokens, reserved_microusd, reservation_active, status, provider_batch_id, usage_json, submitted_at) VALUES (?, 'extraction', ?, 1, 'extraction:1:retired-identity', 'retired-identity', 'gemini-3.1-flash-lite', 'v1', 1000, 100, 1500, 1, 'submitted', 'batches/retired-1', '{}', '2026-10-01T00:00:00.000Z')").run(runId, CYBERPUNK);
+    });
+    cleanups.push(database.cleanup);
+    const gemini = controlledGeminiApi();
+    gemini.reply("poll", { status: 200, body: { metadata: { state: "BATCH_STATE_EXPIRED" } } });
+
+    await tick(database, gemini, "2026-11-10T07:00:00.000Z");
+    await tick(database, gemini, "2026-11-10T07:15:00.000Z");
+
+    expect(database.native.query("SELECT status, provider_batch_id, reserved_microusd, reservation_active, attempt_count, next_attempt_at FROM media_processing_jobs").all()).toEqual([
+      { status: "stale", provider_batch_id: "batches/retired-1", reserved_microusd: 1500, reservation_active: 1, attempt_count: 0, next_attempt_at: null },
+    ]);
+    expect(gemini.calls.filter((call) => call.kind === "submit")).toEqual([]);
   });
 });
 
