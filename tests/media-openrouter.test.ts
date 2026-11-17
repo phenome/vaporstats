@@ -17,6 +17,7 @@ import {
   OPENROUTER_MODERATION,
   OPENROUTER_WORKSPACE_BUDGET,
   openRouterKeyLimit,
+  oversizedArticleHtml,
   runMediaTick,
   seedApps,
   type MediaTickOptions,
@@ -393,5 +394,73 @@ describe("request lifecycle", () => {
     expect(JSON.stringify(synthesis.body)).not.toContain(uncertainUrl);
     expect((await detailOverview(database, CYBERPUNK))?.statements[0]?.sourceUrls).toEqual([settledUrl]);
     expect(result.mediaProcessing?.cost.uncertain).toBe(1);
+  });
+});
+
+/** The source of every extraction request from index `from`, in request order, by the generation id each answer recorded. */
+function extractedSources(database: TestDatabase, providers: Apis, from = 0): number[] {
+  const byGeneration = new Map(database.native.query<{ generation_id: string; source_id: number }, []>("SELECT generation_id, source_id FROM media_processing_jobs WHERE stage = 'extraction' AND generation_id IS NOT NULL").all().map((row) => [row.generation_id, row.source_id]));
+  return providers.openRouter.requests.map((request, index) => ({ request, generation: `gen-${index + 1}` }))
+    .slice(from)
+    .filter(({ request }) => request.stage === "extraction")
+    .map(({ generation }) => byGeneration.get(generation)!);
+}
+
+describe("per-tick bound", () => {
+  test("a tick sends at most the configured number of requests; the rest wait for the next tick in queue order", async () => {
+    const { database } = await authorizedGames({ [CYBERPUNK]: 5 });
+    const providers = apis();
+    const sources = database.native.query<{ id: number }, []>("SELECT id FROM media_sources ORDER BY id").all().map(({ id }) => id);
+
+    const first = await tick(database, providers, "2026-11-18T07:00:00.000Z", { paidSubmissionsPerTick: 2 });
+    expect(extractedSources(database, providers)).toEqual(sources.slice(0, 2));
+    expect(first.mediaProcessing?.queued.openrouter).toBe(3);
+
+    await tick(database, providers, "2026-11-18T07:15:00.000Z", { paidSubmissionsPerTick: 2 });
+    await tick(database, providers, "2026-11-18T07:30:00.000Z", { paidSubmissionsPerTick: 2 });
+
+    expect(extractedSources(database, providers)).toEqual(sources);
+    expect(providers.openRouter.requests.map((request) => request.stage)).toEqual(["extraction", "extraction", "extraction", "extraction", "extraction", "synthesis"]);
+  });
+
+  test("a tick stops sending once its elapsed-time bound is spent; the rest wait for the next tick in queue order", async () => {
+    const { database } = await authorizedGames({ [CYBERPUNK]: 5 });
+    const providers = apis();
+    const sources = database.native.query<{ id: number }, []>("SELECT id FROM media_sources ORDER BY id").all().map(({ id }) => id);
+    // Each request takes a minute; a tick may spend two and a half.
+    let elapsed = 0;
+    providers.openRouter.onChat = () => { elapsed += 60_000; };
+    const options = { paidWorkTimeBudgetMs: 150_000, paidWorkClock: () => elapsed };
+
+    const first = await tick(database, providers, "2026-11-18T07:00:00.000Z", options);
+    expect(extractedSources(database, providers)).toEqual(sources.slice(0, 3));
+    expect(first.mediaProcessing?.queued.openrouter).toBe(2);
+    expect(textJobs(database).filter((job) => job.status === "queued").every((job) => job.attempt_count === 0 && job.next_attempt_at === null)).toBe(true);
+
+    await tick(database, providers, "2026-11-18T07:15:00.000Z", options);
+    expect(extractedSources(database, providers)).toEqual(sources);
+    expect(providers.openRouter.requests.map((request) => request.stage)).toEqual(["extraction", "extraction", "extraction", "extraction", "extraction", "synthesis"]);
+  });
+});
+
+describe("input cap", () => {
+  test("input over the cap by the conservative local estimate is refused before sending, and the output caps are sent with every request", async () => {
+    const { database } = await authorizedGames({ [CYBERPUNK]: 2 });
+    const providers = apis();
+    const [oversized] = sourceUrls(database);
+
+    const result = await tick(database, providers, "2026-11-18T07:00:00.000Z", { outlet: (url) => (url === oversized ? new Response(oversizedArticleHtml(CYBERPUNK)) : undefined) });
+
+    expect(textJobs(database).map(({ stage, status, error }) => ({ stage, status, error }))).toEqual([
+      { stage: "extraction", status: "refused", error: "input_token_cap" },
+      { stage: "extraction", status: "succeeded", error: null },
+      { stage: "synthesis", status: "succeeded", error: null },
+    ]);
+    expect(result.mediaProcessing?.stopReasons).toContain("input_token_cap");
+    expect(providers.openRouter.requests.map((request) => request.stage)).toEqual(["extraction", "synthesis"]);
+    const caps = database.native.query<{ stage: string; max_output_tokens: number }, []>("SELECT stage, max_output_tokens FROM media_processing_jobs WHERE status = 'succeeded' AND stage IN ('extraction', 'synthesis') ORDER BY id").all();
+    expect(providers.openRouter.requests.map((request) => request.body.max_tokens)).toEqual(caps.map((cap) => cap.max_output_tokens));
+    // Actual token usage comes from the provider.
+    expect(database.native.query("SELECT usage_json FROM media_processing_jobs WHERE status = 'succeeded' AND stage = 'extraction'").get()).toEqual({ usage_json: JSON.stringify({ promptTokens: 1_000, completionTokens: 100 }) });
   });
 });
