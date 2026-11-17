@@ -467,33 +467,68 @@ describe("processing scope", () => {
     await expect(authorizeMediaProcessing(database.db, runId)).resolves.toMatchObject({ runId, status: "queued" });
   });
 
-  test("a game whose Overview an earlier run left unbuilt gets no Overview work from a run that changes none of its contributions", async () => {
+  test.each<Refusal>([...DEFINITE_REFUSALS])("a game whose Overview an earlier run refused by its %s gets Overview work only from a run whose affected set covers it", async (refusal) => {
     const database = unprocessedGame();
     const transport = new ControlledGeminiTransport();
-    transport.countTokens = async (model, request) => {
-      if (JSON.stringify(request).includes("Synthesize")) throw new Error("synthesis count unavailable");
-      return ControlledGeminiTransport.prototype.countTokens.call(transport, model, request);
-    };
+    refuseRequests(transport, database.native, (_model, request) => JSON.stringify(request).includes("Synthesize"), refusal, CYBERPUNK);
     transport.nextPolls.push({ state: "succeeded", output: extractionOutput(), usage: SUCCEEDED_USAGE });
     await advanceMediaProcessing(database.db, { runId: await authorizeRun(database, "unbuilt"), transport, articleFetch: outletArticles().articleFetch, now: new Date("2026-11-02T00:00:00.000Z"), ...PAID });
     expect(await getMediaOverview(database.db, CYBERPUNK, { includeUnpublished: true })).toBeNull();
     delete (transport as Partial<ControlledGeminiTransport>).countTokens;
+    // The competing reservation that used the allowance has since been released.
+    database.native.prepare("UPDATE media_processing_jobs SET reservation_active = 0 WHERE request_key = 'competing-reservation'").run();
     const countsBefore = transport.counts.length;
     const submissionsBefore = transport.submissions.length;
 
     const unaffected = outletArticles();
     const rerun = await advanceMediaProcessing(database.db, { runId: await authorizeRun(database, "unbuilt-rerun"), transport, articleFetch: unaffected.articleFetch, now: new Date("2026-11-02T00:01:00.000Z"), ...PAID });
-    const affected = outletArticles();
-    const refetch = await advanceMediaProcessing(database.db, { runId: await authorizeRun(database, "unbuilt-affected", sourceIds(database)), transport, articleFetch: affected.articleFetch, now: new Date("2026-11-02T00:02:00.000Z"), ...PAID });
 
     expect(unaffected.fetched).toEqual([]);
-    expect(affected.fetched).toEqual(sourceUrls(database));
     expect(transport.counts.length).toBe(countsBefore);
     expect(transport.submissions.length).toBe(submissionsBefore);
-    for (const summary of [rerun, refetch]) {
-      expect(summary.submitted).toBe(0);
-      expect(summary.outputs).toEqual({ new: 0, reused: 1, replaced: 0, invalidated: 0, skipped: 0 });
-    }
+    expect(rerun.submitted).toBe(0);
+    expect(rerun.outputs).toEqual({ new: 0, reused: 1, replaced: 0, invalidated: 0, skipped: 0 });
+
+    const affected = outletArticles();
+    const runId = await authorizeRun(database, "unbuilt-affected", sourceIds(database));
+    transport.nextPolls.push({ state: "succeeded", output: overviewOutputForUrls(sourceUrls(database)), usage: SUCCEEDED_USAGE });
+    const rebuilt = await advanceMediaProcessing(database.db, { runId, transport, articleFetch: affected.articleFetch, now: new Date("2026-11-02T00:02:00.000Z"), ...PAID });
+    const settled = await advanceMediaProcessing(database.db, { runId, transport, articleFetch: affected.articleFetch, now: new Date("2026-11-02T00:03:00.000Z"), ...PAID });
+
+    expect(affected.fetched).toEqual(sourceUrls(database));
+    expect(rebuilt.submitted).toBe(1);
+    expect(transport.submissions.length).toBe(submissionsBefore + 1);
+    expect(settled.status).toBe("completed");
+    expect(settled.outputs).toEqual({ new: 1, reused: 1, replaced: 0, invalidated: 0, skipped: 0 });
+    expect(await getMediaOverview(database.db, CYBERPUNK, { includeUnpublished: true })).not.toBeNull();
+  });
+
+  test("a game whose Overview failed in an earlier run gets Overview work only from a run whose affected set covers it", async () => {
+    const database = unprocessedGame();
+    const transport = new ControlledGeminiTransport();
+    transport.nextPolls.push(
+      { state: "succeeded", output: extractionOutput(), usage: SUCCEEDED_USAGE },
+      { state: "failed", error: "synthesis failed", usage: SUCCEEDED_USAGE },
+    );
+    const firstRun = await authorizeRun(database, "overview-failed");
+    await advanceMediaProcessing(database.db, { runId: firstRun, transport, articleFetch: outletArticles().articleFetch, now: new Date("2026-11-02T00:00:00.000Z"), ...PAID });
+    const failed = await advanceMediaProcessing(database.db, { runId: firstRun, transport, articleFetch: outletArticles().articleFetch, now: new Date("2026-11-02T00:01:00.000Z"), ...PAID });
+    expect(failed.failed).toBe(1);
+    expect(await getMediaOverview(database.db, CYBERPUNK, { includeUnpublished: true })).toBeNull();
+    const submissionsBefore = transport.submissions.length;
+
+    const rerun = await advanceMediaProcessing(database.db, { runId: await authorizeRun(database, "overview-failed-rerun"), transport, articleFetch: outletArticles().articleFetch, now: new Date("2026-11-02T00:02:00.000Z"), ...PAID });
+    expect(rerun.submitted).toBe(0);
+
+    const runId = await authorizeRun(database, "overview-failed-affected", sourceIds(database));
+    transport.nextPolls.push({ state: "succeeded", output: overviewOutputForUrls(sourceUrls(database)), usage: SUCCEEDED_USAGE });
+    const retried = await advanceMediaProcessing(database.db, { runId, transport, articleFetch: outletArticles().articleFetch, now: new Date("2026-11-02T00:03:00.000Z"), ...PAID });
+    const settled = await advanceMediaProcessing(database.db, { runId, transport, articleFetch: outletArticles().articleFetch, now: new Date("2026-11-02T00:04:00.000Z"), ...PAID });
+
+    expect(retried.submitted).toBe(1);
+    expect(transport.submissions.length).toBe(submissionsBefore + 1);
+    expect(settled.status).toBe("completed");
+    expect(await getMediaOverview(database.db, CYBERPUNK, { includeUnpublished: true })).not.toBeNull();
   });
 
   test("an Overview reactivated by identity serves its own tags again", async () => {

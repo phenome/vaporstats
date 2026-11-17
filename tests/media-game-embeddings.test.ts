@@ -310,31 +310,45 @@ describe("game overview aggregate embeddings", () => {
     expect(jobs.results?.every((job) => job.status === "reserved" && job.reservation_active === 1)).toBe(true);
   });
 
-  test("a run that changes none of a game's contributions submits no embedding work an earlier run left undone", async () => {
+  test.each<[Refusal | "failed batch", number]>([["token cap", 2], ["allowance", 2], ["failed batch", 2]])("embeddings an earlier run left undone by a %s get work only from a run whose affected set covers the game", async (undone, undoneCount) => {
     const value = fixture();
     const transport = new ControlledGeminiTransport({ embeddings: true });
-    transport.countTokens = async (model, request) => {
-      if (model.includes("embedding")) throw new Error("embedding count unavailable");
-      return ControlledGeminiTransport.prototype.countTokens.call(transport, model, request);
-    };
+    if (undone !== "failed batch") refuseRequests(transport, value.native, (model) => model.includes("embedding"), undone, APPID);
     await authorizeMediaProcessing(value.db, value.runId);
     transport.nextPolls.push(
       { state: "succeeded", output: extractionOutput(), usage: { inputTokens: 100, outputTokens: 20 } },
       { state: "succeeded", output: overviewOutput(), usage: { inputTokens: 100, outputTokens: 20 } },
     );
+    if (undone === "failed batch") transport.nextPolls.push({ state: "failed", error: "embedding failed" }, { state: "failed", error: "embedding failed" });
     await advance(value, transport);
     await advance(value, transport);
-    expect(transport.embeddingSubmissions).toEqual([]);
+    await advance(value, transport);
+    const undoneEmbeddings = await value.db.prepare("SELECT COUNT(*) AS count FROM media_game_embeddings WHERE appid = ? AND active = 1").bind(APPID).first<{ count: number }>();
+    expect(undoneEmbeddings?.count).toBe(0);
     delete (transport as Partial<ControlledGeminiTransport>).countTokens;
+    // The competing reservation that used the allowance has since been released.
+    value.native.prepare("UPDATE media_processing_jobs SET reservation_active = 0 WHERE request_key = 'competing-reservation'").run();
     const countsBefore = transport.counts.length;
+    const submissionsBefore = transport.embeddingSubmissions.length;
 
     await startNextRun(value, "embedding-rerun");
-    await advance(value, transport);
-    await startNextRun(value, "embedding-affected", sourceIds(value));
-    await advance(value, transport);
-
+    const rerun = await advance(value, transport);
+    expect(rerun.submitted).toBe(0);
     expect(transport.counts.length).toBe(countsBefore);
-    expect(transport.embeddingSubmissions).toEqual([]);
+
+    await startNextRun(value, "embedding-affected", sourceIds(value));
+    transport.nextPolls.push(
+      { state: "succeeded", output: embeddingOutput(1), usage: { inputTokens: 100 } },
+      { state: "succeeded", output: embeddingOutput(2), usage: { inputTokens: 100 } },
+    );
+    const retried = await advance(value, transport);
+    const settled = await advance(value, transport);
+
+    expect(retried.submitted).toBe(undoneCount);
+    expect(transport.embeddingSubmissions.length).toBe(submissionsBefore + undoneCount);
+    expect(settled.status).toBe("completed");
+    const active = await value.db.prepare("SELECT dimension FROM media_game_embeddings WHERE appid = ? AND active = 1 ORDER BY dimension").bind(APPID).all<{ dimension: string }>();
+    expect(active.results?.map(({ dimension }) => dimension)).toEqual(["gameplay", "story_world"]);
   });
 
   test.each<[Refusal, number]>([["token cap", 2], ["allowance", 1]])("counts each embedding refused by its %s as skipped once and does not retry it in the run", async (refusal, refusals) => {

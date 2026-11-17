@@ -598,6 +598,16 @@ async function refusedInRun(db: AppDatabase, runId: number, requestKey: string):
 }
 
 /**
+ * The request key `runId` submits the work identified by `baseKey` under. A
+ * job that definitely failed, or went stale, in an earlier run is retried
+ * under a key of this run's own; one from this run is final for the run.
+ */
+async function runRequestKey(db: AppDatabase, baseKey: string, runId: number): Promise<string> {
+  const base = await first<{ run_id: number; status: JobRow["status"] }>(db, "SELECT run_id, status FROM media_processing_jobs WHERE request_key = ?", baseKey);
+  return base && base.run_id !== runId && (base.status === "failed" || base.status === "stale") ? `${baseKey}:retry:${runId}` : baseKey;
+}
+
+/**
  * Records how many active outputs for the run's bounded sources and entities
  * the run kept without producing them. It is a snapshot, so repeated advances
  * of one run do not add to it.
@@ -649,18 +659,24 @@ async function markContributionChanged(db: AppDatabase, sourceId: number, runId:
 }
 
 /**
- * The games among `entities` whose current contributions `runId` changed. A
- * run rebuilds an Overview, and embeds it, only for these games; any other
- * game keeps its outputs whatever its version identities or earlier jobs.
+ * The games among `entities` that `runId` may give Overview and embedding
+ * work: those whose current contributions the run changed, and those with a
+ * source in the run's authorized affected set. Within these games a missing,
+ * failed or refused Overview or embedding is built; a current one is kept.
+ * Every other game keeps its outputs whatever its version identities or
+ * earlier jobs, and receives no paid work.
  */
-async function contributionChangedGames(db: AppDatabase, runId: number, entities: readonly number[]): Promise<Set<number>> {
-  const changed = await rows<{ appid: number }>(
+async function rebuildScopeGames(db: AppDatabase, runId: number, entities: readonly number[]): Promise<Set<number>> {
+  const scoped = await rows<{ appid: number }>(
     db,
-    "SELECT DISTINCT appid FROM media_sources WHERE contribution_run_id = ? AND appid IN (SELECT value FROM json_each(?))",
+    `SELECT DISTINCT appid FROM media_sources
+     WHERE appid IN (SELECT value FROM json_each(?2))
+       AND (contribution_run_id = ?1
+         OR id IN (SELECT value FROM media_processing_authorizations, json_each(affected_source_ids) WHERE run_id = ?1))`,
     runId,
     JSON.stringify(entities),
   );
-  return new Set(changed.map(({ appid }) => appid));
+  return new Set(scoped.map(({ appid }) => appid));
 }
 
 type ExtractionRow = { id: number; source_id: number; input_identity: string; content_hash: string; cleanup_version: string; model: string; config_version: string; output_json: string; active: number };
@@ -997,7 +1013,7 @@ function embeddingValues(value: unknown): number[] | null {
 
 function embeddingOverviewIdentity(job: JobRow): string | null {
   if (job.source_id !== null || !job.dimension) return null;
-  const match = new RegExp(`^embedding:${job.appid}:${job.dimension}:([a-f0-9]{64}):${job.input_identity}$`).exec(job.request_key);
+  const match = new RegExp(`^embedding:${job.appid}:${job.dimension}:([a-f0-9]{64}):${job.input_identity}(?::retry:${job.run_id})?$`).exec(job.request_key);
   return match?.[1] ?? null;
 }
 
@@ -1241,11 +1257,11 @@ export function authorizeMediaProcessing(db: AppDatabase, runId: number, scope: 
 
 const JOB_COLUMNS = "id, run_id, stage, appid, matched_appid, dimension, source_id, request_key, input_identity, model, config_version, max_input_tokens, max_output_tokens, reserved_microusd, charged_microusd, reservation_active, status, provider_batch_id, output_json, usage_json, error";
 
-/** Embeds the active Overviews of `changedGames`, the games whose contributions `runId` changed. */
+/** Embeds the active Overviews of `scopeGames`, the games `runId` may give Overview and embedding work. */
 async function scheduleEmbeddings(
   db: AppDatabase,
   runId: number,
-  changedGames: readonly number[],
+  scopeGames: readonly number[],
   transport: GeminiBatchTransport,
   secret: string | undefined,
   now: Date,
@@ -1253,7 +1269,7 @@ async function scheduleEmbeddings(
   const overviews = await rows<{ appid: number; input_identity: string; output_json: string }>(
     db,
     "SELECT appid, input_identity, output_json FROM media_game_overviews WHERE active = 1 AND appid IN (SELECT value FROM json_each(?)) ORDER BY appid",
-    JSON.stringify(changedGames),
+    JSON.stringify(scopeGames),
   );
   let submitted = 0;
   let stopReason: string | null = null;
@@ -1291,7 +1307,7 @@ async function scheduleEmbeddings(
         });
         continue;
       }
-      const requestKey = `embedding:${overview.appid}:${dimension}:${overview.input_identity}:${identity}`;
+      const requestKey = await runRequestKey(db, `embedding:${overview.appid}:${dimension}:${overview.input_identity}:${identity}`, runId);
       const priorJob = await first<{ status: JobRow["status"] }>(db, "SELECT status FROM media_processing_jobs WHERE request_key = ?", requestKey);
       if ((priorJob && priorJob.status !== "reserved") || await refusedInRun(db, runId, requestKey)) continue;
       const request = makeEmbeddingRequest(input);
@@ -1470,13 +1486,9 @@ async function advanceMediaProcessingNow(db: AppDatabase, options: MediaProcessi
       source.processing_content = null;
       continue;
     }
-    // A definite earlier failure for this input is retried under a key of
-    // this run's own; only an affected source reaches this point again.
-    const baseKey = `extraction:${source.id}:${identity}`;
-    const baseJob = await first<{ status: JobRow["status"] }>(db, "SELECT status FROM media_processing_jobs WHERE request_key = ?", baseKey);
-    const retrying = baseJob?.status === "failed" || baseJob?.status === "stale";
-    const requestKey = retrying ? `${baseKey}:retry:${auth.run_id}` : baseKey;
-    const priorJob = retrying ? await first<{ status: JobRow["status"] }>(db, "SELECT status FROM media_processing_jobs WHERE request_key = ?", requestKey) : baseJob;
+    // Only an affected source reaches an earlier failure for this input again.
+    const requestKey = await runRequestKey(db, `extraction:${source.id}:${identity}`, auth.run_id);
+    const priorJob = await first<{ status: JobRow["status"] }>(db, "SELECT status FROM media_processing_jobs WHERE request_key = ?", requestKey);
     source.processing_content = null;
     if (priorJob && priorJob.status !== "reserved") {
       await discardText(source.id);
@@ -1523,8 +1535,8 @@ async function advanceMediaProcessingNow(db: AppDatabase, options: MediaProcessi
   let uncertain = prePoll.uncertain + currentPoll.uncertain;
   const activeExtractions = await rows<ExtractionRow>(db, "SELECT e.id, e.source_id, e.input_identity, e.content_hash, e.cleanup_version, e.model, e.config_version, e.output_json, e.active FROM media_article_extractions e JOIN media_sources s ON s.id = e.source_id WHERE e.active = 1 AND s.appid IN (SELECT value FROM json_each(?))", JSON.stringify(processingEntities));
 
-  const changedGames = await contributionChangedGames(db, auth.run_id, processingEntities);
-  const appids = [...new Set(activeExtractions.map((row) => sourceById.get(row.source_id)?.appid).filter((appid): appid is number => typeof appid === "number" && changedGames.has(appid)))];
+  const scopeGames = await rebuildScopeGames(db, auth.run_id, processingEntities);
+  const appids = [...new Set(activeExtractions.map((row) => sourceById.get(row.source_id)?.appid).filter((appid): appid is number => typeof appid === "number" && scopeGames.has(appid)))];
   for (const appid of appids) {
     const pendingExtractions = Number((await first<{ count: number }>(
       db,
@@ -1551,7 +1563,7 @@ async function advanceMediaProcessingNow(db: AppDatabase, options: MediaProcessi
       });
       continue;
     }
-    const requestKey = `synthesis:${appid}:${identity}`;
+    const requestKey = await runRequestKey(db, `synthesis:${appid}:${identity}`, auth.run_id);
     const existing = await first<JobRow>(db, "SELECT id, run_id, stage, appid, matched_appid, dimension, source_id, request_key, input_identity, model, config_version, max_input_tokens, max_output_tokens, reserved_microusd, charged_microusd, reservation_active, status, provider_batch_id, output_json, usage_json, error FROM media_processing_jobs WHERE request_key = ?", requestKey);
     if ((existing && existing.status !== "reserved") || await refusedInRun(db, auth.run_id, requestKey)) continue;
     const request = makeSynthesisRequest(appid, game?.name ?? "", appExtractions, appSources);
@@ -1584,7 +1596,7 @@ async function advanceMediaProcessingNow(db: AppDatabase, options: MediaProcessi
     if (!job || job.status !== "reserved") continue;
     if (await submitJob(db, job, request, transport, options.geminiApiKey, now, null) === "submitted") synthesisSubmitted += 1;
   }
-  const embeddingResult = await scheduleEmbeddings(db, auth.run_id, [...changedGames], transport, options.geminiApiKey, now);
+  const embeddingResult = await scheduleEmbeddings(db, auth.run_id, [...scopeGames], transport, options.geminiApiKey, now);
   embeddingSubmitted += embeddingResult.submitted;
   if (!stopReason && embeddingResult.stopReason) stopReason = embeddingResult.stopReason;
 
