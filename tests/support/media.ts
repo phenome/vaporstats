@@ -37,7 +37,7 @@ export function insertCompletedRun(native: Database, identityKey: string, appids
 
 /**
  * Inserts a running later-pass discovery run for `appids` and returns its id.
- * The trigger cannot authorize a later pass yet, so tests create its state directly.
+ * Only the daily media run starts a later pass, so tests of its limits create its state directly.
  */
 export function insertLaterRun(native: Database, appids: readonly number[]): number {
   native

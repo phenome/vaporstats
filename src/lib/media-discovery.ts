@@ -249,7 +249,7 @@ function parsePass(pass: unknown): asserts pass is MediaPass {
   if (pass !== "initial" && pass !== "later") throw new Error("Unknown media discovery pass");
 }
 
-/** Only the initial pass can be authorized; the later pass is recorded but not yet triggerable. */
+/** Only the initial pass can be authorized; the later pass runs only from the daily media run. */
 function parseAuthorizablePass(pass: unknown): asserts pass is "initial" {
   if (pass !== "initial") throw new Error("Only the initial media discovery pass can be authorized");
 }

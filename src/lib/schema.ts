@@ -869,6 +869,7 @@ export const mediaDiscoveryRuns = sqliteTable(
   "media_discovery_runs",
   {
     id: integer("id").primaryKey({ autoIncrement: true }),
+    /** The pass an authorized run serves; a scheduled run serves every due pass and keeps `initial` here. */
     pass: text("pass").notNull(),
     identityKey: text("identity_key").notNull(),
     selectedGames: text("selected_games").notNull(),

@@ -70,11 +70,11 @@ async function recordEnrollment(db: AppDatabase, now: Date): Promise<{ enrollmen
 }
 
 /**
- * Starts `day`'s scheduled discovery run over the due initial-pass queries of
- * every eligible enrolled root and its eligible DLC and expansions. A
- * discovery run still open from an earlier day is closed as superseded: its
- * unserved queries stay due and this run takes them. Returns the run's id,
- * or null when no enrolled root is eligible.
+ * Starts `day`'s scheduled discovery run over the passes due at `now` of
+ * every eligible enrolled root and its eligible DLC and expansions, initial
+ * and later alike. A discovery run still open from an earlier day is closed
+ * as superseded: its unserved queries stay due and this run takes them.
+ * Returns the run's id, or null when no enrolled root is eligible.
  */
 async function startScheduledDiscovery(db: AppDatabase, day: string, now: Date): Promise<number | null> {
   await db.prepare(
@@ -90,6 +90,8 @@ async function startScheduledDiscovery(db: AppDatabase, day: string, now: Date):
   if (selected.length === 0) return null;
   const identity = scheduledDiscoveryIdentity(day);
   await db.prepare(
+    // A scheduled run serves both passes; each query and attempt records its
+    // own pass, and the run's pass column keeps its `initial` default.
     "INSERT INTO media_discovery_runs (pass, identity_key, selected_games, status, origin, started_at) VALUES ('initial', ?, ?, 'running', 'scheduled', ?) ON CONFLICT(identity_key) DO NOTHING",
   ).bind(identity, JSON.stringify(selected), now.toISOString()).run();
   return (await first<{ id: number }>(db, "SELECT id FROM media_discovery_runs WHERE identity_key = ?", identity))?.id ?? null;
