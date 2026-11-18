@@ -1,6 +1,6 @@
 import type { Database } from "bun:sqlite";
 import { runIngestionTick, type IngestionTickOptions } from "../../workers/ingestion";
-import type { TestDatabase } from "./db";
+import { openTestDatabase, type TestDatabase } from "./db";
 import type { GeminiBatchPoll, GeminiBatchTransport } from "../../src/lib/media-processing";
 import { createOpenRouterTransport, type OpenRouterTransport } from "../../src/lib/media-openrouter";
 import { GeminiHttpError } from "../../src/lib/media-paid-providers";
@@ -757,3 +757,335 @@ export const OPENROUTER_SCOPED_FIXTURES: ScopedProviderFixtures<OpenRouterReply>
     "timeout error": { network: "The operation timed out.", name: "TimeoutError" },
   },
 };
+
+/** The outbound calls an interruption sweep counts and interrupts. */
+export const OUTBOUND_KINDS = ["search", "outlet_fetch", "openrouter", "gemini_submit"] as const;
+export type OutboundKind = (typeof OUTBOUND_KINDS)[number];
+
+/** One outbound call, by kind and request identity, with the UTC day it was made. */
+export interface OutboundCall {
+  kind: OutboundKind;
+  /**
+   * What makes a request the same request: a search's `<query>@<domain>`, an
+   * outlet fetch's `discovery:<url>` or `processing:<url>`, a text request's
+   * messages, or an embedding submission's request key.
+   */
+  identity: string;
+  day: string;
+  /** For a search or outlet fetch, the outlet's domain. */
+  domain?: string;
+}
+
+/**
+ * The one documented exception to sending a request once across restarts
+ * (ADR 0020): article text is never retained, so a processing fetch that a
+ * restart interrupted before its item was marked in flight is sent again,
+ * once per such restart, when the item next takes a turn.
+ */
+export const PROCESSING_FETCH_RESENT_AFTER_RESTART = "processing fetch: an article fetch for paid processing is sent again once per restart that interrupted it (ADR 0020)";
+
+/** A media world: the controlled providers and outlets one sweep run uses. */
+export interface MediaWorld {
+  tavily: ReturnType<typeof controlledTavilyApi>;
+  openRouter: ReturnType<typeof controlledOpenRouterApi>;
+  gemini: ReturnType<typeof controlledGeminiApi>;
+  /** Answers an article fetch first; the default article page otherwise. */
+  outlet?: (url: string) => Response | undefined;
+}
+
+/** A state and a stretch of ticks that `sweepInterruptions` interrupts. */
+export interface InterruptionScenario {
+  name: string;
+  /** Builds the database's state before any tick, such as its catalog. */
+  seed(native: Database): void;
+  /** A fresh controlled world for each run. */
+  world(): MediaWorld;
+  /** Uninterrupted ticks that build the state the sweep starts from. */
+  before?: readonly string[];
+  /** Tick options for the `before` ticks; `options` by default. */
+  beforeOptions?: MediaTickOptions;
+  /** The ticks the sweep interrupts, in order, within one UTC day. */
+  ticks: readonly string[];
+  /** Tick options for every tick, such as `paidSubmissionsPerTick`. */
+  options?: MediaTickOptions;
+}
+
+/** What `sweepInterruptions` asserts on each run. */
+export interface InterruptionInvariants {
+  /**
+   * (a) Restart after the k-th call of each listed kind: the call reaches its
+   * provider or outlet, the process stops before its outcome is recorded, the
+   * database is reopened, and ticks run until quiescent. No request identity
+   * may be sent more often than in the uninterrupted run, except under
+   * `PROCESSING_FETCH_RESENT_AFTER_RESTART`.
+   */
+  restarts?: readonly OutboundKind[];
+  /**
+   * (b) An Outlet day stop at the k-th outlet fetch (the outlet answers it
+   * with HTTP 429), then the rest of the day and `days` following UTC days.
+   * At most one accepted article per entity and query; at most 30 attempts
+   * per outlet per UTC day; every query a day-scoped stop held reopens and
+   * completes on a later day; every accepted article is still extracted.
+   */
+  dayStops?: { days: number };
+  /** Sweeps at most this many evenly spaced k per kind; every k by default. */
+  sample?: number;
+}
+
+/** What one sweep found. `violations` is empty when every invariant held. */
+export interface InterruptionReport {
+  /** Calls of each kind in the uninterrupted run. */
+  baseline: Record<OutboundKind, number>;
+  runs: number;
+  /** Queries a day-scoped stop held across the day-stop runs, each of which had to reopen on a later day. */
+  dayStoppedQueries: number;
+  /** Requests a run sent again under `PROCESSING_FETCH_RESENT_AFTER_RESTART`. */
+  resentUnderException: string[];
+  violations: string[];
+}
+
+const DAY_SCOPED_STOP_REASONS = ["daily_attempt_cap", "search_http_429", "fetch_http_429", "tavily_search_http_429"];
+const QUIESCENCE_TICKS = 16;
+
+function addMinutes(at: string, minutes: number): string {
+  return new Date(Date.parse(at) + minutes * 60_000).toISOString();
+}
+
+function nextDayAt(at: string, days: number, time = "06:00"): string {
+  const date = new Date(Date.parse(at));
+  return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate() + days)).toISOString().slice(0, 10) + `T${time}:00.000Z`;
+}
+
+function sampled(count: number, limit: number | undefined): number[] {
+  const all = Array.from({ length: count }, (_, index) => index + 1);
+  if (limit === undefined || count <= limit) return all;
+  return [...new Set(Array.from({ length: limit }, (_, index) => all[Math.round((index * (count - 1)) / Math.max(1, limit - 1))]!))];
+}
+
+function tally(calls: readonly OutboundCall[]): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const call of calls) counts.set(`${call.kind} ${call.identity}`, (counts.get(`${call.kind} ${call.identity}`) ?? 0) + 1);
+  return counts;
+}
+
+/** What a sweep run injects: a restart after, or a 429 to, the k-th call of a kind. */
+type Fault = { mode: "restart" | "day_stop"; kind: OutboundKind; k: number };
+
+/**
+ * One run of `scenario` in a fresh database: a fetch that records every
+ * outbound call and injects `fault`, the scenario's ticks, then ticks every
+ * 15 minutes until one makes no outbound call, and for a day stop the
+ * following days the same way.
+ */
+async function sweepRun(scenario: InterruptionScenario, fault: Fault | null, days: number) {
+  const database = openTestDatabase("vaporstats-sweep-");
+  const calls: OutboundCall[] = [];
+  const interrupted: OutboundCall[] = [];
+  const stoppedQueries = new Map<number, string>();
+  try {
+    scenario.seed(database.native);
+    const world = scenario.world();
+    const inner = mediaTickFetch({ tavily: world.tavily, openRouter: world.openRouter, gemini: world.gemini }, [], world.outlet);
+    let injecting = false;
+    let day = "";
+    const counted: Record<OutboundKind, number> = { search: 0, outlet_fetch: 0, openrouter: 0, gemini_submit: 0 };
+    const classify = (url: string, init?: RequestInit): Omit<OutboundCall, "day"> | null => {
+      if (url === "https://api.tavily.com/search") {
+        const body = JSON.parse(String(init?.body)) as { query: string; include_domains: string[] };
+        return { kind: "search", identity: `${body.query}@${body.include_domains[0]}`, domain: body.include_domains[0] };
+      }
+      if (url === "https://openrouter.ai/api/v1/chat/completions") {
+        return { kind: "openrouter", identity: JSON.stringify((JSON.parse(String(init?.body)) as { messages: unknown }).messages) };
+      }
+      if (url.endsWith(":asyncBatchEmbedContent") || url.endsWith(":batchGenerateContent")) {
+        const body = JSON.parse(String(init?.body)) as { batch: { inputConfig?: { requests: { requests: Array<{ metadata: { key: string } }> } }; input_config?: { requests: { requests: Array<{ metadata: { key: string } }> } } } };
+        return { kind: "gemini_submit", identity: (body.batch.inputConfig ?? body.batch.input_config)!.requests.requests[0]!.metadata.key };
+      }
+      if (url.includes("/articles/")) {
+        // An article already accepted as a source is fetched for processing;
+        // any other is a discovery candidate.
+        const source = database.native.query("SELECT 1 FROM media_sources WHERE original_url = ?1 OR discovery_url = ?1").get(url);
+        return { kind: "outlet_fetch", identity: `${source ? "processing" : "discovery"}:${url}`, domain: new URL(url).hostname };
+      }
+      return null;
+    };
+    const customFetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const call = classify(url, init);
+      if (!call) return inner(input, init);
+      const recorded = { ...call, day };
+      calls.push(recorded);
+      counted[call.kind] += 1;
+      if (fault && injecting && fault.kind === call.kind && counted[call.kind] === fault.k) {
+        if (fault.mode === "day_stop") return new Response("Too Many Requests", { status: 429 });
+        const response = await inner(input, init);
+        await response.arrayBuffer().catch(() => undefined);
+        interrupted.push(recorded);
+        database.reopen();
+        throw new Error("process stopped");
+      }
+      return inner(input, init);
+    }) as typeof fetch;
+    const tick = async (at: string, options = scenario.options) => {
+      day = at.slice(0, 10);
+      const before = calls.length;
+      await runMediaTick(database, { tavily: world.tavily, openRouter: world.openRouter, gemini: world.gemini }, at, { ...options, customFetch });
+      return calls.length - before;
+    };
+    const untilQuiescent = async (from: string) => {
+      let at = from;
+      for (let index = 0; index < QUIESCENCE_TICKS; index += 1) {
+        if ((await tick(at)) === 0) return;
+        at = addMinutes(at, 15);
+      }
+      throw new Error(`${scenario.name}: still making calls ${QUIESCENCE_TICKS} ticks after ${from}`);
+    };
+    for (const at of scenario.before ?? []) await tick(at, scenario.beforeOptions ?? scenario.options);
+    // Only calls in the swept ticks and after them are counted toward k.
+    for (const kind of OUTBOUND_KINDS) counted[kind] = 0;
+    const sweptFrom = calls.length;
+    injecting = true;
+    for (const at of scenario.ticks) await tick(at);
+    const last = scenario.ticks[scenario.ticks.length - 1]!;
+    await untilQuiescent(addMinutes(last, 15));
+    injecting = fault?.mode === "restart";
+    for (const row of database.native.query<{ id: number; stopped_at: string | null; stop_reason: string }, []>(`SELECT id, stopped_at, stop_reason FROM media_discovery_progress WHERE status = 'stopped' AND stop_reason IN (${DAY_SCOPED_STOP_REASONS.map((reason) => `'${reason}'`).join(", ")})`).all()) {
+      stoppedQueries.set(row.id, (row.stopped_at ?? last).slice(0, 10));
+    }
+    for (let offset = 1; offset <= days; offset += 1) await untilQuiescent(nextDayAt(last, offset));
+    const state = {
+      progress: database.native.query<{ id: number; appid: number; pass: string; outlet: string; status: string; stop_reason: string | null; completed_at: string | null }, []>("SELECT id, appid, pass, outlet, status, stop_reason, completed_at FROM media_discovery_progress").all(),
+      admitted: database.native.query<{ appid: number; pass: string; outlet: string; articles: number }, []>("SELECT appid, pass, outlet, COUNT(*) AS articles FROM media_sources GROUP BY appid, pass, outlet HAVING COUNT(*) > 1").all(),
+      attempts: database.native.query<{ outlet: string; day: string; attempts: number }, []>("SELECT outlet, day, COUNT(*) AS attempts FROM media_discovery_attempts GROUP BY outlet, day HAVING COUNT(*) > 30").all(),
+      unextracted: database.native.query<{ original_url: string }, []>("SELECT original_url FROM media_sources AS s WHERE NOT EXISTS (SELECT 1 FROM media_article_extractions AS e WHERE e.source_id = s.id AND e.active = 1)").all(),
+    };
+    return { calls, swept: calls.slice(sweptFrom), interrupted, stoppedQueries, state };
+  } finally {
+    database.cleanup();
+  }
+}
+
+/**
+ * Runs `scenario` once uninterrupted, then once per fault that `invariants`
+ * selects, each in a fresh temporary database, and reports every invariant
+ * a run broke. A scenario's world must answer every request successfully,
+ * so the uninterrupted run sends each request the expected number of times.
+ */
+export async function sweepInterruptions(scenario: InterruptionScenario, invariants: InterruptionInvariants): Promise<InterruptionReport> {
+  const violations: string[] = [];
+  const baselineRun = await sweepRun(scenario, null, 0);
+  const swept = baselineRun.swept;
+  const baseline = Object.fromEntries(OUTBOUND_KINDS.map((kind) => [kind, swept.filter((call) => call.kind === kind).length])) as Record<OutboundKind, number>;
+  const expected = tally(baselineRun.calls);
+  for (const [identity, count] of expected) {
+    if (count > 1 && (identity.startsWith("search ") || identity.startsWith("outlet_fetch discovery:") || identity.startsWith("gemini_submit "))) {
+      violations.push(`${scenario.name}, uninterrupted: ${identity} sent ${count} times`);
+    }
+  }
+  let runs = 1;
+  const resentUnderException: string[] = [];
+  for (const kind of invariants.restarts ?? []) {
+    for (const k of sampled(baseline[kind], invariants.sample)) {
+      const label = `${scenario.name}, restart after ${kind} #${k}`;
+      runs += 1;
+      let run;
+      try {
+        run = await sweepRun(scenario, { mode: "restart", kind, k }, 0);
+      } catch (error) {
+        violations.push(`${label}: ${error instanceof Error ? error.message : String(error)}`);
+        continue;
+      }
+      const allowance = new Map<string, number>();
+      for (const call of run.interrupted) {
+        // PROCESSING_FETCH_RESENT_AFTER_RESTART
+        if (call.kind === "outlet_fetch" && call.identity.startsWith("processing:")) allowance.set(`${call.kind} ${call.identity}`, (allowance.get(`${call.kind} ${call.identity}`) ?? 0) + 1);
+      }
+      for (const [identity, count] of tally(run.calls)) {
+        // An identity the uninterrupted run never sent, such as an Overview
+        // over a different set of articles, may be sent once.
+        const limit = (expected.get(identity) ?? 1) + (allowance.get(identity) ?? 0);
+        if (count > limit) violations.push(`${label}: ${identity.slice(0, 160)} sent ${count} times, at most ${limit} allowed`);
+        else if (count > (expected.get(identity) ?? 1)) resentUnderException.push(`${label}: ${identity}`);
+      }
+    }
+  }
+  let dayStoppedQueries = 0;
+  if (invariants.dayStops) {
+    const outletFetches = swept.filter((call) => call.kind === "outlet_fetch").length;
+    for (const k of sampled(outletFetches, invariants.sample)) {
+      const label = `${scenario.name}, day stop at outlet fetch #${k}`;
+      runs += 1;
+      let run;
+      try {
+        run = await sweepRun(scenario, { mode: "day_stop", kind: "outlet_fetch", k }, invariants.dayStops.days);
+      } catch (error) {
+        violations.push(`${label}: ${error instanceof Error ? error.message : String(error)}`);
+        continue;
+      }
+      for (const row of run.state.admitted) violations.push(`${label}: ${row.articles} articles accepted for ${row.appid} ${row.pass}@${row.outlet}`);
+      for (const row of run.state.attempts) violations.push(`${label}: ${row.attempts} recorded attempts on ${row.outlet} on ${row.day}`);
+      const observed = new Map<string, number>();
+      for (const call of run.calls) if (call.domain) observed.set(`${call.domain} ${call.day}`, (observed.get(`${call.domain} ${call.day}`) ?? 0) + 1);
+      for (const [key, count] of observed) if (count > 30) violations.push(`${label}: ${count} searches and fetches for ${key}`);
+      dayStoppedQueries += run.stoppedQueries.size;
+      for (const [id, stopDay] of run.stoppedQueries) {
+        const row = run.state.progress.find((item) => item.id === id);
+        if (!row || row.status !== "completed" || !row.completed_at || row.completed_at.slice(0, 10) <= stopDay) {
+          violations.push(`${label}: query ${row ? `${row.appid} ${row.pass}@${row.outlet}` : id} day-stopped on ${stopDay} ended ${row?.status ?? "missing"}${row?.stop_reason ? ` (${row.stop_reason})` : ""}`);
+        }
+      }
+      for (const { original_url } of run.state.unextracted) violations.push(`${label}: accepted ${original_url} was never extracted`);
+    }
+  }
+  return { baseline, runs, dayStoppedQueries, resentUnderException, violations };
+}
+
+function experimentArticleUrl(appid: number, domain: string, suffix = ""): string {
+  return `https://${domain}/articles/${appid}-${domain.replaceAll(".", "-")}${suffix}`;
+}
+
+/**
+ * The experiment games' media world. Each entity's first search on an
+ * outlet finds three candidates: a preview published 2026-10-01
+ * (`<initial URL>-preview`), the initial review published 2026-11-10, which
+ * the query prefers, and a second preview published 2026-10-15
+ * (`-preview-again`). Every later search finds three later reviews,
+ * `<initial URL>-revisited` published 2026-11-19, `-revisited-again`
+ * published 2026-11-21 and `-revisited-late` published 2026-11-25; the
+ * earliest is preferred. Every article has its own text, and every provider
+ * answers successfully. Three candidates per query leave a candidate that
+ * would qualify after a day stop held the query between fetches.
+ */
+export function experimentWorld(): MediaWorld {
+  const tavily = controlledTavilyApi();
+  const searches = new Map<string, number>();
+  tavily.results = ({ appid, domain }) => {
+    const count = (searches.get(`${appid}@${domain}`) ?? 0) + 1;
+    searches.set(`${appid}@${domain}`, count);
+    const suffixes = count === 1 ? ["-preview", "", "-preview-again"] : ["-revisited", "-revisited-again", "-revisited-late"];
+    return suffixes.map((suffix) => ({ url: experimentArticleUrl(appid, domain, suffix) }));
+  };
+  const pages = new Map<string, string>();
+  for (const appid of [CYBERPUNK, BALDURS_GATE, HADES_II]) {
+    for (const outlet of MEDIA_OUTLETS) {
+      const body = (when: string) => `${GAME_NAMES[appid]} offers a substantial playable campaign with detailed systems, as ${outlet.name}'s ${when} assessment describes at length. `.repeat(5);
+      const page = (suffix: string, title: string, date: string, when: string) =>
+        pages.set(experimentArticleUrl(appid, outlet.domain, suffix), discoveryArticleHtml(appid, `${GAME_NAMES[appid]} ${title}`, { date, author: `${outlet.name} critic`, body: body(when) }));
+      page("-preview", "Hands-on Preview", "2026-10-01T00:00:00.000Z", "preview");
+      page("-preview-again", "Hands-on Preview Again", "2026-10-15T00:00:00.000Z", "second preview");
+      page("", "Review", "2026-11-10T00:00:00.000Z", "first");
+      page("-revisited", "Review Revisited", "2026-11-19T00:00:00.000Z", "second");
+      page("-revisited-again", "Review Revisited Again", "2026-11-21T00:00:00.000Z", "third");
+      page("-revisited-late", "Review Revisited Late", "2026-11-25T00:00:00.000Z", "fourth");
+    }
+  }
+  return {
+    tavily,
+    openRouter: controlledOpenRouterApi(),
+    gemini: controlledGeminiApi(),
+    outlet: (url) => {
+      const html = pages.get(url);
+      return html === undefined ? undefined : new Response(html);
+    },
+  };
+}
