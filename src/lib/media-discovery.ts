@@ -100,8 +100,8 @@ export interface MediaDiscoveryOptions {
   now?: Date | (() => Date);
 }
 
+/** The ceiling of accepted articles per exact entity, shared by the initial and later passes. */
 export const MAX_MEDIA_ARTICLES_PER_GAME = 15;
-export const MAX_MEDIA_ARTICLES_TOTAL = 45;
 const MAX_REDIRECTS = 5;
 
 type RunRow = {
@@ -629,18 +629,13 @@ async function loadRun(db: AppDatabase, runId?: number): Promise<RunRow> {
 }
 
 /**
- * Why `appid` can admit no further article, if it cannot. Accepted articles
- * from every pass count toward the per-game and total ceilings.
+ * Why `appid` can admit no further article, if it cannot: it reached its own
+ * 15-article ceiling, counting accepted articles from every pass. No total
+ * across entities applies.
  */
 async function articleCeiling(db: AppDatabase, appid: number): Promise<string | null> {
-  const row = await first<{ game: number; total: number }>(
-    db,
-    "SELECT COALESCE(SUM(appid = ?), 0) AS game, COUNT(*) AS total FROM media_sources",
-    appid,
-  );
-  if (Number(row?.game ?? 0) >= MAX_MEDIA_ARTICLES_PER_GAME) return `article_cap:${appid}`;
-  if (Number(row?.total ?? 0) >= MAX_MEDIA_ARTICLES_TOTAL) return "article_cap";
-  return null;
+  const row = await first<{ count: number }>(db, "SELECT COUNT(*) AS count FROM media_sources WHERE appid = ?", appid);
+  return Number(row?.count ?? 0) >= MAX_MEDIA_ARTICLES_PER_GAME ? `article_cap:${appid}` : null;
 }
 
 const EMPTY_USAGE_SUMMARY: MediaRunSummary["usage"] = {

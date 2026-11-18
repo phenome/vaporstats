@@ -297,3 +297,38 @@ describe("the automatic media ingestion switch", () => {
     expect(waitingItems(database).filter(({ id }) => waiting.some((item) => item.id === id))).toEqual([]);
   });
 });
+
+describe("article ceilings in automatic runs", () => {
+  test("the 45-article experiment total is retired: roots and an eligible child whose accepted articles exceed 45 in total each admit up to their own 15-article ceiling, and every new article is queued for processing", async () => {
+    const PHANTOM_LIBERTY = 2138330;
+    const database = experimentCatalog();
+    database.native.prepare("INSERT INTO apps (appid, name, slug, type, is_eligible, is_playable, parent_appid) VALUES (?, 'Cyberpunk 2077: Phantom Liberty', 'phantom-liberty', 'expansion', 1, 1, ?)").run(PHANTOM_LIBERTY, CYBERPUNK);
+    insertSources(database.native, BALDURS_GATE, "initial", 15);
+    insertSources(database.native, HADES_II, "initial", 15);
+    insertSources(database.native, CYBERPUNK, "initial", 14);
+    // The seeded articles were processed under the experiment.
+    const processed = insertCompletedRun(database.native, "initial:experiment", [CYBERPUNK, BALDURS_GATE, HADES_II]);
+    database.native.prepare("UPDATE media_sources SET processing_run_id = ?").run(processed);
+    const providers = { ...apis(), tavily: controlledTavilyApi({ [CYBERPUNK]: "Cyberpunk 2077", [BALDURS_GATE]: "Baldur's Gate 3", [HADES_II]: "Hades II", [PHANTOM_LIBERTY]: "Cyberpunk 2077: Phantom Liberty" }) };
+    const expansionReview = `<!doctype html><html><head><meta property="og:title" content="Cyberpunk 2077: Phantom Liberty Review"><meta property="article:published_time" content="2026-11-01"></head><body><article><h1>Cyberpunk 2077: Phantom Liberty Review</h1><p>${"Phantom Liberty adds a substantial spy story with detailed systems and memorable encounters. ".repeat(5)}</p></article></body></html>`;
+
+    await tick(database, providers, "2026-11-20T06:00:00.000Z", {
+      paidSubmissionsPerTick: 1,
+      outlet: (url) => url.includes(`/${PHANTOM_LIBERTY}-`) ? new Response(expansionReview) : undefined,
+    });
+
+    const perEntity = database.native.query<{ appid: number; count: number }, []>("SELECT appid, COUNT(*) AS count FROM media_sources GROUP BY appid ORDER BY appid").all();
+    expect(perEntity).toEqual([
+      { appid: BALDURS_GATE, count: 15 },
+      { appid: CYBERPUNK, count: 15 },
+      { appid: HADES_II, count: 15 },
+      { appid: PHANTOM_LIBERTY, count: 6 },
+    ]);
+    // Baldur's Gate 3 and Hades II are at their ceilings: no query for them.
+    expect(providers.tavily.searches.filter((search) => search.startsWith("Baldur") || search.startsWith("Hades"))).toEqual([]);
+    const newSources = database.native.query<{ id: number }, []>("SELECT id FROM media_sources WHERE processing_run_id IS NOT ? OR processing_run_id IS NULL ORDER BY id").all(processed);
+    expect(newSources).toHaveLength(7);
+    const extractionItems = database.native.query<{ source_id: number }, []>("SELECT source_id FROM media_processing_jobs WHERE stage = 'extraction' ORDER BY source_id").all();
+    expect(extractionItems.map(({ source_id }) => source_id)).toEqual(newSources.map(({ id }) => id));
+  });
+});

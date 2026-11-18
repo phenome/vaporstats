@@ -75,7 +75,7 @@ describe("article ceilings across assessment passes", () => {
     expect(count(database, "SELECT COUNT(*) AS count FROM media_sources WHERE appid = ?", CYBERPUNK)).toBe(15);
   });
 
-  test("a later pass admits no article once 45 are accepted across passes, and issues no query", async () => {
+  test("a later pass admits an article beyond 45 accepted in total across passes, up to the entity's own 15-article ceiling", async () => {
     const database = fixture();
     insertSources(database.native, BALDURS_GATE, "initial", 15);
     insertSources(database.native, HADES_II, "initial", 10);
@@ -88,8 +88,10 @@ describe("article ceilings across assessment passes", () => {
 
     await runAuthorizedMediaDiscovery(database.db, { runId, tavilyApiKey: "test-key", fetch: fetchFn, now: DAY_ONE });
 
-    expect(calls.filter((call) => !call.url.endsWith("/usage"))).toEqual([]);
-    expect(count(database, "SELECT COUNT(*) AS count FROM media_sources")).toBe(45);
+    // The 45-article experiment total is retired: Cyberpunk 2077 takes its
+    // fifteenth article, and the outlets after it find it at its ceiling.
+    expect(count(database, "SELECT COUNT(*) AS count FROM media_sources WHERE appid = ?", CYBERPUNK)).toBe(15);
+    expect(count(database, "SELECT COUNT(*) AS count FROM media_sources")).toBe(46);
   });
 });
 

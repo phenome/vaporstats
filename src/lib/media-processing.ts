@@ -12,7 +12,6 @@ import {
 } from "./media-overview";
 import {
   MAX_MEDIA_ARTICLES_PER_GAME,
-  MAX_MEDIA_ARTICLES_TOTAL,
   MEDIA_GAME_CHOICES,
   MEDIA_OUTLETS,
   type MediaOutlet,
@@ -1541,13 +1540,13 @@ async function loadAuthorization(
 
 /**
  * Validates an affected set for `selectedGames`: distinct media source ids,
- * at most the experiment's total article ceiling, each belonging to an
- * eligible entity of the selected games.
+ * each belonging to an eligible entity of the selected games, so the set is
+ * bounded by those entities' article ceilings.
  */
 async function validatedAffectedSourceIds(db: AppDatabase, selectedGames: readonly number[], value: readonly number[] | undefined): Promise<number[]> {
   if (value === undefined) return [];
-  if (!Array.isArray(value) || value.length > MAX_MEDIA_ARTICLES_TOTAL || !value.every((id) => Number.isSafeInteger(id) && id > 0) || new Set(value).size !== value.length) {
-    throw new Error("Affected media sources must be distinct positive ids within the article ceiling");
+  if (!Array.isArray(value) || !value.every((id) => Number.isSafeInteger(id) && id > 0) || new Set(value).size !== value.length) {
+    throw new Error("Affected media sources must be distinct positive ids");
   }
   const ids = [...value].sort((a, b) => a - b);
   if (ids.length === 0) return ids;
@@ -1619,17 +1618,14 @@ async function openAuthorizations(db: AppDatabase): Promise<OpenAuthorization[]>
   return open.map((auth) => ({ auth, selectedGames: parseSelectedGames(auth.selected_games) }));
 }
 
-/** The sources of `entities` that processing considers: at most 15 per entity and the experiment total. */
+/** The sources of `entities` that processing considers: at most each entity's own 15-article ceiling. */
 async function boundedSources(db: AppDatabase, entities: readonly number[]): Promise<SourceRow[]> {
   const allSources = await rows<SourceRow>(db, `SELECT ${SOURCE_COLUMNS} FROM media_sources WHERE appid IN (SELECT value FROM json_each(?)) ORDER BY appid, id`, JSON.stringify(entities));
   const sourceCountByGame = new Map<number, number>();
-  let boundedSourceCount = 0;
   return allSources.filter((source) => {
-    if (boundedSourceCount >= MAX_MEDIA_ARTICLES_TOTAL) return false;
     const count = sourceCountByGame.get(source.appid) ?? 0;
     if (count >= MAX_MEDIA_ARTICLES_PER_GAME) return false;
     sourceCountByGame.set(source.appid, count + 1);
-    boundedSourceCount += 1;
     return true;
   });
 }
