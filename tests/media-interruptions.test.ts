@@ -8,6 +8,7 @@ import {
   PROCESSING_FETCH_RESENT_AFTER_RESTART,
   seedApps,
   sweepInterruptions,
+  UNCERTAIN_PAID_RESEND,
   type InterruptionInvariants,
   type InterruptionScenario,
   type OutboundKind,
@@ -114,6 +115,16 @@ describe("interruption sweeps", () => {
       if (invariants.restarts?.includes("outlet_fetch") && baseline.openrouter > 0) {
         expect(report.resentUnderException.length).toBeGreaterThan(0);
         expect(report.resentUnderException.every((resend) => resend.includes(PROCESSING_FETCH_RESENT_AFTER_RESTART.name))).toBe(true);
+      }
+      // A restart during a paid request leaves it uncertain, and it is resent
+      // under the uncertain-resend bound (#80): at most three sends per
+      // identity, which shows the sweep observes paid resends at all.
+      if (invariants.restarts?.some((kind) => kind === "openrouter" || kind === "gemini_submit") && baseline.openrouter > 0) {
+        expect(report.resentAfterUncertain.some((resend) => resend.includes(" openrouter "))).toBe(true);
+        expect(report.resentAfterUncertain.every((resend) => resend.includes(UNCERTAIN_PAID_RESEND.name))).toBe(true);
+      }
+      if (invariants.restarts?.includes("gemini_submit") && baseline.gemini_submit > 0) {
+        expect(report.resentAfterUncertain.some((resend) => resend.includes(" gemini_submit "))).toBe(true);
       }
       // Day stops hold queries, which shows the reopening check runs at all.
       if (invariants.dayStops && baseline.search > 0) expect(report.dayStoppedQueries).toBeGreaterThan(0);

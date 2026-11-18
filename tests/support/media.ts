@@ -4,7 +4,7 @@ import { runIngestionTick, type IngestionTickOptions } from "../../workers/inges
 import { copyTestDatabase, openTestDatabase, type TestDatabase } from "./db";
 import type { GeminiBatchPoll, GeminiBatchTransport } from "../../src/lib/media-processing";
 import { createOpenRouterTransport, type OpenRouterTransport } from "../../src/lib/media-openrouter";
-import { GeminiHttpError } from "../../src/lib/media-paid-providers";
+import { GeminiHttpError, MAX_UNCERTAIN_SENDS } from "../../src/lib/media-paid-providers";
 import { MEDIA_OUTLETS, type MediaPass } from "../../src/lib/media-discovery";
 
 export const CYBERPUNK = 1091500;
@@ -814,6 +814,23 @@ export const PROCESSING_FETCH_RESENT_AFTER_RESTART = {
   perRestart: 1,
 } as const;
 
+/**
+ * The resend of uncertain paid work (#80): a paid request whose outcome is
+ * unknown, such as one a restart interrupted, is sent again under the queue's
+ * backoff, so one OpenRouter request or Gemini submission identity is sent at
+ * most `MAX_UNCERTAIN_SENDS` times, never more. Article text is never
+ * retained, so each resend of an uncertain extraction fetches its article
+ * again: one processing fetch per such resend.
+ */
+export const UNCERTAIN_PAID_RESEND = {
+  name: "paid request resent after an uncertain outcome (#80)",
+  applies: (call: Pick<OutboundCall, "kind">) => call.kind === "openrouter" || call.kind === "gemini_submit",
+  /** Sends allowed per request identity. */
+  maxSends: MAX_UNCERTAIN_SENDS,
+  /** Processing fetches of an article allowed per resend of its uncertain extraction. */
+  refetchesPerResend: 1,
+} as const;
+
 /** A media world: the controlled providers and outlets one sweep run uses. */
 export interface MediaWorld {
   tavily: ReturnType<typeof controlledTavilyApi>;
@@ -855,14 +872,15 @@ export interface InterruptionScenario {
  * run, whatever its faults, is checked for the same invariants:
  *
  * - send once: no request identity is sent twice, except under
- *   `PROCESSING_FETCH_RESENT_AFTER_RESTART`; a request a fault answered with
- *   HTTP 429 never reached its outlet and is not counted as sent;
+ *   `PROCESSING_FETCH_RESENT_AFTER_RESTART` and `UNCERTAIN_PAID_RESEND`; a
+ *   request a fault answered with HTTP 429 never reached its outlet and is
+ *   not counted as sent;
  * - at most one accepted article per entity and query (entity, pass and outlet);
  * - at most 30 attempts per outlet per UTC day, as recorded and as observed;
  * - every query a day-scoped stop held at the end of the swept day completes
  *   on a later day;
- * - every accepted article is extracted, unless its extraction is uncertain
- *   (ADR 0018: an item that may have been charged is never resent).
+ * - every accepted article is extracted, unless its extraction ended
+ *   `uncertain_exhausted` (#80: uncertain work is resent at most three times).
  */
 export interface InterruptionInvariants {
   /**
@@ -894,6 +912,8 @@ export interface InterruptionReport {
   peakOutletDayAttempts: number;
   /** Requests a run sent again under `PROCESSING_FETCH_RESENT_AFTER_RESTART`. */
   resentUnderException: string[];
+  /** Paid requests, and their articles' processing fetches, a run sent again under `UNCERTAIN_PAID_RESEND`. */
+  resentAfterUncertain: string[];
   violations: string[];
 }
 
@@ -1038,13 +1058,34 @@ async function sweepRun(template: { database: TestDatabase; calls: OutboundCall[
     for (const call of driver.interrupted) {
       if (PROCESSING_FETCH_RESENT_AFTER_RESTART.applies(call)) allowance.set(`${call.kind} ${call.identity}`, (allowance.get(`${call.kind} ${call.identity}`) ?? 0) + PROCESSING_FETCH_RESENT_AFTER_RESTART.perRestart);
     }
+    // Each resend of an uncertain extraction fetches its article once more.
+    const refetches = new Map<string, number>();
+    for (const { original_url, resends } of database.native.query<{ original_url: string; resends: number }, []>(
+      `SELECT s.original_url, COUNT(*) AS resends FROM media_processing_attempts AS a
+       JOIN media_processing_jobs AS j ON j.id = a.job_id JOIN media_sources AS s ON s.id = j.source_id
+       WHERE j.stage = 'extraction' AND EXISTS (SELECT 1 FROM media_processing_attempts AS p WHERE p.job_id = a.job_id AND p.attempt = a.attempt - 1 AND p.outcome = 'uncertain')
+       GROUP BY s.original_url`,
+    ).all()) refetches.set(`outlet_fetch processing:${original_url}`, resends * UNCERTAIN_PAID_RESEND.refetchesPerResend);
     const sent = new Map<string, number>();
-    for (const call of [...template.calls, ...driver.calls]) sent.set(`${call.kind} ${call.identity}`, (sent.get(`${call.kind} ${call.identity}`) ?? 0) + 1);
+    const kindOf = new Map<string, OutboundCall>();
+    for (const call of [...template.calls, ...driver.calls]) {
+      sent.set(`${call.kind} ${call.identity}`, (sent.get(`${call.kind} ${call.identity}`) ?? 0) + 1);
+      kindOf.set(`${call.kind} ${call.identity}`, call);
+    }
     const resentUnderException: string[] = [];
+    const resentAfterUncertain: string[] = [];
     for (const [identity, count] of sent) {
-      const limit = 1 + (allowance.get(identity) ?? 0);
+      if (UNCERTAIN_PAID_RESEND.applies(kindOf.get(identity)!)) {
+        if (count > UNCERTAIN_PAID_RESEND.maxSends) violations.push(`${label}: ${identity.slice(0, 160)} sent ${count} times, at most ${UNCERTAIN_PAID_RESEND.maxSends} allowed`);
+        else if (count > 1) resentAfterUncertain.push(`${label}: ${UNCERTAIN_PAID_RESEND.name}: ${identity.slice(0, 160)}`);
+        continue;
+      }
+      const restartAllowance = allowance.get(identity) ?? 0;
+      const uncertainAllowance = refetches.get(identity) ?? 0;
+      const limit = 1 + restartAllowance + uncertainAllowance;
       if (count > limit) violations.push(`${label}: ${identity.slice(0, 160)} sent ${count} times, at most ${limit} allowed`);
-      else if (count > 1) resentUnderException.push(`${label}: ${PROCESSING_FETCH_RESENT_AFTER_RESTART.name}: ${identity}`);
+      else if (count > 1 + uncertainAllowance) resentUnderException.push(`${label}: ${PROCESSING_FETCH_RESENT_AFTER_RESTART.name}: ${identity}`);
+      else if (count > 1) resentAfterUncertain.push(`${label}: ${UNCERTAIN_PAID_RESEND.name}: ${identity}`);
     }
     // One accepted article per entity and query.
     for (const row of native.query<{ appid: number; pass: string; outlet: string; articles: number }, []>("SELECT appid, pass, outlet, COUNT(*) AS articles FROM media_sources GROUP BY appid, pass, outlet HAVING COUNT(*) > 1").all()) {
@@ -1064,13 +1105,13 @@ async function sweepRun(template: { database: TestDatabase; calls: OutboundCall[
         violations.push(`${label}: query ${row ? `${row.appid} ${row.pass}@${row.outlet}` : id} day-stopped on ${stopDay} ended ${row?.status ?? "missing"}${row?.stop_reason ? ` (${row.stop_reason})` : ""}`);
       }
     }
-    // Every accepted article is extracted, unless its extraction is uncertain.
-    for (const { original_url } of native.query<{ original_url: string }, []>("SELECT original_url FROM media_sources AS s WHERE NOT EXISTS (SELECT 1 FROM media_article_extractions AS e WHERE e.source_id = s.id AND e.active = 1) AND NOT EXISTS (SELECT 1 FROM media_processing_jobs AS j WHERE j.source_id = s.id AND j.stage = 'extraction' AND j.status = 'uncertain')").all()) {
+    // Every accepted article is extracted, unless its extraction ended uncertain_exhausted.
+    for (const { original_url } of native.query<{ original_url: string }, []>("SELECT original_url FROM media_sources AS s WHERE NOT EXISTS (SELECT 1 FROM media_article_extractions AS e WHERE e.source_id = s.id AND e.active = 1) AND NOT EXISTS (SELECT 1 FROM media_processing_jobs AS j WHERE j.source_id = s.id AND j.stage = 'extraction' AND j.status = 'uncertain_exhausted')").all()) {
       violations.push(`${label}: accepted ${original_url} was never extracted`);
     }
-    return { swept, violations, resentUnderException, dayStopped: stopped.length, peak: Math.max(0, ...recorded.map(({ attempts }) => attempts)) };
+    return { swept, violations, resentUnderException, resentAfterUncertain, dayStopped: stopped.length, peak: Math.max(0, ...recorded.map(({ attempts }) => attempts)) };
   } catch (error) {
-    return { swept: [], violations: [`${label}: ${error instanceof Error ? error.message : String(error)}`], resentUnderException: [], dayStopped: 0, peak: 0 };
+    return { swept: [], violations: [`${label}: ${error instanceof Error ? error.message : String(error)}`], resentUnderException: [], resentAfterUncertain: [], dayStopped: 0, peak: 0 };
   } finally {
     database.cleanup();
   }
@@ -1112,6 +1153,7 @@ export async function sweepInterruptions(scenario: InterruptionScenario, invaria
       dayStoppedQueries: results.reduce((sum, result) => sum + result.dayStopped, 0),
       peakOutletDayAttempts: Math.max(...results.map((result) => result.peak)),
       resentUnderException: results.flatMap((result) => result.resentUnderException),
+      resentAfterUncertain: results.flatMap((result) => result.resentAfterUncertain),
       violations: results.flatMap((result) => result.violations),
     };
   } finally {
