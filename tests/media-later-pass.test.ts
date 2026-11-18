@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { MEDIA_OUTLETS, type MediaSource } from "../src/lib/media-discovery";
+import { handleCatalogRequest } from "../src/routes/api.catalog";
 import { handleGameDetailRequest } from "../src/routes/api.games.$appid.detail";
 import { openTestDatabase, type TestDatabase } from "./support/db";
 import {
@@ -13,6 +15,7 @@ import {
   HADES_II,
   runMediaTick,
   seedApps,
+  stableJson,
   type MediaTickOptions,
 } from "./support/media";
 
@@ -72,8 +75,10 @@ function world(options: { later?: (appid: number, outlet: Outlet) => Array<{ url
   const page = (url: string, html: string) => pages.set(url, () => new Response(html));
   for (const appid of EXPERIMENT) {
     for (const outlet of MEDIA_OUTLETS) {
-      page(articleUrl(appid, outlet), discoveryArticleHtml(appid, `${GAME_NAMES[appid]} Review`, { date: "2026-11-10T00:00:00.000Z", author: `${outlet.name} critic` }));
-      page(articleUrl(appid, outlet, "-revisited"), discoveryArticleHtml(appid, `${GAME_NAMES[appid]} Review Revisited`, { date: "2026-11-19T00:00:00.000Z", author: `${outlet.name} critic` }));
+      // Each article has its own text, so no two are one originating assessment.
+      const body = (when: string) => `${GAME_NAMES[appid]} offers a substantial playable campaign with detailed systems, as ${outlet.name}'s ${when} assessment describes at length. `.repeat(5);
+      page(articleUrl(appid, outlet), discoveryArticleHtml(appid, `${GAME_NAMES[appid]} Review`, { date: "2026-11-10T00:00:00.000Z", author: `${outlet.name} critic`, body: body("first") }));
+      page(articleUrl(appid, outlet, "-revisited"), discoveryArticleHtml(appid, `${GAME_NAMES[appid]} Review Revisited`, { date: "2026-11-19T00:00:00.000Z", author: `${outlet.name} critic`, body: body("second") }));
     }
   }
   const outlet = (url: string) => pages.get(url)?.();
@@ -201,7 +206,7 @@ describe("later-pass selection", () => {
     expect(fetched.filter((url) => url === articleUrl(CYBERPUNK, IGN))).toHaveLength(2);
     const { sources } = await detail(database, CYBERPUNK);
     const laterSources = sources.filter(({ originalUrl }) => !MEDIA_OUTLETS.some((outlet) => originalUrl === articleUrl(CYBERPUNK, outlet)));
-    expect(laterSources.map(({ outlet, originalUrl, publishedAt }) => ({ outlet, originalUrl, publishedAt })).sort((a, b) => a.originalUrl.localeCompare(b.originalUrl))).toEqual([
+    expect(laterSources.map(({ outlet, originalUrl, publishedAt }): { outlet: string; originalUrl: string; publishedAt: string | null } => ({ outlet, originalUrl, publishedAt })).sort((a, b) => a.originalUrl.localeCompare(b.originalUrl))).toEqual([
       { outlet: "GameSpot", originalUrl: articleUrl(CYBERPUNK, GAMESPOT, "-undated"), publishedAt: null },
       { outlet: "GamesRadar+", originalUrl: articleUrl(CYBERPUNK, GAMESRADAR, "-revisited"), publishedAt: "2026-11-19T00:00:00.000Z" },
       { outlet: "IGN", originalUrl: articleUrl(CYBERPUNK, IGN, "-revisited"), publishedAt: "2026-11-19T00:00:00.000Z" },
@@ -239,5 +244,94 @@ describe("later-pass article rules", () => {
     const cyberpunkQueries = queries(tavily).filter((query) => query.startsWith("Cyberpunk 2077 "));
     expect(cyberpunkQueries.filter((query) => query.includes("review revisited"))).toHaveLength(6);
     expect(cyberpunkQueries).toHaveLength(12);
+  });
+});
+
+describe("later articles in processing and results", () => {
+  test("later articles feed synthesis, the Overview evidence map, Sources, citations and tag results without counting as additional outlet endorsements", async () => {
+    const database = experimentCatalog();
+    const { openRouter, tick } = world();
+    const [ignInitial, ignLater, eurogamerInitial] = [articleUrl(CYBERPUNK, IGN), articleUrl(CYBERPUNK, IGN, "-revisited"), articleUrl(CYBERPUNK, EUROGAMER)];
+    const syntheses: Array<{ urls: string[]; content: string }> = [];
+    openRouter.onChat = (request) => {
+      if (request.stage !== "synthesis") return;
+      syntheses.push({ urls: request.urls, content: JSON.stringify(request.body.messages) });
+      if (!request.urls.includes(ignLater)) return;
+      // The model lists the statement with two IGN articles first.
+      openRouter.output("synthesis", {
+        statements: [
+          { text: "Night City rewards exploring its districts on foot.", sourceUrls: [ignInitial, ignLater] },
+          { text: "Combat supports both stealth and gunplay builds.", sourceUrls: [ignInitial, eurogamerInitial] },
+        ],
+        tags: [{ label: "Reworked skill trees", sourceUrls: [ignLater] }],
+        similarityInputs: { gameplay: ["Stealth and gunplay builds"] },
+      });
+    };
+    for (const at of ["2026-11-20T06:00", "2026-11-20T06:15", "2026-11-20T06:30", "2026-11-21T06:00", "2026-11-21T06:15", "2026-11-21T06:30"]) await tick(database, `${at}:00.000Z`);
+
+    const synthesis = syntheses.filter(({ urls }) => urls.includes(ignLater));
+    expect(synthesis).toHaveLength(1);
+    expect(synthesis[0]!.urls).toEqual(expect.arrayContaining(MEDIA_OUTLETS.flatMap((outlet) => [articleUrl(CYBERPUNK, outlet), articleUrl(CYBERPUNK, outlet, "-revisited")])));
+    expect(synthesis[0]!.content).not.toMatch(/initial assessments/i);
+
+    process.env.MEDIA_OVERVIEW_PUBLIC = "true";
+    const { sources, mediaOverview } = await detail(database, CYBERPUNK);
+    expect(sources.map(({ originalUrl }) => originalUrl)).toEqual(expect.arrayContaining([ignInitial, ignLater]));
+    // Two IGN articles are one outlet's support; IGN and Eurogamer are two.
+    expect(mediaOverview?.statements).toEqual([
+      { text: "Combat supports both stealth and gunplay builds.", sourceUrls: [ignInitial, eurogamerInitial] },
+      { text: "Night City rewards exploring its districts on foot.", sourceUrls: [ignInitial, ignLater] },
+    ]);
+    expect(mediaOverview?.tags.map(({ slug }) => slug)).toEqual(["reworked-skill-trees"]);
+    const catalog = await handleCatalogRequest(new Request("https://vaporstats.test/api/catalog?media_tag=Reworked%20skill%20trees"), database.db);
+    expect((await catalog.json() as { data: Array<{ appid: number }> }).data.map(({ appid }) => appid)).toEqual([CYBERPUNK]);
+  });
+
+  test("an Overview built before synthesis took inputs from both passes stays active, and that configuration change queues no work for an entity whose contributions are unchanged", async () => {
+    const database = experimentCatalog();
+    const { openRouter, gemini, tick } = world({ later: () => [] });
+    for (const at of ["2026-11-20T06:00", "2026-11-20T06:15", "2026-11-20T06:30"]) await tick(database, `${at}:00.000Z`);
+    // Rewrite each active Overview, and the synthesis that built it, as made
+    // under the previous synthesis configuration.
+    const extractions = database.native.query<{ appid: number; source_id: number; input_identity: string; model: string }, []>(
+      "SELECT source.appid, extraction.source_id, extraction.input_identity, extraction.model FROM media_article_extractions AS extraction JOIN media_sources AS source ON source.id = extraction.source_id WHERE extraction.active = 1",
+    ).all();
+    for (const appid of EXPERIMENT) {
+      const own = extractions.filter((row) => row.appid === appid).map((row) => ({ sourceId: row.source_id, inputIdentity: row.input_identity })).sort((a, b) => a.sourceId - b.sourceId);
+      const model = extractions.find((row) => row.appid === appid)!.model;
+      const identity = createHash("sha256").update(stableJson({ stage: "synthesis", appid, model, configVersion: "media-synthesis-2026-09-13-v5", extractions: own })).digest("hex");
+      const current = database.native.query<{ input_identity: string }, [number]>("SELECT input_identity FROM media_game_overviews WHERE appid = ? AND active = 1").get(appid)!.input_identity;
+      database.native.prepare("UPDATE media_game_overviews SET config_version = 'media-synthesis-2026-09-13-v5', input_identity = ? WHERE appid = ? AND active = 1").run(identity, appid);
+      database.native.prepare("UPDATE media_processing_jobs SET config_version = 'media-synthesis-2026-09-13-v5', input_identity = ?1, request_key = replace(request_key, ?2, ?1) WHERE stage = 'synthesis' AND appid = ?3").run(identity, current, appid);
+    }
+    const before = database.native.query("SELECT id, appid, input_identity, config_version FROM media_game_overviews WHERE active = 1 ORDER BY id").all();
+    const requests = { openRouter: openRouter.requests.length, gemini: gemini.submitted.length };
+
+    for (const at of ["2026-11-21T06:00", "2026-11-21T06:15", "2026-11-22T06:00", "2026-11-22T06:15"]) await tick(database, `${at}:00.000Z`);
+
+    expect(database.native.query("SELECT id, appid, input_identity, config_version FROM media_game_overviews WHERE active = 1 ORDER BY id").all()).toEqual(before);
+    expect({ openRouter: openRouter.requests.length, gemini: gemini.submitted.length }).toEqual(requests);
+    expect(database.native.query("SELECT COUNT(*) AS count FROM media_processing_jobs WHERE status = 'queued'").get()).toEqual({ count: 0 });
+  });
+});
+
+describe("undated articles in Sources", () => {
+  test("Sources list dated articles by publication date and undated articles after them, keeping their unknown date instead of placing them by retrieval time", async () => {
+    const database = experimentCatalog();
+    const { page, tick } = world({ later: (appid, outlet) => appid === CYBERPUNK && outlet === IGN ? [{ url: articleUrl(CYBERPUNK, IGN, "-revisited") }] : [] });
+    // GameSpot's initial review, retrieved on November 20, has no date.
+    page(articleUrl(CYBERPUNK, GAMESPOT), reviewPage(CYBERPUNK, "Cyberpunk 2077 Review", { date: null }));
+    // IGN's later review was published after that retrieval.
+    page(articleUrl(CYBERPUNK, IGN, "-revisited"), reviewPage(CYBERPUNK, "Cyberpunk 2077 Review Revisited", { date: "2026-11-20T12:00:00.000Z" }));
+
+    await tick(database, "2026-11-20T06:00:00.000Z");
+    await tick(database, "2026-11-21T06:00:00.000Z");
+
+    const { sources } = await detail(database, CYBERPUNK);
+    expect(sources.map(({ outlet, publishedAt }) => ({ outlet, publishedAt }))).toEqual([
+      ...MEDIA_OUTLETS.filter((outlet) => outlet !== GAMESPOT).map(({ name }) => ({ outlet: name, publishedAt: "2026-11-10T00:00:00.000Z" })),
+      { outlet: "IGN", publishedAt: "2026-11-20T12:00:00.000Z" },
+      { outlet: "GameSpot", publishedAt: null },
+    ]);
   });
 });
