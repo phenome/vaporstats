@@ -47,6 +47,7 @@ const expectedTables = [
   "media_enrollments",
   "media_game_overviews",
   "media_processing_authorizations",
+  "media_processing_attempts",
   "media_processing_jobs",
   "media_sources",
   "media_tag_memberships",
@@ -372,11 +373,12 @@ function seed(db: Database, statements: readonly string[]): void {
 
 const mediaTables = expectedTables.filter((table) => table.startsWith("media_"));
 /**
- * Media tables the retained fixture holds rows in. Enrollments postdate its
- * schema: an upgrade must leave them empty, because the daily media run, not
- * a migration, enrolls entities.
+ * Media tables the retained fixture holds rows in. Enrollments and paid-work
+ * attempts postdate its schema: an upgrade must leave them empty, because the
+ * daily media run, not a migration, enrolls entities, and a job written
+ * before attempts were recorded reports its own values as its one attempt.
  */
-const retainedMediaTables = mediaTables.filter((table) => table !== "media_enrollments");
+const retainedMediaTables = mediaTables.filter((table) => table !== "media_enrollments" && table !== "media_processing_attempts");
 
 /** Applies committed migrations up to, but excluding, `tag` through the production procedure. */
 function migrateBefore(db: Database, tag: string): void {
@@ -557,6 +559,8 @@ function verifyRetainedMediaRowsSurviveUpgrade(): void {
     const enrollments = retained.query<{ count: number }, []>("SELECT COUNT(*) AS count FROM media_enrollments").get()?.count ?? 0;
     const startDate = retained.query<{ count: number }, []>("SELECT COUNT(*) AS count FROM checkpoints WHERE key = 'media:enrollment-start-date'").get()?.count ?? 0;
     if (enrollments !== 0 || startDate !== 0) throw new Error("Migrations seeded media enrollment");
+    const attempts = retained.query<{ count: number }, []>("SELECT COUNT(*) AS count FROM media_processing_attempts").get()?.count ?? 0;
+    if (attempts !== 0) throw new Error("Migrations wrote paid-work attempts");
     // A query stopped before its stop time was recorded keeps its last update
     // as that time, so it reopens on a later UTC day.
     const stops = retained.query<{ id: number; stopped_at: string | null }, []>("SELECT id, stopped_at FROM media_discovery_progress ORDER BY id").all();

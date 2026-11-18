@@ -1150,8 +1150,11 @@ export const mediaProcessingJobs = sqliteTable(
     index("idx_media_processing_jobs_queue").on(table.provider, table.status, table.appid, table.enqueuedAt),
     // `reserved` and `failed` are kept for retained rows written under the
     // retired lifetime allowance; new work is `queued` and ends `refused`,
-    // never failed.
-    check("media_processing_jobs_status_check", sql`${table.status} IN ('queued', 'reserved', 'submitted', 'succeeded', 'failed', 'refused', 'uncertain', 'stale')`),
+    // never failed. `uncertain` marks an item in flight (or a retained row's
+    // unknown outcome); `uncertain_exhausted` ends an item after its third
+    // consecutive uncertain outcome for one input identity, so only a
+    // correction set resends it.
+    check("media_processing_jobs_status_check", sql`${table.status} IN ('queued', 'reserved', 'submitted', 'succeeded', 'failed', 'refused', 'uncertain', 'uncertain_exhausted', 'stale')`),
     check("media_processing_jobs_attempt_check", sql`${table.attemptCount} >= 0`),
     check("media_processing_jobs_retained_check", sql`${table.retained} IN (0, 1)`),
     check("media_processing_jobs_cost_source_check", sql`${table.costSource} IS NULL OR ${table.costSource} IN ('estimated', 'provider_reported', 'unknown')`),
@@ -1165,6 +1168,55 @@ export const mediaProcessingJobs = sqliteTable(
       "media_processing_jobs_charge_check",
       sql`${table.reservedMicrousd} >= 0 AND (${table.chargedMicrousd} IS NULL OR ${table.chargedMicrousd} >= 0)`,
     ),
+  ],
+);
+
+/**
+ * One send of a paid-work item to its provider. Every attempt keeps its own
+ * provider identifiers, usage and cost, so a resent item reports every
+ * charge. A job written before attempts were recorded has no attempt rows and
+ * reports its own recorded values as its one attempt.
+ */
+export const mediaProcessingAttempts = sqliteTable(
+  "media_processing_attempts",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    jobId: integer("job_id")
+      .notNull()
+      .references(() => mediaProcessingJobs.id, { onDelete: "no action" }),
+    /** 1 for the item's first recorded send, then one more per send. */
+    attempt: integer("attempt").notNull(),
+    /** The provider the attempt was sent to. */
+    provider: text("provider").notNull(),
+    /** The item's input identity when it was sent. */
+    inputIdentity: text("input_identity").notNull(),
+    sentAt: text("sent_at").notNull(),
+    /**
+     * Null while the request is in flight, then the class of its outcome:
+     * `succeeded`, `refused`, `stale`, `uncertain`, `transient`,
+     * `credit_pause` or `missing_configuration`.
+     */
+    outcome: text("outcome"),
+    /** The Gemini batch the attempt created. */
+    providerBatchId: text("provider_batch_id"),
+    /** The generation id an OpenRouter answer reported. */
+    generationId: text("generation_id"),
+    routedProvider: text("routed_provider"),
+    routedModel: text("routed_model"),
+    usageJson: text("usage_json").notNull().default("{}"),
+    chargedMicrousd: integer("charged_microusd"),
+    /** How `charged_microusd` was obtained, as on the job. */
+    costSource: text("cost_source"),
+    /** When the attempt's cost was recorded; it reports in that UTC month. */
+    settledAt: text("settled_at"),
+    error: text("error"),
+  },
+  (table) => [
+    uniqueIndex("uq_media_processing_attempts_job_attempt").on(table.jobId, table.attempt),
+    check("media_processing_attempts_attempt_check", sql`${table.attempt} >= 1`),
+    check("media_processing_attempts_outcome_check", sql`${table.outcome} IS NULL OR ${table.outcome} IN ('succeeded', 'refused', 'stale', 'uncertain', 'transient', 'credit_pause', 'missing_configuration')`),
+    check("media_processing_attempts_cost_source_check", sql`${table.costSource} IS NULL OR ${table.costSource} IN ('estimated', 'provider_reported', 'unknown')`),
+    check("media_processing_attempts_charge_check", sql`${table.chargedMicrousd} IS NULL OR ${table.chargedMicrousd} >= 0`),
   ],
 );
 

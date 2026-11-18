@@ -1,0 +1,89 @@
+PRAGMA foreign_keys=OFF;--> statement-breakpoint
+CREATE TABLE `__new_media_processing_jobs` (
+	`id` integer PRIMARY KEY AUTOINCREMENT NOT NULL,
+	`run_id` integer NOT NULL,
+	`stage` text NOT NULL,
+	`appid` integer NOT NULL,
+	`matched_appid` integer,
+	`dimension` text,
+	`source_id` integer,
+	`request_key` text NOT NULL,
+	`input_identity` text NOT NULL,
+	`model` text NOT NULL,
+	`config_version` text NOT NULL,
+	`max_input_tokens` integer NOT NULL,
+	`max_output_tokens` integer NOT NULL,
+	`reserved_microusd` integer NOT NULL,
+	`charged_microusd` integer,
+	`reservation_active` integer DEFAULT 1 NOT NULL,
+	`status` text DEFAULT 'queued' NOT NULL,
+	`provider` text DEFAULT 'gemini' NOT NULL,
+	`enqueued_at` text DEFAULT CURRENT_TIMESTAMP NOT NULL,
+	`attempt_count` integer DEFAULT 0 NOT NULL,
+	`next_attempt_at` text,
+	`retained` integer DEFAULT 0 NOT NULL,
+	`cost_source` text,
+	`generation_id` text,
+	`routed_provider` text,
+	`routed_model` text,
+	`provider_batch_id` text,
+	`output_json` text,
+	`usage_json` text DEFAULT '{}' NOT NULL,
+	`error` text,
+	`submitted_at` text,
+	`completed_at` text,
+	`created_at` text DEFAULT CURRENT_TIMESTAMP NOT NULL,
+	FOREIGN KEY (`run_id`) REFERENCES `media_discovery_runs`(`id`) ON UPDATE no action ON DELETE no action,
+	FOREIGN KEY (`appid`) REFERENCES `apps`(`appid`) ON UPDATE no action ON DELETE no action,
+	FOREIGN KEY (`matched_appid`) REFERENCES `apps`(`appid`) ON UPDATE no action ON DELETE no action,
+	FOREIGN KEY (`source_id`) REFERENCES `media_sources`(`id`) ON UPDATE no action ON DELETE no action,
+	CONSTRAINT "media_processing_jobs_stage_check" CHECK("__new_media_processing_jobs"."stage" IN ('extraction', 'embedding', 'synthesis', 'explanation')),
+	CONSTRAINT "media_processing_jobs_status_check" CHECK("__new_media_processing_jobs"."status" IN ('queued', 'reserved', 'submitted', 'succeeded', 'failed', 'refused', 'uncertain', 'uncertain_exhausted', 'stale')),
+	CONSTRAINT "media_processing_jobs_attempt_check" CHECK("__new_media_processing_jobs"."attempt_count" >= 0),
+	CONSTRAINT "media_processing_jobs_retained_check" CHECK("__new_media_processing_jobs"."retained" IN (0, 1)),
+	CONSTRAINT "media_processing_jobs_cost_source_check" CHECK("__new_media_processing_jobs"."cost_source" IS NULL OR "__new_media_processing_jobs"."cost_source" IN ('estimated', 'provider_reported', 'unknown')),
+	CONSTRAINT "media_processing_jobs_dimension_check" CHECK("__new_media_processing_jobs"."dimension" IS NULL OR "__new_media_processing_jobs"."dimension" IN ('gameplay', 'story_world')),
+	CONSTRAINT "media_processing_jobs_reservation_check" CHECK("__new_media_processing_jobs"."reservation_active" IN (0, 1)),
+	CONSTRAINT "media_processing_jobs_token_check" CHECK("__new_media_processing_jobs"."max_input_tokens" >= 0 AND "__new_media_processing_jobs"."max_output_tokens" > 0),
+	CONSTRAINT "media_processing_jobs_charge_check" CHECK("__new_media_processing_jobs"."reserved_microusd" >= 0 AND ("__new_media_processing_jobs"."charged_microusd" IS NULL OR "__new_media_processing_jobs"."charged_microusd" >= 0))
+);
+--> statement-breakpoint
+-- Every job row is copied unchanged: `uncertain_exhausted` only widens the
+-- status check, and the autoincrement high-water mark is kept.
+INSERT INTO `__new_media_processing_jobs`("id", "run_id", "stage", "appid", "matched_appid", "dimension", "source_id", "request_key", "input_identity", "model", "config_version", "max_input_tokens", "max_output_tokens", "reserved_microusd", "charged_microusd", "reservation_active", "status", "provider", "enqueued_at", "attempt_count", "next_attempt_at", "retained", "cost_source", "generation_id", "routed_provider", "routed_model", "provider_batch_id", "output_json", "usage_json", "error", "submitted_at", "completed_at", "created_at") SELECT "id", "run_id", "stage", "appid", "matched_appid", "dimension", "source_id", "request_key", "input_identity", "model", "config_version", "max_input_tokens", "max_output_tokens", "reserved_microusd", "charged_microusd", "reservation_active", "status", "provider", "enqueued_at", "attempt_count", "next_attempt_at", "retained", "cost_source", "generation_id", "routed_provider", "routed_model", "provider_batch_id", "output_json", "usage_json", "error", "submitted_at", "completed_at", "created_at" FROM `media_processing_jobs`;--> statement-breakpoint
+DELETE FROM sqlite_sequence WHERE name = '__new_media_processing_jobs';--> statement-breakpoint
+INSERT INTO sqlite_sequence (name, seq) SELECT '__new_media_processing_jobs', seq FROM sqlite_sequence WHERE name = 'media_processing_jobs';--> statement-breakpoint
+DROP TABLE `media_processing_jobs`;--> statement-breakpoint
+ALTER TABLE `__new_media_processing_jobs` RENAME TO `media_processing_jobs`;--> statement-breakpoint
+PRAGMA foreign_keys=ON;--> statement-breakpoint
+CREATE UNIQUE INDEX `uq_media_processing_jobs_request` ON `media_processing_jobs` (`request_key`);--> statement-breakpoint
+CREATE UNIQUE INDEX `uq_media_processing_jobs_provider_batch` ON `media_processing_jobs` (`provider_batch_id`);--> statement-breakpoint
+CREATE INDEX `idx_media_processing_jobs_authorization` ON `media_processing_jobs` (`run_id`,`status`);--> statement-breakpoint
+CREATE INDEX `idx_media_processing_jobs_queue` ON `media_processing_jobs` (`provider`,`status`,`appid`,`enqueued_at`);--> statement-breakpoint
+-- Per-attempt records start empty: a job written before them reports its own
+-- recorded provider ids, usage and cost as its one attempt.
+CREATE TABLE `media_processing_attempts` (
+	`id` integer PRIMARY KEY AUTOINCREMENT NOT NULL,
+	`job_id` integer NOT NULL,
+	`attempt` integer NOT NULL,
+	`provider` text NOT NULL,
+	`input_identity` text NOT NULL,
+	`sent_at` text NOT NULL,
+	`outcome` text,
+	`provider_batch_id` text,
+	`generation_id` text,
+	`routed_provider` text,
+	`routed_model` text,
+	`usage_json` text DEFAULT '{}' NOT NULL,
+	`charged_microusd` integer,
+	`cost_source` text,
+	`settled_at` text,
+	`error` text,
+	FOREIGN KEY (`job_id`) REFERENCES `media_processing_jobs`(`id`) ON UPDATE no action ON DELETE no action,
+	CONSTRAINT "media_processing_attempts_attempt_check" CHECK("media_processing_attempts"."attempt" >= 1),
+	CONSTRAINT "media_processing_attempts_outcome_check" CHECK("media_processing_attempts"."outcome" IS NULL OR "media_processing_attempts"."outcome" IN ('succeeded', 'refused', 'stale', 'uncertain', 'transient', 'credit_pause', 'missing_configuration')),
+	CONSTRAINT "media_processing_attempts_cost_source_check" CHECK("media_processing_attempts"."cost_source" IS NULL OR "media_processing_attempts"."cost_source" IN ('estimated', 'provider_reported', 'unknown')),
+	CONSTRAINT "media_processing_attempts_charge_check" CHECK("media_processing_attempts"."charged_microusd" IS NULL OR "media_processing_attempts"."charged_microusd" >= 0)
+);
+--> statement-breakpoint
+CREATE UNIQUE INDEX `uq_media_processing_attempts_job_attempt` ON `media_processing_attempts` (`job_id`,`attempt`);
