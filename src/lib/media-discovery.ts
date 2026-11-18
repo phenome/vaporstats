@@ -376,17 +376,18 @@ function isoTimestamp(value: string): string {
  * When `outlets`' queries of one entity's pass have all finished, or null
  * while any of them has not: a query finishes when it completes or meets a
  * stop that never reopens, an Outlet denial. A query held by a day-scoped
- * stop, kept by a Provider stop, or never created is unfinished.
+ * stop, kept by a Provider stop, or never created is unfinished. A finished
+ * pass with no recorded time counts as finished at the earliest time.
  */
 function passFinishedAt(progress: readonly ProgressRow[], outlets: readonly MediaOutlet[]): string | null {
-  let finishedAt: string | null = null;
+  let finishedAt = "";
   for (const outlet of outlets) {
     const row = progress.find((item) => item.outlet === outlet);
     if (!row) return null;
     const lastingStop = row.status === "stopped" && !(DAY_SCOPED_STOPS as readonly string[]).includes(row.stop_reason ?? "");
     if (row.status !== "completed" && !lastingStop) return null;
     const at = row.status === "completed" ? row.completed_at ?? row.query_attempted_at : row.stopped_at ?? row.query_attempted_at;
-    if (at && (finishedAt === null || isoTimestamp(at) > finishedAt)) finishedAt = isoTimestamp(at);
+    if (at && isoTimestamp(at) > finishedAt) finishedAt = isoTimestamp(at);
   }
   return finishedAt;
 }
@@ -436,8 +437,8 @@ async function duePasses(db: AppDatabase, targets: readonly MediaTarget[], asOf:
     if (laterOutlets.length === 0 || passFinishedAt(ownProgress("later"), laterOutlets) !== null) continue;
     let dueAt = initialFinishedAt;
     if (enrollment.reason !== "experiment") {
-      const released = mainReleasedDate(releases.get(target.appid) ?? { release_status: "", release_date: null, release_date_source: null, steam_release_date: null, original_release_date: null });
-      const releasedOn = parsePreciseReleaseDate(released?.date);
+      const app = releases.get(target.appid);
+      const releasedOn = app ? parsePreciseReleaseDate(mainReleasedDate(app)?.date) : null;
       if (!releasedOn) continue;
       const releaseAgeDue = new Date(Date.parse(`${releasedOn}T00:00:00.000Z`) + LATER_PASS_RELEASE_AGE_DAYS * 86_400_000).toISOString();
       if (releaseAgeDue > dueAt) dueAt = releaseAgeDue;
