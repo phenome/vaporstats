@@ -34,6 +34,22 @@ function seedNearIgnCap(native: Database): void {
   for (let index = 0; index < IGN_ATTEMPTS_USED; index += 1) insert.run(CYBERPUNK, `https://ign.com/articles/earlier-${index}`);
 }
 
+/**
+ * `experimentWorld`, except that every extraction request for Cyberpunk
+ * 2077's IGN review loses its connection after it was sent, so that item is
+ * uncertain at every send and reaches the three-send limit.
+ */
+function lostAnswerWorld() {
+  const world = experimentWorld();
+  world.openRouter.onChat = (record) => {
+    const messages = JSON.stringify(record.body.messages);
+    if (record.stage === "extraction" && messages.includes("Cyberpunk 2077 offers") && messages.includes("as IGN's first assessment")) {
+      world.openRouter.reply("chat", { network: "socket closed before the response" });
+    }
+  };
+  return world;
+}
+
 interface Registered {
   scenario: InterruptionScenario;
   invariants: InterruptionInvariants;
@@ -92,6 +108,18 @@ const SCENARIOS: Registered[] = [
     scenario: { name: "near IGN's daily attempt cap", seed: seedNearIgnCap, world: experimentWorld, ticks: FIRST_DAY, days: 1 },
     invariants: { restarts: ["search", "outlet_fetch"], dayStops: true, combined: 2, sample: 12 },
     baseline: { search: 17, outlet_fetch: 63, openrouter: 17, gemini_submit: 2 },
+  },
+  {
+    // The initial pass, but Cyberpunk 2077's IGN review never gets an answer:
+    // its extraction is uncertain at every send, is resent with backoff, and
+    // ends uncertain_exhausted at the three-send limit, the third send on the
+    // following day. Cyberpunk 2077's Overview waits for it, so the swept day
+    // makes 2 Overviews and 2 embeddings, 21 text requests (18 extractions,
+    // the one resend that fell on that day, and 2 Overviews) and 73 outlet
+    // fetches (the 72 of the initial pass and the resend's article fetch).
+    scenario: { name: "an extraction whose answer is always lost", seed: (native) => seedApps(native, EXPERIMENT), world: lostAnswerWorld, ticks: FIRST_DAY, days: 1 },
+    invariants: { restarts: ["openrouter"], sample: 8 },
+    baseline: { search: 18, outlet_fetch: 73, openrouter: 21, gemini_submit: 2 },
   },
 ];
 

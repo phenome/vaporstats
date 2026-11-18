@@ -1120,8 +1120,9 @@ async function sweepRun(template: { database: TestDatabase; calls: OutboundCall[
 /**
  * Runs `scenario` once uninterrupted, then once per fault that `invariants`
  * selects, each in a copy of one template database, and reports every
- * invariant a run broke. A scenario's world must answer every request
- * successfully, so only the injected faults interrupt it.
+ * invariant a run broke. A scenario's world answers every request
+ * successfully unless it scripts a failure on purpose, such as an answer
+ * that is always lost; otherwise only the injected faults interrupt it.
  */
 export async function sweepInterruptions(scenario: InterruptionScenario, invariants: InterruptionInvariants): Promise<InterruptionReport> {
   const template = await sweepTemplate(scenario);
