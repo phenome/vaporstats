@@ -188,7 +188,7 @@ _Avoid_: Global zoom, shared timescale, unified period selector
 
 ## Media discovery
 
-Terms for the bounded media-discovery experiment. The source rules are the experiment specification ([#51](https://github.com/phenome/vaporstats/issues/51)) and its shared-limits slice ([#66](https://github.com/phenome/vaporstats/issues/66)).
+Terms for media discovery, which runs as automatic media ingestion for enrolled games. The source rules are the experiment specification ([#51](https://github.com/phenome/vaporstats/issues/51)) and its shared-limits slice ([#66](https://github.com/phenome/vaporstats/issues/66)); automatic operation is specified in [#71](https://github.com/phenome/vaporstats/issues/71) and recorded in [ADR 0019](docs/adr/0019-automatic-daily-media-run.md).
 
 **Outlet**:
 One of the six selected English-language gaming publications: IGN, Eurogamer, GameSpot, PC Gamer, Kotaku, and GamesRadar+. An access shortfall is reported, never filled by replacing an outlet.
@@ -207,16 +207,27 @@ An outlet closed for the rest of a UTC day because it reached its daily attempt 
 _Avoid_: Outlet throttle, outlet cooldown
 
 **Provider stop**:
-A run's stop caused by any Search provider failure: HTTP 401, 403, 429, or 5xx, a network error, exhausted free credits, or a missing key. It never denies or day-stops an outlet and uses none of an outlet's daily attempts; the unserved query is kept for a later authorized run, and the run stops with a `tavily_*` reason.
+A run's stop caused by any Search provider failure: HTTP 401, 403, 429, or 5xx, a network error, exhausted free credits, or a missing key. It never denies or day-stops an outlet and uses none of an outlet's daily attempts; the unserved query is kept for the next Daily media run, and the run stops with a `tavily_*` reason.
 _Avoid_: Outlet denial, outlet rate limit, search denial
 
 **Assessment pass**:
-One of two separately authorized discovery rounds over the same outlets: the **initial** pass collects each outlet's earliest qualifying assessment found, and the **later** pass collects later assessments. Article ceilings, per-outlet attempt caps, query bounds, Outlet denials, and Outlet day stops are shared across passes and reruns; neither a rerun nor a new pass renews them.
+One of two discovery rounds over the same outlets for each enrolled entity, which the Daily media run searches when they are due: the **initial** pass collects each outlet's earliest qualifying assessment found, and the **later** pass collects later assessments. Each pass issues at most one query per entity and outlet. The 15-article ceiling per exact entity, per-outlet attempt caps, query bounds, Outlet denials, and Outlet day stops are shared across passes and runs; neither a new run nor a new pass renews them. No total across entities applies.
 _Avoid_: Phase, round, stage
 
 **Authorized affected set**:
-The media sources, by source id, that a processing run is explicitly authorized to refetch and reprocess in addition to sources new to processing. It is fixed when the run is authorized, may be empty, and must belong to the run's eligible games. Sources outside it keep their outputs without a fetch or paid work. Within it, paid re-extraction happens only when an article's cleaned content changes; a metadata, cleanup, model, or configuration version change alone keeps the active output. A game with at least one source in the set receives Overview and embedding work when its Overview or embedding is missing, failed, or refused, even when none of its content changed; a game outside the set receives that work only when the run changed its contributions. For that work, a definite refusal, such as input over the token cap, is final for the run that made it, while a transient failure, such as a token count that throws, stays in the Paid-work queue and is retried with backoff. Optional improvements and catalog-wide rewrites never run outside it.
+The corrections and reprocessing mechanism: the media sources, by source id, that a correction set is explicitly authorized to refetch and reprocess in addition to sources new to processing. Regular work never needs it: accepted sources of enrolled entities enter the Paid-work queue without an authorization. It is fixed when the run is authorized, may be empty, and must belong to the run's eligible games. Sources outside it keep their outputs without a fetch or paid work. Within it, paid re-extraction happens only when an article's cleaned content changes; a metadata, cleanup, model, or configuration version change alone keeps the active output. A game with at least one source in the set receives Overview and embedding work when its Overview or embedding is missing, failed, or refused, even when none of its content changed; a game outside the set receives that work only when the run changed its contributions. For that work, a definite refusal, such as input over the token cap, is final for the run that made it, while a transient failure, such as a token count that throws, stays in the Paid-work queue and is retried with backoff. Optional improvements and catalog-wide rewrites never run outside it.
 _Avoid_: Backfill scope, whole catalog
+
+**Media enrollment**:
+The durable record that an exact entity takes part in automatic media ingestion: the entity, the reason it was first enrolled under (`experiment`, `new_release`, or `watchlist`), and its enrollment time. An entity has one enrollment, and it is never removed automatically. An enrolled root's discovery targets are the root and its eligible DLC and expansions, each with its own ceiling and queries. The three games of the media experiment (Cyberpunk 2077, Baldur's Gate 3, and Hades II) are enrolled with reason `experiment` by the first Daily media run, and their existing progress and outputs carry over unchanged.
+_Avoid_: Subscription, tracked game
+
+**Enrollment start date**:
+The UTC date of the first Daily media run while automatic media ingestion is enabled. The application records it durably at that moment, never in a migration, and never moves it. Newly released games are measured against it, so games released before it are not enrolled automatically.
+
+**Daily media run**:
+The once-per-UTC-day start of media discovery, in the first ingestion tick at or after 06:00 UTC, sharing the daily credit check's durable checkpoint. In order, it records the Enrollment start date and enrollments, runs the daily credit checks, then starts one scheduled discovery run over the due Assessment pass queries. After downtime it catches up once on that UTC day, and a missed earlier day is never made up. A scheduled discovery run interrupted by a restart resumes in a later tick on the same UTC day; ticks never start searches outside the Daily media run. It happens only while the `MEDIA_AUTOMATIC_INGESTION` server switch is `true`; while it is off, ticks only poll work already submitted to a provider, and queued work and due passes are kept.
+_Avoid_: Daily cycle, media cron, collection pass
 
 **Paid-work queue**:
 The durable set of extraction, Overview synthesis, and embedding items waiting for a paid provider, kept in the paid-job ledger. Extraction and synthesis items wait for OpenRouter, embedding items for Gemini. Each item records its entity, stage, input identity, enqueue time, attempt count, next attempt time, provider, and status. Each tick, every active provider takes items in rounds across entities, ordered by each entity's last turn and then its oldest waiting item, so no entity holds another back and every entity with ready work takes a turn within a bounded number of ticks; a tick stops taking items at its bound on items or elapsed time. A waiting item holds no article text. Spending is limited only by the provider's own credit limit; recorded cost is for reporting. See [ADR 0017](docs/adr/0017-provider-credit-pauses.md) and [ADR 0018](docs/adr/0018-openrouter-text-generation.md).
