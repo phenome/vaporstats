@@ -268,6 +268,7 @@ const SAFE_MEDIA_PROCESSING_STOP_REASONS: Record<string, true> = {
   "provider_paused:openrouter:guardrail_budget": true,
   "provider_paused:openrouter:workspace_budget": true,
   "provider_paused:openrouter:unrecognized_client_error": true,
+  "provider_paused:openrouter:output_truncated": true,
 };
 
 function safeNonNegativeInteger(value: number): number {

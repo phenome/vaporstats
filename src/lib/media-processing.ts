@@ -36,6 +36,7 @@ import {
   OpenRouterHttpError,
   liftProviderPause,
   MAX_CLIENT_ERROR_PAUSES,
+  countsAsClientErrorPause,
   MAX_UNCERTAIN_OUTCOMES_PER_JOB,
   MAX_UNCERTAIN_SENDS,
   paidWorkCost,
@@ -1138,7 +1139,7 @@ async function holdItem(advance: QueueAdvance, job: JobRow, outcome: Exclude<Pro
     noteReason(advance, job.run_id, outcome.reason === "input_token_cap" ? "input_token_cap" : "provider_refusal");
     return;
   }
-  if (outcome.class === "missing_configuration" && outcome.reason === "unrecognized_client_error") return holdClientError(advance, job, outcome);
+  if (outcome.class === "missing_configuration" && countsAsClientErrorPause(outcome)) return holdClientError(advance, job, outcome);
   if (outcome.class === "credit_pause" || outcome.class === "missing_configuration") {
     await transaction(db, async () => {
       await db.prepare(`UPDATE media_processing_jobs SET status = 'queued', error = NULL, submitted_at = NULL WHERE id = ? AND status = 'uncertain' AND error = '${IN_FLIGHT}'`).bind(job.id).run();
@@ -1159,8 +1160,9 @@ async function holdItem(advance: QueueAdvance, job: JobRow, outcome: Exclude<Pro
 }
 
 /**
- * Acts on an unrecognized client error that `job`'s count or send triggered.
- * It pauses the provider, as a configuration problem, and also backs the item
+ * Acts on a pause that `job`'s count or send triggered by a problem on the
+ * project side (`countsAsClientErrorPause`): an unrecognized client error, or
+ * an answer cut off at the output cap. It pauses the provider, as a configuration problem, and also backs the item
  * off like a transient failure, so the item that triggered it does not take
  * the provider's first turn again. The `MAX_CLIENT_ERROR_PAUSES`-th pause the
  * item triggers for one input identity ends it `client_error_exhausted`: not
@@ -1260,7 +1262,9 @@ async function sendTextItem(advance: QueueAdvance, job: JobRow, request: OpenRou
   let outcome: ProviderOutcome;
   try {
     completion = await openRouter.complete(request);
-    outcome = classifyOpenRouterOutcome(null);
+    outcome = classifyOpenRouterOutcome(null, completion);
+    // An answer cut off at the output cap was still generated and charged.
+    if (outcome.class !== "success") await recordAnswer(db, job, completion, now);
   } catch (error) {
     outcome = classifyOpenRouterOutcome(error);
     // An error answer can still report a generation and a charge.

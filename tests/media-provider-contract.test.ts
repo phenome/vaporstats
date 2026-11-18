@@ -8,6 +8,7 @@ import {
   controlledOpenRouterApi,
   GEMINI_SCOPED_FIXTURES,
   OPENROUTER_SCOPED_FIXTURES,
+  OPENROUTER_TRUNCATED,
   PROVIDER_RESPONSE_SCOPES,
   type GeminiScopedFixture,
   type OpenRouterReply,
@@ -65,8 +66,9 @@ async function openRouterOutcome(reply: OpenRouterReply): Promise<ProviderOutcom
   const transport = createOpenRouterTransport("test-openrouter-key", api.fetchFn, { timeoutMs: 50 });
   api.reply("chat", reply);
   try {
-    await transport.complete({ model: OPENROUTER_TEXT_MODEL, messages: [{ role: "user", content: "Contract" }], response_format: { type: "json_object" }, reasoning: { effort: "low" }, max_tokens: 100 });
-    return classifyOpenRouterOutcome(null);
+    const answer = await transport.complete({ model: OPENROUTER_TEXT_MODEL, messages: [{ role: "user", content: "Contract" }], response_format: { type: "json_object" }, reasoning: { effort: "low" }, max_tokens: 100 });
+    // As processing does: an answer is classified too, since it may have been cut off.
+    return classifyOpenRouterOutcome(null, answer);
   } catch (error) {
     return classifyOpenRouterOutcome(error);
   }
@@ -129,4 +131,20 @@ describe("unrecognized 4xx answers pause the provider", () => {
       expect(await openRouterOutcome({ status: 200, body: { error: { code: status, message: "Unrecognized" } } })).toEqual(paused);
     });
   }
+});
+
+// The first live run (2026-11-18): an answer cut off at the output cap is a
+// configuration problem on the project side, never an item refusal. It pauses
+// OpenRouter with `output_truncated`, like an unrecognized client error.
+describe("an answer cut off at the output cap pauses OpenRouter", () => {
+  const paused: ProviderOutcome = { class: "missing_configuration", reason: "output_truncated" };
+  test("finish reason length pauses with output_truncated and refuses nothing", async () => {
+    expect(await openRouterOutcome(OPENROUTER_TRUNCATED)).toEqual(paused);
+  });
+  test("native finish reason max_tokens pauses with output_truncated and refuses nothing", async () => {
+    expect(await openRouterOutcome(OPENROUTER_SCOPED_FIXTURES.provider_wide["200 cut off at the output cap, reported only as the native finish reason"]!)).toEqual(paused);
+  });
+  test("a complete answer that ends with stop is a success", async () => {
+    expect(await openRouterOutcome({ status: 200, body: { id: "gen-1", choices: [{ index: 0, finish_reason: "stop", native_finish_reason: "end_turn", message: { role: "assistant", content: "{}" } }] } })).toEqual({ class: "success" });
+  });
 });

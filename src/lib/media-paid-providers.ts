@@ -28,8 +28,9 @@ export type PaidProviderCall = "count" | "submit" | "poll";
  *   most `MAX_UNCERTAIN_SENDS` consecutive times for one input identity.
  * - `missing_configuration`: the provider cannot be used as configured (no
  *   key, a rejected key, a key without permission, a project precondition
- *   such as billing, a model it no longer serves, or a 4xx the classifier does
- *   not recognize); it pauses and nothing fails or is refused.
+ *   such as billing, a model it no longer serves, a 4xx the classifier does
+ *   not recognize, or an answer cut off at the output cap); it pauses and
+ *   nothing is refused.
  */
 export type ProviderOutcome =
   | { class: "success" }
@@ -42,7 +43,7 @@ export type ProviderOutcome =
 export type CreditPauseReason =
   | "prepay_depleted" | "spend_cap"
   | "key_limit" | "credits" | "guardrail_budget" | "workspace_budget";
-export type ConfigurationPauseReason = "missing_key" | "rejected_key" | "invalid_key" | "permission_denied" | "forbidden" | "failed_precondition" | "model_unavailable" | "unrecognized_client_error";
+export type ConfigurationPauseReason = "missing_key" | "rejected_key" | "invalid_key" | "permission_denied" | "forbidden" | "failed_precondition" | "model_unavailable" | "unrecognized_client_error" | "output_truncated";
 export type ProviderPauseReason = CreditPauseReason | ConfigurationPauseReason;
 
 /** A non-OK Gemini HTTP response, as the batch transport receives it. */
@@ -105,6 +106,10 @@ const ENDED_UNRUN_BATCH = /EXPIRE|CANCEL/i;
 const FAILED_AFTER_ACCEPTANCE_BATCH = /FAIL|ERROR/i;
 /** The pause of a 4xx a classifier does not recognize: a configuration problem on the project side, never an item refusal (#80). */
 const UNRECOGNIZED_CLIENT_ERROR: ProviderOutcome = { class: "missing_configuration", reason: "unrecognized_client_error" };
+/** The pause of an answer cut off at the output cap: the cap is the project's configuration, never the item's fault. */
+const OUTPUT_TRUNCATED: ProviderOutcome = { class: "missing_configuration", reason: "output_truncated" };
+/** Finish reasons of an answer cut off at the output cap: OpenRouter's normalized `length`, or the provider's own. */
+const TRUNCATED_FINISH = new Set(["length", "max_tokens", "MAX_TOKENS", "max_output_tokens"]);
 const CREDIT_DEPLETED = /prepay|credits?\s+(?:are\s+|is\s+)?(?:depleted|exhausted)|spend(?:ing)?[\s_-]*(?:cap|limit)/i;
 
 function retryAfterFrom(error: GeminiHttpError): number | null {
@@ -217,13 +222,19 @@ const OPENROUTER_BUDGET_PAUSES: Record<string, CreditPauseReason> = {
 
 /**
  * Classifies one OpenRouter chat-completion or key request: `null` when it
- * answered, otherwise what it threw. Every chat completion may be charged,
+ * answered, with the `answer` it gave, otherwise what it threw. An answer cut
+ * off at the output cap (finish reason `length`, or a native `max_tokens`)
+ * pauses OpenRouter as `output_truncated`: the cap is the project's
+ * configuration, so the item is never refused. Every chat completion may be charged,
  * so a failure that cannot prove the request was never fully sent is
  * uncertain: a client timeout, a connection lost after sending, or a
  * provider failure or timeout reported after a provider accepted it.
  */
-export function classifyOpenRouterOutcome(error: unknown): ProviderOutcome {
-  if (error === null || error === undefined) return { class: "success" };
+export function classifyOpenRouterOutcome(error: unknown, answer: OpenRouterCompletion | null = null): ProviderOutcome {
+  if (error === null || error === undefined) {
+    const truncated = answer !== null && [answer.finishReason, answer.nativeFinishReason].some((reason) => reason !== null && TRUNCATED_FINISH.has(reason));
+    return truncated ? OUTPUT_TRUNCATED : { class: "success" };
+  }
   if (error instanceof OpenRouterMissingKeyError) return { class: "missing_configuration", reason: "missing_key" };
   if (error instanceof OpenRouterHttpError) {
     const { status, limitSource } = error;
@@ -335,6 +346,17 @@ export const MAX_UNCERTAIN_OUTCOMES_PER_JOB = 6;
  * pauses.
  */
 export const MAX_CLIENT_ERROR_PAUSES = 3;
+
+/**
+ * Whether `outcome` is a pause that the item behind it triggered by a problem
+ * on the project side, so it counts toward that item's
+ * `MAX_CLIENT_ERROR_PAUSES`: an unrecognized client error (#80), or an answer
+ * cut off at the output cap (2026-11-18). The two share one per-item count, so
+ * three of either, mixed, end the item `client_error_exhausted`.
+ */
+export function countsAsClientErrorPause(outcome: ProviderOutcome): boolean {
+  return outcome.class === "missing_configuration" && (outcome.reason === "unrecognized_client_error" || outcome.reason === "output_truncated");
+}
 
 export interface ProviderState {
   provider: PaidProvider;

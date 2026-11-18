@@ -505,6 +505,23 @@ export function controlledOpenRouterApi() {
   });
 }
 
+/**
+ * OpenRouter's answer cut off at the output cap, shaped like the first live
+ * run's job A (2026-11-18): 1,200 completion tokens, 1,078 of them reasoning,
+ * finish reason `length` (native `max_tokens`), and a truncated JSON answer.
+ */
+export const OPENROUTER_TRUNCATED: OpenRouterReply & { status: number; body: unknown } = {
+  status: 200,
+  body: {
+    id: "gen-truncated",
+    object: "chat.completion",
+    model: "anthropic/claude-haiku-5.5",
+    provider: "Claude Platform on AWS",
+    choices: [{ index: 0, finish_reason: "length", native_finish_reason: "max_tokens", message: { role: "assistant", content: "{\"contributions\":[{\"text\":\"The combat" } }],
+    usage: { prompt_tokens: 3_081, completion_tokens: 1_200, completion_tokens_details: { reasoning_tokens: 1_078 }, cost: 0.0009 },
+  },
+};
+
 /** OpenRouter's reply when the API key's credit limit is exhausted, as a 402 or a 403. */
 export const openRouterKeyLimit = (status: 402 | 403): OpenRouterReply => ({ status, body: { error: { code: status, message: "Key limit exceeded", metadata: { limit_source: "openrouter_key_limit", remedy_hint: "Raise the key's limit." } } } });
 /** OpenRouter's reply when the account balance cannot cover the request. */
@@ -753,6 +770,9 @@ export const OPENROUTER_SCOPED_FIXTURES: ScopedProviderFixtures<OpenRouterReply>
     "404 model unavailable": { status: 404, body: { error: { code: 404, message: "No endpoints found for anthropic/claude-haiku-5.5." } } },
     "200 accepted, then 402 credits": { status: 200, body: { error: { code: 402, message: "Insufficient credits", metadata: { limit_source: "openrouter_credits" } } } },
     ...Object.fromEntries([405, 409, 410, 413, 422].map((status) => [`${status} unrecognized`, { status, body: { error: { code: status, message: "Unrecognized" } } }])),
+    // The answer was cut off at the output cap: the cap is the project's configuration, not the item's fault.
+    "200 cut off at the output cap": OPENROUTER_TRUNCATED,
+    "200 cut off at the output cap, reported only as the native finish reason": { status: 200, body: { ...OPENROUTER_TRUNCATED.body as object, choices: [{ index: 0, finish_reason: "stop", native_finish_reason: "max_tokens", message: { role: "assistant", content: "{\"contributions\":[{\"text\":\"The combat" } }] } },
   },
   item_content: {
     "400 invalid request": { status: 400, body: { error: { code: 400, message: "Invalid request" } } },

@@ -17,6 +17,7 @@ import {
   GEMINI_SPEND_CAP,
   insertCompletedRun,
   insertSources,
+  OPENROUTER_TRUNCATED,
   overviewOutputForUrls,
   processingArticleHtml,
   runMediaTick,
@@ -630,6 +631,97 @@ describe("an unrecognized client error tied to one item", () => {
       });
     }
   }
+});
+
+// The first live run (2026-11-18): an answer cut off at the output cap is a
+// configuration problem on the project side. Like an unrecognized client
+// error it pauses OpenRouter, backs the item off, keeps its cost, and never
+// refuses it; the two share one per-item count, and the third of either ends
+// the item `client_error_exhausted`.
+describe("an answer cut off at the output cap", () => {
+  const BAD = BALDURS_GATE;
+  const GOOD = CYBERPUNK;
+  const UNRECOGNIZED = { status: 422, body: { error: { code: 422, message: "Unrecognized" } } };
+
+  /** Providers that answer Baldur's Gate 3's extraction with each of `answers` in turn, and everything else normally. */
+  function cutOffProviders(...answers: Array<typeof OPENROUTER_TRUNCATED | typeof UNRECOGNIZED>) {
+    const apis = providers();
+    let sent = 0;
+    apis.openRouter.onChat = (record) => {
+      if (record.stage !== "extraction" || !JSON.stringify(record.body.messages).includes(`Steam app ${BAD}`)) return;
+      sent += 1;
+      const answer = answers.shift();
+      if (answer) apis.openRouter.reply("chat", answer);
+    };
+    return { apis, sent: () => sent };
+  }
+
+  const item = (database: TestDatabase, appid: number) => database.native.query<{ status: string; attempt_count: number; next_attempt_at: string | null; error: string | null; charged_microusd: number | null; usage_json: string }, [number]>(
+    "SELECT status, attempt_count, next_attempt_at, error, charged_microusd, usage_json FROM media_processing_jobs WHERE stage = 'extraction' AND appid = ? ORDER BY id LIMIT 1",
+  ).get(appid);
+
+  test("pauses OpenRouter with output_truncated, backs only that item off with its cost and reasoning usage recorded, refuses nothing, and the item settles after the daily check", async () => {
+    const { database } = await authorizedGames({ [BAD]: 1, [GOOD]: 1 });
+    const { apis, sent } = cutOffProviders(OPENROUTER_TRUNCATED);
+
+    const paused = await tick(database, apis, "2026-11-10T07:00:00.000Z");
+
+    expect(paused.mediaProcessing?.providers.openrouter).toMatchObject({ paused: true, reason: "output_truncated", pausedAt: "2026-11-10T07:00:00.000Z" });
+    expect(paused.mediaProcessing?.stopReasons).toContain("provider_paused:openrouter:output_truncated");
+    expect(item(database, BAD)).toEqual({
+      status: "queued",
+      attempt_count: 1,
+      next_attempt_at: "2026-11-10T07:15:00.000Z",
+      error: "client_error:output_truncated",
+      charged_microusd: 900,
+      usage_json: JSON.stringify({ promptTokens: 3_081, completionTokens: 1_200, reasoningTokens: 1_078 }),
+    });
+    expect(jobs(database).some((job) => job.status === "refused")).toBe(false);
+    expect(paused.mediaProcessing?.outputs.skipped).toBe(0);
+    expect(database.native.query("SELECT outcome, error, charged_microusd, generation_id FROM media_processing_attempts ORDER BY id").all()).toEqual([
+      { outcome: "missing_configuration", error: "output_truncated", charged_microusd: 900, generation_id: "gen-truncated" },
+    ]);
+
+    // Paused until the daily check, which lifts it; the item is then sent once more and settles.
+    await tick(database, apis, "2026-11-11T05:45:00.000Z");
+    expect(sent()).toBe(1);
+    await tick(database, apis, "2026-11-11T06:00:00.000Z");
+    await tick(database, apis, "2026-11-11T06:15:00.000Z");
+    expect(sent()).toBe(2);
+    expect(item(database, BAD)).toMatchObject({ status: "succeeded", charged_microusd: 1_050 });
+  });
+
+  test("the third cut-off answer for one input identity ends the item client_error_exhausted, never refused, and it is sent no more", async () => {
+    const { database } = await authorizedGames({ [BAD]: 1, [GOOD]: 1 });
+    const { apis, sent } = cutOffProviders(OPENROUTER_TRUNCATED, OPENROUTER_TRUNCATED, OPENROUTER_TRUNCATED);
+
+    await tick(database, apis, "2026-11-10T07:00:00.000Z");
+    await tick(database, apis, "2026-11-11T06:00:00.000Z");
+    expect(item(database, BAD)).toMatchObject({ status: "queued", attempt_count: 2 });
+    await tick(database, apis, "2026-11-12T06:00:00.000Z");
+
+    expect(sent()).toBe(3);
+    expect(item(database, BAD)).toMatchObject({ status: "client_error_exhausted", error: "client_error_exhausted:output_truncated", charged_microusd: 2_700 });
+    expect(jobs(database).some((job) => job.status === "refused")).toBe(false);
+    await tick(database, apis, "2026-11-13T06:00:00.000Z");
+    await tick(database, apis, "2026-11-13T06:15:00.000Z");
+    expect(sent()).toBe(3);
+    expect(item(database, GOOD)?.status).toBe("succeeded");
+  });
+
+  test("cut-off answers and unrecognized client errors share one count: three of either, mixed, end the item client_error_exhausted", async () => {
+    const { database } = await authorizedGames({ [BAD]: 1, [GOOD]: 1 });
+    const { apis, sent } = cutOffProviders(UNRECOGNIZED, OPENROUTER_TRUNCATED, UNRECOGNIZED);
+
+    await tick(database, apis, "2026-11-10T07:00:00.000Z");
+    expect(item(database, BAD)).toMatchObject({ status: "queued", error: "client_error:unrecognized_client_error" });
+    await tick(database, apis, "2026-11-11T06:00:00.000Z");
+    expect(item(database, BAD)).toMatchObject({ status: "queued", error: "client_error:output_truncated" });
+    await tick(database, apis, "2026-11-12T06:00:00.000Z");
+
+    expect(sent()).toBe(3);
+    expect(item(database, BAD)).toMatchObject({ status: "client_error_exhausted", error: "client_error_exhausted:unrecognized_client_error" });
+  });
 });
 
 describe("embedding order", () => {
