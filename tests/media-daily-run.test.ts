@@ -235,6 +235,38 @@ describe("the daily media run", () => {
     expect(repeatedSearches(providers)).toEqual([]);
     expect(providers.tavily.usageCalls).toBe(2);
   });
+
+  test("the tick log reports the searches, outlet attempts and articles of each daily media run, not the pass's totals, with Tavily's usage", async () => {
+    const database = experimentCatalog();
+    const providers = apis();
+    providers.tavily.remaining = 6;
+    const logged: string[] = [];
+    const log = console.log;
+    console.log = (...values: unknown[]) => { logged.push(values.map(String).join(" ")); };
+    const discoveryLog = () => (JSON.parse(logged.filter((line) => line.includes("\"ingestion_completion\"")).at(-1)!) as { mediaDiscovery: unknown }).mediaDiscovery;
+    try {
+      await tick(database, providers, "2026-11-20T06:00:00.000Z");
+      // Six searches, each with the one candidate it found fetched and accepted.
+      expect(discoveryLog()).toMatchObject({
+        searches: 6,
+        attempts: 12,
+        articles: 6,
+        tavily: { searchCreditsConsumed: 6, planUsage: 1_000, planLimit: 1_000, remainingCredits: 0 },
+      });
+
+      providers.tavily.remaining = 100;
+      await tick(database, providers, "2026-11-21T06:00:00.000Z");
+      // The twelve queries left over; the pass now holds 18 queries and articles.
+      expect(discoveryLog()).toMatchObject({
+        searches: 12,
+        attempts: 24,
+        articles: 12,
+        tavily: { searchCreditsConsumed: 12, planUsage: 912, planLimit: 1_000, remainingCredits: 88 },
+      });
+    } finally {
+      console.log = log;
+    }
+  });
 });
 
 describe("the automatic media ingestion switch", () => {

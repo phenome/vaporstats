@@ -69,9 +69,14 @@ export interface MediaRunSummary {
   games: number[];
   resumed: boolean;
   newIdentity: boolean;
+  /** Queries searched so far in the pass, across every run. */
   queries: number;
+  /** Outlet attempts recorded so far in the pass, across every run and stage. */
   attempts: number;
+  /** Articles accepted so far in the pass, across every run. */
   articles: number;
+  /** What this call itself did: searches issued, outlet attempts reserved and articles accepted. */
+  issued: { searches: number; attempts: number; articles: number };
   stopReasons: string[];
   summary: {
     runId: number;
@@ -578,12 +583,13 @@ async function releaseRefusedQuery(db: AppDatabase, progressId: number, status: 
  * candidate reached it. Every request reserves its attempt first; any other
  * failure skips only this candidate.
  */
-async function fetchManual(fetchFn: MediaFetch, url: string, outlet: (typeof MEDIA_OUTLETS)[number], db: AppDatabase, runId: number, appid: number, clock: MediaClock): Promise<{ html: string; finalUrl: string } | { stop: string; contacted: boolean } | null> {
+async function fetchManual(fetchFn: MediaFetch, url: string, outlet: (typeof MEDIA_OUTLETS)[number], db: AppDatabase, runId: number, appid: number, clock: MediaClock, issued: MediaRunSummary["issued"]): Promise<{ html: string; finalUrl: string } | { stop: string; contacted: boolean } | null> {
   let current = url;
   for (let redirect = 0; redirect <= MAX_REDIRECTS; redirect += 1) {
     if (!hostInOutlet(current, outlet)) return null;
     const reservation = await reserveOutletAttempt(db, { runId, appid, outlet: outlet.name, kind: "fetch", url: current, date: clock() });
     if ("stop" in reservation) return { stop: reservation.stop, contacted: redirect > 0 };
+    issued.attempts += 1;
     let response: Response;
     try {
       response = await fetchFn(current, { redirect: "manual", headers: { Accept: "text/html,application/xhtml+xml" } });
@@ -718,6 +724,7 @@ export async function runAuthorizedMediaDiscovery(db: AppDatabase, options: Medi
   const fetchFn = options.fetch ?? fetch;
   const apiKey = options.tavilyApiKey ?? process.env.TAVILY_API_KEY;
   let usageSummary: MediaRunSummary["usage"] = { ...EMPTY_USAGE_SUMMARY };
+  const issued: MediaRunSummary["issued"] = { searches: 0, attempts: 0, articles: 0 };
   try {
     const clock: MediaClock = () => isoNow(options.now);
     await reopenDayScopedProgress(db, run.id, pass, targetAppids, dayKey(clock()));
@@ -788,6 +795,8 @@ export async function runAuthorizedMediaDiscovery(db: AppDatabase, options: Medi
           }
           const attemptId = reservation.attemptId;
           searchesIssued += 1;
+          issued.searches += 1;
+          issued.attempts += 1;
           await db.prepare(
             "UPDATE media_discovery_progress SET query_attempted_at = ?, status = 'searching', stop_reason = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
           ).bind(attemptNow.toISOString(), progressId).run();
@@ -852,7 +861,7 @@ export async function runAuthorizedMediaDiscovery(db: AppDatabase, options: Medi
         }
         const selections = new Map<number, { review: MediaSource | null; preview: MediaSource | null }>();
         for (; index < candidates.length; index += 1) {
-          const fetched = await fetchManual(fetchFn, candidates[index]!.url, outlet, db, run.id, appid, clock);
+          const fetched = await fetchManual(fetchFn, candidates[index]!.url, outlet, db, run.id, appid, clock, issued);
           if (fetched && "stop" in fetched) {
             // A candidate the outlet answered is done; one refused before any
             // request is retried when the outlet reopens.
@@ -880,7 +889,8 @@ export async function runAuthorizedMediaDiscovery(db: AppDatabase, options: Medi
           if (!selected) continue;
           const ceiling = await articleCeiling(db, selected.appid);
           if (!ceiling) {
-            await db.prepare("INSERT OR IGNORE INTO media_sources (appid, pass, original_url, discovery_url, title, outlet, author, published_at, updated_at, retrieved_at, type, hands_on, affiliation, platform, build_context) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").bind(selected.appid, pass, selected.originalUrl, selected.discoveryUrl, selected.title, selected.outlet, selected.author, selected.publishedAt, selected.updatedAt, selected.retrievedAt, selected.type, selected.handsOn === null ? null : selected.handsOn ? 1 : 0, selected.affiliation, selected.platform, selected.buildContext).run();
+            const inserted = await db.prepare("INSERT OR IGNORE INTO media_sources (appid, pass, original_url, discovery_url, title, outlet, author, published_at, updated_at, retrieved_at, type, hands_on, affiliation, platform, build_context) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").bind(selected.appid, pass, selected.originalUrl, selected.discoveryUrl, selected.title, selected.outlet, selected.author, selected.publishedAt, selected.updatedAt, selected.retrievedAt, selected.type, selected.handsOn === null ? null : selected.handsOn ? 1 : 0, selected.affiliation, selected.platform, selected.buildContext).run();
+            if (inserted.meta.changes === 1) issued.articles += 1;
           } else {
             stopReasons.add(ceiling);
           }
@@ -920,7 +930,7 @@ export async function runAuthorizedMediaDiscovery(db: AppDatabase, options: Medi
     usage: usageSummary,
   };
   await db.prepare("UPDATE media_discovery_runs SET status = ?, article_count = ?, query_count = ?, attempt_count = ?, stop_reason = ?, summary = ?, usage = ?, finished_at = CURRENT_TIMESTAMP WHERE id = ?").bind(status, counts.articles, counts.queries, counts.attempts, stopReason, JSON.stringify(durableSummary), JSON.stringify(usageSummary), run.id).run();
-  return { runId: run.id, pass, status, games: selectedGames, resumed: run.resumed === 1, newIdentity: run.resumed !== 1, queries: counts.queries, attempts: counts.attempts, articles: counts.articles, stopReasons: [...stopReasons].sort(), summary, usage: usageSummary };
+  return { runId: run.id, pass, status, games: selectedGames, resumed: run.resumed === 1, newIdentity: run.resumed !== 1, queries: counts.queries, attempts: counts.attempts, articles: counts.articles, issued, stopReasons: [...stopReasons].sort(), summary, usage: usageSummary };
   } catch (error) {
     const counts = await mediaRunCounts(db, pass, targetAppids);
     const stopReason = "execution_error";
@@ -956,7 +966,7 @@ export async function runAuthorizedMediaDiscovery(db: AppDatabase, options: Medi
     await transaction(db, async () => {
       await db.prepare("UPDATE media_discovery_runs SET status = 'failed', article_count = ?, query_count = ?, attempt_count = ?, stop_reason = ?, summary = ?, usage = ?, finished_at = CURRENT_TIMESTAMP WHERE id = ?").bind(counts.articles, counts.queries, counts.attempts, stopReason, JSON.stringify(durableSummary), JSON.stringify(usageSummary), run.id).run();
     });
-    return { runId: run.id, pass, status: "failed", games: selectedGames, resumed: run.resumed === 1, newIdentity: run.resumed !== 1, queries: counts.queries, attempts: counts.attempts, articles: counts.articles, stopReasons: [stopReason], summary, usage: usageSummary };
+    return { runId: run.id, pass, status: "failed", games: selectedGames, resumed: run.resumed === 1, newIdentity: run.resumed !== 1, queries: counts.queries, attempts: counts.attempts, articles: counts.articles, issued, stopReasons: [stopReason], summary, usage: usageSummary };
   }
 }
 

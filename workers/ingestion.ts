@@ -214,9 +214,16 @@ function logCompletion(result: IngestionTickResult): void {
       runId: result.mediaDiscovery.runId,
       status: result.mediaDiscovery.status,
       resumed: result.mediaDiscovery.resumed,
-      queries: result.mediaDiscovery.queries,
-      attempts: result.mediaDiscovery.attempts,
-      articles: result.mediaDiscovery.articles,
+      // This tick's discovery work, not the pass's running totals.
+      searches: result.mediaDiscovery.issued.searches,
+      attempts: result.mediaDiscovery.issued.attempts,
+      articles: result.mediaDiscovery.issued.articles,
+      tavily: {
+        searchCreditsConsumed: result.mediaDiscovery.usage.searchCreditsConsumed,
+        planUsage: result.mediaDiscovery.usage.planUsage,
+        planLimit: result.mediaDiscovery.usage.planLimit,
+        remainingCredits: result.mediaDiscovery.usage.remainingCredits,
+      },
       stopReasons: result.mediaDiscovery.stopReasons,
     },
     mediaProcessing: result.mediaProcessing && {
