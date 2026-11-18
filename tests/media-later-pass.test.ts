@@ -167,6 +167,24 @@ function reviewPage(appid: number, title: string, options: { date?: string | nul
   return discoveryArticleHtml(appid, title, { date: options.date, author: "Later critic" }).replace("<head>", `<head>${canonical}`);
 }
 
+describe("the automatic media ingestion switch", () => {
+  test("while MEDIA_AUTOMATIC_INGESTION is off, a due later pass searches, fetches and submits nothing, and stays due for when it is on again", async () => {
+    const database = experimentCatalog();
+    const { tavily, openRouter, gemini, fetched, tick } = world();
+    for (const at of ["2026-11-20T06:00", "2026-11-20T06:15", "2026-11-20T06:30"]) await tick(database, `${at}:00.000Z`);
+    const before = { searches: tavily.requests.length, usage: tavily.usageCalls, fetched: fetched.length, openRouter: openRouter.calls.length, gemini: gemini.calls.length };
+
+    for (const at of ["2026-11-21T06:00", "2026-11-21T06:15", "2026-11-22T06:00"]) {
+      const result = await tick(database, `${at}:00.000Z`, { mediaAutomaticIngestion: false });
+      expect(result.mediaDiscovery).toBeUndefined();
+    }
+    expect({ searches: tavily.requests.length, usage: tavily.usageCalls, fetched: fetched.length, openRouter: openRouter.calls.length, gemini: gemini.calls.length }).toEqual(before);
+
+    await tick(database, "2026-11-23T06:00:00.000Z");
+    expect(queries(tavily).filter((query) => query.includes(" review revisited@"))).toHaveLength(18);
+  });
+});
+
 describe("later-pass selection", () => {
   test("follows the 2026-11-16 decision: only outlets with an accepted initial article, a URL new to the entity, a dated article published after that outlet's initial article, and an undated article kept undated", async () => {
     const database = experimentCatalog();
@@ -368,5 +386,65 @@ describe("fairness between due passes", () => {
       [],
       [],
     ]);
+  });
+});
+
+describe("the later pass end to end", () => {
+  test("daily media run, later-pass discovery across a restart, the paid-work queue across a restart, then the Internal website API; a further daily media run with nothing new admits, fetches and submits nothing", async () => {
+    const database = experimentCatalog();
+    const { tavily, openRouter, gemini, fetched, tick } = world();
+    const ticks = async (day: string, times: string[], options: MediaTickOptions = {}) => {
+      for (const time of times) await tick(database, `${day}T${time}:00.000Z`, options);
+    };
+    await ticks("2026-11-20", ["06:00", "06:15", "06:30"]);
+    expect(queries(tavily)).toHaveLength(18);
+
+    // The process stops during the fourth later-pass search on November 21.
+    const answer = tavily.results!;
+    let crashed: string | null = null;
+    tavily.results = (search) => {
+      if (tavily.requests.length === 22 && crashed === null) {
+        crashed = `${search.query}@${search.domain}`;
+        database.reopen();
+        throw new Error("process stopped");
+      }
+      return answer(search);
+    };
+    const interrupted = await tick(database, "2026-11-21T06:00:00.000Z");
+    expect(interrupted.status).toBe("error");
+    expect(crashed).toMatch(/ review revisited@/);
+
+    // A later tick that day resumes the scheduled run, then the queue
+    // processes the later articles four requests a tick, restarting between ticks.
+    await ticks("2026-11-21", ["06:15"], { paidSubmissionsPerTick: 4 });
+    for (const time of ["06:30", "06:45", "07:00", "07:15", "07:30", "07:45"]) {
+      database.reopen();
+      await ticks("2026-11-21", [time], { paidSubmissionsPerTick: 4 });
+    }
+
+    const searched = queries(tavily);
+    expect(searched).toHaveLength(36);
+    expect(searched.filter((query, index) => searched.indexOf(query) !== index)).toEqual([]);
+    const laterUrls = EXPERIMENT.flatMap((appid) => MEDIA_OUTLETS.map((outlet) => articleUrl(appid, outlet, "-revisited")));
+    const lost = laterUrls.find((url) => crashed === `${GAME_NAMES[Number(new URL(url).pathname.split("/")[2]!.split("-")[0])]} review revisited@${new URL(url).hostname}`)!;
+    // Each later article was fetched once by discovery and once by processing;
+    // the crashed search may have been served, so it is never repeated.
+    for (const url of laterUrls) expect(fetched.filter((item) => item === url)).toHaveLength(url === lost ? 0 : 2);
+    const extractions = openRouter.requests.filter(({ stage }) => stage === "extraction");
+    expect(extractions).toHaveLength(18 + 17);
+    expect(new Set(extractions.map(({ body }) => JSON.stringify(body.messages))).size).toBe(35);
+
+    process.env.MEDIA_OVERVIEW_PUBLIC = "true";
+    for (const appid of EXPERIMENT) {
+      const { sources, mediaOverview } = await detail(database, appid);
+      const ownLater = laterUrls.filter((url) => url.includes(`/${appid}-`) && url !== lost);
+      expect(sources.map(({ originalUrl }) => originalUrl)).toEqual(expect.arrayContaining(ownLater));
+      expect(mediaOverview?.statements[0]?.sourceUrls).toEqual(expect.arrayContaining(ownLater));
+    }
+
+    const before = { articles: (await Promise.all(EXPERIMENT.map(async (appid) => (await detail(database, appid)).sources.length))), fetched: fetched.length, openRouter: openRouter.requests.length, gemini: gemini.submitted.length };
+    await ticks("2026-11-22", ["06:00", "06:15", "06:30"]);
+    expect({ articles: (await Promise.all(EXPERIMENT.map(async (appid) => (await detail(database, appid)).sources.length))), fetched: fetched.length, openRouter: openRouter.requests.length, gemini: gemini.submitted.length }).toEqual(before);
+    expect(queries(tavily)).toHaveLength(36);
   });
 });
