@@ -17,6 +17,7 @@ import {
   GEMINI_SPEND_CAP,
   insertCompletedRun,
   insertSources,
+  overviewOutputForUrls,
   processingArticleHtml,
   runMediaTick,
   seedApps,
@@ -260,7 +261,7 @@ describe("project-level provider errors", () => {
 
   // #80 (2026-11-18): an unrecognized 4xx is a configuration problem on the project side.
   for (const status of [405, 409, 410, 413, 422]) {
-    test(`an unrecognized ${status} pauses Gemini with reason unrecognized_client_error, refuses nothing, keeps the queue intact, and lifts at the daily check`, async () => {
+    test(`an unrecognized ${status} pauses Gemini with reason unrecognized_client_error, refuses nothing, keeps the queue intact with only the triggering item backed off, and lifts at the daily check`, async () => {
       const { database } = await authorizedGames({ [CYBERPUNK]: 1, [BALDURS_GATE]: 1 });
       const apis = providers();
       apis.gemini.reply("submit", { status, body: { error: { code: status, message: "Unrecognized" } } });
@@ -269,7 +270,10 @@ describe("project-level provider errors", () => {
 
       expect(paused.mediaProcessing?.providers.gemini).toMatchObject({ paused: true, reason: "unrecognized_client_error", pausedAt: "2026-11-10T07:00:00.000Z" });
       expect(paused.mediaProcessing?.providers.openrouter.paused).toBe(false);
-      expect(embeddingJobs(database).map(({ status: state, attempt_count, error }) => ({ state, attempt_count, error }))).toEqual(Array(2).fill({ state: "queued", attempt_count: 0, error: null }));
+      expect(embeddingJobs(database).map(({ status: state, attempt_count, error }) => ({ state, attempt_count, error }))).toEqual([
+        { state: "queued", attempt_count: 1, error: "client_error:unrecognized_client_error" },
+        { state: "queued", attempt_count: 0, error: null },
+      ]);
       expect(jobs(database).some((job) => job.status === "refused")).toBe(false);
       expect(paused.mediaProcessing?.outputs.skipped).toBe(0);
       expect(paused.mediaProcessing?.stopReasons).toContain("provider_paused:gemini:unrecognized_client_error");
@@ -283,7 +287,7 @@ describe("project-level provider errors", () => {
       expect(embeddingJobs(database).map(({ status: state }) => state)).toEqual(["succeeded", "succeeded"]);
     });
 
-    test(`an unrecognized ${status} pauses OpenRouter with reason unrecognized_client_error, refuses nothing, keeps the queue intact, and lifts at the daily check`, async () => {
+    test(`an unrecognized ${status} pauses OpenRouter with reason unrecognized_client_error, refuses nothing, keeps the queue intact with only the triggering item backed off, and lifts at the daily check`, async () => {
       const { database } = await authorizedGames({ [CYBERPUNK]: 1, [BALDURS_GATE]: 1 });
       const apis = providers();
       apis.openRouter.reply("chat", { status, body: { error: { code: status, message: "Unrecognized" } } });
@@ -291,7 +295,10 @@ describe("project-level provider errors", () => {
       const paused = await tick(database, apis, "2026-11-10T07:00:00.000Z");
 
       expect(paused.mediaProcessing?.providers.openrouter).toMatchObject({ paused: true, reason: "unrecognized_client_error", pausedAt: "2026-11-10T07:00:00.000Z" });
-      expect(jobs(database).map(({ stage, status: state, attempt_count, error }) => ({ stage, state, attempt_count, error }))).toEqual(Array(2).fill({ stage: "extraction", state: "queued", attempt_count: 0, error: null }));
+      expect(jobs(database).map(({ stage, status: state, attempt_count, error }) => ({ stage, state, attempt_count, error }))).toEqual([
+        { stage: "extraction", state: "queued", attempt_count: 1, error: "client_error:unrecognized_client_error" },
+        { stage: "extraction", state: "queued", attempt_count: 0, error: null },
+      ]);
       expect(paused.mediaProcessing?.outputs.skipped).toBe(0);
       expect(paused.mediaProcessing?.stopReasons).toContain("provider_paused:openrouter:unrecognized_client_error");
 
@@ -548,6 +555,81 @@ describe("transient failures", () => {
     await tick(database, apis, "2026-11-10T03:15:00.000Z");
     expect(embeddingJobs(database)[0]).toMatchObject({ status: "queued", attempt_count: 21, next_attempt_at: "2026-11-11T03:15:00.000Z" });
   });
+});
+
+describe("an unrecognized client error tied to one item", () => {
+  type Where = "gemini count" | "gemini submit" | "openrouter chat";
+  const BAD = BALDURS_GATE;
+  const GOOD = CYBERPUNK;
+  const MARKER = "Unrecognized marker input";
+
+  /** Providers that answer `status` to every request of `where` for Baldur's Gate 3, and normally to everything else. */
+  function badItemProviders(where: Where, status: number) {
+    const apis = providers();
+    const gemini = apis.gemini;
+    let triggered = 0;
+    const unrecognized = () => { triggered += 1; return { status, body: { error: { code: status, message: "Unrecognized" } } }; };
+    apis.openRouter.onChat = (record) => {
+      if (where === "openrouter chat" && record.stage === "extraction" && JSON.stringify(record.body.messages).includes(`Steam app ${BAD}`)) apis.openRouter.reply("chat", unrecognized());
+      // Baldur's Gate 3's Overview gets its own similarity input, so its embedding's token count can be told apart.
+      if (record.stage === "synthesis" && record.urls.some((url) => url.includes(`/${BAD}-`))) apis.openRouter.output("synthesis", { ...overviewOutputForUrls(record.urls), similarityInputs: { gameplay: [MARKER] } });
+    };
+    const wrapped = {
+      ...gemini,
+      fetchFn: async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+        const url = String(input);
+        const body = String(init?.body ?? "");
+        const hit = (where === "gemini count" && url.endsWith(":countTokens") && body.includes(MARKER))
+          || (where === "gemini submit" && url.endsWith(":asyncBatchEmbedContent") && body.includes(`embedding:${BAD}:`));
+        if (hit) return Response.json(unrecognized().body, { status });
+        return gemini.fetchFn(input, init);
+      },
+    };
+    return { apis: { gemini: wrapped, openRouter: apis.openRouter }, triggered: () => triggered };
+  }
+
+  const stageOf = (where: Where) => (where === "openrouter chat" ? "extraction" : "embedding");
+  const providerOf = (where: Where) => (where === "openrouter chat" ? "openrouter" : "gemini");
+  const item = (database: TestDatabase, where: Where, appid: number) => database.native.query<{ status: string; attempt_count: number; next_attempt_at: string | null }, [string, number]>(
+    "SELECT status, attempt_count, next_attempt_at FROM media_processing_jobs WHERE stage = ? AND appid = ? ORDER BY id LIMIT 1",
+  ).get(stageOf(where), appid);
+
+  for (const where of ["gemini count", "gemini submit", "openrouter chat"] as const) {
+    for (const status of [405, 409, 410, 413, 422]) {
+      test(`a ${status} at the ${where} of one item backs that item off, lets other games' items progress the day the pause lifts, and after three pauses stops it as client_error_exhausted`, async () => {
+        const { database } = await authorizedGames({ [BAD]: 1, [GOOD]: 1 });
+        const { apis, triggered } = badItemProviders(where, status);
+        const provider = providerOf(where);
+
+        const first = await tick(database, apis, "2026-11-10T07:00:00.000Z");
+        expect(first.mediaProcessing?.providers[provider]).toMatchObject({ paused: true, reason: "unrecognized_client_error" });
+        expect(item(database, where, BAD)).toEqual({ status: "queued", attempt_count: 1, next_attempt_at: "2026-11-10T07:15:00.000Z" });
+        expect(triggered()).toBe(1);
+
+        // The pause lifts at the daily check; the other game's item goes first and settles that day.
+        await tick(database, apis, "2026-11-11T06:00:00.000Z");
+        expect(item(database, where, GOOD)?.status).toBe("succeeded");
+        expect(triggered()).toBe(2);
+        expect(item(database, where, BAD)).toMatchObject({ status: "queued", attempt_count: 2 });
+
+        await tick(database, apis, "2026-11-12T06:00:00.000Z");
+        expect(triggered()).toBe(3);
+        expect(item(database, where, BAD)?.status).toBe("client_error_exhausted");
+        expect(jobs(database).some((job) => job.status === "refused")).toBe(false);
+
+        // It no longer triggers pauses; the other game finishes its work.
+        const after = await tick(database, apis, "2026-11-13T06:00:00.000Z");
+        await tick(database, apis, "2026-11-13T06:15:00.000Z");
+        expect(triggered()).toBe(3);
+        expect(after.mediaProcessing?.providers[provider].paused).toBe(false);
+        expect(database.native.query(`SELECT stage, status FROM media_processing_jobs WHERE appid = ${GOOD} ORDER BY id`).all()).toEqual([
+          { stage: "extraction", status: "succeeded" },
+          { stage: "synthesis", status: "succeeded" },
+          { stage: "embedding", status: "succeeded" },
+        ]);
+      });
+    }
+  }
 });
 
 describe("embedding order", () => {

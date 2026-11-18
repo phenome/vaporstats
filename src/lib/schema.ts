@@ -1117,6 +1117,13 @@ export const mediaProcessingJobs = sqliteTable(
     /** The earliest time a waiting item may be submitted again; null while it is ready. */
     nextAttemptAt: text("next_attempt_at"),
     /**
+     * Provider pauses for an unrecognized client error that this item
+     * triggered for `client_error_identity`, its input identity then. The
+     * third for one identity ends the item `client_error_exhausted`.
+     */
+    clientErrorPauses: integer("client_error_pauses").notNull().default(0),
+    clientErrorIdentity: text("client_error_identity"),
+    /**
      * 1 for a row written before the paid-work queue existed. Such a row is
      * history: it is never deleted, never submitted, and never returned to
      * the queue; only a batch it already submitted is still polled.
@@ -1151,10 +1158,11 @@ export const mediaProcessingJobs = sqliteTable(
     // `reserved` and `failed` are kept for retained rows written under the
     // retired lifetime allowance; new work is `queued` and ends `refused`,
     // never failed. `uncertain` marks an item in flight (or a retained row's
-    // unknown outcome); `uncertain_exhausted` ends an item after its third
-    // consecutive uncertain outcome for one input identity, so only a
-    // correction set resends it.
-    check("media_processing_jobs_status_check", sql`${table.status} IN ('queued', 'reserved', 'submitted', 'succeeded', 'failed', 'refused', 'uncertain', 'uncertain_exhausted', 'stale')`),
+    // unknown outcome); `uncertain_exhausted` ends an item at its uncertain
+    // limits, and `client_error_exhausted` after it triggered three pauses
+    // for an unrecognized client error; only a correction set resends either.
+    check("media_processing_jobs_status_check", sql`${table.status} IN ('queued', 'reserved', 'submitted', 'succeeded', 'failed', 'refused', 'uncertain', 'uncertain_exhausted', 'client_error_exhausted', 'stale')`),
+    check("media_processing_jobs_client_error_check", sql`${table.clientErrorPauses} >= 0`),
     check("media_processing_jobs_attempt_check", sql`${table.attemptCount} >= 0`),
     check("media_processing_jobs_retained_check", sql`${table.retained} IN (0, 1)`),
     check("media_processing_jobs_cost_source_check", sql`${table.costSource} IS NULL OR ${table.costSource} IN ('estimated', 'provider_reported', 'unknown')`),

@@ -21,6 +21,8 @@ CREATE TABLE `__new_media_processing_jobs` (
 	`enqueued_at` text DEFAULT CURRENT_TIMESTAMP NOT NULL,
 	`attempt_count` integer DEFAULT 0 NOT NULL,
 	`next_attempt_at` text,
+	`client_error_pauses` integer DEFAULT 0 NOT NULL,
+	`client_error_identity` text,
 	`retained` integer DEFAULT 0 NOT NULL,
 	`cost_source` text,
 	`generation_id` text,
@@ -38,7 +40,8 @@ CREATE TABLE `__new_media_processing_jobs` (
 	FOREIGN KEY (`matched_appid`) REFERENCES `apps`(`appid`) ON UPDATE no action ON DELETE no action,
 	FOREIGN KEY (`source_id`) REFERENCES `media_sources`(`id`) ON UPDATE no action ON DELETE no action,
 	CONSTRAINT "media_processing_jobs_stage_check" CHECK("__new_media_processing_jobs"."stage" IN ('extraction', 'embedding', 'synthesis', 'explanation')),
-	CONSTRAINT "media_processing_jobs_status_check" CHECK("__new_media_processing_jobs"."status" IN ('queued', 'reserved', 'submitted', 'succeeded', 'failed', 'refused', 'uncertain', 'uncertain_exhausted', 'stale')),
+	CONSTRAINT "media_processing_jobs_status_check" CHECK("__new_media_processing_jobs"."status" IN ('queued', 'reserved', 'submitted', 'succeeded', 'failed', 'refused', 'uncertain', 'uncertain_exhausted', 'client_error_exhausted', 'stale')),
+	CONSTRAINT "media_processing_jobs_client_error_check" CHECK("__new_media_processing_jobs"."client_error_pauses" >= 0),
 	CONSTRAINT "media_processing_jobs_attempt_check" CHECK("__new_media_processing_jobs"."attempt_count" >= 0),
 	CONSTRAINT "media_processing_jobs_retained_check" CHECK("__new_media_processing_jobs"."retained" IN (0, 1)),
 	CONSTRAINT "media_processing_jobs_cost_source_check" CHECK("__new_media_processing_jobs"."cost_source" IS NULL OR "__new_media_processing_jobs"."cost_source" IN ('estimated', 'provider_reported', 'unknown')),
@@ -48,9 +51,10 @@ CREATE TABLE `__new_media_processing_jobs` (
 	CONSTRAINT "media_processing_jobs_charge_check" CHECK("__new_media_processing_jobs"."reserved_microusd" >= 0 AND ("__new_media_processing_jobs"."charged_microusd" IS NULL OR "__new_media_processing_jobs"."charged_microusd" >= 0))
 );
 --> statement-breakpoint
--- Every job row is copied unchanged: `uncertain_exhausted` only widens the
--- status check, and the autoincrement high-water mark is kept.
-INSERT INTO `__new_media_processing_jobs`("id", "run_id", "stage", "appid", "matched_appid", "dimension", "source_id", "request_key", "input_identity", "model", "config_version", "max_input_tokens", "max_output_tokens", "reserved_microusd", "charged_microusd", "reservation_active", "status", "provider", "enqueued_at", "attempt_count", "next_attempt_at", "retained", "cost_source", "generation_id", "routed_provider", "routed_model", "provider_batch_id", "output_json", "usage_json", "error", "submitted_at", "completed_at", "created_at") SELECT "id", "run_id", "stage", "appid", "matched_appid", "dimension", "source_id", "request_key", "input_identity", "model", "config_version", "max_input_tokens", "max_output_tokens", "reserved_microusd", "charged_microusd", "reservation_active", "status", "provider", "enqueued_at", "attempt_count", "next_attempt_at", "retained", "cost_source", "generation_id", "routed_provider", "routed_model", "provider_batch_id", "output_json", "usage_json", "error", "submitted_at", "completed_at", "created_at" FROM `media_processing_jobs`;--> statement-breakpoint
+-- Every job row is copied unchanged and starts with no client-error pauses:
+-- the new statuses only widen the status check, and the autoincrement
+-- high-water mark is kept.
+INSERT INTO `__new_media_processing_jobs`("id", "run_id", "stage", "appid", "matched_appid", "dimension", "source_id", "request_key", "input_identity", "model", "config_version", "max_input_tokens", "max_output_tokens", "reserved_microusd", "charged_microusd", "reservation_active", "status", "provider", "enqueued_at", "attempt_count", "next_attempt_at", "client_error_pauses", "client_error_identity", "retained", "cost_source", "generation_id", "routed_provider", "routed_model", "provider_batch_id", "output_json", "usage_json", "error", "submitted_at", "completed_at", "created_at") SELECT "id", "run_id", "stage", "appid", "matched_appid", "dimension", "source_id", "request_key", "input_identity", "model", "config_version", "max_input_tokens", "max_output_tokens", "reserved_microusd", "charged_microusd", "reservation_active", "status", "provider", "enqueued_at", "attempt_count", "next_attempt_at", "client_error_pauses", "client_error_identity", "retained", "cost_source", "generation_id", "routed_provider", "routed_model", "provider_batch_id", "output_json", "usage_json", "error", "submitted_at", "completed_at", "created_at" FROM `media_processing_jobs`;--> statement-breakpoint
 DELETE FROM sqlite_sequence WHERE name = '__new_media_processing_jobs';--> statement-breakpoint
 INSERT INTO sqlite_sequence (name, seq) SELECT '__new_media_processing_jobs', seq FROM sqlite_sequence WHERE name = 'media_processing_jobs';--> statement-breakpoint
 DROP TABLE `media_processing_jobs`;--> statement-breakpoint

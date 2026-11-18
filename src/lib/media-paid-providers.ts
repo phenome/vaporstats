@@ -327,6 +327,15 @@ export const MAX_UNCERTAIN_SENDS = 3;
  */
 export const MAX_UNCERTAIN_OUTCOMES_PER_JOB = 6;
 
+/**
+ * How many provider pauses for an unrecognized client error one item may
+ * trigger for one input identity. Each also backs the item off like a
+ * transient failure; the last ends it `client_error_exhausted`, which is not
+ * a refusal: only a correction set resends it, and it triggers no more
+ * pauses.
+ */
+export const MAX_CLIENT_ERROR_PAUSES = 3;
+
 export interface ProviderState {
   provider: PaidProvider;
   paused: boolean;

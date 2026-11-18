@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "750a36da-1d5c-4b6f-9025-ddf471a38bdf",
+  "id": "1f5b3a1a-c3dd-44a8-a5c2-e76aa41f3dd8",
   "prevId": "b20887d0-a256-414a-963f-75e25e571293",
   "tables": {
     "app_facet_memberships": {
@@ -2443,6 +2443,21 @@
           "notNull": false,
           "autoincrement": false
         },
+        "client_error_pauses": {
+          "name": "client_error_pauses",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 0
+        },
+        "client_error_identity": {
+          "name": "client_error_identity",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
         "retained": {
           "name": "retained",
           "type": "integer",
@@ -2628,7 +2643,11 @@
         },
         "media_processing_jobs_status_check": {
           "name": "media_processing_jobs_status_check",
-          "value": "\"media_processing_jobs\".\"status\" IN ('queued', 'reserved', 'submitted', 'succeeded', 'failed', 'refused', 'uncertain', 'uncertain_exhausted', 'stale')"
+          "value": "\"media_processing_jobs\".\"status\" IN ('queued', 'reserved', 'submitted', 'succeeded', 'failed', 'refused', 'uncertain', 'uncertain_exhausted', 'client_error_exhausted', 'stale')"
+        },
+        "media_processing_jobs_client_error_check": {
+          "name": "media_processing_jobs_client_error_check",
+          "value": "\"media_processing_jobs\".\"client_error_pauses\" >= 0"
         },
         "media_processing_jobs_attempt_check": {
           "name": "media_processing_jobs_attempt_check",

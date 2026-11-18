@@ -34,6 +34,7 @@ import {
   GeminiMissingKeyError,
   OpenRouterHttpError,
   liftProviderPause,
+  MAX_CLIENT_ERROR_PAUSES,
   MAX_UNCERTAIN_OUTCOMES_PER_JOB,
   MAX_UNCERTAIN_SENDS,
   paidWorkCost,
@@ -679,7 +680,7 @@ async function countOutputs(db: AppDatabase, runId: number, outcome: keyof typeo
 async function runRequestKey(db: AppDatabase, baseKey: string, runId: number): Promise<string> {
   const base = await first<{ run_id: number; status: JobRow["status"]; retained: number }>(db, "SELECT run_id, status, retained FROM media_processing_jobs WHERE request_key = ?", baseKey);
   const unsubmittedHistory = base?.retained === 1 && base.status === "reserved";
-  const endedEarlier = base !== null && base.run_id !== runId && (base.status === "failed" || base.status === "stale" || base.status === "refused" || base.status === "uncertain" || base.status === "uncertain_exhausted");
+  const endedEarlier = base !== null && base.run_id !== runId && (base.status === "failed" || base.status === "stale" || base.status === "refused" || base.status === "uncertain" || base.status === "uncertain_exhausted" || base.status === "client_error_exhausted");
   return unsubmittedHistory || endedEarlier ? `${baseKey}:retry:${runId}` : baseKey;
 }
 
@@ -784,9 +785,10 @@ type JobStage = "extraction" | "embedding" | "synthesis" | "explanation";
  * lifetime allowance before the queue existed: new work that a provider or
  * validation definitely refuses is `refused`. `uncertain` marks an item in
  * flight; an uncertain outcome returns it to the queue, and its last allowed
- * one ends it `uncertain_exhausted`.
+ * one ends it `uncertain_exhausted`. An item that triggered its last allowed
+ * pause for an unrecognized client error ends `client_error_exhausted`.
  */
-type JobStatus = "queued" | "reserved" | "submitted" | "succeeded" | "failed" | "refused" | "uncertain" | "uncertain_exhausted" | "stale";
+type JobStatus = "queued" | "reserved" | "submitted" | "succeeded" | "failed" | "refused" | "uncertain" | "uncertain_exhausted" | "client_error_exhausted" | "stale";
 type JobRow = { id: number; retained: number; run_id: number; stage: JobStage; appid: number; matched_appid: number | null; dimension: SimilarityDimension | null; source_id: number | null; request_key: string; input_identity: string; model: string; config_version: string; max_input_tokens: number; max_output_tokens: number; reserved_microusd: number; charged_microusd: number | null; reservation_active: number; status: JobStatus; provider: PaidProvider; enqueued_at: string; attempt_count: number; provider_batch_id: string | null; output_json: string | null; usage_json: string; error: string | null };
 const JOB_COLUMNS = "id, retained, run_id, stage, appid, matched_appid, dimension, source_id, request_key, input_identity, model, config_version, max_input_tokens, max_output_tokens, reserved_microusd, charged_microusd, reservation_active, status, provider, enqueued_at, attempt_count, provider_batch_id, output_json, usage_json, error";
 /**
@@ -1117,6 +1119,7 @@ async function holdItem(advance: QueueAdvance, job: JobRow, outcome: Exclude<Pro
     noteReason(advance, job.run_id, outcome.reason === "input_token_cap" ? "input_token_cap" : "provider_refusal");
     return;
   }
+  if (outcome.class === "missing_configuration" && outcome.reason === "unrecognized_client_error") return holdClientError(advance, job, outcome);
   if (outcome.class === "credit_pause" || outcome.class === "missing_configuration") {
     await transaction(db, async () => {
       await db.prepare(`UPDATE media_processing_jobs SET status = 'queued', error = NULL, submitted_at = NULL WHERE id = ? AND status = 'uncertain' AND error = '${IN_FLIGHT}'`).bind(job.id).run();
@@ -1134,6 +1137,39 @@ async function holdItem(advance: QueueAdvance, job: JobRow, outcome: Exclude<Pro
     await closeAttempt(db, job.id, attemptOutcome(outcome), `transient:${outcome.reason}`);
   });
   noteReason(advance, job.run_id, "transient_provider_failure");
+}
+
+/**
+ * Acts on an unrecognized client error that `job`'s count or send triggered.
+ * It pauses the provider, as a configuration problem, and also backs the item
+ * off like a transient failure, so the item that triggered it does not take
+ * the provider's first turn again. The `MAX_CLIENT_ERROR_PAUSES`-th pause the
+ * item triggers for one input identity ends it `client_error_exhausted`: not
+ * a refusal, and only a correction set resends it.
+ */
+async function holdClientError(advance: QueueAdvance, job: JobRow, outcome: Extract<ProviderOutcome, { class: "missing_configuration" }>): Promise<void> {
+  const { db, now } = advance;
+  await transaction(db, async () => {
+    const current = await first<{ attempt_count: number; input_identity: string; client_error_pauses: number; client_error_identity: string | null }>(
+      db,
+      `SELECT attempt_count, input_identity, client_error_pauses, client_error_identity FROM media_processing_jobs WHERE id = ? AND (${WAITING} OR (status = 'uncertain' AND error = '${IN_FLIGHT}'))`,
+      job.id,
+    );
+    await pauseProvider(db, job.provider, outcome.reason, now);
+    if (!current) return;
+    await closeAttempt(db, job.id, outcome.class, outcome.reason);
+    const pauses = (current.client_error_identity === current.input_identity ? current.client_error_pauses : 0) + 1;
+    if (pauses >= MAX_CLIENT_ERROR_PAUSES) {
+      await db.prepare("UPDATE media_processing_jobs SET status = 'client_error_exhausted', error = ?, next_attempt_at = NULL, completed_at = ?, client_error_pauses = ?, client_error_identity = ? WHERE id = ?")
+        .bind(`client_error_exhausted:${outcome.reason}`, now.toISOString(), pauses, current.input_identity, job.id).run();
+      await countOutputs(db, job.run_id, "skipped");
+      return;
+    }
+    const failures = current.attempt_count + 1;
+    await db.prepare("UPDATE media_processing_jobs SET status = 'queued', attempt_count = ?, next_attempt_at = ?, error = ?, submitted_at = NULL, client_error_pauses = ?, client_error_identity = ? WHERE id = ?")
+      .bind(failures, transientRetryAt(failures, now, null).toISOString(), `client_error:${outcome.reason}`, pauses, current.input_identity, job.id).run();
+  });
+  advance.paused.add(job.provider);
 }
 
 /** Counts `request`'s input tokens, or returns the classified failure. A count is free and never uncertain. */
@@ -2108,6 +2144,16 @@ async function takeTurn(advance: QueueAdvance, job: JobRow): Promise<boolean> {
  * Taking stops at the per-tick bound on items or elapsed time; the items
  * left keep their place for the next tick.
  */
+/**
+ * Whether `job` is retrying after a failure it took itself, such as a
+ * transient failure, an uncertain outcome or an unrecognized client error.
+ * A credit probe never picks such an item, so an item that keeps failing
+ * cannot take the provider's first turn after every daily check.
+ */
+function inBackoff(job: JobRow): boolean {
+  return job.attempt_count > 0;
+}
+
 async function submitQueuedWork(advance: QueueAdvance, probing: Set<PaidProvider>): Promise<void> {
   const { db, now } = advance;
   for (const provider of PAID_PROVIDERS) {
@@ -2130,7 +2176,7 @@ async function submitQueuedWork(advance: QueueAdvance, probing: Set<PaidProvider
     const turns: JobRow[] = [];
     if (probing.has(provider)) {
       probing.delete(provider);
-      const probe = ready.find((job) => job.stage === "embedding");
+      const probe = ready.find((job) => job.stage === "embedding" && !inBackoff(job));
       if (probe) {
         turns.push(probe);
         byEntity.set(probe.appid, byEntity.get(probe.appid)!.filter((job) => job.id !== probe.id));
@@ -2177,11 +2223,11 @@ async function finishRun(advance: QueueAdvance, run: OpenAuthorization): Promise
   const runAggregate = await first<{ succeeded: number; failed: number; uncertain: number; pending: number; jobs: number; hard: number; waiting: number }>(
     db,
     `SELECT COALESCE(SUM(status = 'succeeded'), 0) AS succeeded,
-       COALESCE(SUM(status IN ('failed', 'refused', 'stale')), 0) AS failed,
+       COALESCE(SUM(status IN ('failed', 'refused', 'stale', 'client_error_exhausted')), 0) AS failed,
        COALESCE(SUM(status IN ('uncertain', 'uncertain_exhausted') OR (${WAITING} AND error LIKE 'uncertain:%')), 0) AS uncertain,
        COALESCE(SUM(status IN ('submitted', 'uncertain') OR ${WAITING}), 0) AS pending,
        COUNT(*) AS jobs,
-       COALESCE(SUM(status IN ('failed', 'uncertain_exhausted') OR (status = 'refused' AND submitted_at IS NOT NULL)), 0) AS hard,
+       COALESCE(SUM(status IN ('failed', 'uncertain_exhausted', 'client_error_exhausted') OR (status = 'refused' AND submitted_at IS NOT NULL)), 0) AS hard,
        COALESCE(SUM(${WAITING}), 0) AS waiting
      FROM media_processing_jobs WHERE run_id = ?`,
     auth.run_id,
