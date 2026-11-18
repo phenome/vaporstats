@@ -32,9 +32,15 @@ import {
 } from "../src/lib/media-discovery";
 import {
   advanceMediaProcessing,
-  runIdleDailyCreditCheck,
   type MediaProcessingSummary,
 } from "../src/lib/media-processing";
+import {
+  automaticMediaIngestionEnabled,
+  latestScheduledDiscovery,
+  openScheduledDiscovery,
+  runDailyMediaRun,
+  type DailyMediaRunSummary,
+} from "../src/lib/media-daily-run";
 import {
   compactReviewEvidence,
   type CompactReviewEvidenceResult,
@@ -68,6 +74,11 @@ export interface IngestionTickOptions {
   /** A monotonic clock in milliseconds that measures `paidWorkTimeBudgetMs`. */
   paidWorkClock?: () => number;
   stalePriceDealsOnly?: boolean;
+  /**
+   * Whether automatic media ingestion is enabled; defaults to the server's
+   * `MEDIA_AUTOMATIC_INGESTION` setting, which is off unless it is `true`.
+   */
+  mediaAutomaticIngestion?: boolean;
 }
 
 export interface IngestionTickResult {
@@ -82,6 +93,7 @@ export interface IngestionTickResult {
   rollups?: RollupJobResult;
   prices?: HourlyPriceFeedTickResult;
   tagDictionary?: SteamTagDictionaryRefreshResult;
+  mediaDailyRun?: DailyMediaRunSummary;
   mediaDiscovery?: MediaRunSummary;
   mediaProcessing?: MediaProcessingSummary;
   reviewCompaction?: CompactReviewEvidenceResult;
@@ -192,6 +204,12 @@ function logCompletion(result: IngestionTickResult): void {
       entries: result.tagDictionary.entries,
       date: result.tagDictionary.date,
     },
+    mediaDailyRun: result.mediaDailyRun && {
+      day: result.mediaDailyRun.day,
+      enrollmentStartDate: result.mediaDailyRun.enrollmentStartDate,
+      enrolled: result.mediaDailyRun.enrolled.length,
+      discoveryRunId: result.mediaDailyRun.discoveryRunId,
+    },
     mediaDiscovery: result.mediaDiscovery && {
       runId: result.mediaDiscovery.runId,
       status: result.mediaDiscovery.status,
@@ -223,6 +241,65 @@ function logCompletion(result: IngestionTickResult): void {
   }));
 }
 
+/**
+ * The media part of a tick. While automatic media ingestion is enabled, the
+ * daily media run happens when due, today's scheduled discovery run resumes
+ * if a restart interrupted it, and the paid-work queue advances. Ticks never
+ * start searches of their own. While it is disabled, only work already
+ * submitted to a provider is polled: no daily media run, discovery, credit
+ * check, new queue item or paid submission, and queued work and due passes
+ * are kept.
+ */
+async function advanceMedia(
+  options: IngestionTickOptions,
+  anchorTime: Date,
+  customFetch: typeof fetch,
+): Promise<Pick<IngestionTickResult, "mediaDailyRun" | "mediaDiscovery" | "mediaProcessing">> {
+  const { db } = options;
+  const providerOptions = {
+    geminiApiKey: options.geminiApiKey ?? process.env.GEMINI_API_KEY,
+    openRouterApiKey: options.openRouterApiKey ?? process.env.OPENROUTER_API_KEY,
+    openRouterTimeoutMs: options.openRouterTimeoutMs,
+    articleFetch: customFetch,
+    providerFetch: customFetch,
+    now: anchorTime,
+  };
+  if (!(options.mediaAutomaticIngestion ?? automaticMediaIngestionEnabled())) {
+    const submitted = await db.prepare("SELECT id FROM media_processing_jobs WHERE status = 'submitted' LIMIT 1").first<{ id: number }>();
+    if (!submitted) return {};
+    return { mediaProcessing: await advanceMediaProcessing(db, { ...providerOptions, pollOnly: true }) };
+  }
+  const mediaDailyRun = await runDailyMediaRun(db, anchorTime, providerOptions) ?? undefined;
+  let mediaDiscovery: MediaRunSummary | undefined;
+  const scheduledRun = await openScheduledDiscovery(db, anchorTime);
+  if (scheduledRun !== null) {
+    mediaDiscovery = await runSerializedMediaDiscovery(db, {
+      runId: scheduledRun,
+      tavilyApiKey: options.tavilyApiKey ?? process.env.TAVILY_API_KEY,
+      fetch: customFetch,
+      now: anchorTime,
+    });
+  }
+  const automaticRunId = await latestScheduledDiscovery(db);
+  const pendingAuthorization = await db
+    .prepare("SELECT a.run_id FROM media_processing_authorizations AS a JOIN media_discovery_runs AS r ON r.id = a.run_id WHERE a.status IN ('queued', 'waiting') AND r.status NOT IN ('queued', 'running') ORDER BY a.authorized_at LIMIT 1")
+    .first<{ run_id: number }>();
+  const queuedWork = await db
+    .prepare("SELECT run_id FROM media_processing_jobs WHERE status = 'submitted' OR (status = 'queued' AND retained = 0) LIMIT 1")
+    .first<{ run_id: number }>();
+  if (automaticRunId === null && !pendingAuthorization && !queuedWork) return { mediaDailyRun, mediaDiscovery };
+  const mediaProcessing = await advanceMediaProcessing(db, {
+    ...providerOptions,
+    ...(pendingAuthorization ? { runId: pendingAuthorization.run_id } : {}),
+    ...(automaticRunId !== null ? { automaticRunId } : {}),
+    probe: mediaDailyRun?.probe,
+    submissionsPerTick: options.paidSubmissionsPerTick,
+    paidWorkTimeBudgetMs: options.paidWorkTimeBudgetMs,
+    paidWorkClock: options.paidWorkClock,
+  });
+  return { mediaDailyRun, mediaDiscovery, mediaProcessing };
+}
+
 async function performIngestionTick(options: IngestionTickOptions): Promise<IngestionTickResult> {
   const startedAt = Date.now();
   const anchorTime = options.anchorTime ?? new Date();
@@ -243,48 +320,7 @@ async function performIngestionTick(options: IngestionTickOptions): Promise<Inge
   const tick = await runPlayerCollectionTick(options.db, { anchorTime, customFetch });
   const reviewCollection = await runReviewCollection(options.db, { anchorTime, customFetch });
   const criticCollection = await runCriticCollection(options.db, { now: anchorTime, fetch: customFetch });
-  let mediaDiscovery: MediaRunSummary | undefined;
-  const pendingMediaRun = await options.db
-    .prepare("SELECT id FROM media_discovery_runs WHERE pass = 'initial' AND status IN ('queued', 'running') ORDER BY id LIMIT 1")
-    .first<{ id: number }>();
-  if (pendingMediaRun) {
-    mediaDiscovery = await runSerializedMediaDiscovery(options.db, {
-      runId: pendingMediaRun.id,
-      tavilyApiKey: options.tavilyApiKey ?? process.env.TAVILY_API_KEY,
-      fetch: customFetch,
-      now: anchorTime,
-    });
-  }
-  let mediaProcessing: MediaProcessingSummary | undefined;
-  const pendingMediaProcessing = await options.db
-    .prepare("SELECT a.run_id FROM media_processing_authorizations AS a JOIN media_discovery_runs AS r ON r.id = a.run_id WHERE a.status IN ('queued', 'waiting') AND r.status NOT IN ('queued', 'running') ORDER BY a.authorized_at LIMIT 1")
-    .first<{ run_id: number }>();
-  // Queued paid work advances every tick without a new authorization. The
-  // daily credit check runs in every tick: within the advance, which probes
-  // with a queued item, or on its own when no paid work waits.
-  const queuedMediaWork = await options.db
-    .prepare("SELECT run_id FROM media_processing_jobs WHERE status = 'submitted' OR (status = 'queued' AND retained = 0) ORDER BY id LIMIT 1")
-    .first<{ run_id: number }>();
-  if (pendingMediaProcessing || queuedMediaWork) {
-    mediaProcessing = await advanceMediaProcessing(options.db, {
-      ...(pendingMediaProcessing ? { runId: pendingMediaProcessing.run_id } : {}),
-      geminiApiKey: options.geminiApiKey ?? process.env.GEMINI_API_KEY,
-      openRouterApiKey: options.openRouterApiKey ?? process.env.OPENROUTER_API_KEY,
-      openRouterTimeoutMs: options.openRouterTimeoutMs,
-      submissionsPerTick: options.paidSubmissionsPerTick,
-      paidWorkTimeBudgetMs: options.paidWorkTimeBudgetMs,
-      paidWorkClock: options.paidWorkClock,
-      articleFetch: customFetch,
-      providerFetch: customFetch,
-      now: anchorTime,
-    });
-  } else {
-    await runIdleDailyCreditCheck(options.db, anchorTime, {
-      openRouterApiKey: options.openRouterApiKey ?? process.env.OPENROUTER_API_KEY,
-      openRouterTimeoutMs: options.openRouterTimeoutMs,
-      providerFetch: customFetch,
-    });
-  }
+  const media = await advanceMedia(options, anchorTime, customFetch);
 
   let discovery: DiscoveryResult | undefined;
   let rollups: RollupJobResult | undefined;
@@ -335,8 +371,7 @@ async function performIngestionTick(options: IngestionTickOptions): Promise<Inge
     rollups,
     prices,
     tagDictionary,
-    mediaDiscovery,
-    mediaProcessing,
+    ...media,
     reviewCompaction,
     scoreUpgrade,
     catalogRefresh,

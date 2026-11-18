@@ -515,11 +515,54 @@ export const OPENROUTER_PERMISSION_DENIED: OpenRouterReply = { status: 403, body
 /** OpenRouter's reply to an invalid or disabled API key. */
 export const OPENROUTER_INVALID_KEY: OpenRouterReply = { status: 401, body: { error: { code: 401, message: "No auth credentials found" } } };
 
-type MediaTickApis = { gemini?: ReturnType<typeof controlledGeminiApi>; openRouter?: ReturnType<typeof controlledOpenRouterApi> };
+/** One answer the controlled Tavily API gives a search: an HTTP reply, or a connection failure. */
+export type TavilyReply = { status: number; body?: unknown } | { network: string };
 
 /**
- * The tick's fetch: Gemini and OpenRouter requests go to their controlled
- * APIs, article pages are served for every outlet URL unless `outlet`
+ * A controlled Tavily search API behind a fetch function. The usage endpoint
+ * reports a free plan with `remaining` credits left (100 by default) and no
+ * pay-as-you-go allowance. Each search returns one article on the searched
+ * outlet's domain, `https://<domain>/articles/<appid>-<domain>`, for the
+ * catalog entity whose name the query starts with, unless a reply is queued
+ * with `reply`. `searches` records each search as `<entity name>@<domain>`.
+ */
+export function controlledTavilyApi(names: Record<number, string> = GAME_NAMES) {
+  const replies: TavilyReply[] = [];
+  const searches: string[] = [];
+  /** `remaining`: free credits the usage endpoint reports; `usageCalls`: usage requests received. */
+  const api = { remaining: 100, usageCalls: 0 };
+  const byLongestName = Object.entries(names).sort(([, a], [, b]) => b.length - a.length);
+  const fetchFn = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+    const url = String(input);
+    if (url === "https://api.tavily.com/usage") {
+      api.usageCalls += 1;
+      return Response.json({ account: { current_plan: "free" }, plan_usage: 1_000 - api.remaining, plan_limit: 1_000, paygo_usage: 0, paygo_limit: 0 });
+    }
+    if (url !== "https://api.tavily.com/search") return Response.json({ error: "Not Found" }, { status: 404 });
+    const payload = JSON.parse(String(init?.body)) as { include_domains: string[]; query: string };
+    const domain = payload.include_domains[0]!;
+    const entity = byLongestName.find(([, name]) => payload.query.startsWith(`${name} `));
+    searches.push(`${entity?.[1] ?? payload.query}@${domain}`);
+    const reply = replies.shift();
+    if (reply && "network" in reply) throw new Error(reply.network);
+    if (reply) return Response.json(reply.body ?? {}, { status: reply.status });
+    if (!entity) return Response.json({ results: [], usage: { credits_used: 1 } });
+    return Response.json({ request_id: `search-${searches.length}`, usage: { credits_used: 1 }, results: [{ url: `https://${domain}/articles/${entity[0]}-${domain.replaceAll(".", "-")}` }] });
+  };
+  return Object.assign(api, {
+    fetchFn,
+    searches,
+    /** Queues `reply` for the next search. */
+    reply(...queued: TavilyReply[]) { replies.push(...queued); },
+    isTavilyRequest: (url: string) => url.startsWith("https://api.tavily.com/"),
+  });
+}
+
+type MediaTickApis = { gemini?: ReturnType<typeof controlledGeminiApi>; openRouter?: ReturnType<typeof controlledOpenRouterApi>; tavily?: ReturnType<typeof controlledTavilyApi> };
+
+/**
+ * The tick's fetch: Gemini, OpenRouter and Tavily requests go to their
+ * controlled APIs, article pages are served for every outlet URL unless `outlet`
  * answers first, and anything else is unavailable.
  */
 export function mediaTickFetch(apis: MediaTickApis, fetched: string[] = [], outlet?: (url: string) => Response | undefined): typeof fetch {
@@ -527,6 +570,7 @@ export function mediaTickFetch(apis: MediaTickApis, fetched: string[] = [], outl
     const url = String(input);
     if (apis.gemini?.isGeminiRequest(url)) return apis.gemini.fetchFn(input, init);
     if (apis.openRouter?.isOpenRouterRequest(url)) return apis.openRouter.fetchFn(input, init);
+    if (apis.tavily?.isTavilyRequest(url)) return apis.tavily.fetchFn(input, init);
     if (url.includes("/articles/")) {
       fetched.push(url);
       const answer = outlet?.(url);
@@ -543,7 +587,11 @@ export type MediaTickOptions = Partial<IngestionTickOptions> & { fetched?: strin
 
 /**
  * Runs one ingestion tick at `at` with the controlled provider APIs and
- * outlets, and test keys for Gemini and OpenRouter. The tick's daily player
+ * outlets, and test keys for Gemini, OpenRouter and Tavily. Automatic media
+ * ingestion is enabled unless `mediaAutomaticIngestion` says otherwise, so a
+ * tick at or after 06:00 UTC runs that day's daily media run. Without a
+ * controlled Tavily API, every search request is unavailable, and the daily
+ * media run searches nothing. The tick's daily player
  * cycle is marked done, so it writes no snapshot, and reception artifacts
  * stay inside the temporary database directory.
  */
@@ -559,6 +607,8 @@ export function runMediaTick(database: TestDatabase, apis: MediaTickApis, at: st
     customFetch: mediaTickFetch(apis, fetched, outlet),
     geminiApiKey: "test-gemini-key",
     openRouterApiKey: "test-openrouter-key",
+    tavilyApiKey: "test-tavily-key",
+    mediaAutomaticIngestion: true,
     ...rest,
   });
 }

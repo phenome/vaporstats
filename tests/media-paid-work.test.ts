@@ -156,8 +156,10 @@ describe("retained submitted batches", () => {
     const apis = providers();
     apis.gemini.reply("poll", { status: 200, body: { metadata: { state: "BATCH_STATE_EXPIRED" } } });
 
-    await tick(database, apis, "2026-11-10T07:00:00.000Z");
-    await tick(database, apis, "2026-11-10T07:15:00.000Z");
+    // While automatic media ingestion is disabled, submitted batches are still
+    // polled, and the source the retained row took enters no queue.
+    await tick(database, apis, "2026-11-10T07:00:00.000Z", { mediaAutomaticIngestion: false });
+    await tick(database, apis, "2026-11-10T07:15:00.000Z", { mediaAutomaticIngestion: false });
 
     expect(database.native.query("SELECT status, provider_batch_id, reserved_microusd, reservation_active, attempt_count, next_attempt_at FROM media_processing_jobs").all()).toEqual([
       { status: "stale", provider_batch_id: "batches/retired-1", reserved_microusd: 1500, reservation_active: 1, attempt_count: 0, next_attempt_at: null },
@@ -407,7 +409,8 @@ describe("daily credit check without paid work", () => {
     await tick(database, apis, "2026-11-10T07:00:00.000Z");
     const settled = await tick(database, apis, "2026-11-10T07:15:00.000Z");
     expect(settled.mediaProcessing?.providers.gemini).toMatchObject({ paused: true, reason: "rejected_key" });
-    expect((await tick(database, apis, "2026-11-10T07:30:00.000Z")).mediaProcessing).toBeUndefined();
+    const idle = await tick(database, apis, "2026-11-10T07:30:00.000Z");
+    expect(idle.mediaProcessing).toMatchObject({ submitted: 0, queued: { gemini: 0, openrouter: 0 } });
 
     // The next day's first tick after 06:00 has no paid work, and still checks.
     await tick(database, apis, "2026-11-11T06:30:00.000Z");

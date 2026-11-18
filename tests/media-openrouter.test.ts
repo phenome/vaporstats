@@ -712,7 +712,8 @@ describe("daily OpenRouter credit check", () => {
     providers.openRouter.reply("key", keyAnswer(0));
 
     const idle = await tick(database, providers, "2026-11-18T06:30:00.000Z");
-    expect(idle.mediaProcessing).toBeUndefined();
+    expect(idle.mediaDailyRun?.day).toBe("2026-11-18");
+    expect(idle.mediaProcessing?.submitted ?? 0).toBe(0);
     expect(providers.openRouter.calls).toEqual([{ kind: "key" }]);
 
     insertSources(database.native, CYBERPUNK, "initial", 1);

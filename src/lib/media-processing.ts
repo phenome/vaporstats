@@ -207,6 +207,19 @@ export interface MediaProcessingOptions {
   paidWorkTimeBudgetMs?: number;
   /** A monotonic clock in milliseconds that measures `paidWorkTimeBudgetMs`. */
   paidWorkClock?: () => number;
+  /**
+   * Automatic media ingestion: sources of enrolled entities that are new to
+   * processing enter the queue without an authorization, attributed to this
+   * scheduled discovery run, and their Overview and embedding work follows.
+   */
+  automaticRunId?: number;
+  /** Providers whose pause the daily credit check just lifted, so they first submit a probe. */
+  probe?: readonly PaidProvider[];
+  /**
+   * Only polls work already submitted, while automatic media ingestion is
+   * disabled: no credit check, no new queue item and no paid submission.
+   */
+  pollOnly?: boolean;
 }
 
 /** `error`'s message on one bounded line, with every configured secret and bearer token redacted. */
@@ -665,6 +678,27 @@ async function runRequestKey(db: AppDatabase, baseKey: string, runId: number): P
   const unsubmittedHistory = base?.retained === 1 && base.status === "reserved";
   const endedEarlier = base !== null && base.run_id !== runId && (base.status === "failed" || base.status === "stale" || base.status === "refused" || base.status === "uncertain");
   return unsubmittedHistory || endedEarlier ? `${baseKey}:retry:${runId}` : baseKey;
+}
+
+/**
+ * The request key automatic work queues the work identified by `baseKey`
+ * under, or null when that work already has an item: waiting, in flight,
+ * settled, or ended refused, failed, stale or uncertain, which only a
+ * correction set re-attempts. Work a retained row reserved but never
+ * submitted is queued under a key of `runId`'s own, so the retained row
+ * stays history.
+ */
+async function automaticRequestKey(db: AppDatabase, baseKey: string, runId: number): Promise<string | null> {
+  const retryPrefix = `${baseKey}:retry:`;
+  const items = await rows<{ status: JobRow["status"]; retained: number }>(
+    db,
+    "SELECT status, retained FROM media_processing_jobs WHERE request_key = ? OR substr(request_key, 1, length(?)) = ?",
+    baseKey,
+    retryPrefix,
+    retryPrefix,
+  );
+  if (items.some((item) => !(item.retained === 1 && item.status === "reserved"))) return null;
+  return items.length > 0 ? `${retryPrefix}${runId}` : baseKey;
 }
 
 /**
@@ -1477,6 +1511,12 @@ async function eligibleProcessingEntities(db: AppDatabase, selectedRoots: readon
   return eligible.map(({ appid }) => appid);
 }
 
+/** The eligible entities of every enrolled root: the root and its eligible DLC and expansions. */
+async function enrolledEntities(db: AppDatabase): Promise<number[]> {
+  const roots = await rows<{ appid: number }>(db, "SELECT appid FROM media_enrollments ORDER BY appid");
+  return eligibleProcessingEntities(db, roots.map(({ appid }) => appid));
+}
+
 async function loadAuthorization(
   db: AppDatabase,
   runId?: number,
@@ -1615,14 +1655,13 @@ async function hasPendingExtractions(db: AppDatabase, appid: number): Promise<bo
 }
 
 /**
- * Queues an extraction for every source `run` takes. Taking the source and
+ * Queues an extraction for every source run `runId` takes: sources new to
+ * processing, and the sources of its authorized `affected` set. Taking the source and
  * queuing its item is one write; the article is fetched only when the item
  * is submitted, so a waiting item holds no text.
  */
-async function enqueueExtractions(advance: QueueAdvance, run: OpenAuthorization, entities: readonly number[]): Promise<void> {
+async function enqueueExtractions(advance: QueueAdvance, runId: number, affected: ReadonlySet<number>, entities: readonly number[]): Promise<void> {
   const { db, now } = advance;
-  const runId = run.auth.run_id;
-  const affected = new Set(parseAffectedSourceIds(run.auth.affected_source_ids));
   for (const source of await boundedSources(db, entities)) {
     if (!inScope(source, runId, affected)) continue;
     await transaction(db, async () => {
@@ -1638,15 +1677,17 @@ async function enqueueExtractions(advance: QueueAdvance, run: OpenAuthorization,
 }
 
 /**
- * Queues Overview and embedding work for the games `runId` may rebuild. An
- * Overview is queued only when its game has no queued or in-flight
+ * Queues Overview and embedding work for the games `runId` may rebuild: an
+ * authorized run's rebuild scope, or every one of `entities` for automatic
+ * work. An Overview is queued only when its game has no queued or in-flight
  * extraction, and its current contributions differ from those its active
  * Overview was built from, or it has none. A model or configuration version
- * change alone queues nothing.
+ * change alone queues nothing. Automatic work never queues again work that
+ * already has an item, whatever its outcome.
  */
-async function enqueueOverviewWork(advance: QueueAdvance, runId: number, entities: readonly number[]): Promise<void> {
+async function enqueueOverviewWork(advance: QueueAdvance, runId: number, entities: readonly number[], automatic = false): Promise<void> {
   const { db, now } = advance;
-  const scopeGames = [...await rebuildScopeGames(db, runId, entities)].sort((a, b) => a - b);
+  const scopeGames = automatic ? [...entities].sort((a, b) => a - b) : [...await rebuildScopeGames(db, runId, entities)].sort((a, b) => a - b);
   for (const appid of scopeGames) {
     if (await hasPendingExtractions(db, appid)) continue;
     const evidence = await currentGameEvidence(db, appid);
@@ -1665,15 +1706,17 @@ async function enqueueOverviewWork(advance: QueueAdvance, runId: number, entitie
       });
       continue;
     }
-    const requestKey = await runRequestKey(db, `synthesis:${appid}:${identity}`, runId);
-    if (await first<{ id: number }>(db, "SELECT id FROM media_processing_jobs WHERE request_key = ?", requestKey)) continue;
+    const requestKey = automatic
+      ? await automaticRequestKey(db, `synthesis:${appid}:${identity}`, runId)
+      : await runRequestKey(db, `synthesis:${appid}:${identity}`, runId);
+    if (!requestKey || await first<{ id: number }>(db, "SELECT id FROM media_processing_jobs WHERE request_key = ?", requestKey)) continue;
     await enqueueItem(db, { provider: "openrouter", run_id: runId, stage: "synthesis", appid, source_id: null, request_key: requestKey, input_identity: identity, model: OPENROUTER_TEXT_MODEL, config_version: SYNTHESIS_CONFIG_VERSION, max_output_tokens: SYNTHESIS_MAX_OUTPUT_TOKENS }, now);
   }
-  await enqueueEmbeddings(advance, runId, scopeGames);
+  await enqueueEmbeddings(advance, runId, scopeGames, automatic);
 }
 
 /** Queues an embedding for each dimension whose `similarityInputs` changed in an active Overview of `scopeGames`. */
-async function enqueueEmbeddings(advance: QueueAdvance, runId: number, scopeGames: readonly number[]): Promise<void> {
+async function enqueueEmbeddings(advance: QueueAdvance, runId: number, scopeGames: readonly number[], automatic: boolean): Promise<void> {
   const { db, now } = advance;
   const overviews = await rows<{ appid: number; input_identity: string; output_json: string }>(
     db,
@@ -1713,8 +1756,9 @@ async function enqueueEmbeddings(advance: QueueAdvance, runId: number, scopeGame
         });
         continue;
       }
-      const requestKey = await runRequestKey(db, `embedding:${overview.appid}:${dimension}:${overview.input_identity}:${identity}`, runId);
-      if (await first<{ id: number }>(db, "SELECT id FROM media_processing_jobs WHERE request_key = ?", requestKey)) continue;
+      const baseKey = `embedding:${overview.appid}:${dimension}:${overview.input_identity}:${identity}`;
+      const requestKey = automatic ? await automaticRequestKey(db, baseKey, runId) : await runRequestKey(db, baseKey, runId);
+      if (!requestKey || await first<{ id: number }>(db, "SELECT id FROM media_processing_jobs WHERE request_key = ?", requestKey)) continue;
       await enqueueItem(db, { provider: "gemini", run_id: runId, stage: "embedding", appid: overview.appid, dimension, source_id: null, request_key: requestKey, input_identity: identity, model: GEMINI_EMBEDDING_MODEL, config_version: GEMINI_EMBEDDING_CONFIG_VERSION, max_output_tokens: EMBEDDING_MAX_OUTPUT_TOKENS }, now);
     }
   }
@@ -2061,21 +2105,29 @@ async function advanceMediaProcessingNow(db: AppDatabase, options: MediaProcessi
   // Advances never overlap, so an item still marked in flight was sent by a
   // process that stopped before recording its answer.
   await db.prepare(`UPDATE media_processing_jobs SET error = ? WHERE status = 'uncertain' AND error = '${IN_FLIGHT}'`).bind(IN_FLIGHT_AT_STARTUP).run();
-  const probing = new Set(await runDailyCreditCheck(db, now, creditChecks(openRouter)) ?? []);
+  const pollOnly = options.pollOnly === true;
+  const probing = new Set(pollOnly ? [] : [...(options.probe ?? []), ...(await runDailyCreditCheck(db, now, creditChecks(openRouter)) ?? [])]);
   for (const provider of PAID_PROVIDERS) if ((await providerState(db, provider)).paused) advance.paused.add(provider);
 
   const globallySubmitted = await rows<JobRow>(db, `SELECT ${JOB_COLUMNS} FROM media_processing_jobs WHERE status = 'submitted' ORDER BY id`);
   const prePoll = await pollSubmittedJobs(advance, globallySubmitted);
-  const authorization = await loadAuthorization(db, options.runId);
-  const open = await openAuthorizations(db);
+  const authorization = pollOnly ? null : await loadAuthorization(db, options.runId);
+  const open = pollOnly ? [] : await openAuthorizations(db);
   const entitiesByRun = new Map<number, number[]>();
   for (const run of open) {
     const entities = await eligibleProcessingEntities(db, run.selectedGames);
     entitiesByRun.set(run.auth.run_id, entities);
-    await enqueueExtractions(advance, run, entities);
+    await enqueueExtractions(advance, run.auth.run_id, new Set(parseAffectedSourceIds(run.auth.affected_source_ids)), entities);
     await enqueueOverviewWork(advance, run.auth.run_id, entities);
   }
-  await submitQueuedWork(advance, probing);
+  // Automatic work: sources of enrolled entities that are new to processing
+  // enter the queue without an authorization; authorized runs take theirs first.
+  const automatic = pollOnly || options.automaticRunId === undefined ? null : { runId: options.automaticRunId, entities: await enrolledEntities(db) };
+  if (automatic) {
+    await enqueueExtractions(advance, automatic.runId, new Set(), automatic.entities);
+    await enqueueOverviewWork(advance, automatic.runId, automatic.entities, true);
+  }
+  if (!pollOnly) await submitQueuedWork(advance, probing);
   // Stages chain within one advance: text answers settle as they arrive, so
   // their Overview work, and then the embeddings of Overviews built here,
   // are queued and taken in the same advance. Each batch submitted in this
@@ -2089,9 +2141,10 @@ async function advanceMediaProcessingNow(db: AppDatabase, options: MediaProcessi
     currentPoll.failed += polled.failed;
     currentPoll.uncertain += polled.uncertain;
   };
-  for (let stage = 0; stage < 2; stage += 1) {
+  for (let stage = 0; stage < 2 && !pollOnly; stage += 1) {
     await pollNewBatches();
     for (const run of open) await enqueueOverviewWork(advance, run.auth.run_id, entitiesByRun.get(run.auth.run_id)!);
+    if (automatic) await enqueueOverviewWork(advance, automatic.runId, automatic.entities, true);
     await submitQueuedWork(advance, probing);
   }
   await pollNewBatches();
@@ -2103,7 +2156,7 @@ async function advanceMediaProcessingNow(db: AppDatabase, options: MediaProcessi
   if (target) return { ...target, ...report };
 
   const latestJob = await first<{ run_id: number }>(db, "SELECT run_id FROM media_processing_jobs ORDER BY id DESC LIMIT 1");
-  const reconciliationRunId = globallySubmitted.at(-1)?.run_id ?? options.runId ?? latestJob?.run_id;
+  const reconciliationRunId = globallySubmitted.at(-1)?.run_id ?? options.runId ?? options.automaticRunId ?? latestJob?.run_id;
   if (reconciliationRunId === undefined) throw new Error("Media processing authorization not found");
   const unresolved = await first<{ count: number }>(db, `SELECT COUNT(*) AS count FROM media_processing_jobs WHERE status IN ('submitted', 'uncertain') OR ${WAITING}`);
   const recorded = await first<{ stop_reason: string | null }>(db, "SELECT stop_reason FROM media_processing_authorizations WHERE run_id = ?", reconciliationRunId);
@@ -2122,17 +2175,19 @@ async function advanceMediaProcessingNow(db: AppDatabase, options: MediaProcessi
 }
 
 /**
- * Runs the daily credit check in a tick that has no paid work to advance, so
- * it runs in the first tick at or after 06:00 UTC whether or not work waits.
- * It records the day and lifts the pauses the check lifts; with no item to
- * probe, the next submission is the probe. Serialized with every other
- * queue write.
+ * Runs the daily credit check of the daily media run when it is due, whether
+ * or not paid work waits. It records the day and lifts the pauses the check
+ * lifts; `onRecorded` runs in that same write. Returns the providers whose
+ * pause was lifted so their next submission probes credit, which the next
+ * advance takes as `probe`, or null when the check was not due. Serialized
+ * with every other queue write.
  */
-export function runIdleDailyCreditCheck(
+export function runMediaDailyCreditCheck(
   db: AppDatabase,
   now: Date,
   options: Pick<MediaProcessingOptions, "openRouter" | "openRouterApiKey" | "openRouterTimeoutMs" | "providerFetch"> = {},
-): Promise<void> {
+  onRecorded?: () => Promise<void>,
+): Promise<PaidProvider[] | null> {
   const next = mediaProcessingQueue
     .catch(() => undefined)
     .then(async () => {
@@ -2141,7 +2196,7 @@ export function runIdleDailyCreditCheck(
         try { openRouter = createOpenRouterTransport(options.openRouterApiKey, options.providerFetch as OpenRouterFetch | undefined, { timeoutMs: options.openRouterTimeoutMs }); }
         catch { openRouter = null; }
       }
-      await runDailyCreditCheck(db, now, creditChecks(openRouter));
+      return runDailyCreditCheck(db, now, creditChecks(openRouter), onRecorded);
     });
   mediaProcessingQueue = next;
   return next;

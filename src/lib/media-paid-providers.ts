@@ -373,20 +373,23 @@ export type CreditChecks = Partial<Record<PaidProvider, () => Promise<OpenRouter
  * a missing key's, lifted so its next submission probes credit. The day,
  * each provider's check time and its outcome are recorded in one write, so a
  * restart never runs it twice that day; a missed earlier day is never made
- * up. Returns the providers whose pause it lifted to probe.
+ * up. `onRecorded` runs in that same write, so whatever it records happens
+ * exactly once per UTC day with the check. Returns the providers whose pause
+ * it lifted to probe, or null when the check was not due.
  */
-export async function runDailyCreditCheck(db: AppDatabase, now: Date, checks: CreditChecks = {}): Promise<PaidProvider[] | null> {
-  if (now.getUTCHours() < CREDIT_CHECK_HOUR_UTC) return null;
+export async function runDailyCreditCheck(db: AppDatabase, now: Date, checks: CreditChecks = {}, onRecorded?: () => Promise<void>): Promise<PaidProvider[] | null> {
+  if (!await dailyCreditCheckDue(db, now)) return null;
   const day = now.toISOString().slice(0, 10);
-  if (await readCheckpoint(db, CREDIT_CHECK_KEY) === day) return null;
   const answers = new Map<PaidProvider, OpenRouterKeyCheck>();
   for (const provider of PAID_PROVIDERS) {
     const check = checks[provider];
     if (check) answers.set(provider, await check());
   }
   const lifted: PaidProvider[] = [];
+  let recorded = false;
   await writeTransaction(db, async () => {
     if (await readCheckpoint(db, CREDIT_CHECK_KEY) === day) return;
+    recorded = true;
     await writeCheckpoint(db, CREDIT_CHECK_KEY, day);
     const checkedAt = now.toISOString();
     for (const provider of PAID_PROVIDERS) {
@@ -409,8 +412,18 @@ export async function runDailyCreditCheck(db: AppDatabase, now: Date, checks: Cr
         await writeProviderState(db, { ...state, paused: true, reason: answer.reason, pausedAt, checkedAt, checkOutcome: answer.reason });
       }
     }
+    await onRecorded?.();
   });
-  return lifted;
+  return recorded ? lifted : null;
+}
+
+/**
+ * Whether the daily credit check, and with it the daily media run, is due at
+ * `now`: at or after 06:00 UTC on a UTC day that has no check recorded yet.
+ */
+export async function dailyCreditCheckDue(db: AppDatabase, now: Date): Promise<boolean> {
+  if (now.getUTCHours() < CREDIT_CHECK_HOUR_UTC) return false;
+  return await readCheckpoint(db, CREDIT_CHECK_KEY) !== now.toISOString().slice(0, 10);
 }
 
 /**
