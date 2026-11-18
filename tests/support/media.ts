@@ -521,7 +521,7 @@ export type TavilyReply = { status: number; body?: unknown } | { network: string
 /**
  * A controlled Tavily search API behind a fetch function. The usage endpoint
  * reports a free plan with `remaining` credits left (100 by default) and no
- * pay-as-you-go allowance. Each search returns one article on the searched
+ * pay-as-you-go allowance unless `plan` or `paygoLimit` say otherwise. Each search returns one article on the searched
  * outlet's domain, `https://<domain>/articles/<appid>-<domain>`, for the
  * catalog entity whose name the query starts with, unless a reply is queued
  * with `reply`. `searches` records each search as `<entity name>@<domain>`.
@@ -529,20 +529,27 @@ export type TavilyReply = { status: number; body?: unknown } | { network: string
 export function controlledTavilyApi(names: Record<number, string> = GAME_NAMES) {
   const replies: TavilyReply[] = [];
   const searches: string[] = [];
-  /** `remaining`: free credits the usage endpoint reports; `usageCalls`: usage requests received. */
-  const api = { remaining: 100, usageCalls: 0 };
+  /** Every search request, as sent. */
+  const requests: Array<{ body: unknown }> = [];
+  /**
+   * `remaining`: free credits the usage endpoint reports; `plan` and
+   * `paygoLimit`: the account's plan and pay-as-you-go allowance;
+   * `usageCalls`: usage requests received.
+   */
+  const api = { remaining: 100, plan: "free", paygoLimit: 0, usageCalls: 0 };
   const byLongestName = Object.entries(names).sort(([, a], [, b]) => b.length - a.length);
   const fetchFn = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
     const url = String(input);
     if (url === "https://api.tavily.com/usage") {
       api.usageCalls += 1;
-      return Response.json({ account: { current_plan: "free" }, plan_usage: 1_000 - api.remaining, plan_limit: 1_000, paygo_usage: 0, paygo_limit: 0 });
+      return Response.json({ account: { current_plan: api.plan }, plan_usage: 1_000 - api.remaining, plan_limit: 1_000, paygo_usage: 0, paygo_limit: api.paygoLimit });
     }
     if (url !== "https://api.tavily.com/search") return Response.json({ error: "Not Found" }, { status: 404 });
     const payload = JSON.parse(String(init?.body)) as { include_domains: string[]; query: string };
     const domain = payload.include_domains[0]!;
     const entity = byLongestName.find(([, name]) => payload.query.startsWith(`${name} `));
     searches.push(`${entity?.[1] ?? payload.query}@${domain}`);
+    requests.push({ body: init?.body });
     const reply = replies.shift();
     if (reply && "network" in reply) throw new Error(reply.network);
     if (reply) return Response.json(reply.body ?? {}, { status: reply.status });
@@ -552,6 +559,7 @@ export function controlledTavilyApi(names: Record<number, string> = GAME_NAMES) 
   return Object.assign(api, {
     fetchFn,
     searches,
+    requests,
     /** Queues `reply` for the next search. */
     reply(...queued: TavilyReply[]) { replies.push(...queued); },
     isTavilyRequest: (url: string) => url.startsWith("https://api.tavily.com/"),

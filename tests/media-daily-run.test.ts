@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { getMediaSources } from "../src/lib/media-discovery";
+import { getMediaSources, MEDIA_OUTLETS } from "../src/lib/media-discovery";
 import { getMediaOverview } from "../src/lib/media-overview";
 import { authorizeMediaProcessing } from "../src/lib/media-processing";
 import { handleGameDetailRequest } from "../src/routes/api.games.$appid.detail";
@@ -330,5 +330,82 @@ describe("article ceilings in automatic runs", () => {
     expect(newSources).toHaveLength(7);
     const extractionItems = database.native.query<{ source_id: number }, []>("SELECT source_id FROM media_processing_jobs WHERE stage = 'extraction' ORDER BY source_id").all();
     expect(extractionItems.map(({ source_id }) => source_id)).toEqual(newSources.map(({ id }) => id));
+  });
+});
+
+function attempts(database: TestDatabase, outlet: string) {
+  return database.native.query<{ day: string; kind: string; count: number }, [string]>("SELECT day, kind, COUNT(*) AS count FROM media_discovery_attempts WHERE outlet = ? GROUP BY day, kind ORDER BY day, kind").all(outlet);
+}
+
+function extractionStatus(database: TestDatabase, url: string) {
+  return database.native.query<{ status: string }, [string]>("SELECT job.status FROM media_processing_jobs AS job JOIN media_sources AS source ON source.id = job.source_id WHERE job.stage = 'extraction' AND source.original_url = ?").all(url).map(({ status }) => status);
+}
+
+describe("settled source rules in automatic runs", () => {
+  test("an Outlet denial is permanent across daily media runs and the processing fetches they cause, and an Outlet day stop at the 30-attempt cap holds discovery and processing until the next UTC day", async () => {
+    const database = experimentCatalog();
+    const [ign, eurogamer] = [MEDIA_OUTLETS[0], MEDIA_OUTLETS[1]];
+    // An unprocessed article on each outlet, carried over from the experiment.
+    insertSources(database.native, CYBERPUNK, "initial", 1, ign);
+    insertSources(database.native, CYBERPUNK, "initial", 1, eurogamer);
+    const [ignArticle, eurogamerArticle] = database.native.query<{ original_url: string }, []>("SELECT original_url FROM media_sources ORDER BY id").all().map(({ original_url }) => original_url);
+    // Earlier work used 29 of Eurogamer's 30 attempts on November 20.
+    const seed = database.native.prepare("INSERT INTO media_discovery_attempts (appid, outlet, pass, day, kind, succeeded, attempted_at) VALUES (?, 'Eurogamer', 'initial', '2026-11-20', 'fetch', 1, '2026-11-20T00:00:00.000Z')");
+    for (let index = 0; index < 29; index += 1) seed.run(CYBERPUNK);
+    const providers = apis();
+    const fetched: string[] = [];
+    // IGN denies every article fetch.
+    const outlet = (url: string) => new URL(url).hostname === ign.domain ? new Response("Forbidden", { status: 403 }) : undefined;
+
+    await tick(database, providers, "2026-11-20T06:00:00.000Z", { outlet, fetched });
+
+    // IGN: one search and the fetch it refused; nothing else that day.
+    expect(attempts(database, "IGN")).toEqual([{ day: "2026-11-20", kind: "fetch", count: 1 }, { day: "2026-11-20", kind: "search", count: 1 }]);
+    expect(extractionStatus(database, ignArticle!)).toEqual(["queued"]);
+    // Eurogamer: the one search left under the cap, then a day stop for
+    // discovery's fetch and for processing's.
+    expect(attempts(database, "Eurogamer")).toEqual([{ day: "2026-11-20", kind: "fetch", count: 29 }, { day: "2026-11-20", kind: "search", count: 1 }]);
+    expect(extractionStatus(database, eurogamerArticle!)).toEqual(["queued"]);
+    expect(fetched.filter((url) => new URL(url).hostname === eurogamer.domain)).toEqual([]);
+
+    await tick(database, providers, "2026-11-20T06:15:00.000Z", { outlet, fetched });
+    await tick(database, providers, "2026-11-21T06:00:00.000Z", { outlet, fetched });
+
+    // The denial holds on the next day: IGN is never contacted again, and
+    // its article waits under the outlet's stop rules.
+    expect(attempts(database, "IGN")).toEqual([{ day: "2026-11-20", kind: "fetch", count: 1 }, { day: "2026-11-20", kind: "search", count: 1 }]);
+    expect(providers.tavily.searches.filter((search) => search.endsWith(`@${ign.domain}`))).toHaveLength(1);
+    expect(extractionStatus(database, ignArticle!)).toEqual(["queued"]);
+    // Eurogamer reopens on November 21: the stopped query's candidate is
+    // fetched, the other entities are searched once, and processing fetches
+    // the waiting article and the three new ones: 2 searches and 3 + 4 fetches.
+    expect(providers.tavily.searches.filter((search) => search.endsWith(`@${eurogamer.domain}`))).toHaveLength(3);
+    expect(repeatedSearches(providers)).toEqual([]);
+    expect(attempts(database, "Eurogamer").filter(({ day }) => day === "2026-11-21")).toEqual([{ day: "2026-11-21", kind: "fetch", count: 7 }, { day: "2026-11-21", kind: "search", count: 2 }]);
+    expect(extractionStatus(database, eurogamerArticle!)).toEqual(["succeeded"]);
+  });
+
+  test("searches stay on Tavily's free plan with paid overage disabled, and take at most 10 candidates per query", async () => {
+    const paid = experimentCatalog();
+    const paidProviders = apis();
+    paidProviders.tavily.paygoLimit = 50;
+    const overage = await tick(paid, paidProviders, "2026-11-20T06:00:00.000Z");
+    expect(overage.mediaDiscovery).toMatchObject({ status: "stopped", queries: 0, stopReasons: ["tavily_free_credits_unavailable"] });
+    paidProviders.tavily.paygoLimit = 0;
+    paidProviders.tavily.plan = "bootstrap";
+    const paidPlan = await tick(paid, paidProviders, "2026-11-21T06:00:00.000Z");
+    expect(paidPlan.mediaDiscovery).toMatchObject({ status: "stopped", queries: 0, stopReasons: ["tavily_account_not_free"] });
+    expect(paidProviders.tavily.searches).toEqual([]);
+
+    const database = experimentCatalog();
+    const providers = apis();
+    const results = Array.from({ length: 12 }, (_, index) => ({ url: `https://ign.com/articles/${BALDURS_GATE}-candidate-${index}` }));
+    providers.tavily.reply({ status: 200, body: { results, usage: { credits_used: 1 } } });
+    const fetched: string[] = [];
+    await tick(database, providers, "2026-11-20T06:00:00.000Z", { fetched });
+    // Discovery fetches the first ten; processing later fetches the accepted one again.
+    expect([...new Set(fetched.filter((url) => url.includes(`${BALDURS_GATE}-candidate-`)))]).toEqual(results.slice(0, 10).map(({ url }) => url));
+    const request = JSON.parse(String(providers.tavily.requests[0]?.body)) as Record<string, unknown>;
+    expect(request).toMatchObject({ search_depth: "basic", max_results: 10, include_answer: false, include_raw_content: false });
   });
 });
