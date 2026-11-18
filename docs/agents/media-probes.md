@@ -6,9 +6,11 @@ Every helper named below lives in [`tests/support/media.ts`](../../tests/support
 
 ## 1. Send-once across restarts
 
-A restart can happen between any outbound call and the write that records its outcome. No search, discovery fetch, OpenRouter request or Gemini submission is ever sent twice because of it. The one exception is `PROCESSING_FETCH_RESENT_AFTER_RESTART` (ADR 0020): a processing fetch interrupted before its item was marked in flight is sent again, once per such restart.
+A restart can happen between any outbound call and the write that records its outcome. No request identity (a search, a discovery or processing fetch, an OpenRouter request, a Gemini submission) is ever sent twice, in an uninterrupted run or an interrupted one. The one exception is the exported constant `PROCESSING_FETCH_RESENT_AFTER_RESTART` (ADR 0020): a processing fetch interrupted before its item was marked in flight is sent again, at most once per restart that interrupted it. A request answered with HTTP 429 by an injected day stop never reached its outlet and is not counted as sent.
 
-- Covered by `sweepInterruptions(scenario, { restarts })` in [`tests/media-interruptions.test.ts`](../../tests/media-interruptions.test.ts). It restarts after the k-th call of each kind, for every k, then ticks until quiescent.
+- Covered by `sweepInterruptions(scenario, { restarts })` in [`tests/media-interruptions.test.ts`](../../tests/media-interruptions.test.ts). It restarts after the k-th swept call of each kind, for every k (or `sample` evenly spaced k), then ticks until quiescent.
+- Every run of every scenario, whatever its faults, is checked for every invariant of probes 1 and 2.
+- A scenario's `before` ticks run once into a template database that every run copies, so they are never interrupted; they must be ticks another registered scenario sweeps, which the test asserts.
 - A change that adds an outbound call, or a new stage or pass that sends one, registers a scenario in `SCENARIOS` that reaches it, with the expected baseline call counts.
 - A new kind of outbound call extends `OUTBOUND_KINDS` and the sweep's call classifier, rather than adding a test outside the sweep.
 
@@ -16,7 +18,9 @@ A restart can happen between any outbound call and the write that records its ou
 
 A query or run resumed after a restart or an Outlet day stop keeps every per-query and per-day rule: one accepted article per entity and query, at most 30 attempts per outlet per UTC day (every pass, stage and run counts), and every day-stopped query reopens on a later day while processing fetches continue.
 
-- Covered by `sweepInterruptions(scenario, { dayStops })`, which answers the k-th outlet fetch with HTTP 429 and resumes over the following days. `experimentWorld` returns three candidates per query, so a candidate that would qualify remains after a stop.
+- Covered by `sweepInterruptions(scenario, { dayStops, combined })`. `dayStops` answers the k-th swept outlet fetch with HTTP 429 and resumes over the scenario's following `days`; `combined` adds runs that also restart after the next day's first outlet fetch and first search. `experimentWorld` returns three candidates per query, so a candidate that would qualify remains after a stop.
+- The "near IGN's daily attempt cap" scenario seeds 25 of IGN's 30 attempts on the swept day, so the cap engages under restarts and day stops; it asserts that the recorded peak is exactly 30.
+- `tests/media-enablement.test.ts` covers the resume of production's capped Hades II queries, which had already admitted an article: they resume without a new search and admit no second article.
 - A change to how a query, pass or run resumes registers the resume path as a scenario. Assert the invariant on the resumed path, not only on a fresh run.
 
 ## 3. Classifier scopes
