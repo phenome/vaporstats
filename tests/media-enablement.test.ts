@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import type { Database } from "bun:sqlite";
 import { openTestDatabase, type TestDatabase } from "./support/db";
-import { BALDURS_GATE, CYBERPUNK, experimentWorld, GAME_NAMES, HADES_II, PRODUCTION_LIKE, runMediaTick, seedProductionLike, type MediaWorld } from "./support/media";
+import { BALDURS_GATE, CYBERPUNK, experimentWorld, GAME_NAMES, HADES_II, productionCandidateUrl, runMediaTick, seedProductionLike, type MediaWorld } from "./support/media";
 
 // Switching automatic media ingestion off and on over the production media
 // state of 2026-11-18, at the ingestion-tick seam, with a temporary SQLite
@@ -46,22 +46,58 @@ function providerCalls(world: MediaWorld, fetched: readonly string[]) {
 const name = (appid: number) => GAME_NAMES[appid]!;
 const domains: Record<string, string> = { IGN: "ign.com", Eurogamer: "eurogamer.net", "PC Gamer": "pcgamer.com", Kotaku: "kotaku.com", "GamesRadar+": "gamesradar.com" };
 
+// The production media state, read-only, as checked on 2026-11-18. Each
+// progress row is [appid, outlet, status, stop reason, candidate index,
+// candidate count, searched, stopped at].
+const BG3 = BALDURS_GATE;
+const CP = CYBERPUNK;
+const H2 = HADES_II;
+const PRODUCTION_SOURCES = [[1, BG3, "IGN"], [3, BG3, "GamesRadar+"], [4, CP, "IGN"], [5, CP, "Eurogamer"], [6, CP, "PC Gamer"], [8, H2, "IGN"], [9, H2, "Eurogamer"], [10, H2, "PC Gamer"], [11, H2, "Kotaku"]];
+const PRODUCTION_PROGRESS = [
+  [BG3, "Eurogamer", "completed", null, 0, 0, 1, null],
+  [BG3, "GameSpot", "stopped", "fetch_http_403", 2, 10, 1, "2026-09-11T03:47:12.000Z"],
+  [BG3, "GamesRadar+", "completed", null, 10, 10, 1, null],
+  [BG3, "IGN", "completed", null, 10, 10, 1, null],
+  [BG3, "Kotaku", "completed", null, 10, 10, 1, null],
+  [BG3, "PC Gamer", "completed", null, 0, 0, 1, null],
+  [CP, "Eurogamer", "completed", null, 10, 10, 1, null],
+  [CP, "GameSpot", "stopped", "fetch_http_403", 1, 10, 1, "2026-09-13T21:24:01.000Z"],
+  [CP, "GamesRadar+", "completed", null, 10, 10, 1, null],
+  [CP, "IGN", "completed", null, 10, 10, 1, null],
+  [CP, "Kotaku", "completed", null, 10, 10, 1, null],
+  [CP, "PC Gamer", "completed", null, 10, 10, 1, null],
+  [H2, "Eurogamer", "completed", null, 10, 10, 1, null],
+  [H2, "GameSpot", "stopped", "fetch_http_403", 1, 10, 1, "2026-09-11T03:47:12.000Z"],
+  [H2, "GamesRadar+", "stopped", "daily_attempt_cap", 0, 0, 0, "2026-09-11T03:47:12.000Z"],
+  [H2, "IGN", "stopped", "daily_attempt_cap", 6, 10, 1, "2026-09-11T03:47:12.000Z"],
+  [H2, "Kotaku", "stopped", "daily_attempt_cap", 7, 10, 1, "2026-09-11T03:47:12.000Z"],
+  [H2, "PC Gamer", "stopped", "daily_attempt_cap", 4, 10, 1, "2026-09-11T03:47:12.000Z"],
+];
+
 describe("production-like media state", () => {
-  test("is the state of 2026-11-18: 9 sources, 3 GameSpot denials, 4 day-capped initial queries, 8 retained Gemini jobs, 7 completed authorizations and no enrollment", () => {
+  test("is the production state of 2026-11-18: its sources, initial progress, Overviews, retained Gemini jobs and authorizations, and no enrollment", () => {
     const { native } = productionLike();
     const count = (query: string) => native.query<{ count: number }, []>(query).get()!.count;
-    expect(native.query("SELECT appid, outlet, pass FROM media_sources ORDER BY appid, outlet").all()).toEqual(
-      [BALDURS_GATE, CYBERPUNK, HADES_II].flatMap((appid) => ["Eurogamer", "IGN", "PC Gamer"].map((outlet) => ({ appid, outlet, pass: "initial" }))),
-    );
-    expect(count("SELECT COUNT(*) AS count FROM media_sources WHERE processing_run_id IS NOT NULL")).toBe(3);
-    expect(native.query("SELECT DISTINCT s.appid FROM media_article_extractions AS e JOIN media_sources AS s ON s.id = e.source_id WHERE e.active = 1").all()).toEqual([{ appid: CYBERPUNK }]);
-    expect(native.query("SELECT appid FROM media_game_overviews WHERE active = 1").all()).toEqual([{ appid: CYBERPUNK }]);
-    expect(native.query("SELECT appid, outlet, status_code FROM media_discovery_attempts WHERE kind = 'fetch' AND status_code IN (401, 403) ORDER BY appid").all()).toEqual([BALDURS_GATE, CYBERPUNK, HADES_II].map((appid) => ({ appid, outlet: "GameSpot", status_code: 403 })));
-    expect(native.query("SELECT appid, outlet, substr(stopped_at, 1, 7) AS month FROM media_discovery_progress WHERE stop_reason = 'daily_attempt_cap' ORDER BY appid, outlet").all()).toEqual(
-      PRODUCTION_LIKE.dayCappedQueries.map(([appid, outlet]) => ({ appid, outlet, month: "2026-09" })).sort((a, b) => a.appid - b.appid || a.outlet.localeCompare(b.outlet)),
-    );
-    expect(native.query("SELECT status, COUNT(*) AS count FROM media_processing_jobs WHERE retained = 1 AND provider = 'gemini' GROUP BY status ORDER BY status").all()).toEqual([{ status: "stale", count: 2 }, { status: "succeeded", count: 6 }]);
-    expect(count("SELECT COUNT(*) AS count FROM media_processing_jobs")).toBe(8);
+    expect(native.query("SELECT id, appid, outlet FROM media_sources ORDER BY id").all()).toEqual(PRODUCTION_SOURCES.map(([id, appid, outlet]) => ({ id, appid, outlet })));
+    expect(native.query("SELECT id FROM media_sources WHERE processing_run_id IS NOT NULL ORDER BY id").all()).toEqual([{ id: 4 }, { id: 5 }, { id: 6 }]);
+    expect(native.query("SELECT DISTINCT pass FROM media_sources").all()).toEqual([{ pass: "initial" }]);
+    expect(native.query<{ appid: number; outlet: string; status: string; stop_reason: string | null; candidate_index: number; candidates: number; searched: number; stopped_at: string | null }, []>(
+      "SELECT appid, outlet, status, stop_reason, candidate_index, json_array_length(candidate_urls) AS candidates, query_attempted_at IS NOT NULL AS searched, stopped_at FROM media_discovery_progress WHERE pass = 'initial' ORDER BY appid, outlet",
+    ).all().map((row) => [row.appid, row.outlet, row.status, row.stop_reason, row.candidate_index, row.candidates, row.searched, row.stopped_at])).toEqual(PRODUCTION_PROGRESS);
+    // The capped Hades II queries that were searched had already admitted their outlet's source.
+    for (const [outlet, source] of [["IGN", 8], ["Kotaku", 11], ["PC Gamer", 10]] as const) {
+      const row = native.query<{ candidate_urls: string; candidate_index: number }, [string]>(`SELECT candidate_urls, candidate_index FROM media_discovery_progress WHERE appid = ${H2} AND outlet = ?`).get(outlet)!;
+      const considered = (JSON.parse(row.candidate_urls) as Array<{ url: string }>).slice(0, row.candidate_index).map(({ url }) => url);
+      expect(considered).toContain(native.query<{ discovery_url: string }, [number]>("SELECT discovery_url FROM media_sources WHERE id = ?").get(source)!.discovery_url);
+    }
+    expect(native.query("SELECT appid, outlet, status_code FROM media_discovery_attempts WHERE kind = 'fetch' AND status_code IN (401, 403) ORDER BY appid").all()).toEqual([BG3, CP, H2].map((appid) => ({ appid, outlet: "GameSpot", status_code: 403 })));
+    expect(native.query("SELECT appid, active FROM media_game_overviews ORDER BY id").all()).toEqual([{ appid: CP, active: 0 }, { appid: CP, active: 1 }]);
+    expect(native.query("SELECT appid, stage, status, provider, retained, COUNT(*) AS count FROM media_processing_jobs GROUP BY appid, stage, status, provider, retained ORDER BY stage, status").all()).toEqual([
+      { appid: CP, stage: "extraction", status: "succeeded", provider: "gemini", retained: 1, count: 4 },
+      { appid: CP, stage: "synthesis", status: "stale", provider: "gemini", retained: 1, count: 2 },
+      { appid: CP, stage: "synthesis", status: "succeeded", provider: "gemini", retained: 1, count: 2 },
+    ]);
+    expect(count("SELECT COUNT(*) AS count FROM media_game_embeddings")).toBe(0);
     expect(native.query("SELECT status, COUNT(*) AS count FROM media_processing_authorizations GROUP BY status").all()).toEqual([{ status: "completed", count: 7 }]);
     expect(count("SELECT COUNT(*) AS count FROM media_enrollments")).toBe(0);
     expect(count("SELECT COUNT(*) AS count FROM checkpoints WHERE key LIKE 'media:%'")).toBe(0);
@@ -83,15 +119,18 @@ describe("automatic media ingestion over the production-like state", () => {
     expect(mediaState(database.native)).toEqual(before);
   });
 
-  // The review of #75 expected: day 1, Cyberpunk 2077's later pass on its
-  // represented outlets plus the four reopened Baldur's Gate 3 and Hades II
-  // initial queries; day 2, those games' later passes on their represented
-  // outlets; day 3, no search. The reopened queries each accept an initial
-  // article on day 1, so on day 2 Kotaku and GamesRadar+ are represented
-  // too. Every source new to processing is queued on the day it is accepted
-  // or, for the six discovered-only sources, on day 1, and each game's
-  // Overview is rebuilt the day its contributions change.
-  test("switched on, day 1 takes Cyberpunk 2077's later pass and the four reopened initial queries, day 2 the Baldur's Gate 3 and Hades II later passes, and day 3 searches nothing", async () => {
+  // Day 1: every Baldur's Gate 3 and Cyberpunk 2077 initial query has
+  // completed or met an Outlet denial, so both later passes are due and ask
+  // the outlets with an accepted initial article. Hades II's four capped
+  // queries reopen: GamesRadar+, never searched, is searched; IGN, Kotaku and
+  // PC Gamer resume at their recorded candidate without a new search and,
+  // having admitted their article before the cap, admit no other. Every
+  // source new to processing is queued. Cyberpunk 2077's active Overview has
+  // similarity inputs and no vector, so both its dimensions are embedded
+  // before the later articles change it, and the new Overview's gameplay
+  // input once more. Day 2: Hades II's initial pass finished on day 1, so its
+  // later pass asks its five represented outlets. Day 3: nothing is due.
+  test("switched on, day 1 takes the Baldur's Gate 3 and Cyberpunk 2077 later passes and resumes Hades II's capped queries without a new search or a second article, day 2 the Hades II later pass, and day 3 searches nothing", async () => {
     const database = productionLike();
     const world = experimentWorld();
     const fetched: string[] = [];
@@ -112,28 +151,37 @@ describe("automatic media ingestion over the production-like state", () => {
     const at = (appid: number, outlets: readonly string[]) => outlets.map((outlet) => `${name(appid)}@${domains[outlet]}`);
     expect(observed).toEqual([
       {
-        searches: [...at(CYBERPUNK, PRODUCTION_LIKE.representedOutlets), ...at(BALDURS_GATE, ["Kotaku", "GamesRadar+"]), ...at(HADES_II, ["Kotaku", "GamesRadar+"])],
-        // Baldur's Gate 3 and Hades II: 3 discovered-only sources and 2 reopened
-        // initial articles each; Cyberpunk 2077: 3 later articles. The new
-        // Overviews change every game's gameplay similarity input.
+        searches: [...at(BG3, ["IGN", "GamesRadar+"]), ...at(CP, ["IGN", "Eurogamer", "PC Gamer"]), ...at(H2, ["GamesRadar+"])],
         enqueued: [
-          `embedding ${name(BALDURS_GATE)} ×1`, `embedding ${name(CYBERPUNK)} ×1`, `embedding ${name(HADES_II)} ×1`,
-          `extraction ${name(BALDURS_GATE)} ×5`, `extraction ${name(CYBERPUNK)} ×3`, `extraction ${name(HADES_II)} ×5`,
-          `synthesis ${name(BALDURS_GATE)} ×1`, `synthesis ${name(CYBERPUNK)} ×1`, `synthesis ${name(HADES_II)} ×1`,
+          `embedding ${name(BG3)} ×1`, `embedding ${name(CP)} ×3`, `embedding ${name(H2)} ×1`,
+          `extraction ${name(BG3)} ×4`, `extraction ${name(CP)} ×3`, `extraction ${name(H2)} ×5`,
+          `synthesis ${name(BG3)} ×1`, `synthesis ${name(CP)} ×1`, `synthesis ${name(H2)} ×1`,
         ],
-        overviews: [name(BALDURS_GATE), name(CYBERPUNK), name(HADES_II)],
+        overviews: [name(BG3), name(CP), name(H2)],
       },
       {
-        searches: [...at(BALDURS_GATE, [...PRODUCTION_LIKE.representedOutlets, "Kotaku", "GamesRadar+"]), ...at(HADES_II, [...PRODUCTION_LIKE.representedOutlets, "Kotaku", "GamesRadar+"])],
-        // Their Overviews keep the same similarity inputs, so no embedding is queued.
-        enqueued: [`extraction ${name(BALDURS_GATE)} ×5`, `extraction ${name(HADES_II)} ×5`, `synthesis ${name(BALDURS_GATE)} ×1`, `synthesis ${name(HADES_II)} ×1`],
-        overviews: [name(BALDURS_GATE), name(HADES_II)],
+        searches: at(H2, ["IGN", "Eurogamer", "PC Gamer", "Kotaku", "GamesRadar+"]),
+        // Its Overview keeps the same similarity inputs, so no embedding is queued.
+        enqueued: [`extraction ${name(H2)} ×5`, `synthesis ${name(H2)} ×1`],
+        overviews: [name(H2)],
       },
       { searches: [], enqueued: [], overviews: [] },
     ]);
+    // One initial article per Hades II outlet: the resumed capped queries admitted no second one.
+    expect(database.native.query(`SELECT outlet, id FROM media_sources WHERE appid = ${H2} AND pass = 'initial' ORDER BY outlet`).all()).toEqual([
+      { outlet: "Eurogamer", id: 9 }, { outlet: "GamesRadar+", id: 17 }, { outlet: "IGN", id: 8 }, { outlet: "Kotaku", id: 11 }, { outlet: "PC Gamer", id: 10 },
+    ]);
+    // Each resumed capped query fetched its remaining candidates once, and completed on day 1.
+    for (const [outlet, from] of [["IGN", 6], ["Kotaku", 7], ["PC Gamer", 4]] as const) {
+      const domain = domains[outlet]!;
+      expect(fetched.filter((url) => url.startsWith(`https://${domain}/articles/${H2}-`) && url.includes("-candidate-"))).toEqual(Array.from({ length: 10 - from }, (_, index) => productionCandidateUrl(H2, domain, from + index)));
+    }
+    expect(database.native.query(`SELECT outlet, status, completed_at FROM media_discovery_progress WHERE appid = ${H2} AND pass = 'initial' AND outlet IN ('IGN', 'Kotaku', 'PC Gamer', 'GamesRadar+') ORDER BY outlet`).all()).toEqual(
+      ["GamesRadar+", "IGN", "Kotaku", "PC Gamer"].map((outlet) => ({ outlet, status: "completed", completed_at: "2026-11-19T06:00:00.000Z" })),
+    );
     // GameSpot stays denied; retained Gemini jobs are never touched.
     expect(fetched.filter((url) => url.includes("gamespot.com"))).toEqual([]);
     expect(database.native.query("SELECT * FROM media_processing_jobs WHERE retained = 1 ORDER BY id").all()).toEqual(retained);
-    expect(database.native.query("SELECT status, COUNT(*) AS count FROM media_processing_jobs WHERE retained = 0 GROUP BY status").all()).toEqual([{ status: "succeeded", count: 31 }]);
+    expect(database.native.query("SELECT status, COUNT(*) AS count FROM media_processing_jobs WHERE retained = 0 GROUP BY status").all()).toEqual([{ status: "succeeded", count: 26 }]);
   });
 });
