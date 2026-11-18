@@ -97,6 +97,12 @@ export interface IngestionTickResult {
   mediaDailyRun?: DailyMediaRunSummary;
   mediaDiscovery?: MediaRunSummary;
   mediaProcessing?: MediaProcessingSummary;
+  /**
+   * Why the media part of this tick stopped early: an unexpected exception
+   * caught at the media boundary. The tick still completes, and the media
+   * work recorded before the exception is reported.
+   */
+  mediaError?: string;
   reviewCompaction?: CompactReviewEvidenceResult;
   scoreUpgrade?: PlayerScoreUpgradeResult;
   receptionPublication?: ReceptionPublicationProgress;
@@ -245,8 +251,32 @@ function logCompletion(result: IngestionTickResult): void {
     },
     catalogRefresh: result.catalogRefresh,
     receptionPublication: result.receptionPublication,
+    mediaError: result.mediaError,
     error: result.error,
   }));
+}
+
+type MediaReport = Pick<IngestionTickResult, "mediaDailyRun" | "mediaDiscovery" | "mediaProcessing">;
+
+/**
+ * The media boundary of a tick: `advanceMedia`, with any exception it throws
+ * caught and logged as a media error, so the tick's other work still runs
+ * and reports. The media work recorded before the exception is kept.
+ */
+async function advanceMediaIsolated(
+  options: IngestionTickOptions,
+  anchorTime: Date,
+  customFetch: typeof fetch,
+): Promise<MediaReport & Pick<IngestionTickResult, "mediaError">> {
+  const report: MediaReport = {};
+  try {
+    await advanceMedia(options, anchorTime, customFetch, report);
+    return report;
+  } catch (error) {
+    const mediaError = boundedError(error);
+    console.error(JSON.stringify({ event: "media_error", anchorTime: anchorTime.toISOString(), error: mediaError }));
+    return { ...report, mediaError };
+  }
 }
 
 /**
@@ -262,7 +292,8 @@ async function advanceMedia(
   options: IngestionTickOptions,
   anchorTime: Date,
   customFetch: typeof fetch,
-): Promise<Pick<IngestionTickResult, "mediaDailyRun" | "mediaDiscovery" | "mediaProcessing">> {
+  report: MediaReport,
+): Promise<void> {
   const { db } = options;
   const providerOptions = {
     geminiApiKey: options.geminiApiKey ?? process.env.GEMINI_API_KEY,
@@ -274,17 +305,18 @@ async function advanceMedia(
   };
   if (!(options.mediaAutomaticIngestion ?? automaticMediaIngestionEnabled())) {
     const submitted = await db.prepare("SELECT id FROM media_processing_jobs WHERE status = 'submitted' LIMIT 1").first<{ id: number }>();
-    if (!submitted) return {};
-    return { mediaProcessing: await advanceMediaProcessing(db, { ...providerOptions, pollOnly: true }) };
+    if (!submitted) return;
+    report.mediaProcessing = await advanceMediaProcessing(db, { ...providerOptions, pollOnly: true });
+    return;
   }
   // The first tick of a started process rechecks paused providers, so a fix
   // deployed for a configuration pause need not wait for the daily check.
   const rechecked = await recheckPausedProvidersAtStartup(db, anchorTime, providerOptions);
   const mediaDailyRun = await runDailyMediaRun(db, anchorTime, providerOptions) ?? undefined;
-  let mediaDiscovery: MediaRunSummary | undefined;
+  report.mediaDailyRun = mediaDailyRun;
   const scheduledRun = await openScheduledDiscovery(db, anchorTime);
   if (scheduledRun !== null) {
-    mediaDiscovery = await runSerializedMediaDiscovery(db, {
+    report.mediaDiscovery = await runSerializedMediaDiscovery(db, {
       runId: scheduledRun,
       tavilyApiKey: options.tavilyApiKey ?? process.env.TAVILY_API_KEY,
       fetch: customFetch,
@@ -298,8 +330,8 @@ async function advanceMedia(
   const queuedWork = await db
     .prepare("SELECT run_id FROM media_processing_jobs WHERE status = 'submitted' OR (status = 'queued' AND retained = 0) LIMIT 1")
     .first<{ run_id: number }>();
-  if (automaticRunId === null && !pendingAuthorization && !queuedWork) return { mediaDailyRun, mediaDiscovery };
-  const mediaProcessing = await advanceMediaProcessing(db, {
+  if (automaticRunId === null && !pendingAuthorization && !queuedWork) return;
+  report.mediaProcessing = await advanceMediaProcessing(db, {
     ...providerOptions,
     ...(pendingAuthorization ? { runId: pendingAuthorization.run_id } : {}),
     ...(automaticRunId !== null ? { automaticRunId } : {}),
@@ -308,7 +340,6 @@ async function advanceMedia(
     paidWorkTimeBudgetMs: options.paidWorkTimeBudgetMs,
     paidWorkClock: options.paidWorkClock,
   });
-  return { mediaDailyRun, mediaDiscovery, mediaProcessing };
 }
 
 async function performIngestionTick(options: IngestionTickOptions): Promise<IngestionTickResult> {
@@ -331,7 +362,7 @@ async function performIngestionTick(options: IngestionTickOptions): Promise<Inge
   const tick = await runPlayerCollectionTick(options.db, { anchorTime, customFetch });
   const reviewCollection = await runReviewCollection(options.db, { anchorTime, customFetch });
   const criticCollection = await runCriticCollection(options.db, { now: anchorTime, fetch: customFetch });
-  const media = await advanceMedia(options, anchorTime, customFetch);
+  const media = await advanceMediaIsolated(options, anchorTime, customFetch);
 
   let discovery: DiscoveryResult | undefined;
   let rollups: RollupJobResult | undefined;

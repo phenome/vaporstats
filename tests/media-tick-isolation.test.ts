@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { advanceMediaProcessing, authorizeMediaProcessing } from "../src/lib/media-processing";
 import { openTestDatabase, type TestDatabase } from "./support/db";
 import {
@@ -200,5 +200,51 @@ describe("a discovery candidate whose handling throws", () => {
       { original_url: experimentUrl(BALDURS_GATE, "gamesradar.com") },
     ]);
     expect(database.native.query("SELECT COUNT(*) AS count FROM media_sources").get()).toEqual({ count: 18 });
+  });
+});
+
+describe("a throw anywhere in the media part of a tick", () => {
+  /** Runs `work`, returning what it logged as JSON events. */
+  async function logged<T>(work: () => Promise<T>): Promise<{ result: T; events: Array<Record<string, unknown>> }> {
+    const lines: string[] = [];
+    const log = spyOn(console, "log").mockImplementation((line: unknown) => { lines.push(String(line)); });
+    const error = spyOn(console, "error").mockImplementation((line: unknown) => { lines.push(String(line)); });
+    try {
+      const result = await work();
+      return { result, events: lines.flatMap((line) => { try { return [JSON.parse(line) as Record<string, unknown>]; } catch { return []; } }) };
+    } finally {
+      log.mockRestore();
+      error.mockRestore();
+    }
+  }
+
+  /** Every non-media part of a tick reports. */
+  function expectNonMediaReported(result: Awaited<ReturnType<typeof runMediaTick>>) {
+    expect(result.status).toBe("completed");
+    for (const part of ["scoreUpgrade", "prices", "tick", "reviewCollection", "criticCollection", "tagDictionary", "catalogRefresh", "receptionPublication"] as const) {
+      expect(result[part]).toBeDefined();
+    }
+  }
+
+  test("in the paid-work queue is logged as a media error inside a completed tick", async () => {
+    const database = await authorizedGames([CYBERPUNK]);
+    const { result, events } = await logged(() => tick(database, providers(), "2026-11-18T20:30:00.000Z", {
+      paidWorkClock: () => { throw new Error("queue defect"); },
+    }));
+    expectNonMediaReported(result);
+    expect(result.mediaError).toBe("queue defect");
+    expect(result.mediaProcessing).toBeUndefined();
+    expect(events.filter((event) => event.event === "media_error")).toEqual([{ event: "media_error", anchorTime: "2026-11-18T20:30:00.000Z", error: "queue defect" }]);
+    expect(events.filter((event) => event.event === "ingestion_error")).toEqual([]);
+    expect(events.find((event) => event.event === "ingestion_completion")).toEqual(expect.objectContaining({ status: "completed", mediaError: "queue defect" }));
+  });
+
+  test("in the daily media run is logged as a media error inside a completed tick", async () => {
+    const database = experimentGames();
+    database.native.exec("CREATE TRIGGER enrollment_defect BEFORE INSERT ON media_enrollments BEGIN SELECT RAISE(ABORT, 'enrollment defect'); END");
+    const { result, events } = await logged(() => runMediaTick(database, experimentWorld(), "2026-11-20T06:00:00.000Z"));
+    expectNonMediaReported(result);
+    expect(result.mediaError).toContain("enrollment defect");
+    expect(events.filter((event) => event.event === "media_error")).toHaveLength(1);
   });
 });
