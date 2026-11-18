@@ -17,7 +17,7 @@ import {
   type MediaOutlet,
   type MediaPass,
 } from "./media-discovery";
-import { finishOutletAttempt, reserveOutletAttempt } from "./media-outlet-access";
+import { finishOutletAttempt, isOutletDenialStop, reserveOutletAttempt } from "./media-outlet-access";
 import {
   createOpenRouterTransport,
   type OpenRouterChatRequest,
@@ -2021,14 +2021,17 @@ async function takeExtractionTurn(advance: QueueAdvance, job: JobRow): Promise<b
   }
   const stopped = advance.outletStops.get(source.outlet);
   if (stopped) {
-    // The outlet's stop rules hold the item waiting; it keeps its place.
     noteReason(advance, job.run_id, `${source.outlet}:${stopped}`);
+    // An Outlet denial is permanent, so its article can never be fetched.
+    if (isOutletDenialStop(stopped)) await refuseItem(db, job, "outlet_denied", now);
+    // A day stop holds the item waiting; it keeps its place.
     return false;
   }
   const body = await fetchArticle(db, source, job.run_id, advance.articleFetch, advance.clock);
   if (body && typeof body === "object") {
     advance.outletStops.set(source.outlet, body.outletStop);
     noteReason(advance, job.run_id, `${source.outlet}:${body.outletStop}`);
+    if (isOutletDenialStop(body.outletStop)) await refuseItem(db, job, "outlet_denied", now);
     return true;
   }
   const cleaned = body ? cleanArticle(body) : null;

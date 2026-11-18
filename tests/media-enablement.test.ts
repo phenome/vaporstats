@@ -189,3 +189,20 @@ describe("automatic media ingestion over the production-like state", () => {
     expect(database.native.query(`SELECT e.dimension, e.overview_input_identity = o.input_identity AS current FROM media_game_embeddings AS e JOIN media_game_overviews AS o ON o.appid = e.appid AND o.active = 1 WHERE e.appid = ${CP} ORDER BY e.id`).all()).toEqual([{ dimension: "gameplay", current: 1 }]);
   });
 });
+
+describe("embedding holds over the production-like state", () => {
+  test("a new Cyberpunk 2077 article behind GameSpot's Outlet denial is refused as outlet_denied, so the Overview is rebuilt and embedded", async () => {
+    const database = productionLike();
+    const world = experimentWorld();
+    const fetched: string[] = [];
+    const url = "https://www.gamespot.com/articles/1091500-gamespot-late-review";
+    database.native.prepare("INSERT INTO media_sources (appid, pass, original_url, discovery_url, title, outlet, author, published_at, retrieved_at, type) VALUES (?, 'initial', ?, ?, 'Cyberpunk 2077 Review', 'GameSpot', 'GameSpot critic', '2025-01-01T00:00:00.000Z', '2026-09-12T00:00:00.000Z', 'review')").run(CP, url, url);
+
+    for (const day of DAYS) for (const time of TIMES) await runMediaTick(database, world, `${day}T${time}:00.000Z`, { outlet: world.outlet, fetched });
+
+    expect(fetched.filter((fetchedUrl) => fetchedUrl.includes("gamespot.com"))).toEqual([]);
+    expect(database.native.query("SELECT j.status, j.error FROM media_processing_jobs AS j JOIN media_sources AS s ON s.id = j.source_id WHERE s.outlet = 'GameSpot'").all()).toEqual([{ status: "refused", error: "outlet_denied" }]);
+    const overview = database.native.query<{ input_identity: string }, []>(`SELECT input_identity FROM media_game_overviews WHERE appid = ${CP} AND active = 1`).get()!;
+    expect(database.native.query(`SELECT dimension, overview_input_identity FROM media_game_embeddings WHERE appid = ${CP} AND active = 1`).all()).toEqual([{ dimension: "gameplay", overview_input_identity: overview.input_identity }]);
+  });
+});

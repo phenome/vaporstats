@@ -70,6 +70,15 @@ async function outletDayStop(db: AppDatabase, outlet: MediaOutlet, date: Date): 
   return limited ? "fetch_http_429" : null;
 }
 
+/**
+ * Whether `stop`, a reason an outlet must not be contacted, is an Outlet
+ * denial: an access refusal (HTTP 401 or 403) to an article fetch, which is
+ * permanent. Every other stop is a day stop that reopens on the next UTC day.
+ */
+export function isOutletDenialStop(stop: string): boolean {
+  return /^fetch_http_40[13]$/.test(stop);
+}
+
 /** Why `outlet` must not be contacted at `date`: a lasting access denial first, then a same-day stop. */
 async function mediaOutletStop(db: AppDatabase, outlet: MediaOutlet, date: Date): Promise<string | null> {
   return (await outletDenial(db, outlet)) ?? outletDayStop(db, outlet, date);

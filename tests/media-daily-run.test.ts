@@ -410,9 +410,10 @@ describe("settled source rules in automatic runs", () => {
 
     await tick(database, providers, "2026-11-20T06:00:00.000Z", { outlet, fetched });
 
-    // IGN: one search and the fetch it refused; nothing else that day.
+    // IGN: one search and the fetch it refused; nothing else that day. The
+    // denial is permanent, so the article's extraction is refused (#80).
     expect(attempts(database, "IGN")).toEqual([{ day: "2026-11-20", kind: "fetch", count: 1 }, { day: "2026-11-20", kind: "search", count: 1 }]);
-    expect(extractionStatus(database, ignArticle!)).toEqual(["queued"]);
+    expect(extractionStatus(database, ignArticle!)).toEqual(["refused"]);
     // Eurogamer: the one search left under the cap, then a day stop for
     // discovery's fetch and for processing's.
     expect(attempts(database, "Eurogamer")).toEqual([{ day: "2026-11-20", kind: "fetch", count: 29 }, { day: "2026-11-20", kind: "search", count: 1 }]);
@@ -423,10 +424,11 @@ describe("settled source rules in automatic runs", () => {
     await tick(database, providers, "2026-11-21T06:00:00.000Z", { outlet, fetched });
 
     // The denial holds on the next day: IGN is never contacted again, and
-    // its article waits under the outlet's stop rules.
+    // its article stays refused as outlet_denied.
     expect(attempts(database, "IGN")).toEqual([{ day: "2026-11-20", kind: "fetch", count: 1 }, { day: "2026-11-20", kind: "search", count: 1 }]);
     expect(providers.tavily.searches.filter((search) => search.endsWith(`@${ign.domain}`))).toHaveLength(1);
-    expect(extractionStatus(database, ignArticle!)).toEqual(["queued"]);
+    expect(extractionStatus(database, ignArticle!)).toEqual(["refused"]);
+    expect(database.native.query<{ error: string }, [string]>("SELECT j.error FROM media_processing_jobs AS j JOIN media_sources AS s ON s.id = j.source_id WHERE s.original_url = ?").all(ignArticle!)).toEqual([{ error: "outlet_denied" }]);
     // Eurogamer reopens on November 21: the stopped query's candidate is
     // fetched, the other entities are searched once, and processing fetches
     // the waiting article and the three new ones: 2 searches and 3 + 4 fetches.
