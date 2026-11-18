@@ -65,7 +65,7 @@ async function openRouterOutcome(reply: OpenRouterReply): Promise<ProviderOutcom
   const transport = createOpenRouterTransport("test-openrouter-key", api.fetchFn, { timeoutMs: 50 });
   api.reply("chat", reply);
   try {
-    await transport.complete({ model: OPENROUTER_TEXT_MODEL, messages: [{ role: "user", content: "Contract" }], response_format: { type: "json_object" }, max_tokens: 100 });
+    await transport.complete({ model: OPENROUTER_TEXT_MODEL, messages: [{ role: "user", content: "Contract" }], response_format: { type: "json_object" }, reasoning: { effort: "low" }, max_tokens: 100 });
     return classifyOpenRouterOutcome(null);
   } catch (error) {
     return classifyOpenRouterOutcome(error);

@@ -423,7 +423,7 @@ export interface OpenRouterRequestRecord {
   /** `extraction` or `synthesis`, by whether the request cites article URLs. */
   stage: "extraction" | "synthesis";
   model: string;
-  body: { model: string; messages: Array<{ role: string; content: string }>; response_format?: unknown; max_tokens?: number };
+  body: { model: string; messages: Array<{ role: string; content: string }>; response_format?: unknown; max_tokens?: number; reasoning?: unknown };
   authorization: string | null;
   /** Article URLs the request cites, for a synthesis. */
   urls: string[];
@@ -443,6 +443,7 @@ export const OPENROUTER_USAGE = { prompt_tokens: 1_000, completion_tokens: 100, 
 export function controlledOpenRouterApi() {
   const replies: Record<OpenRouterCall, OpenRouterReply[]> = { chat: [], key: [] };
   const outputs: { extraction: unknown[]; synthesis: unknown[] } = { extraction: [], synthesis: [] };
+  const usages: unknown[] = [];
   /** Every chat completion the API received, including refused ones. */
   const requests: OpenRouterRequestRecord[] = [];
   /** Every request the API received, by kind. */
@@ -487,7 +488,7 @@ export function controlledOpenRouterApi() {
       model: body.model,
       provider: "Anthropic",
       choices: [{ index: 0, finish_reason: "stop", message: { role: "assistant", content: typeof output === "string" ? output : JSON.stringify(output) } }],
-      usage: OPENROUTER_USAGE,
+      usage: usages.shift() ?? OPENROUTER_USAGE,
     });
   };
   return Object.assign(api, {
@@ -498,6 +499,8 @@ export function controlledOpenRouterApi() {
     reply(kind: OpenRouterCall, ...queued: OpenRouterReply[]) { replies[kind].push(...queued); },
     /** Queues the model output of the next successful request of `stage`. */
     output(stage: "extraction" | "synthesis", ...queued: unknown[]) { outputs[stage].push(...queued); },
+    /** Queues the `usage` object of the next successful request, in place of `OPENROUTER_USAGE`. */
+    usage(...queued: unknown[]) { usages.push(...queued); },
     isOpenRouterRequest: (url: string) => url.startsWith("https://openrouter.ai/"),
   });
 }

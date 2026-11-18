@@ -21,6 +21,7 @@ import { finishOutletAttempt, isOutletDenialStop, reserveOutletAttempt } from ".
 import {
   createOpenRouterTransport,
   type OpenRouterChatRequest,
+  type OpenRouterReasoning,
   type OpenRouterCompletion,
   type OpenRouterFetch,
   type OpenRouterTransport,
@@ -74,8 +75,26 @@ const EMBEDDING_INPUT_PRICE_MICRO_USD_PER_TOKEN = 0.1;
 export const DEFAULT_PAID_SUBMISSIONS_PER_TICK = 60;
 /** How long one advance may spend taking paid items from the queue before the rest wait for the next tick. */
 export const DEFAULT_PAID_WORK_TIME_BUDGET_MS = 5 * 60 * 1_000;
-const EXTRACTION_MAX_OUTPUT_TOKENS = 1_200;
-const SYNTHESIS_MAX_OUTPUT_TOKENS = 3_200;
+/**
+ * How text requests reason (ADR 0018, amended 2026-11-18). Claude Haiku 5.5
+ * thinks adaptively and by default, at medium effort; low is its smallest
+ * effort level, and a fixed reasoning budget is not accepted.
+ */
+const TEXT_REASONING: OpenRouterReasoning = { effort: "low" };
+/**
+ * Output tokens a text request may spend reasoning before its answer starts.
+ * Reasoning counts against the output cap, and adaptive thinking has no hard
+ * budget, so each cap adds this allowance to the stage's answer budget. The
+ * first live run's extraction reasoned 1,078 tokens at the default medium
+ * effort; an answer cut short by a larger reasoning spend pauses OpenRouter
+ * as `output_truncated` instead of refusing the item.
+ */
+const TEXT_REASONING_ALLOWANCE_TOKENS = 2_000;
+/** The largest valid answer of an extraction and of an Overview. */
+const EXTRACTION_ANSWER_TOKENS = 1_200;
+const SYNTHESIS_ANSWER_TOKENS = 3_200;
+const EXTRACTION_MAX_OUTPUT_TOKENS = TEXT_REASONING_ALLOWANCE_TOKENS + EXTRACTION_ANSWER_TOKENS;
+const SYNTHESIS_MAX_OUTPUT_TOKENS = TEXT_REASONING_ALLOWANCE_TOKENS + SYNTHESIS_ANSWER_TOKENS;
 const EMBEDDING_MAX_OUTPUT_TOKENS = 1;
 /**
  * The input cap of one OpenRouter request, in locally estimated tokens. It
@@ -531,7 +550,7 @@ function synthesisIdentityFor(appid: number, extractions: ExtractionRow[], model
 
 /** One OpenRouter chat completion for the text model that asks for JSON output. */
 function chatRequest(maxTokens: number, ...messages: OpenRouterChatRequest["messages"]): OpenRouterChatRequest {
-  return { model: OPENROUTER_TEXT_MODEL, messages, response_format: { type: "json_object" }, max_tokens: maxTokens };
+  return { model: OPENROUTER_TEXT_MODEL, messages, response_format: { type: "json_object" }, reasoning: TEXT_REASONING, max_tokens: maxTokens };
 }
 
 /** A conservative local estimate of `request`'s input tokens. */
@@ -974,12 +993,12 @@ async function recordLegacyAttempt(db: AppDatabase, jobId: number): Promise<void
  * as its next attempt, in one committed write before the request is sent.
  * Returns whether the item was still waiting.
  */
-async function markInFlight(db: AppDatabase, job: JobRow, maxInputTokens: number, now: Date): Promise<boolean> {
+async function markInFlight(db: AppDatabase, job: JobRow, maxInputTokens: number, now: Date, maxOutputTokens: number = job.max_output_tokens): Promise<boolean> {
   let marked = false;
   await transaction(db, async () => {
     // History of a send recorded before per-attempt records existed comes first.
     await recordLegacyAttempt(db, job.id);
-    const update = await db.prepare(`UPDATE media_processing_jobs SET status = 'uncertain', error = '${IN_FLIGHT}', max_input_tokens = ?, submitted_at = ? WHERE id = ? AND ${WAITING}`).bind(maxInputTokens, now.toISOString(), job.id).run();
+    const update = await db.prepare(`UPDATE media_processing_jobs SET status = 'uncertain', error = '${IN_FLIGHT}', max_input_tokens = ?, max_output_tokens = ?, submitted_at = ? WHERE id = ? AND ${WAITING}`).bind(maxInputTokens, maxOutputTokens, now.toISOString(), job.id).run();
     if (update.meta.changes !== 1) return;
     marked = true;
     await db.prepare("INSERT INTO media_processing_attempts (job_id, attempt, provider, input_identity, sent_at) VALUES (?1, COALESCE((SELECT MAX(attempt) FROM media_processing_attempts WHERE job_id = ?1), 0) + 1, ?2, ?3, ?4)")
@@ -1235,7 +1254,8 @@ async function sendTextItem(advance: QueueAdvance, job: JobRow, request: OpenRou
   if (!openRouter) return holdItem(advance, job, { class: "missing_configuration", reason: "missing_key" });
   const estimated = estimatedInputTokens(request);
   if (estimated > OPENROUTER_MAX_INPUT_TOKENS) return holdItem(advance, job, { class: "refusal", reason: "input_token_cap" });
-  if (!await markInFlight(db, job, estimated, now)) return;
+  // An item queued under an earlier cap records the cap it is sent with.
+  if (!await markInFlight(db, job, estimated, now, request.max_tokens)) return;
   let completion: OpenRouterCompletion | null = null;
   let outcome: ProviderOutcome;
   try {
@@ -1268,7 +1288,8 @@ function reportedCharge(completion: OpenRouterCompletion): { microusd: number; s
  */
 async function recordAnswer(db: AppDatabase, job: JobRow, answer: OpenRouterCompletion, now: Date): Promise<void> {
   const charge = reportedCharge(answer);
-  const usageJson = JSON.stringify({ promptTokens: answer.usage.promptTokens, completionTokens: answer.usage.completionTokens });
+  const { promptTokens, completionTokens, reasoningTokens } = answer.usage;
+  const usageJson = JSON.stringify({ promptTokens, completionTokens, ...(reasoningTokens === null ? {} : { reasoningTokens }) });
   await db.prepare("UPDATE media_processing_jobs SET usage_json = ?, cost_source = CASE WHEN cost_source = 'provider_reported' THEN cost_source ELSE ? END, generation_id = ?, routed_provider = ?, routed_model = ? WHERE id = ?")
     .bind(usageJson, charge.source, answer.generationId, answer.provider, answer.model, job.id).run();
   await recordAttemptCharge(db, job.id, { usageJson, microusd: charge.microusd, source: charge.source, generationId: answer.generationId, routedProvider: answer.provider, routedModel: answer.model }, now);

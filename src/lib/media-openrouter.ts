@@ -12,10 +12,20 @@ export const OPENROUTER_API_BASE = "https://openrouter.ai/api/v1";
 /** How long one chat completion may take before its outcome becomes unknown. */
 export const DEFAULT_OPENROUTER_REQUEST_TIMEOUT_MS = 120_000;
 
+/**
+ * OpenRouter's unified reasoning setting: an effort level, which OpenRouter
+ * maps to the model's own. Reasoning tokens count against `max_tokens`.
+ */
+export interface OpenRouterReasoning {
+  effort: "low" | "medium" | "high";
+}
+
 export interface OpenRouterChatRequest {
   model: string;
   messages: Array<{ role: "system" | "user"; content: string }>;
   response_format: { type: "json_object" };
+  reasoning: OpenRouterReasoning;
+  /** The output cap, reasoning and answer combined. */
   max_tokens: number;
 }
 
@@ -29,9 +39,16 @@ export interface OpenRouterCompletion {
   provider: string | null;
   /** The first choice's message content, or null when it has none. */
   content: string | null;
+  /** The first choice's normalized `finish_reason`, such as `stop` or `length`. */
+  finishReason: string | null;
+  /** The first choice's `native_finish_reason`, as the routed provider reported it, such as `max_tokens`. */
+  nativeFinishReason: string | null;
   usage: {
     promptTokens: number | null;
+    /** Reasoning and answer tokens combined. */
     completionTokens: number | null;
+    /** `usage.completion_tokens_details.reasoning_tokens`: the part of `completionTokens` spent reasoning. */
+    reasoningTokens: number | null;
     /** `usage.cost`: the amount charged, in credits. */
     cost: number | null;
   };
@@ -80,7 +97,14 @@ function completionFrom(body: Record<string, unknown>): OpenRouterCompletion {
     model: text(body.model),
     provider: text(body.provider),
     content: typeof content === "string" ? content : null,
-    usage: { promptTokens: count(usage.prompt_tokens), completionTokens: count(usage.completion_tokens), cost: count(usage.cost) },
+    finishReason: text(choice.finish_reason),
+    nativeFinishReason: text(choice.native_finish_reason),
+    usage: {
+      promptTokens: count(usage.prompt_tokens),
+      completionTokens: count(usage.completion_tokens),
+      reasoningTokens: count(object(usage.completion_tokens_details).reasoning_tokens),
+      cost: count(usage.cost),
+    },
   };
 }
 

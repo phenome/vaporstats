@@ -123,6 +123,54 @@ describe("text generation through OpenRouter", () => {
   });
 });
 
+// The first live run (2026-11-18) showed Claude Haiku 5.5 reasoning by default,
+// with reasoning tokens counted against the output cap: an extraction capped at
+// 1,200 tokens spent 1,078 on reasoning and lost its answer. ADR 0018 (amended
+// 2026-11-18) sets reasoning explicitly and sizes each cap as a 2,000-token
+// reasoning allowance plus the stage's 1,200 or 3,200-token answer budget.
+describe("reasoning and output caps", () => {
+  test("every text request sets reasoning explicitly at low effort, with a cap of 3,200 tokens for an extraction and 5,200 for an Overview, and records the cap it sent", async () => {
+    const { database } = await authorizedGames();
+    const providers = apis();
+
+    await tick(database, providers, "2026-11-18T03:00:00.000Z");
+
+    expect(providers.openRouter.requests.map(({ stage, body }) => ({ stage, reasoning: body.reasoning, max_tokens: body.max_tokens }))).toEqual([
+      { stage: "extraction", reasoning: { effort: "low" }, max_tokens: 3_200 },
+      { stage: "synthesis", reasoning: { effort: "low" }, max_tokens: 5_200 },
+    ]);
+    expect(database.native.query("SELECT stage, max_output_tokens FROM media_processing_jobs WHERE stage IN ('extraction', 'synthesis') ORDER BY id").all()).toEqual([
+      { stage: "extraction", max_output_tokens: 3_200 },
+      { stage: "synthesis", max_output_tokens: 5_200 },
+    ]);
+  });
+
+  test("a waiting item queued under an earlier cap is sent with the current cap, and records the cap it was sent with", async () => {
+    const { database } = await authorizedGames();
+    const providers = apis();
+    await tick(database, providers, "2026-11-18T03:00:00.000Z", { openRouterApiKey: "" });
+    database.native.run("UPDATE media_processing_jobs SET max_output_tokens = 1200 WHERE stage = 'extraction'");
+
+    await tick(database, providers, "2026-11-18T03:15:00.000Z");
+
+    expect(providers.openRouter.requests[0]?.body.max_tokens).toBe(3_200);
+    expect(database.native.query("SELECT max_output_tokens FROM media_processing_jobs WHERE stage = 'extraction'").get()).toEqual({ max_output_tokens: 3_200 });
+  });
+
+  test("reasoning tokens the provider reports are recorded in the stored usage", async () => {
+    const { database } = await authorizedGames();
+    const providers = apis();
+    providers.openRouter.usage({ prompt_tokens: 3_081, completion_tokens: 1_400, completion_tokens_details: { reasoning_tokens: 600 }, cost: 0.0009 });
+
+    await tick(database, providers, "2026-11-18T03:00:00.000Z");
+
+    const usage = (stage: string) => database.native.query<{ usage_json: string }, [string]>("SELECT usage_json FROM media_processing_jobs WHERE stage = ?").get(stage)!.usage_json;
+    expect(JSON.parse(usage("extraction"))).toEqual({ promptTokens: 3_081, completionTokens: 1_400, reasoningTokens: 600 });
+    // Without a reported breakdown, the usage has no reasoning count.
+    expect(JSON.parse(usage("synthesis"))).toEqual({ promptTokens: 1_000, completionTokens: 100 });
+  });
+});
+
 describe("applying answers", () => {
   test("an answer is applied under the current-input and stale-write checks: one whose input stopped being current while in flight is recorded stale, with its cost", async () => {
     const { database } = await authorizedGames();
