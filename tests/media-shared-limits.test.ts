@@ -19,9 +19,11 @@ import {
   seedApps,
 } from "./support/media";
 
-// Media limits are shared by the initial and later assessment passes. The
-// trigger cannot start a later pass yet, so each test creates later-pass state
-// directly and drives discovery and processing with a controlled transport and clock.
+// Media limits are shared by the initial and later assessment passes. Each
+// test creates later-pass state directly and drives discovery and processing
+// with a controlled transport and clock. A later pass asks only the outlets
+// with an accepted initial article for the entity, so tests that exercise an
+// outlet in the later pass give the entity one there first.
 
 const cleanups: Array<() => void> = [];
 afterEach(() => { while (cleanups.length > 0) cleanups.pop()!(); });
@@ -55,6 +57,11 @@ function progress(database: TestDatabase, pass: MediaPass, outlet: MediaOutlet):
   return database.native
     .query<{ status: string; stop_reason: string | null }, [string, string, number]>("SELECT status, stop_reason FROM media_discovery_progress WHERE pass = ? AND outlet = ? AND appid = ?")
     .get(pass, outlet, CYBERPUNK);
+}
+
+/** Gives `appid` one accepted initial article on each of `outlets`, so its later pass asks them. */
+function representOutlets(database: TestDatabase, appid = CYBERPUNK, outlets: readonly (typeof MEDIA_OUTLETS)[number][] = MEDIA_OUTLETS): void {
+  for (const outlet of outlets) insertSources(database.native, appid, "initial", 1, outlet);
 }
 
 function count(database: TestDatabase, query: string, ...values: (string | number)[]): number {
@@ -99,6 +106,7 @@ describe("per-outlet UTC-day attempt cap across passes", () => {
   test("initial-pass attempts leave the later pass one attempt that day, across a restart, and reopen on the next UTC day", async () => {
     const database = fixture();
     seedAttempts(database, "IGN", "initial", "2026-09-10", 29);
+    representOutlets(database);
     const runId = insertLaterRun(database.native, [CYBERPUNK]);
     const { calls, fetchFn } = discoveryFetch();
 
@@ -124,7 +132,7 @@ describe("outlet attempt reservation", () => {
     const database = fixture();
     seedAttempts(database, "IGN", "initial", "2026-09-10", 1);
 
-    await expect(reserveOutletAttempt(database.db, { runId: 999, appid: CYBERPUNK, outlet: "IGN", kind: "fetch", url: "https://ign.com/a", date: DAY_ONE })).rejects.toThrow();
+    await expect(reserveOutletAttempt(database.db, { runId: 999, pass: "initial", appid: CYBERPUNK, outlet: "IGN", kind: "fetch", url: "https://ign.com/a", date: DAY_ONE })).rejects.toThrow();
     expect(count(database, "SELECT COUNT(*) AS count FROM media_discovery_attempts")).toBe(1);
   });
 });
@@ -138,6 +146,8 @@ describe("outlet stops across passes", () => {
     expect(progress(database, "initial", "IGN")).toEqual({ status: "stopped", stop_reason: "fetch_http_403" });
 
     database.reopen();
+    // An IGN article accepted before the denial keeps IGN in the later pass.
+    representOutlets(database, CYBERPUNK, [IGN]);
     const runId = insertLaterRun(database.native, [CYBERPUNK]);
     const { calls, fetchFn } = discoveryFetch();
     const later = await runAuthorizedMediaDiscovery(database.db, { runId, tavilyApiKey: "test-key", fetch: fetchFn, now: new Date("2026-10-10T12:00:00.000Z") });
@@ -161,6 +171,7 @@ describe("outlet stops across passes", () => {
     expect(stopped.stopReasons).toEqual(["tavily_search_http_401"]);
     expect(rejected.calls.filter((call) => call.url.endsWith("/search"))).toHaveLength(1);
 
+    representOutlets(database);
     const runId = insertLaterRun(database.native, [CYBERPUNK]);
     const { calls, fetchFn } = discoveryFetch();
     const later = await runAuthorizedMediaDiscovery(database.db, { runId, tavilyApiKey: "test-key", fetch: fetchFn, now: DAY_TWO });
@@ -285,6 +296,8 @@ describe("outlet stops across passes", () => {
     await runAuthorizedMediaDiscovery(database.db, { runId: initial.runId, tavilyApiKey: "test-key", fetch: limited.fetchFn, now: DAY_ONE });
     expect(progress(database, "initial", "IGN")).toEqual({ status: "stopped", stop_reason: "fetch_http_429" });
 
+    // An IGN article accepted earlier keeps IGN in the later pass.
+    representOutlets(database, CYBERPUNK, [IGN]);
     const runId = insertLaterRun(database.native, [CYBERPUNK]);
     const { calls, fetchFn } = discoveryFetch();
     const sameDay = await runAuthorizedMediaDiscovery(database.db, { runId, tavilyApiKey: "test-key", fetch: fetchFn, now: DAY_ONE_LATE });
@@ -354,7 +367,7 @@ describe("provider stops for every search outcome", () => {
 
     // The outlet is neither denied nor day-stopped, and its UTC-day count is
     // unchanged: exactly the two attempts left before the stop remain.
-    const probe = () => reserveOutletAttempt(database.db, { runId: first.runId, appid: CYBERPUNK, outlet: item.outlet, kind: "fetch", url: null, date: DAY_ONE_LATE });
+    const probe = () => reserveOutletAttempt(database.db, { runId: first.runId, pass: "initial", appid: CYBERPUNK, outlet: item.outlet, kind: "fetch", url: null, date: DAY_ONE_LATE });
     expect("attemptId" in (await probe())).toBe(true);
     expect("attemptId" in (await probe())).toBe(true);
     expect(await probe()).toEqual({ stop: "daily_attempt_cap" });
@@ -379,6 +392,8 @@ describe("discovery query bound per pass", () => {
     await runAuthorizedMediaDiscovery(database.db, { runId: initial.runId, tavilyApiKey: "test-key", fetch: fetchFn, now: DAY_ONE });
     expect(searches()).toBe(12);
 
+    // The initial pass found Cyberpunk 2077 an article on every outlet; Phantom Liberty's were accepted earlier.
+    representOutlets(database, 2138330);
     const runId = insertLaterRun(database.native, [CYBERPUNK]);
     const later = await runAuthorizedMediaDiscovery(database.db, { runId, tavilyApiKey: "test-key", fetch: fetchFn, now: DAY_TWO });
     expect(later.queries).toBe(12);
@@ -551,6 +566,7 @@ describe("processing limits across passes", () => {
     seedAttempts(database, "IGN", "initial", "2026-09-10", 29);
     const limitedFetch = async (input: RequestInfo | URL, init?: RequestInit) =>
       String(input).endsWith("/search") ? new Response("", { status: 429 }) : discoveryFetch().fetchFn(input, init);
+    representOutlets(database);
     const later = insertLaterRun(database.native, [CYBERPUNK]);
     const discovery = await runAuthorizedMediaDiscovery(database.db, { runId: later, tavilyApiKey: "test-key", fetch: limitedFetch, now: DAY_ONE });
     expect(discovery.stopReasons).toEqual(["tavily_search_http_429"]);

@@ -1,6 +1,6 @@
 import type { AppDatabase } from "./db";
 import { writeTransaction } from "./db-transaction";
-import type { MediaOutlet } from "./media-discovery";
+import type { MediaOutlet, MediaPass } from "./media-discovery";
 
 /**
  * Outlet access rules shared by every media pass and stage. Discovery
@@ -79,22 +79,23 @@ async function mediaOutletStop(db: AppDatabase, outlet: MediaOutlet, date: Date)
 type OutletAttemptKind = "search" | "fetch" | "redirect" | "failure";
 
 /**
- * Reserves one attempt on `outlet` under `runId`'s pass before the outlet is
- * contacted, or returns why it must not be contacted. The stop check and the
- * reservation run in one serialized write transaction, so concurrent passes
- * and stages never admit more than the outlet's remaining allowance.
+ * Reserves one attempt on `outlet` for `pass`, the assessment pass the
+ * request serves, under `runId` before the outlet is contacted, or returns why
+ * it must not be contacted. The stop check and the reservation run in one
+ * serialized write transaction, so concurrent passes and stages never admit
+ * more than the outlet's remaining allowance.
  */
 export async function reserveOutletAttempt(
   db: AppDatabase,
-  attempt: { runId: number; appid: number; outlet: MediaOutlet; kind: "search" | "fetch"; url: string | null; date: Date },
+  attempt: { runId: number; pass: MediaPass; appid: number; outlet: MediaOutlet; kind: "search" | "fetch"; url: string | null; date: Date },
 ): Promise<{ attemptId: number } | { stop: string }> {
   return writeTransaction(db, async () => {
     const stop = await mediaOutletStop(db, attempt.outlet, attempt.date);
     if (stop) return { stop };
     const reserved = await first<{ id: number }>(
       db,
-      "INSERT INTO media_discovery_attempts (appid, outlet, pass, day, kind, url, succeeded, attempted_at) SELECT ?, ?, pass, ?, ?, ?, 0, ? FROM media_discovery_runs WHERE id = ? RETURNING id",
-      attempt.appid, attempt.outlet, dayKey(attempt.date), attempt.kind, attempt.url, attempt.date.toISOString(), attempt.runId,
+      "INSERT INTO media_discovery_attempts (appid, outlet, pass, day, kind, url, succeeded, attempted_at) SELECT ?, ?, ?, ?, ?, ?, 0, ? FROM media_discovery_runs WHERE id = ? RETURNING id",
+      attempt.appid, attempt.outlet, attempt.pass, dayKey(attempt.date), attempt.kind, attempt.url, attempt.date.toISOString(), attempt.runId,
     );
     if (!reserved) throw new Error(`Unable to reserve a media outlet attempt: run ${attempt.runId} not found`);
     await db.prepare("UPDATE media_discovery_runs SET attempt_count = attempt_count + 1 WHERE id = ?").bind(attempt.runId).run();

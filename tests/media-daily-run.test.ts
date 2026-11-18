@@ -104,9 +104,13 @@ describe("enrollment in the daily media run", () => {
 
 const EXPERIMENT = [CYBERPUNK, BALDURS_GATE, HADES_II];
 
-/** Every distinct search, so a repeated query shows up as a count above one. */
+/** Every search as its query and outlet domain, so a repeated query shows up as a count above one. */
 function repeatedSearches(providers: Apis): string[] {
-  return providers.tavily.searches.filter((search, index, all) => all.indexOf(search) !== index);
+  const queries = providers.tavily.requests.map(({ body }) => {
+    const payload = JSON.parse(String(body)) as { query: string; include_domains: string[] };
+    return `${payload.query}@${payload.include_domains[0]}`;
+  });
+  return queries.filter((query, index, all) => all.indexOf(query) !== index);
 }
 
 function waitingItems(database: TestDatabase) {
@@ -181,7 +185,7 @@ describe("the daily media run", () => {
     });
     expect(crashed.status).toBe("error");
     expect(providers.tavily.searches).toHaveLength(4);
-    expect(scheduledRuns(database)).toEqual([{ identity_key: "scheduled:initial:2026-11-20", status: "running" }]);
+    expect(scheduledRuns(database)).toEqual([{ identity_key: "scheduled:2026-11-20", status: "running" }]);
 
     const resumed = await tick(database, providers, "2026-11-20T06:15:00.000Z");
 
@@ -189,7 +193,7 @@ describe("the daily media run", () => {
     expect(resumed.mediaDiscovery).toMatchObject({ status: "completed", queries: 18 });
     expect(providers.tavily.searches).toHaveLength(18);
     expect(repeatedSearches(providers)).toEqual([]);
-    expect(scheduledRuns(database)).toEqual([{ identity_key: "scheduled:initial:2026-11-20", status: "completed" }]);
+    expect(scheduledRuns(database)).toEqual([{ identity_key: "scheduled:2026-11-20", status: "completed" }]);
 
     const later = await tick(database, providers, "2026-11-20T06:30:00.000Z");
 
@@ -220,7 +224,9 @@ describe("the daily media run", () => {
     expect(providers.tavily.searches).toHaveLength(6);
 
     // November 21 passes with the process down. On November 22 the kept
-    // queries run once, and November 21 is never made up.
+    // queries run once, and November 21 is never made up. Baldur's Gate 3's
+    // initial discovery finished on November 20, so its later pass searches
+    // its six outlets on November 22 too.
     providers.tavily.remaining = 100;
     const nextRun = await tick(database, providers, "2026-11-22T09:00:00.000Z");
     expect(nextRun.mediaDailyRun?.day).toBe("2026-11-22");
@@ -228,10 +234,10 @@ describe("the daily media run", () => {
     await tick(database, providers, "2026-11-23T05:45:00.000Z");
 
     expect(scheduledRuns(database)).toEqual([
-      { identity_key: "scheduled:initial:2026-11-20", status: "stopped" },
-      { identity_key: "scheduled:initial:2026-11-22", status: "completed" },
+      { identity_key: "scheduled:2026-11-20", status: "stopped" },
+      { identity_key: "scheduled:2026-11-22", status: "completed" },
     ]);
-    expect(providers.tavily.searches).toHaveLength(18);
+    expect(providers.tavily.searches).toHaveLength(24);
     expect(repeatedSearches(providers)).toEqual([]);
     expect(providers.tavily.usageCalls).toBe(2);
   });
@@ -256,12 +262,15 @@ describe("the daily media run", () => {
 
       providers.tavily.remaining = 100;
       await tick(database, providers, "2026-11-21T06:00:00.000Z");
-      // The twelve queries left over; the pass now holds 18 queries and articles.
+      // The twelve initial queries left over, each with an accepted article,
+      // and Baldur's Gate 3's later pass, due since its initial discovery
+      // finished on November 20: six searches that find only the articles it
+      // already has, so nothing is fetched.
       expect(discoveryLog()).toMatchObject({
-        searches: 12,
-        attempts: 24,
+        searches: 18,
+        attempts: 30,
         articles: 12,
-        tavily: { searchCreditsConsumed: 12, planUsage: 912, planLimit: 1_000, remainingCredits: 88 },
+        tavily: { searchCreditsConsumed: 18, planUsage: 918, planLimit: 1_000, remainingCredits: 82 },
       });
     } finally {
       console.log = log;

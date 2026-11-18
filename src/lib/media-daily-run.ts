@@ -39,7 +39,7 @@ function utcDay(date: Date): string {
 
 /** The identity of `day`'s scheduled discovery run; at most one exists per UTC day. */
 export function scheduledDiscoveryIdentity(day: string): string {
-  return `scheduled:initial:${day}`;
+  return `scheduled:${day}`;
 }
 
 async function first<T>(db: AppDatabase, query: string, ...values: unknown[]): Promise<T | null> {

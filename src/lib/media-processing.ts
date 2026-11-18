@@ -15,6 +15,7 @@ import {
   MEDIA_GAME_CHOICES,
   MEDIA_OUTLETS,
   type MediaOutlet,
+  type MediaPass,
 } from "./media-discovery";
 import { finishOutletAttempt, reserveOutletAttempt } from "./media-outlet-access";
 import {
@@ -648,8 +649,8 @@ function storedExtractionJson(value: unknown, sourceIdentity: string, sourceUrl:
 
 type AuthorizationRow = { run_id: number; status: string; stop_reason: string | null; billing_confirmation: string | null; affected_source_ids: string };
 
-type SourceRow = { id: number; appid: number; original_url: string; title: string; outlet: MediaOutlet; author: string | null; published_at: string | null; updated_at: string | null; retrieved_at: string; type: string; hands_on: number | null; affiliation: string | null; platform: string | null; build_context: string | null; normalized_content_hash: string | null; cleanup_version: string | null; processing_content: string | null; processing_input_identity: string | null; processing_run_id: number | null };
-const SOURCE_COLUMNS = "id, appid, original_url, title, outlet, author, published_at, updated_at, retrieved_at, type, hands_on, affiliation, platform, build_context, normalized_content_hash, cleanup_version, processing_content, processing_input_identity, processing_run_id";
+type SourceRow = { id: number; appid: number; pass: MediaPass; original_url: string; title: string; outlet: MediaOutlet; author: string | null; published_at: string | null; updated_at: string | null; retrieved_at: string; type: string; hands_on: number | null; affiliation: string | null; platform: string | null; build_context: string | null; normalized_content_hash: string | null; cleanup_version: string | null; processing_content: string | null; processing_input_identity: string | null; processing_run_id: number | null };
+const SOURCE_COLUMNS = "id, appid, pass, original_url, title, outlet, author, published_at, updated_at, retrieved_at, type, hands_on, affiliation, platform, build_context, normalized_content_hash, cleanup_version, processing_content, processing_input_identity, processing_run_id";
 const COUNTED_OUTPUT_COLUMNS = {
   new: "new_outputs",
   replaced: "replaced_outputs",
@@ -819,15 +820,15 @@ async function enqueueItem(db: AppDatabase, item: QueueInput, now: Date): Promis
 /**
  * Fetches a source's article, or returns why its outlet must not be contacted
  * again in this run: an access denial, the shared UTC-day attempt cap, or a
- * same-day rate limit. Every request reserves its attempt under the run's pass
- * first; any other failure skips only this source.
+ * same-day rate limit. Every request reserves its attempt for the source's
+ * pass first; any other failure skips only this source.
  */
 async function fetchArticle(db: AppDatabase, source: SourceRow, runId: number, fetchFn: ArticleFetch, clock: () => Date): Promise<string | { outletStop: string } | null> {
   let current = source.original_url;
   const outlet = outletFor(current);
   if (!outlet || outlet.name !== source.outlet) return null;
   for (let redirect = 0; redirect <= MAX_REDIRECTS; redirect += 1) {
-    const reservation = await reserveOutletAttempt(db, { runId, appid: source.appid, outlet: source.outlet, kind: "fetch", url: current, date: clock() });
+    const reservation = await reserveOutletAttempt(db, { runId, pass: source.pass, appid: source.appid, outlet: source.outlet, kind: "fetch", url: current, date: clock() });
     if ("stop" in reservation) return { outletStop: reservation.stop };
     let response: Response | string;
     try { response = await fetchFn(current, { redirect: "manual", headers: { Accept: "text/html,application/xhtml+xml" } }); }

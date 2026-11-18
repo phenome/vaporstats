@@ -242,17 +242,20 @@ export function stableJson(value: unknown): string {
 export function discoveryArticleHtml(
   appid: number,
   title: string,
-  options: { date?: string; author?: string; affiliation?: string; body?: string } = {},
+  options: { date?: string | null; author?: string; affiliation?: string; body?: string } = {},
 ): string {
   const body = options.body ?? `${GAME_NAMES[appid]} delivers a substantial playable campaign with detailed systems and memorable encounters. `.repeat(5);
   const affiliation = options.affiliation ? `<meta name="author_affiliation" content="${options.affiliation}">` : "";
-  return `<!doctype html><html><head><meta property="og:title" content="${title}"><meta property="article:published_time" content="${options.date ?? "2025-01-01"}"><meta name="author" content="${options.author ?? "Reviewer"}">${affiliation}</head><body><article><h1>${title}</h1><p>${body}</p></article></body></html>`;
+  const published = options.date === null ? "" : `<meta property="article:published_time" content="${options.date ?? "2025-01-01"}">`;
+  return `<!doctype html><html><head><meta property="og:title" content="${title}">${published}<meta name="author" content="${options.author ?? "Reviewer"}">${affiliation}</head><body><article><h1>${title}</h1><p>${body}</p></article></body></html>`;
 }
 
 /**
  * Controlled Tavily and outlet fetch. Search returns one article per outlet
- * domain; `variants` overrides individual article URLs with a status, body
- * or redirect.
+ * domain: an initial-pass query finds `/articles/<appid>-<domain>`, published
+ * 2025-01-01, and a later-pass query finds `/articles/<appid>-<domain>-later`,
+ * which is undated. `variants` overrides individual article URLs with a
+ * status, body or redirect.
  */
 export function discoveryFetch(options: { variants?: Record<string, { status?: number; body?: string; redirect?: string }> } = {}) {
   const calls: { url: string; init?: RequestInit }[] = [];
@@ -264,7 +267,7 @@ export function discoveryFetch(options: { variants?: Record<string, { status?: n
       const payload = JSON.parse(String(init?.body)) as { include_domains: string[]; query: string };
       const domain = payload.include_domains[0]!;
       const appid = payload.query.includes("Baldur") ? BALDURS_GATE : payload.query.includes("Hades") ? HADES_II : CYBERPUNK;
-      const slug = `${appid}-${domain.replaceAll(".", "-")}`;
+      const slug = `${appid}-${domain.replaceAll(".", "-")}${payload.query.includes(" revisited") ? "-later" : ""}`;
       return Response.json({ request_id: `search-${domain}`, usage: { credits_used: 1 }, results: [{ url: `https://${domain}/articles/${slug}` }] });
     }
     const variant = options.variants?.[url];
@@ -272,7 +275,7 @@ export function discoveryFetch(options: { variants?: Record<string, { status?: n
     if (variant?.body) return new Response(variant.body, { status: variant.status ?? 200 });
     const appid = url.includes(String(BALDURS_GATE)) ? BALDURS_GATE : url.includes(String(HADES_II)) ? HADES_II : CYBERPUNK;
     const outlet = MEDIA_OUTLETS.find((item) => url.includes(item.domain));
-    return new Response(discoveryArticleHtml(appid, `${GAME_NAMES[appid]} Review${outlet ? ` - ${outlet.name}` : ""}`));
+    return new Response(discoveryArticleHtml(appid, `${GAME_NAMES[appid]} Review${outlet ? ` - ${outlet.name}` : ""}`, url.endsWith("-later") ? { date: null } : {}));
   };
   return { calls, fetchFn };
 }
@@ -536,7 +539,18 @@ export function controlledTavilyApi(names: Record<number, string> = GAME_NAMES) 
    * `paygoLimit`: the account's plan and pay-as-you-go allowance;
    * `usageCalls`: usage requests received.
    */
-  const api = { remaining: 100, plan: "free", paygoLimit: 0, usageCalls: 0 };
+  const api = {
+    remaining: 100,
+    plan: "free",
+    paygoLimit: 0,
+    usageCalls: 0,
+    /**
+     * The results of a search that has no queued reply, by its entity, query
+     * and outlet domain; when unset or when it returns undefined, the search
+     * returns its one default article.
+     */
+    results: undefined as ((search: { appid: number; query: string; domain: string }) => Array<{ url: string; published_date?: string }> | undefined) | undefined,
+  };
   const byLongestName = Object.entries(names).sort(([, a], [, b]) => b.length - a.length);
   const fetchFn = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
     const url = String(input);
@@ -554,6 +568,8 @@ export function controlledTavilyApi(names: Record<number, string> = GAME_NAMES) 
     if (reply && "network" in reply) throw new Error(reply.network);
     if (reply) return Response.json(reply.body ?? {}, { status: reply.status });
     if (!entity) return Response.json({ results: [], usage: { credits_used: 1 } });
+    const results = api.results?.({ appid: Number(entity[0]), query: payload.query, domain });
+    if (results) return Response.json({ request_id: `search-${searches.length}`, usage: { credits_used: 1 }, results });
     return Response.json({ request_id: `search-${searches.length}`, usage: { credits_used: 1 }, results: [{ url: `https://${domain}/articles/${entity[0]}-${domain.replaceAll(".", "-")}` }] });
   };
   return Object.assign(api, {
