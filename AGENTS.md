@@ -12,6 +12,7 @@ Repository artifacts are written for external collaborators and readers.
 ## Coding standards
 
 - Apply the judgement rules in [CODING_STANDARDS.md](CODING_STANDARDS.md) when writing and reviewing changes.
+- For media discovery or paid-processing changes, cover every probe in [docs/agents/media-probes.md](docs/agents/media-probes.md) before handing off, and report each probe with the test that covers it.
 
 ## TanStack route modules
 
