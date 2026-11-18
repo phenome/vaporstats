@@ -1114,6 +1114,12 @@ export async function runAuthorizedMediaDiscovery(db: AppDatabase, options: Medi
   }
 }
 
+/**
+ * `appid`'s accepted articles from every assessment pass: dated articles by
+ * publication date, then undated articles in the order they were accepted.
+ * An undated article keeps its unknown date and is never placed in time by
+ * when it was retrieved.
+ */
 export async function getMediaSources(db: AppDatabase, appid: number): Promise<MediaSource[]> {
   if (!Number.isInteger(appid) || appid <= 0) return [];
   const sourceRows = await rows<{
@@ -1131,7 +1137,7 @@ export async function getMediaSources(db: AppDatabase, appid: number): Promise<M
       AND app.is_eligible = 1
       AND ${ELIGIBLE_MEDIA_ENTITY_SQL}
      WHERE source.appid = ?
-     ORDER BY COALESCE(source.published_at, source.retrieved_at), source.id`,
+     ORDER BY source.published_at IS NULL, source.published_at, source.id`,
     appid,
   );
   return sourceRows.map((row) => ({ appid: row.appid, originalUrl: row.original_url, discoveryUrl: row.discovery_url, title: row.title, outlet: row.outlet, author: row.author, publishedAt: row.published_at, updatedAt: row.updated_at, retrievedAt: row.retrieved_at, type: row.type, handsOn: row.hands_on === null ? null : row.hands_on === 1, affiliation: row.affiliation, platform: row.platform, buildContext: row.build_context }));
