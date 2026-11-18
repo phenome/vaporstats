@@ -38,10 +38,16 @@ export function MediaMatchesSection({
 
   return (
     <section id="media-matches" aria-labelledby="media-matches-title" className="min-w-0 space-y-4 scroll-mt-28">
-      <div className="border-b border-zinc-800 pb-2">
+      <div className="flex items-baseline justify-between gap-3 border-b border-zinc-800 pb-2">
         <h2 id="media-matches-title" className="font-mono text-xs font-semibold uppercase tracking-wider text-zinc-200">
           Media matches
         </h2>
+        <AppLink
+          href="/methodology"
+          className="font-mono text-[10px] uppercase tracking-wider text-zinc-500 hover:text-zinc-300 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-orange-500"
+        >
+          How this works
+        </AppLink>
       </div>
       {(Object.keys(DIMENSION_LABELS) as MediaMatchDimension[]).map((dimension) => {
         const dimensionMatches = visibleMatches.filter((match) => match.dimension === dimension);

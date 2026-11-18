@@ -11,6 +11,7 @@
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as DealsRouteImport } from './routes/deals'
+import { Route as MethodologyRouteImport } from './routes/methodology'
 import { Route as PrivacyRouteImport } from './routes/privacy'
 import { Route as SearchRouteImport } from './routes/search'
 import { Route as ApiCatalogRouteImport } from './routes/api.catalog'
@@ -47,6 +48,11 @@ const IndexRoute = IndexRouteImport.update({
 const DealsRoute = DealsRouteImport.update({
   id: '/deals',
   path: '/deals',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const MethodologyRoute = MethodologyRouteImport.update({
+  id: '/methodology',
+  path: '/methodology',
   getParentRoute: () => rootRouteImport,
 } as any)
 const PrivacyRoute = PrivacyRouteImport.update({
@@ -189,6 +195,7 @@ const ApiGamesAppidEventsEventidReaderRoute =
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/deals': typeof DealsRoute
+  '/methodology': typeof MethodologyRoute
   '/privacy': typeof PrivacyRoute
   '/search': typeof SearchRoute
   '/api/catalog': typeof ApiCatalogRoute
@@ -220,6 +227,7 @@ export interface FileRoutesByFullPath {
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/deals': typeof DealsRoute
+  '/methodology': typeof MethodologyRoute
   '/privacy': typeof PrivacyRoute
   '/search': typeof SearchRoute
   '/api/catalog': typeof ApiCatalogRoute
@@ -252,6 +260,7 @@ export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
   '/deals': typeof DealsRoute
+  '/methodology': typeof MethodologyRoute
   '/privacy': typeof PrivacyRoute
   '/search': typeof SearchRoute
   '/api/catalog': typeof ApiCatalogRoute
@@ -285,6 +294,7 @@ export interface FileRouteTypes {
   fullPaths:
     | '/'
     | '/deals'
+    | '/methodology'
     | '/privacy'
     | '/search'
     | '/api/catalog'
@@ -316,6 +326,7 @@ export interface FileRouteTypes {
   to:
     | '/'
     | '/deals'
+    | '/methodology'
     | '/privacy'
     | '/search'
     | '/api/catalog'
@@ -347,6 +358,7 @@ export interface FileRouteTypes {
     | '__root__'
     | '/'
     | '/deals'
+    | '/methodology'
     | '/privacy'
     | '/search'
     | '/api/catalog'
@@ -379,6 +391,7 @@ export interface FileRouteTypes {
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   DealsRoute: typeof DealsRoute
+  MethodologyRoute: typeof MethodologyRoute
   PrivacyRoute: typeof PrivacyRoute
   SearchRoute: typeof SearchRoute
   ApiCatalogRoute: typeof ApiCatalogRoute
@@ -422,6 +435,13 @@ declare module '@tanstack/react-router' {
       path: '/deals'
       fullPath: '/deals'
       preLoaderRoute: typeof DealsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/methodology': {
+      id: '/methodology'
+      path: '/methodology'
+      fullPath: '/methodology'
+      preLoaderRoute: typeof MethodologyRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/privacy': {
@@ -619,6 +639,7 @@ declare module '@tanstack/react-router' {
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   DealsRoute: DealsRoute,
+  MethodologyRoute: MethodologyRoute,
   PrivacyRoute: PrivacyRoute,
   SearchRoute: SearchRoute,
   ApiCatalogRoute: ApiCatalogRoute,

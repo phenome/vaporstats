@@ -74,10 +74,16 @@ export function MediaOverviewSection({
 
   return (
     <section id="media-overview" aria-labelledby="media-overview-title" className="min-w-0 space-y-3 scroll-mt-28">
-      <div className="border-b border-zinc-800 pb-2">
+      <div className="flex items-baseline justify-between gap-3 border-b border-zinc-800 pb-2">
         <h2 id="media-overview-title" className="font-mono text-xs font-semibold uppercase tracking-wider text-zinc-200">
           Overview
         </h2>
+        <AppLink
+          href="/methodology"
+          className="font-mono text-[10px] uppercase tracking-wider text-zinc-500 hover:text-zinc-300 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-orange-500"
+        >
+          How this works
+        </AppLink>
       </div>
       <div className="space-y-3 text-sm leading-6 text-zinc-300">
         <CitedFindings findings={overview.statements} sources={sources} sourceNumbers={sourceNumbers} />
