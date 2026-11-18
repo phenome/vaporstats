@@ -1,7 +1,7 @@
 import type { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
 import { runIngestionTick, type IngestionTickOptions } from "../../workers/ingestion";
-import { openTestDatabase, type TestDatabase } from "./db";
+import { copyTestDatabase, openTestDatabase, type TestDatabase } from "./db";
 import type { GeminiBatchPoll, GeminiBatchTransport } from "../../src/lib/media-processing";
 import { createOpenRouterTransport, type OpenRouterTransport } from "../../src/lib/media-openrouter";
 import { GeminiHttpError } from "../../src/lib/media-paid-providers";
@@ -798,12 +798,19 @@ export interface OutboundCall {
 }
 
 /**
- * The one documented exception to sending a request once across restarts
- * (ADR 0020): article text is never retained, so a processing fetch that a
- * restart interrupted before its item was marked in flight is sent again,
- * once per such restart, when the item next takes a turn.
+ * The one exception to sending each request at most once (ADR 0020):
+ * article text is never retained, so a processing fetch that a restart
+ * interrupted before its item was marked in flight is sent again when the
+ * item next takes a turn. It is bounded to one extra send per restart that
+ * interrupted that fetch. Every other request identity is sent at most once,
+ * in the uninterrupted run and in every interrupted one.
  */
-export const PROCESSING_FETCH_RESENT_AFTER_RESTART = "processing fetch: an article fetch for paid processing is sent again once per restart that interrupted it (ADR 0020)";
+export const PROCESSING_FETCH_RESENT_AFTER_RESTART = {
+  name: "processing fetch resent after a restart interrupted it (ADR 0020)",
+  applies: (call: Pick<OutboundCall, "kind" | "identity">) => call.kind === "outlet_fetch" && call.identity.startsWith("processing:"),
+  /** Extra sends allowed per restart that interrupted the fetch. */
+  perRestart: 1,
+} as const;
 
 /** A media world: the controlled providers and outlets one sweep run uses. */
 export interface MediaWorld {
@@ -821,7 +828,11 @@ export interface InterruptionScenario {
   seed(native: Database): void;
   /** A fresh controlled world for each run. */
   world(): MediaWorld;
-  /** Uninterrupted ticks that build the state the sweep starts from. */
+  /**
+   * Uninterrupted ticks that build the state the sweep starts from. They run
+   * once, until quiescent, into a template every run copies, so they are not
+   * interrupted: they must be ticks another registered scenario sweeps.
+   */
   before?: readonly string[];
   /** Tick options for the `before` ticks; `options` by default. */
   beforeOptions?: MediaTickOptions;
@@ -829,37 +840,56 @@ export interface InterruptionScenario {
   ticks: readonly string[];
   /** Tick options for every tick, such as `paidSubmissionsPerTick`. */
   options?: MediaTickOptions;
+  /**
+   * UTC days a run continues after the swept day when a day stop was
+   * injected or holds a query, paid work still waits, or a fault falls on a
+   * following day.
+   */
+  days: number;
 }
 
-/** What `sweepInterruptions` asserts on each run. */
+/**
+ * Which runs `sweepInterruptions` makes besides the uninterrupted one. Every
+ * run, whatever its faults, is checked for the same invariants:
+ *
+ * - send once: no request identity is sent twice, except under
+ *   `PROCESSING_FETCH_RESENT_AFTER_RESTART`; a request a fault answered with
+ *   HTTP 429 never reached its outlet and is not counted as sent;
+ * - at most one accepted article per entity and query (entity, pass and outlet);
+ * - at most 30 attempts per outlet per UTC day, as recorded and as observed;
+ * - every query a day-scoped stop held at the end of the swept day completes
+ *   on a later day;
+ * - every accepted article is extracted, unless its extraction is uncertain
+ *   (ADR 0018: an item that may have been charged is never resent).
+ */
 export interface InterruptionInvariants {
   /**
-   * (a) Restart after the k-th call of each listed kind: the call reaches its
-   * provider or outlet, the process stops before its outcome is recorded, the
-   * database is reopened, and ticks run until quiescent. No request identity
-   * may be sent more often than in the uninterrupted run, except under
-   * `PROCESSING_FETCH_RESENT_AFTER_RESTART`.
+   * Restart after the k-th swept call of each listed kind: the call reaches
+   * its provider or outlet, the process stops before its outcome is recorded,
+   * the database is reopened, and ticks continue until quiescent.
    */
   restarts?: readonly OutboundKind[];
+  /** An Outlet day stop at the k-th swept outlet fetch: the outlet answers it with HTTP 429. */
+  dayStops?: boolean;
   /**
-   * (b) An Outlet day stop at the k-th outlet fetch (the outlet answers it
-   * with HTTP 429), then the rest of the day and `days` following UTC days.
-   * At most one accepted article per entity and query; at most 30 attempts
-   * per outlet per UTC day; every query a day-scoped stop held reopens and
-   * completes on a later day; every accepted article is still extracted.
+   * Runs that combine an Outlet day stop at a swept outlet fetch with
+   * restarts after the first outlet fetch and the first search of the
+   * following day, for this many evenly spaced day stops.
    */
-  dayStops?: { days: number };
+  combined?: number;
   /** Sweeps at most this many evenly spaced k per kind; every k by default. */
   sample?: number;
 }
 
 /** What one sweep found. `violations` is empty when every invariant held. */
 export interface InterruptionReport {
-  /** Calls of each kind in the uninterrupted run. */
+  /** Calls of each kind in the uninterrupted run's swept ticks. */
   baseline: Record<OutboundKind, number>;
   runs: number;
-  /** Queries a day-scoped stop held across the day-stop runs, each of which had to reopen on a later day. */
+  /** Queries a day-scoped stop held at the end of a swept day, across every run. */
   dayStoppedQueries: number;
+  /** Most attempts recorded on one outlet on one UTC day, across every run. */
+  peakOutletDayAttempts: number;
   /** Requests a run sent again under `PROCESSING_FETCH_RESENT_AFTER_RESTART`. */
   resentUnderException: string[];
   violations: string[];
@@ -883,104 +913,162 @@ function sampled(count: number, limit: number | undefined): number[] {
   return [...new Set(Array.from({ length: limit }, (_, index) => all[Math.round((index * (count - 1)) / Math.max(1, limit - 1))]!))];
 }
 
-function tally(calls: readonly OutboundCall[]): Map<string, number> {
-  const counts = new Map<string, number>();
-  for (const call of calls) counts.set(`${call.kind} ${call.identity}`, (counts.get(`${call.kind} ${call.identity}`) ?? 0) + 1);
-  return counts;
+/**
+ * What a sweep run injects: a restart after, or a 429 to, the k-th call of a
+ * kind, counted from the start of the swept ticks or of the following days.
+ */
+type Fault = { mode: "restart" | "day_stop"; kind: OutboundKind; k: number; phase: "swept" | "following" };
+
+function classifyCall(native: Database, url: string, init?: RequestInit): Omit<OutboundCall, "day"> | null {
+  if (url === "https://api.tavily.com/search") {
+    const body = JSON.parse(String(init?.body)) as { query: string; include_domains: string[] };
+    return { kind: "search", identity: `${body.query}@${body.include_domains[0]}`, domain: body.include_domains[0] };
+  }
+  if (url === "https://openrouter.ai/api/v1/chat/completions") {
+    return { kind: "openrouter", identity: JSON.stringify((JSON.parse(String(init?.body)) as { messages: unknown }).messages) };
+  }
+  if (url.endsWith(":asyncBatchEmbedContent") || url.endsWith(":batchGenerateContent")) {
+    const body = JSON.parse(String(init?.body)) as { batch: { inputConfig?: { requests: { requests: Array<{ metadata: { key: string } }> } }; input_config?: { requests: { requests: Array<{ metadata: { key: string } }> } } } };
+    return { kind: "gemini_submit", identity: (body.batch.inputConfig ?? body.batch.input_config)!.requests.requests[0]!.metadata.key };
+  }
+  if (url.includes("/articles/")) {
+    // An article already accepted as a source is fetched for processing;
+    // any other is a discovery candidate.
+    const source = native.query("SELECT 1 FROM media_sources WHERE original_url = ?1 OR discovery_url = ?1").get(url);
+    return { kind: "outlet_fetch", identity: `${source ? "processing" : "discovery"}:${url}`, domain: new URL(url).hostname };
+  }
+  return null;
 }
 
-/** What a sweep run injects: a restart after, or a 429 to, the k-th call of a kind. */
-type Fault = { mode: "restart" | "day_stop"; kind: OutboundKind; k: number };
-
-/**
- * One run of `scenario` in a fresh database: a fetch that records every
- * outbound call and injects `fault`, the scenario's ticks, then ticks every
- * 15 minutes until one makes no outbound call, and for a day stop the
- * following days the same way.
- */
-async function sweepRun(scenario: InterruptionScenario, fault: Fault | null, days: number) {
-  const database = openTestDatabase("vaporstats-sweep-");
+/** A database and world driven through ticks with every outbound call recorded and `faults` injected. */
+function sweepDriver(database: TestDatabase, scenario: InterruptionScenario, world: MediaWorld, faults: readonly Fault[]) {
+  const apis = { tavily: world.tavily, openRouter: world.openRouter, gemini: world.gemini };
+  const inner = mediaTickFetch(apis, [], world.outlet);
   const calls: OutboundCall[] = [];
   const interrupted: OutboundCall[] = [];
-  const stoppedQueries = new Map<number, string>();
-  try {
-    scenario.seed(database.native);
-    const world = scenario.world();
-    const inner = mediaTickFetch({ tavily: world.tavily, openRouter: world.openRouter, gemini: world.gemini }, [], world.outlet);
-    let injecting = false;
-    let day = "";
-    const counted: Record<OutboundKind, number> = { search: 0, outlet_fetch: 0, openrouter: 0, gemini_submit: 0 };
-    const classify = (url: string, init?: RequestInit): Omit<OutboundCall, "day"> | null => {
-      if (url === "https://api.tavily.com/search") {
-        const body = JSON.parse(String(init?.body)) as { query: string; include_domains: string[] };
-        return { kind: "search", identity: `${body.query}@${body.include_domains[0]}`, domain: body.include_domains[0] };
-      }
-      if (url === "https://openrouter.ai/api/v1/chat/completions") {
-        return { kind: "openrouter", identity: JSON.stringify((JSON.parse(String(init?.body)) as { messages: unknown }).messages) };
-      }
-      if (url.endsWith(":asyncBatchEmbedContent") || url.endsWith(":batchGenerateContent")) {
-        const body = JSON.parse(String(init?.body)) as { batch: { inputConfig?: { requests: { requests: Array<{ metadata: { key: string } }> } }; input_config?: { requests: { requests: Array<{ metadata: { key: string } }> } } } };
-        return { kind: "gemini_submit", identity: (body.batch.inputConfig ?? body.batch.input_config)!.requests.requests[0]!.metadata.key };
-      }
-      if (url.includes("/articles/")) {
-        // An article already accepted as a source is fetched for processing;
-        // any other is a discovery candidate.
-        const source = database.native.query("SELECT 1 FROM media_sources WHERE original_url = ?1 OR discovery_url = ?1").get(url);
-        return { kind: "outlet_fetch", identity: `${source ? "processing" : "discovery"}:${url}`, domain: new URL(url).hostname };
-      }
-      return null;
-    };
-    const customFetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
-      const url = String(input);
-      const call = classify(url, init);
-      if (!call) return inner(input, init);
-      const recorded = { ...call, day };
-      calls.push(recorded);
-      counted[call.kind] += 1;
-      if (fault && injecting && fault.kind === call.kind && counted[call.kind] === fault.k) {
-        if (fault.mode === "day_stop") return new Response("Too Many Requests", { status: 429 });
-        const response = await inner(input, init);
-        await response.arrayBuffer().catch(() => undefined);
-        interrupted.push(recorded);
-        database.reopen();
-        throw new Error("process stopped");
-      }
-      return inner(input, init);
-    }) as typeof fetch;
-    const tick = async (at: string, options = scenario.options) => {
-      day = at.slice(0, 10);
-      const before = calls.length;
-      await runMediaTick(database, { tavily: world.tavily, openRouter: world.openRouter, gemini: world.gemini }, at, { ...options, customFetch });
-      return calls.length - before;
-    };
-    const untilQuiescent = async (from: string) => {
-      let at = from;
-      for (let index = 0; index < QUIESCENCE_TICKS; index += 1) {
-        if ((await tick(at)) === 0) return;
-        at = addMinutes(at, 15);
-      }
-      throw new Error(`${scenario.name}: still making calls ${QUIESCENCE_TICKS} ticks after ${from}`);
-    };
-    for (const at of scenario.before ?? []) await tick(at, scenario.beforeOptions ?? scenario.options);
-    // Only calls in the swept ticks and after them are counted toward k.
-    for (const kind of OUTBOUND_KINDS) counted[kind] = 0;
-    const sweptFrom = calls.length;
-    injecting = true;
-    for (const at of scenario.ticks) await tick(at);
-    const last = scenario.ticks[scenario.ticks.length - 1]!;
-    await untilQuiescent(addMinutes(last, 15));
-    injecting = fault?.mode === "restart";
-    for (const row of database.native.query<{ id: number; stopped_at: string | null; stop_reason: string }, []>(`SELECT id, stopped_at, stop_reason FROM media_discovery_progress WHERE status = 'stopped' AND stop_reason IN (${DAY_SCOPED_STOP_REASONS.map((reason) => `'${reason}'`).join(", ")})`).all()) {
-      stoppedQueries.set(row.id, (row.stopped_at ?? last).slice(0, 10));
+  let phase: Fault["phase"] | null = null;
+  let day = "";
+  const counted = new Map<string, number>();
+  const customFetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const call = classifyCall(database.native, String(input), init);
+    if (!call) return inner(input, init);
+    const recorded = { ...call, day };
+    const key = `${phase} ${call.kind}`;
+    counted.set(key, (counted.get(key) ?? 0) + 1);
+    const fault = faults.find((item) => item.phase === phase && item.kind === call.kind && item.k === counted.get(key));
+    // A 429 the fault answers never reaches the outlet, so it is not a send.
+    if (fault?.mode === "day_stop") return new Response("Too Many Requests", { status: 429 });
+    calls.push(recorded);
+    if (fault?.mode === "restart") {
+      const response = await inner(input, init);
+      await response.arrayBuffer().catch(() => undefined);
+      interrupted.push(recorded);
+      database.reopen();
+      throw new Error("process stopped");
     }
-    for (let offset = 1; offset <= days; offset += 1) await untilQuiescent(nextDayAt(last, offset));
-    const state = {
-      progress: database.native.query<{ id: number; appid: number; pass: string; outlet: string; status: string; stop_reason: string | null; completed_at: string | null }, []>("SELECT id, appid, pass, outlet, status, stop_reason, completed_at FROM media_discovery_progress").all(),
-      admitted: database.native.query<{ appid: number; pass: string; outlet: string; articles: number }, []>("SELECT appid, pass, outlet, COUNT(*) AS articles FROM media_sources GROUP BY appid, pass, outlet HAVING COUNT(*) > 1").all(),
-      attempts: database.native.query<{ outlet: string; day: string; attempts: number }, []>("SELECT outlet, day, COUNT(*) AS attempts FROM media_discovery_attempts GROUP BY outlet, day HAVING COUNT(*) > 30").all(),
-      unextracted: database.native.query<{ original_url: string }, []>("SELECT original_url FROM media_sources AS s WHERE NOT EXISTS (SELECT 1 FROM media_article_extractions AS e WHERE e.source_id = s.id AND e.active = 1)").all(),
-    };
-    return { calls, swept: calls.slice(sweptFrom), interrupted, stoppedQueries, state };
+    return inner(input, init);
+  }) as typeof fetch;
+  const tick = async (at: string, options = scenario.options) => {
+    day = at.slice(0, 10);
+    const before = calls.length;
+    await runMediaTick(database, apis, at, { ...options, customFetch });
+    return calls.length - before;
+  };
+  const untilQuiescent = async (from: string, options = scenario.options) => {
+    let at = from;
+    for (let index = 0; index < QUIESCENCE_TICKS; index += 1) {
+      if ((await tick(at, options)) === 0) return;
+      at = addMinutes(at, 15);
+    }
+    throw new Error(`${scenario.name}: still making calls ${QUIESCENCE_TICKS} ticks after ${from}`);
+  };
+  return {
+    calls,
+    interrupted,
+    tick,
+    untilQuiescent,
+    enter(next: Fault["phase"]) { phase = next; },
+  };
+}
+
+/**
+ * The state every run of `scenario` starts from: seeded, migrated, and
+ * advanced through its `before` ticks until quiescent, with the calls those
+ * ticks made. No batch may be left submitted, since each run's world is new.
+ */
+async function sweepTemplate(scenario: InterruptionScenario): Promise<{ database: TestDatabase; calls: OutboundCall[] }> {
+  const database = openTestDatabase("vaporstats-sweep-template-");
+  scenario.seed(database.native);
+  const driver = sweepDriver(database, scenario, scenario.world(), []);
+  const before = scenario.before ?? [];
+  for (const at of before) await driver.tick(at, scenario.beforeOptions ?? scenario.options);
+  if (before.length > 0) await driver.untilQuiescent(addMinutes(before[before.length - 1]!, 15), scenario.beforeOptions ?? scenario.options);
+  if (database.native.query("SELECT 1 FROM media_processing_jobs WHERE status = 'submitted'").get()) throw new Error(`${scenario.name}: a batch is still submitted after the before ticks`);
+  return { database, calls: driver.calls };
+}
+
+/** One run of `scenario` from its template, with `faults`, checked for every invariant. */
+async function sweepRun(template: { database: TestDatabase; calls: OutboundCall[] }, scenario: InterruptionScenario, faults: readonly Fault[], label: string) {
+  const database = copyTestDatabase(template.database, "vaporstats-sweep-");
+  const violations: string[] = [];
+  try {
+    const driver = sweepDriver(database, scenario, scenario.world(), faults);
+    driver.enter("swept");
+    for (const at of scenario.ticks) await driver.tick(at);
+    const last = scenario.ticks[scenario.ticks.length - 1]!;
+    await driver.untilQuiescent(addMinutes(last, 15));
+    const swept = [...driver.calls];
+    const stopped = database.native.query<{ id: number; stopped_at: string | null }, []>(`SELECT id, stopped_at FROM media_discovery_progress WHERE status = 'stopped' AND stop_reason IN (${DAY_SCOPED_STOP_REASONS.map((reason) => `'${reason}'`).join(", ")})`).all();
+    // The following days exist to reopen what a day stop held (queries and
+    // paid work alike), to finish waiting work, and to host following-day
+    // faults; with none of these, they would only repeat what the scenario
+    // that sweeps those days already checks.
+    driver.enter("following");
+    const held = stopped.length > 0
+      || faults.some((fault) => fault.mode === "day_stop" || fault.phase === "following")
+      || database.native.query("SELECT 1 FROM media_processing_jobs WHERE status = 'queued' AND retained = 0").get() !== null;
+    const following = held ? scenario.days : 0;
+    for (let offset = 1; offset <= following; offset += 1) await driver.untilQuiescent(nextDayAt(last, offset));
+    const { native } = database;
+
+    // Send once.
+    const allowance = new Map<string, number>();
+    for (const call of driver.interrupted) {
+      if (PROCESSING_FETCH_RESENT_AFTER_RESTART.applies(call)) allowance.set(`${call.kind} ${call.identity}`, (allowance.get(`${call.kind} ${call.identity}`) ?? 0) + PROCESSING_FETCH_RESENT_AFTER_RESTART.perRestart);
+    }
+    const sent = new Map<string, number>();
+    for (const call of [...template.calls, ...driver.calls]) sent.set(`${call.kind} ${call.identity}`, (sent.get(`${call.kind} ${call.identity}`) ?? 0) + 1);
+    const resentUnderException: string[] = [];
+    for (const [identity, count] of sent) {
+      const limit = 1 + (allowance.get(identity) ?? 0);
+      if (count > limit) violations.push(`${label}: ${identity.slice(0, 160)} sent ${count} times, at most ${limit} allowed`);
+      else if (count > 1) resentUnderException.push(`${label}: ${PROCESSING_FETCH_RESENT_AFTER_RESTART.name}: ${identity}`);
+    }
+    // One accepted article per entity and query.
+    for (const row of native.query<{ appid: number; pass: string; outlet: string; articles: number }, []>("SELECT appid, pass, outlet, COUNT(*) AS articles FROM media_sources GROUP BY appid, pass, outlet HAVING COUNT(*) > 1").all()) {
+      violations.push(`${label}: ${row.articles} articles accepted for ${row.appid} ${row.pass}@${row.outlet}`);
+    }
+    // At most 30 attempts per outlet per UTC day.
+    const recorded = native.query<{ outlet: string; day: string; attempts: number }, []>("SELECT outlet, day, COUNT(*) AS attempts FROM media_discovery_attempts GROUP BY outlet, day").all();
+    for (const row of recorded) if (row.attempts > 30) violations.push(`${label}: ${row.attempts} recorded attempts on ${row.outlet} on ${row.day}`);
+    const observed = new Map<string, number>();
+    for (const call of driver.calls) if (call.domain) observed.set(`${call.domain} ${call.day}`, (observed.get(`${call.domain} ${call.day}`) ?? 0) + 1);
+    for (const [key, count] of observed) if (count > 30) violations.push(`${label}: ${count} searches and fetches for ${key}`);
+    // Every day-stopped query reopens and completes on a later day.
+    for (const { id, stopped_at } of stopped) {
+      const stopDay = (stopped_at ?? last).slice(0, 10);
+      const row = native.query<{ appid: number; pass: string; outlet: string; status: string; stop_reason: string | null; completed_at: string | null }, [number]>("SELECT appid, pass, outlet, status, stop_reason, completed_at FROM media_discovery_progress WHERE id = ?").get(id);
+      if (!row || row.status !== "completed" || !row.completed_at || row.completed_at.slice(0, 10) <= stopDay) {
+        violations.push(`${label}: query ${row ? `${row.appid} ${row.pass}@${row.outlet}` : id} day-stopped on ${stopDay} ended ${row?.status ?? "missing"}${row?.stop_reason ? ` (${row.stop_reason})` : ""}`);
+      }
+    }
+    // Every accepted article is extracted, unless its extraction is uncertain.
+    for (const { original_url } of native.query<{ original_url: string }, []>("SELECT original_url FROM media_sources AS s WHERE NOT EXISTS (SELECT 1 FROM media_article_extractions AS e WHERE e.source_id = s.id AND e.active = 1) AND NOT EXISTS (SELECT 1 FROM media_processing_jobs AS j WHERE j.source_id = s.id AND j.stage = 'extraction' AND j.status = 'uncertain')").all()) {
+      violations.push(`${label}: accepted ${original_url} was never extracted`);
+    }
+    return { swept, violations, resentUnderException, dayStopped: stopped.length, peak: Math.max(0, ...recorded.map(({ attempts }) => attempts)) };
+  } catch (error) {
+    return { swept: [], violations: [`${label}: ${error instanceof Error ? error.message : String(error)}`], resentUnderException: [], dayStopped: 0, peak: 0 };
   } finally {
     database.cleanup();
   }
@@ -988,77 +1076,45 @@ async function sweepRun(scenario: InterruptionScenario, fault: Fault | null, day
 
 /**
  * Runs `scenario` once uninterrupted, then once per fault that `invariants`
- * selects, each in a fresh temporary database, and reports every invariant
- * a run broke. A scenario's world must answer every request successfully,
- * so the uninterrupted run sends each request the expected number of times.
+ * selects, each in a copy of one template database, and reports every
+ * invariant a run broke. A scenario's world must answer every request
+ * successfully, so only the injected faults interrupt it.
  */
 export async function sweepInterruptions(scenario: InterruptionScenario, invariants: InterruptionInvariants): Promise<InterruptionReport> {
-  const violations: string[] = [];
-  const baselineRun = await sweepRun(scenario, null, 0);
-  const swept = baselineRun.swept;
-  const baseline = Object.fromEntries(OUTBOUND_KINDS.map((kind) => [kind, swept.filter((call) => call.kind === kind).length])) as Record<OutboundKind, number>;
-  const expected = tally(baselineRun.calls);
-  for (const [identity, count] of expected) {
-    if (count > 1 && (identity.startsWith("search ") || identity.startsWith("outlet_fetch discovery:") || identity.startsWith("gemini_submit "))) {
-      violations.push(`${scenario.name}, uninterrupted: ${identity} sent ${count} times`);
-    }
-  }
-  let runs = 1;
-  const resentUnderException: string[] = [];
-  for (const kind of invariants.restarts ?? []) {
-    for (const k of sampled(baseline[kind], invariants.sample)) {
-      const label = `${scenario.name}, restart after ${kind} #${k}`;
-      runs += 1;
-      let run;
-      try {
-        run = await sweepRun(scenario, { mode: "restart", kind, k }, 0);
-      } catch (error) {
-        violations.push(`${label}: ${error instanceof Error ? error.message : String(error)}`);
-        continue;
-      }
-      const allowance = new Map<string, number>();
-      for (const call of run.interrupted) {
-        // PROCESSING_FETCH_RESENT_AFTER_RESTART
-        if (call.kind === "outlet_fetch" && call.identity.startsWith("processing:")) allowance.set(`${call.kind} ${call.identity}`, (allowance.get(`${call.kind} ${call.identity}`) ?? 0) + 1);
-      }
-      for (const [identity, count] of tally(run.calls)) {
-        // An identity the uninterrupted run never sent, such as an Overview
-        // over a different set of articles, may be sent once.
-        const limit = (expected.get(identity) ?? 1) + (allowance.get(identity) ?? 0);
-        if (count > limit) violations.push(`${label}: ${identity.slice(0, 160)} sent ${count} times, at most ${limit} allowed`);
-        else if (count > (expected.get(identity) ?? 1)) resentUnderException.push(`${label}: ${identity}`);
+  const template = await sweepTemplate(scenario);
+  try {
+    const results = [await sweepRun(template, scenario, [], `${scenario.name}, uninterrupted`)];
+    const swept = results[0]!.swept;
+    const baseline = Object.fromEntries(OUTBOUND_KINDS.map((kind) => [kind, swept.filter((call) => call.kind === kind).length])) as Record<OutboundKind, number>;
+    for (const kind of invariants.restarts ?? []) {
+      for (const k of sampled(baseline[kind], invariants.sample)) {
+        results.push(await sweepRun(template, scenario, [{ mode: "restart", kind, k, phase: "swept" }], `${scenario.name}, restart after ${kind} #${k}`));
       }
     }
-  }
-  let dayStoppedQueries = 0;
-  if (invariants.dayStops) {
-    const outletFetches = swept.filter((call) => call.kind === "outlet_fetch").length;
-    for (const k of sampled(outletFetches, invariants.sample)) {
-      const label = `${scenario.name}, day stop at outlet fetch #${k}`;
-      runs += 1;
-      let run;
-      try {
-        run = await sweepRun(scenario, { mode: "day_stop", kind: "outlet_fetch", k }, invariants.dayStops.days);
-      } catch (error) {
-        violations.push(`${label}: ${error instanceof Error ? error.message : String(error)}`);
-        continue;
+    if (invariants.dayStops) {
+      for (const k of sampled(baseline.outlet_fetch, invariants.sample)) {
+        results.push(await sweepRun(template, scenario, [{ mode: "day_stop", kind: "outlet_fetch", k, phase: "swept" }], `${scenario.name}, day stop at outlet fetch #${k}`));
       }
-      for (const row of run.state.admitted) violations.push(`${label}: ${row.articles} articles accepted for ${row.appid} ${row.pass}@${row.outlet}`);
-      for (const row of run.state.attempts) violations.push(`${label}: ${row.attempts} recorded attempts on ${row.outlet} on ${row.day}`);
-      const observed = new Map<string, number>();
-      for (const call of run.calls) if (call.domain) observed.set(`${call.domain} ${call.day}`, (observed.get(`${call.domain} ${call.day}`) ?? 0) + 1);
-      for (const [key, count] of observed) if (count > 30) violations.push(`${label}: ${count} searches and fetches for ${key}`);
-      dayStoppedQueries += run.stoppedQueries.size;
-      for (const [id, stopDay] of run.stoppedQueries) {
-        const row = run.state.progress.find((item) => item.id === id);
-        if (!row || row.status !== "completed" || !row.completed_at || row.completed_at.slice(0, 10) <= stopDay) {
-          violations.push(`${label}: query ${row ? `${row.appid} ${row.pass}@${row.outlet}` : id} day-stopped on ${stopDay} ended ${row?.status ?? "missing"}${row?.stop_reason ? ` (${row.stop_reason})` : ""}`);
-        }
-      }
-      for (const { original_url } of run.state.unextracted) violations.push(`${label}: accepted ${original_url} was never extracted`);
     }
+    for (const k of sampled(baseline.outlet_fetch, invariants.combined ?? 0)) {
+      if (!invariants.combined) break;
+      results.push(await sweepRun(template, scenario, [
+        { mode: "day_stop", kind: "outlet_fetch", k, phase: "swept" },
+        { mode: "restart", kind: "outlet_fetch", k: 1, phase: "following" },
+        { mode: "restart", kind: "search", k: 1, phase: "following" },
+      ], `${scenario.name}, day stop at outlet fetch #${k}, then restarts after the next day's first outlet fetch and first search`));
+    }
+    return {
+      baseline,
+      runs: results.length,
+      dayStoppedQueries: results.reduce((sum, result) => sum + result.dayStopped, 0),
+      peakOutletDayAttempts: Math.max(...results.map((result) => result.peak)),
+      resentUnderException: results.flatMap((result) => result.resentUnderException),
+      violations: results.flatMap((result) => result.violations),
+    };
+  } finally {
+    template.database.cleanup();
   }
-  return { baseline, runs, dayStoppedQueries, resentUnderException, violations };
 }
 
 function experimentArticleUrl(appid: number, domain: string, suffix = ""): string {

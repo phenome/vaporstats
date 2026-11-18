@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import type { Database } from "bun:sqlite";
 import {
   BALDURS_GATE,
   CYBERPUNK,
@@ -12,19 +13,30 @@ import {
   type OutboundKind,
 } from "./support/media";
 
-// Restart and Outlet day stop sweeps at the ingestion-tick seam. Each run uses
-// its own temporary SQLite file and controlled providers and outlets; nothing
-// reaches a real provider. A scenario with a known defect is registered with
-// `knownFailure` and runs as `test.failing`, so it reports once fixed.
+// Restart and Outlet day stop sweeps at the ingestion-tick seam. Each run
+// copies one migrated template database and uses controlled providers and
+// outlets; nothing reaches a real provider. A scenario with a known defect is
+// registered with `knownFailure` and runs as `test.failing`, so it reports
+// once fixed.
 
 const EXPERIMENT = [BALDURS_GATE, CYBERPUNK, HADES_II];
 const at = (time: string, day = "2026-11-20") => `${day}T${time}:00.000Z`;
 const EVERY_KIND: readonly OutboundKind[] = ["search", "outlet_fetch", "openrouter", "gemini_submit"];
+const FIRST_DAY = [at("06:00"), at("06:15")];
+
+/** Attempts IGN already used on 2026-11-20 in the near-cap scenario, before its first tick. */
+const IGN_ATTEMPTS_USED = 25;
+
+function seedNearIgnCap(native: Database): void {
+  seedApps(native, EXPERIMENT);
+  const insert = native.prepare("INSERT INTO media_discovery_attempts (appid, outlet, pass, day, kind, url, status_code, succeeded, attempted_at) VALUES (?, 'IGN', 'initial', '2026-11-20', 'fetch', ?, 200, 1, '2026-11-20T01:00:00.000Z')");
+  for (let index = 0; index < IGN_ATTEMPTS_USED; index += 1) insert.run(CYBERPUNK, `https://ign.com/articles/earlier-${index}`);
+}
 
 interface Registered {
   scenario: InterruptionScenario;
   invariants: InterruptionInvariants;
-  /** Calls of each kind the uninterrupted run makes, so a sweep never passes by sweeping nothing. */
+  /** Calls of each kind the uninterrupted run's swept ticks make, so a sweep never passes by sweeping nothing. */
   baseline: Record<OutboundKind, number>;
   /** Why this scenario currently breaks an invariant; it then runs as `test.failing`. */
   knownFailure?: string;
@@ -32,37 +44,28 @@ interface Registered {
 
 const SCENARIOS: Registered[] = [
   {
-    // The first daily media run: 18 initial queries, 18 discovery and 18
-    // processing fetches, 18 extractions and 3 Overviews, 3 embeddings.
-    scenario: {
-      name: "initial pass",
-      seed: (native) => seedApps(native, EXPERIMENT),
-      world: experimentWorld,
-      ticks: [at("06:00"), at("06:15")],
-    },
-    invariants: { restarts: EVERY_KIND, dayStops: { days: 2 } },
+    // The first daily media run: 18 initial queries, three candidates each
+    // (54 discovery fetches), 18 processing fetches, 18 extractions and 3
+    // Overviews, 3 embeddings. The following day takes the later passes.
+    scenario: { name: "initial pass", seed: (native) => seedApps(native, EXPERIMENT), world: experimentWorld, ticks: FIRST_DAY, days: 1 },
+    invariants: { restarts: EVERY_KIND, dayStops: true, combined: 3 },
     baseline: { search: 18, outlet_fetch: 72, openrouter: 21, gemini_submit: 3 },
   },
   {
     // The next daily media run takes the experiment games' later passes: 18
-    // later queries, then their articles' extractions and new Overviews. The
-    // controlled Overviews keep their similarity inputs, so no embedding is
-    // submitted again.
-    scenario: {
-      name: "later pass",
-      seed: (native) => seedApps(native, EXPERIMENT),
-      world: experimentWorld,
-      before: [at("06:00"), at("06:15")],
-      ticks: [at("06:00", "2026-11-21"), at("06:15", "2026-11-21")],
-    },
-    invariants: { restarts: EVERY_KIND, dayStops: { days: 2 } },
+    // later queries, three candidates each (54 discovery fetches), 18
+    // processing fetches, 18 extractions and 3 new Overviews. The controlled
+    // Overviews keep their similarity inputs, so no embedding is submitted
+    // again. Its `before` ticks are the initial-pass scenario's swept ticks.
+    scenario: { name: "later pass", seed: (native) => seedApps(native, EXPERIMENT), world: experimentWorld, before: FIRST_DAY, ticks: [at("06:00", "2026-11-21"), at("06:15", "2026-11-21")], days: 1 },
+    invariants: { restarts: EVERY_KIND, dayStops: true, combined: 2 },
     baseline: { search: 18, outlet_fetch: 72, openrouter: 21, gemini_submit: 0 },
   },
   {
-    // Discovery accepts every article while no paid request may be sent;
-    // the queue then takes three items per provider a tick, so restarts fall
-    // between and within ticks of OpenRouter text requests and Gemini
-    // embedding submissions.
+    // Discovery accepts every article while no paid request may be sent; the
+    // queue then takes three items per provider a tick, so day stops fall
+    // on processing fetches spread across ticks. Restarts during paid work
+    // are swept by the initial-pass scenario.
     scenario: {
       name: "paid processing on both providers",
       seed: (native) => seedApps(native, EXPERIMENT),
@@ -71,31 +74,50 @@ const SCENARIOS: Registered[] = [
       beforeOptions: { paidSubmissionsPerTick: 0 },
       ticks: [at("06:15"), at("06:30"), at("06:45"), at("07:00"), at("07:15"), at("07:30"), at("07:45")],
       options: { paidSubmissionsPerTick: 3 },
+      days: 1,
     },
-    invariants: { restarts: ["outlet_fetch", "openrouter", "gemini_submit"], dayStops: { days: 2 } },
+    invariants: { dayStops: true, combined: 2 },
     baseline: { search: 0, outlet_fetch: 18, openrouter: 21, gemini_submit: 3 },
+  },
+  {
+    // IGN has used 25 of its 30 attempts on 2026-11-20 before the first
+    // daily media run. Its last 5 serve Baldur's Gate 3's search and three
+    // candidate fetches and Cyberpunk 2077's search; the cap then holds
+    // Cyberpunk 2077's IGN query, Hades II's (never searched) and Baldur's
+    // Gate 3's IGN processing fetch until the next day. So the swept day
+    // makes 17 searches, 48 discovery and 15 processing fetches, 15
+    // extractions and the 2 Overviews whose games have no waiting extraction,
+    // and their 2 embeddings. Restarts and day stops around the cap must keep it.
+    scenario: { name: "near IGN's daily attempt cap", seed: seedNearIgnCap, world: experimentWorld, ticks: FIRST_DAY, days: 1 },
+    invariants: { restarts: ["search", "outlet_fetch"], dayStops: true, combined: 2, sample: 12 },
+    baseline: { search: 17, outlet_fetch: 63, openrouter: 17, gemini_submit: 2 },
   },
 ];
 
 describe("interruption sweeps", () => {
+  test("a scenario's before ticks are ticks another registered scenario sweeps, since the sweep never interrupts them", () => {
+    for (const { scenario } of SCENARIOS) {
+      if (!scenario.before) continue;
+      expect(SCENARIOS.some(({ scenario: other }) => other !== scenario && scenario.before!.every((tick) => other.ticks.includes(tick)))).toBe(true);
+    }
+  });
+
   for (const { scenario, invariants, baseline, knownFailure } of SCENARIOS) {
     const run = knownFailure ? test.failing : test;
-    run(`${scenario.name}: ${[invariants.restarts ? "no request is sent twice across a restart after any outbound call" : null, invariants.dayStops ? "an Outlet day stop at any outlet fetch keeps the per-query, per-day and reopening invariants" : null].filter(Boolean).join("; ")}${knownFailure ? ` (known failure: ${knownFailure})` : ""}`, async () => {
+    const faults = [invariants.restarts ? `a restart after any ${invariants.restarts.join(", ")} call` : null, invariants.dayStops ? "an Outlet day stop at any outlet fetch" : null, invariants.combined ? "both at once" : null].filter(Boolean).join(", ");
+    run(`${scenario.name}: send once, one article per query, the daily attempt cap, reopening and extraction hold across ${faults}${knownFailure ? ` (known failure: ${knownFailure})` : ""}`, async () => {
       const report = await sweepInterruptions(scenario, invariants);
       expect(report.baseline).toEqual(baseline);
       expect(report.violations).toEqual([]);
-      // Discovery fetches answered 429 hold their queries, which shows the day-stop sweep checks reopening at all.
-      if (invariants.dayStops && baseline.search > 0) expect(report.dayStoppedQueries).toBeGreaterThan(0);
       // A restart during a processing fetch resends it under the one named
       // exception, which shows the sweep observes resends at all.
-      if (invariants.restarts?.includes("outlet_fetch") && baseline.outlet_fetch > 0) {
+      if (invariants.restarts?.includes("outlet_fetch") && baseline.openrouter > 0) {
         expect(report.resentUnderException.length).toBeGreaterThan(0);
-        expect(report.resentUnderException.every((resend) => resend.includes("outlet_fetch processing:"))).toBe(true);
+        expect(report.resentUnderException.every((resend) => resend.includes(PROCESSING_FETCH_RESENT_AFTER_RESTART.name))).toBe(true);
       }
+      // Day stops hold queries, which shows the reopening check runs at all.
+      if (invariants.dayStops && baseline.search > 0) expect(report.dayStoppedQueries).toBeGreaterThan(0);
+      if (scenario.seed === seedNearIgnCap) expect(report.peakOutletDayAttempts).toBe(30);
     }, 600_000);
   }
-
-  test("the processing-fetch exception is the only one, and it is named once", () => {
-    expect(PROCESSING_FETCH_RESENT_AFTER_RESTART).toContain("ADR 0020");
-  });
 });
