@@ -473,6 +473,24 @@ async function qualifiesForLaterPass(db: AppDatabase, source: MediaSource): Prom
   return initial.every((row) => row.published_at === null || Date.parse(row.published_at) < Date.parse(publishedAt));
 }
 
+/**
+ * The entities a query of `pass` on `outlet` already admitted an article for
+ * from its `considered` candidates. A query admits only articles found
+ * through its own candidates, and records each one's candidate URL as its
+ * discovery URL.
+ */
+async function admittedEntities(db: AppDatabase, pass: MediaPass, outlet: MediaOutlet, considered: readonly Candidate[]): Promise<Set<number>> {
+  if (considered.length === 0) return new Set();
+  const admitted = await rows<{ appid: number }>(
+    db,
+    "SELECT DISTINCT appid FROM media_sources WHERE pass = ? AND outlet = ? AND discovery_url IN (SELECT value FROM json_each(?))",
+    pass,
+    outlet,
+    JSON.stringify(considered.map(({ url }) => url)),
+  );
+  return new Set(admitted.map(({ appid }) => appid));
+}
+
 /** The one query an entity's pass sends to each outlet's domain. */
 function passQuery(target: MediaTarget, pass: MediaPass): string {
   return pass === "initial" ? `${target.name} review preview` : `${target.name} review revisited`;
@@ -1001,6 +1019,10 @@ export async function runAuthorizedMediaDiscovery(db: AppDatabase, options: Medi
           await db.prepare("UPDATE media_discovery_runs SET query_count = query_count + 1, provider_request_ids = json_insert(provider_request_ids, '$[#]', ?), usage = json_patch(usage, ?) WHERE id = ?").bind(providerRequestId, JSON.stringify(usage), run.id).run();
         }
         const selections = new Map<number, { review: MediaSource | null; preview: MediaSource | null }>();
+        // Each query admits at most one article per entity, across resumes: an
+        // entity this query already admitted an article for, before an Outlet
+        // day stop held it, admits no other.
+        const admitted = await admittedEntities(db, pass, outlet.name, candidates.slice(0, index));
         for (; index < candidates.length; index += 1) {
           // A later candidate already among the entity's sources is not fetched again.
           if (pass === "later" && await first<{ id: number }>(db, "SELECT id FROM media_sources WHERE appid = ? AND (original_url = ? OR discovery_url = ?) LIMIT 1", appid, candidates[index]!.url, candidates[index]!.url)) {
@@ -1023,6 +1045,7 @@ export async function runAuthorizedMediaDiscovery(db: AppDatabase, options: Medi
           if (!source) continue;
           source.discoveryUrl = candidates[index]!.url;
           if (pass === "later" && !await qualifiesForLaterPass(db, source)) continue;
+          if (admitted.has(source.appid)) continue;
           const selection = selections.get(source.appid) ?? { review: null, preview: null };
           if (source.type === "review") {
             selection.review = !selection.review || candidateDate(source) < candidateDate(selection.review) ? source : selection.review;

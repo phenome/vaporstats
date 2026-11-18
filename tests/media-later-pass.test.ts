@@ -301,6 +301,46 @@ describe("later-pass article rules", () => {
   });
 });
 
+describe("one article per entity and query across resumes", () => {
+  // IGN's query for Cyberpunk 2077 finds three reviews; the second meets a
+  // rate limit, an Outlet day stop, after the first was selected.
+  const stoppedQuery = (suffix: string, dates: [string, string]) => {
+    const { tavily, page, pages, tick } = world();
+    const [first, limited, third] = ["-a", "-b", "-c"].map((slug) => articleUrl(CYBERPUNK, IGN, `${suffix}${slug}`));
+    page(first!, reviewPage(CYBERPUNK, "Cyberpunk 2077 Review", { date: dates[0] }));
+    pages.set(limited!, () => new Response("Too Many Requests", { status: 429 }));
+    page(third!, reviewPage(CYBERPUNK, "Cyberpunk 2077 Review", { date: dates[1] }));
+    return { tavily, tick, urls: [first!, limited!, third!] };
+  };
+
+  test("an initial query that admitted an article for an entity before an Outlet day stop admits no other article for it when it resumes", async () => {
+    const database = experimentCatalog();
+    const { tavily, tick, urls } = stoppedQuery("-initial", ["2026-11-10T00:00:00.000Z", "2026-11-08T00:00:00.000Z"]);
+    const answer = tavily.results!;
+    tavily.results = (search) => search.appid === CYBERPUNK && search.domain === IGN.domain ? urls.map((url) => ({ url })) : answer(search);
+
+    await tick(database, "2026-11-20T06:00:00.000Z");
+    await tick(database, "2026-11-21T06:00:00.000Z");
+
+    const ign = (await detail(database, CYBERPUNK)).sources.filter(({ outlet }) => outlet === "IGN").map(({ originalUrl }) => originalUrl);
+    expect(ign).toEqual([urls[0]]);
+  });
+
+  test("a later query that admitted an article for an entity before an Outlet day stop admits no other article for it when it resumes", async () => {
+    const database = experimentCatalog();
+    const { tavily, tick, urls } = stoppedQuery("-later", ["2026-11-19T00:00:00.000Z", "2026-11-18T00:00:00.000Z"]);
+    const answer = tavily.results!;
+    tavily.results = (search) => search.appid === CYBERPUNK && search.domain === IGN.domain && search.query.includes("revisited") ? urls.map((url) => ({ url })) : answer(search);
+
+    await tick(database, "2026-11-20T06:00:00.000Z");
+    await tick(database, "2026-11-21T06:00:00.000Z");
+    await tick(database, "2026-11-22T06:00:00.000Z");
+
+    const ign = (await detail(database, CYBERPUNK)).sources.filter(({ outlet }) => outlet === "IGN").map(({ originalUrl }) => originalUrl);
+    expect(ign).toEqual([articleUrl(CYBERPUNK, IGN), urls[0]]);
+  });
+});
+
 describe("later articles in processing and results", () => {
   test("later articles feed synthesis, the Overview evidence map, Sources, citations and tag results without counting as additional outlet endorsements", async () => {
     const database = experimentCatalog();

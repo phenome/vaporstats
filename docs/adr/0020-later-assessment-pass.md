@@ -23,7 +23,7 @@ Each enrolled entity gets one initial and one later assessment pass. The later p
 
 Under the decision of 2026-11-17 recorded on #75, an outlet whose initial article for the entity is undated still has later articles collected, dated or not, under the same URL, exact-subject and article-type rules. The order between such an initial article and a later one stays unknown and is never inferred.
 
-Like the initial pass, each query admits at most one article per entity: a review before a preview, the earliest dated first, and undated last.
+Like the initial pass, each query admits at most one article per entity: a review before a preview, the earliest dated first, and undated last. This holds across resumes: when an Outlet day stop holds a query after it admitted an entity's article, the query resumes on a later UTC day without admitting another article for that entity.
 
 **Both passes feed results.** Processing, synthesis, the Overview's evidence map, Sources, citations and tag results read sources from both passes. Synthesis receives each article's pass and treats a missing publication date as unknown. A same-outlet later article counts toward its outlet's support once, so it never adds an outlet endorsement. Sources list dated articles by publication date and undated articles after them, never placed in time by their retrieval. The synthesis configuration version changes with this wording; under the rule of [#67](https://github.com/phenome/vaporstats/issues/67), that change alone queues no work.
 
