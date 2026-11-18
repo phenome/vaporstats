@@ -392,7 +392,7 @@ describe("bounded Gemini media processing", () => {
     expect(transport.submissions).toHaveLength(2);
   });
 
-  test("marks submission failures uncertain and does not retry them", async () => {
+  test("marks a submission in flight uncertain, and a connection lost after sending returns it to the queue with backoff", async () => {
     const value = fixture(); cleanups.push(value.cleanup);
     await authorizeMediaProcessing(value.db, value.runId);
     let observedDuringSubmit: string | null = null;
@@ -402,16 +402,18 @@ describe("bounded Gemini media processing", () => {
       observedDuringSubmit = job?.status ?? null;
     };
     transport.throwSubmission = true;
-    const first = await advanceMediaProcessing(value.db, { runId: value.runId, transport, openRouter: transport.openRouter, articleFetch: async () => articleHtml(APPIDS[0]) });
+    const now = new Date("2026-11-18T07:00:00.000Z");
+    const first = await advanceMediaProcessing(value.db, { runId: value.runId, now, transport, openRouter: transport.openRouter, articleFetch: async () => articleHtml(APPIDS[0]) });
     expect(String(observedDuringSubmit)).toBe("uncertain");
     expect(first.uncertain).toBe(1);
     transport.throwSubmission = false;
-    const second = await advanceMediaProcessing(value.db, { runId: value.runId, transport, openRouter: transport.openRouter, articleFetch: async () => articleHtml(APPIDS[0]) });
+    // The backoff holds it for one tick.
+    const second = await advanceMediaProcessing(value.db, { runId: value.runId, now: new Date("2026-11-18T07:05:00.000Z"), transport, openRouter: transport.openRouter, articleFetch: async () => articleHtml(APPIDS[0]) });
     expect(second.submitted).toBe(0);
     expect(transport.submissions).toHaveLength(0);
-    const job = await value.db.prepare("SELECT status, reservation_active FROM media_processing_jobs LIMIT 1").first<{ status: string; reservation_active: number }>();
+    const job = await value.db.prepare("SELECT status, error, next_attempt_at, reservation_active FROM media_processing_jobs LIMIT 1").first();
     // New work reserves nothing: the provider's credit limit bounds spend.
-    expect(job).toEqual({ status: "uncertain", reservation_active: 0 });
+    expect(job).toEqual({ status: "queued", error: "uncertain:no_response", next_attempt_at: "2026-11-18T07:15:00.000Z", reservation_active: 0 });
   });
 
   test("text answers scripted on the controlled transport reach processing through the real OpenRouter transport and classifier", async () => {
@@ -426,7 +428,7 @@ describe("bounded Gemini media processing", () => {
 
     expect(summary.uncertain).toBe(1);
     expect(value.native.query("SELECT status, error, generation_id, charged_microusd FROM media_processing_jobs").all()).toEqual([
-      { status: "uncertain", error: "uncertain:accepted_http_502", generation_id: "gen-accepted", charged_microusd: 10 },
+      { status: "queued", error: "uncertain:accepted_http_502", generation_id: "gen-accepted", charged_microusd: 10 },
     ]);
   });
 
@@ -720,7 +722,7 @@ describe("bounded Gemini media processing", () => {
   });
 
 
-  test("keeps authorization waiting while an uncertain reservation remains", async () => {
+  test("an item held uncertain before uncertain items were resent returns to the queue with backoff and keeps its authorization waiting", async () => {
     const value = fixture(); cleanups.push(value.cleanup);
     await authorizeMediaProcessing(value.db, value.runId);
     await value.db.prepare("DELETE FROM media_sources WHERE appid = ?").bind(APPIDS[0]).run();
@@ -728,12 +730,13 @@ describe("bounded Gemini media processing", () => {
       "INSERT INTO media_game_overviews (appid, input_identity, model, config_version, output_json, active) VALUES (?, ?, ?, ?, ?, 1)",
     ).bind(APPIDS[0], "uncertain-overview-input", "test-model", "test-config", "{}").run();
     await value.db.prepare(
-      "INSERT INTO media_processing_jobs (run_id, stage, appid, request_key, input_identity, model, config_version, max_input_tokens, max_output_tokens, reserved_microusd, reservation_active, status, usage_json) VALUES (?, 'extraction', ?, 'uncertain-job', 'uncertain-input', 'test-model', 'test-config', 1, 1, 1234, 1, 'uncertain', '{}')",
+      "INSERT INTO media_processing_jobs (run_id, stage, appid, request_key, input_identity, model, config_version, max_input_tokens, max_output_tokens, reserved_microusd, reservation_active, status, usage_json, error) VALUES (?, 'extraction', ?, 'uncertain-job', 'uncertain-input', 'test-model', 'test-config', 1, 1, 1234, 1, 'uncertain', '{}', 'uncertain:timeout')",
     ).bind(value.runId, APPIDS[0]).run();
 
     const transport = new ControlledTransport();
     const result = await advanceMediaProcessing(value.db, {
       runId: value.runId,
+      now: new Date("2026-11-18T07:00:00.000Z"),
       transport, openRouter: transport.openRouter,
       articleFetch: async () => articleHtml(APPIDS[0]),
     });
@@ -748,7 +751,8 @@ describe("bounded Gemini media processing", () => {
       overviewAppids: [APPIDS[0]],
       cost: { uncertain: 1, providers: { gemini: { allTimeMicrousd: 0 } } },
     });
-    expect(authorization).toEqual({ status: "waiting", stop_reason: null });
+    expect(value.native.query("SELECT status, attempt_count, next_attempt_at, error FROM media_processing_jobs WHERE request_key = 'uncertain-job'").get()).toEqual({ status: "queued", attempt_count: 1, next_attempt_at: "2026-11-18T07:15:00.000Z", error: "uncertain:timeout" });
+    expect(authorization).toEqual({ status: "waiting", stop_reason: "uncertain_submission" });
     expect(transport.submissions).toHaveLength(0);
   });
   test("polls existing submitted work without a queued authorization", async () => {

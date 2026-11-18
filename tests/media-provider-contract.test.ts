@@ -114,7 +114,7 @@ describe("paid-provider classifier contract", () => {
 // provider with `unrecognized_client_error` until the next daily check, and
 // never refuses an item.
 describe("unrecognized 4xx answers pause the provider", () => {
-  const paused = { class: "missing_configuration", reason: "unrecognized_client_error" };
+  const paused: ProviderOutcome = { class: "missing_configuration", reason: "unrecognized_client_error" };
   for (const status of [405, 409, 410, 413, 422]) {
     test(`Gemini submit ${status} pauses Gemini and refuses nothing`, async () => {
       expect(await geminiOutcome({ call: "submit", reply: { status, body: { error: { code: status, message: "Unrecognized" } } } })).toEqual(paused);

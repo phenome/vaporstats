@@ -71,6 +71,13 @@ function embeddingJobs(database: TestDatabase) {
   return jobs(database).filter((job) => job.stage === "embedding");
 }
 
+/** Every recorded attempt of Gemini's embedding items, in order. */
+function geminiAttempts(database: TestDatabase) {
+  return database.native.query<{ attempt: number; outcome: string | null; provider_batch_id: string | null }, []>(
+    "SELECT a.attempt, a.outcome, a.provider_batch_id FROM media_processing_attempts AS a JOIN media_processing_jobs AS j ON j.id = a.job_id WHERE j.stage = 'embedding' ORDER BY a.id",
+  ).all();
+}
+
 /** The stage of every batch Gemini accepted, in order. */
 function geminiStages(apis: Providers): string[] {
   return apis.gemini.submitted.map((key) => key.split(":")[0]!);
@@ -81,9 +88,9 @@ describe("retired lifetime allowance", () => {
     const { database } = await authorizedGames();
     const history = insertCompletedRun(database.native, "initial:history:test", [CYBERPUNK]);
     database.native.prepare(
-      `INSERT INTO media_processing_jobs (run_id, stage, appid, request_key, input_identity, model, config_version, max_input_tokens, max_output_tokens, reserved_microusd, charged_microusd, reservation_active, status, enqueued_at, completed_at)
-       VALUES (?1, 'synthesis', ?2, 'history-settled', 'history-settled', 'gemini-3.1-flash-lite', 'v1', 100, 10, 3000000, 3000000, 0, 'succeeded', '2026-10-01T00:00:00.000Z', '2026-10-01T00:10:00.000Z'),
-              (?1, 'synthesis', ?2, 'history-uncertain', 'history-uncertain', 'gemini-3.1-flash-lite', 'v1', 100, 10, 2500000, NULL, 1, 'uncertain', '2026-10-01T00:00:00.000Z', NULL)`,
+      `INSERT INTO media_processing_jobs (run_id, stage, appid, request_key, input_identity, model, config_version, max_input_tokens, max_output_tokens, reserved_microusd, charged_microusd, reservation_active, status, enqueued_at, completed_at, retained)
+       VALUES (?1, 'synthesis', ?2, 'history-settled', 'history-settled', 'gemini-3.1-flash-lite', 'v1', 100, 10, 3000000, 3000000, 0, 'succeeded', '2026-10-01T00:00:00.000Z', '2026-10-01T00:10:00.000Z', 1),
+              (?1, 'synthesis', ?2, 'history-uncertain', 'history-uncertain', 'gemini-3.1-flash-lite', 'v1', 100, 10, 2500000, NULL, 1, 'uncertain', '2026-10-01T00:00:00.000Z', NULL, 1)`,
     ).run(history, CYBERPUNK);
     const historyRows = () => database.native.query("SELECT * FROM media_processing_jobs WHERE request_key LIKE 'history-%' ORDER BY id").all();
     const before = historyRows();
@@ -312,7 +319,7 @@ describe("project-level provider errors", () => {
     expect(embeddingJobs(database).map(({ status }) => status)).toEqual(["succeeded"]);
   });
 
-  test("a poll for a batch the provider no longer knows leaves its item uncertain and pauses nothing", async () => {
+  test("a poll for a batch the provider no longer knows makes its item uncertain: it pauses nothing, returns to the queue with backoff, and is submitted again", async () => {
     const { database } = await authorizedGames();
     const apis = providers();
     apis.gemini.reply("poll", { status: 404, body: { error: { code: 404, status: "NOT_FOUND", message: "Requested entity was not found." } } });
@@ -320,8 +327,39 @@ describe("project-level provider errors", () => {
     const polled = await tick(database, apis, "2026-11-10T07:00:00.000Z");
 
     expect(polled.mediaProcessing?.providers.gemini.paused).toBe(false);
-    expect(embeddingJobs(database).map(({ status }) => status)).toEqual(["uncertain"]);
+    expect(embeddingJobs(database).map(({ status, attempt_count, next_attempt_at, error }) => ({ status, attempt_count, next_attempt_at, error }))).toEqual([
+      { status: "queued", attempt_count: 1, next_attempt_at: "2026-11-10T07:15:00.000Z", error: "uncertain:http_404" },
+    ]);
     expect(polled.mediaProcessing?.cost.uncertain).toBe(1);
+
+    await tick(database, apis, "2026-11-10T07:15:00.000Z");
+    expect(geminiStages(apis)).toEqual(["embedding", "embedding"]);
+    expect(embeddingJobs(database).map(({ status }) => status)).toEqual(["succeeded"]);
+    expect(geminiAttempts(database)).toEqual([
+      { attempt: 1, outcome: "uncertain", provider_batch_id: "batches/controlled-1" },
+      { attempt: 2, outcome: "succeeded", provider_batch_id: "batches/controlled-2" },
+    ]);
+  });
+
+  test("a batch Gemini accepted and then reported as BATCH_STATE_FAILED with a generic error is uncertain, not a refusal: its usage is recorded and it is submitted again", async () => {
+    const { database } = await authorizedGames();
+    const apis = providers();
+    apis.gemini.reply("poll", { status: 200, body: { metadata: { state: "BATCH_STATE_FAILED" }, error: { message: "Internal error encountered." }, usageMetadata: { promptTokenCount: 500 } } });
+
+    const failed = await tick(database, apis, "2026-11-10T07:00:00.000Z");
+
+    expect(embeddingJobs(database).map(({ status, error }) => ({ status, error }))).toEqual([{ status: "queued", error: "uncertain:batch_failed" }]);
+    expect(failed.mediaProcessing?.outputs.skipped).toBe(0);
+    expect(failed.mediaProcessing?.stopReasons).not.toContain("provider_refusal");
+
+    const resent = await tick(database, apis, "2026-11-10T07:15:00.000Z");
+    expect(embeddingJobs(database).map(({ status }) => status)).toEqual(["succeeded"]);
+    // 500 tokens for the failed batch and 1,000 for the one that succeeded, at US$0.10 per million.
+    expect(database.native.query("SELECT a.attempt, a.outcome, a.charged_microusd FROM media_processing_attempts AS a JOIN media_processing_jobs AS j ON j.id = a.job_id WHERE j.stage = 'embedding' ORDER BY a.attempt").all()).toEqual([
+      { attempt: 1, outcome: "uncertain", charged_microusd: 50 },
+      { attempt: 2, outcome: "succeeded", charged_microusd: 100 },
+    ]);
+    expect(resent.mediaProcessing?.cost.providers.gemini.allTimeMicrousd).toBe(150);
   });
 
   for (const state of ["BATCH_STATE_EXPIRED", "BATCH_STATE_CANCELLED"]) {
@@ -544,17 +582,22 @@ describe("definite refusals and uncertain submissions", () => {
     expect(extraction).toMatchObject({ status: "refused", error: "invalid_output: no supported contributions" });
   });
 
-  test("a submission sent without a response is uncertain, never resubmitted, and reported in the uncertain count", async () => {
+  test("a submission sent without a response is uncertain: reported in the uncertain count, resubmitted with backoff at most three consecutive times, then ended uncertain_exhausted", async () => {
     const { database } = await authorizedGames();
     const apis = providers();
-    apis.gemini.reply("submit", { network: "socket closed before the response" });
+    const lost = { network: "socket closed before the response" };
+    apis.gemini.reply("submit", lost, lost, lost);
 
     const sent = await tick(database, apis, "2026-11-10T03:00:00.000Z");
+    expect(embeddingJobs(database).map(({ status, next_attempt_at, error }) => ({ status, next_attempt_at, error }))).toEqual([{ status: "queued", next_attempt_at: "2026-11-10T03:15:00.000Z", error: "uncertain:no_response" }]);
+    expect(sent.mediaProcessing?.cost.uncertain).toBe(1);
+    await tick(database, apis, "2026-11-10T03:15:00.000Z");
+    const exhausted = await tick(database, apis, "2026-11-10T03:45:00.000Z");
     const later = await tick(database, apis, "2026-11-11T06:00:00.000Z");
 
-    expect(embeddingJobs(database).map(({ status }) => status)).toEqual(["uncertain"]);
-    expect(apis.gemini.calls.filter((call) => call.kind === "submit")).toHaveLength(1);
-    expect(sent.mediaProcessing?.cost.uncertain).toBe(1);
+    expect(embeddingJobs(database).map(({ status, error }) => ({ status, error }))).toEqual([{ status: "uncertain_exhausted", error: "uncertain_exhausted:no_response" }]);
+    expect(apis.gemini.calls.filter((call) => call.kind === "submit")).toHaveLength(3);
+    expect(exhausted.mediaProcessing?.cost.uncertain).toBe(1);
     expect(later.mediaProcessing?.cost.uncertain).toBe(1);
   });
 
@@ -653,7 +696,7 @@ describe("cost reporting", () => {
   test("a refused batch without provider usage records zero cost marked unknown, not an estimate from its token caps", async () => {
     const { database } = await authorizedGames();
     const apis = providers();
-    apis.gemini.reply("poll", { status: 200, body: { metadata: { state: "BATCH_STATE_FAILED" }, error: { message: "internal batch error" } } });
+    apis.gemini.reply("poll", { status: 200, body: { metadata: { state: "BATCH_STATE_SUCCEEDED" }, response: { inlinedResponses: { inlinedResponses: [{ error: { code: 400, message: "Invalid content." } }] } } } });
 
     const refused = await tick(database, apis, "2026-11-10T07:00:00.000Z");
 
@@ -663,7 +706,7 @@ describe("cost reporting", () => {
     expect(refused.mediaProcessing?.cost.providers.gemini).toEqual({ monthToDateMicrousd: 0, allTimeMicrousd: 0 });
   });
 
-  test("a retained batch settled without provider usage keeps its reservation as history and reports no spend", async () => {
+  test("a retained batch that failed after acceptance without provider usage stays uncertain history, keeps its reservation, and reports no spend", async () => {
     const database = openUpgradedTestDatabase("0022_paid_work_queue", (native) => {
       seedApps(native, [CYBERPUNK]);
       const runId = insertCompletedRun(native, "initial:paid-work:test", [CYBERPUNK]);
@@ -677,7 +720,7 @@ describe("cost reporting", () => {
     const settled = await tick(database, apis, "2026-11-10T07:00:00.000Z");
 
     expect(database.native.query("SELECT status, reserved_microusd, reservation_active, charged_microusd, cost_source FROM media_processing_jobs").all()).toEqual([
-      { status: "refused", reserved_microusd: 4_900_000, reservation_active: 1, charged_microusd: 0, cost_source: "unknown" },
+      { status: "uncertain", reserved_microusd: 4_900_000, reservation_active: 1, charged_microusd: 0, cost_source: "unknown" },
     ]);
     expect(settled.mediaProcessing?.cost.providers.gemini).toEqual({ monthToDateMicrousd: 0, allTimeMicrousd: 0 });
   });

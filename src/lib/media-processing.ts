@@ -34,6 +34,7 @@ import {
   GeminiMissingKeyError,
   OpenRouterHttpError,
   liftProviderPause,
+  MAX_UNCERTAIN_SENDS,
   paidWorkCost,
   pauseProvider,
   PAID_PROVIDERS,
@@ -677,7 +678,7 @@ async function countOutputs(db: AppDatabase, runId: number, outcome: keyof typeo
 async function runRequestKey(db: AppDatabase, baseKey: string, runId: number): Promise<string> {
   const base = await first<{ run_id: number; status: JobRow["status"]; retained: number }>(db, "SELECT run_id, status, retained FROM media_processing_jobs WHERE request_key = ?", baseKey);
   const unsubmittedHistory = base?.retained === 1 && base.status === "reserved";
-  const endedEarlier = base !== null && base.run_id !== runId && (base.status === "failed" || base.status === "stale" || base.status === "refused" || base.status === "uncertain");
+  const endedEarlier = base !== null && base.run_id !== runId && (base.status === "failed" || base.status === "stale" || base.status === "refused" || base.status === "uncertain" || base.status === "uncertain_exhausted");
   return unsubmittedHistory || endedEarlier ? `${baseKey}:retry:${runId}` : baseKey;
 }
 
@@ -780,9 +781,11 @@ type JobStage = "extraction" | "embedding" | "synthesis" | "explanation";
  * A paid-work queue item. `queued` items wait for their provider. `reserved`
  * and `failed` appear only on retained rows, written under the retired
  * lifetime allowance before the queue existed: new work that a provider or
- * validation definitely refuses is `refused`.
+ * validation definitely refuses is `refused`. `uncertain` marks an item in
+ * flight; an uncertain outcome returns it to the queue, and its last allowed
+ * one ends it `uncertain_exhausted`.
  */
-type JobStatus = "queued" | "reserved" | "submitted" | "succeeded" | "failed" | "refused" | "uncertain" | "stale";
+type JobStatus = "queued" | "reserved" | "submitted" | "succeeded" | "failed" | "refused" | "uncertain" | "uncertain_exhausted" | "stale";
 type JobRow = { id: number; retained: number; run_id: number; stage: JobStage; appid: number; matched_appid: number | null; dimension: SimilarityDimension | null; source_id: number | null; request_key: string; input_identity: string; model: string; config_version: string; max_input_tokens: number; max_output_tokens: number; reserved_microusd: number; charged_microusd: number | null; reservation_active: number; status: JobStatus; provider: PaidProvider; enqueued_at: string; attempt_count: number; provider_batch_id: string | null; output_json: string | null; usage_json: string; error: string | null };
 const JOB_COLUMNS = "id, retained, run_id, stage, appid, matched_appid, dimension, source_id, request_key, input_identity, model, config_version, max_input_tokens, max_output_tokens, reserved_microusd, charged_microusd, reservation_active, status, provider, enqueued_at, attempt_count, provider_batch_id, output_json, usage_json, error";
 /**
@@ -922,19 +925,169 @@ function noteReason(advance: QueueAdvance, runId: number, reason: string): void 
  * is uncertain: its request may have reached the provider.
  */
 const IN_FLIGHT = "submission in progress";
-/** The error an item in flight when the application stopped is left with. */
-const IN_FLIGHT_AT_STARTUP = "uncertain:in_flight_at_startup";
+/** Why an item found in flight when an advance starts is uncertain: the application stopped while it was sent. */
+const IN_FLIGHT_AT_STARTUP = "in_flight_at_startup";
+
+/** The class an attempt's outcome is recorded with. */
+type AttemptOutcome = "succeeded" | "refused" | "stale" | "uncertain" | "transient" | "credit_pause" | "missing_configuration";
+
+/** The attempt outcome of a provider outcome class. */
+function attemptOutcome(outcome: Exclude<ProviderOutcome, { class: "success" }>): AttemptOutcome {
+  return outcome.class === "refusal" ? "refused" : outcome.class;
+}
+
+/** The outcome a job written before per-attempt records existed reports for its one send. */
+function legacyAttemptOutcome(status: JobStatus, error: string | null): AttemptOutcome | null {
+  if (status === "succeeded" || status === "refused" || status === "stale") return status;
+  if (status === "failed") return "refused";
+  if (status === "uncertain_exhausted") return "uncertain";
+  if (status === "uncertain") return error === IN_FLIGHT ? null : "uncertain";
+  if (status === "submitted") return null;
+  // A waiting item that was sent before kept an answer that did not settle it.
+  return "transient";
+}
+
+/**
+ * Gives job `jobId`, sent before per-attempt records existed, its one attempt
+ * from its own recorded provider ids, usage and cost, so later attempts add
+ * to that history instead of hiding it from cost reports. A job never sent,
+ * or one with attempts, is left as it is.
+ */
+async function recordLegacyAttempt(db: AppDatabase, jobId: number): Promise<void> {
+  if (await first<{ id: number }>(db, "SELECT id FROM media_processing_attempts WHERE job_id = ? LIMIT 1", jobId)) return;
+  const job = await first<{ provider: PaidProvider; input_identity: string; status: JobStatus; error: string | null; submitted_at: string | null; completed_at: string | null; enqueued_at: string; provider_batch_id: string | null; generation_id: string | null; routed_provider: string | null; routed_model: string | null; usage_json: string; charged_microusd: number | null; cost_source: string | null }>(
+    db,
+    "SELECT provider, input_identity, status, error, submitted_at, completed_at, enqueued_at, provider_batch_id, generation_id, routed_provider, routed_model, usage_json, charged_microusd, cost_source FROM media_processing_jobs WHERE id = ?",
+    jobId,
+  );
+  if (!job || (job.submitted_at === null && job.provider_batch_id === null && job.charged_microusd === null)) return;
+  await db.prepare("INSERT INTO media_processing_attempts (job_id, attempt, provider, input_identity, sent_at, outcome, provider_batch_id, generation_id, routed_provider, routed_model, usage_json, charged_microusd, cost_source, settled_at, error) VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+    .bind(jobId, job.provider, job.input_identity, job.submitted_at ?? job.enqueued_at, legacyAttemptOutcome(job.status, job.error), job.provider_batch_id, job.generation_id, job.routed_provider, job.routed_model, job.usage_json, job.charged_microusd, job.cost_source, job.charged_microusd === null ? null : job.completed_at, job.error === IN_FLIGHT ? null : job.error)
+    .run();
+}
+
+/**
+ * Marks waiting item `job` in flight with its send time and records the send
+ * as its next attempt, in one committed write before the request is sent.
+ * Returns whether the item was still waiting.
+ */
+async function markInFlight(db: AppDatabase, job: JobRow, maxInputTokens: number, now: Date): Promise<boolean> {
+  let marked = false;
+  await transaction(db, async () => {
+    // History of a send recorded before per-attempt records existed comes first.
+    await recordLegacyAttempt(db, job.id);
+    const update = await db.prepare(`UPDATE media_processing_jobs SET status = 'uncertain', error = '${IN_FLIGHT}', max_input_tokens = ?, submitted_at = ? WHERE id = ? AND ${WAITING}`).bind(maxInputTokens, now.toISOString(), job.id).run();
+    if (update.meta.changes !== 1) return;
+    marked = true;
+    await db.prepare("INSERT INTO media_processing_attempts (job_id, attempt, provider, input_identity, sent_at) VALUES (?1, COALESCE((SELECT MAX(attempt) FROM media_processing_attempts WHERE job_id = ?1), 0) + 1, ?2, ?3, ?4)")
+      .bind(job.id, job.provider, job.input_identity, now.toISOString()).run();
+  });
+  return marked;
+}
+
+/** The latest attempt of `jobId` while its outcome is not recorded yet. */
+const OPEN_ATTEMPT = "id = (SELECT id FROM media_processing_attempts WHERE job_id = ?1 ORDER BY attempt DESC LIMIT 1) AND outcome IS NULL";
+
+/** Records the outcome of `jobId`'s attempt in flight, if it has one. */
+async function closeAttempt(db: AppDatabase, jobId: number, outcome: AttemptOutcome, error: string | null = null): Promise<void> {
+  await db.prepare(`UPDATE media_processing_attempts SET outcome = ?2, error = ?3 WHERE ${OPEN_ATTEMPT}`).bind(jobId, outcome, error).run();
+}
+
+/** Records the Gemini batch that `jobId`'s attempt in flight created. */
+async function recordAttemptBatch(db: AppDatabase, jobId: number, batchId: string): Promise<void> {
+  await db.prepare(`UPDATE media_processing_attempts SET provider_batch_id = ?2 WHERE ${OPEN_ATTEMPT}`).bind(jobId, batchId).run();
+}
+
+/**
+ * Records the usage and cost of `jobId`'s attempt in flight, settled at
+ * `now`, and sets the job's recorded cost to the sum of all its attempts.
+ */
+async function recordAttemptCharge(db: AppDatabase, jobId: number, charge: { usageJson: string; microusd: number; source: string; generationId?: string | null; routedProvider?: string | null; routedModel?: string | null }, now: Date): Promise<void> {
+  await db.prepare(`UPDATE media_processing_attempts SET usage_json = ?2, charged_microusd = ?3, cost_source = ?4, settled_at = ?5, generation_id = COALESCE(?6, generation_id), routed_provider = COALESCE(?7, routed_provider), routed_model = COALESCE(?8, routed_model) WHERE ${OPEN_ATTEMPT}`)
+    .bind(jobId, charge.usageJson, charge.microusd, charge.source, now.toISOString(), charge.generationId ?? null, charge.routedProvider ?? null, charge.routedModel ?? null).run();
+  await db.prepare("UPDATE media_processing_jobs SET charged_microusd = (SELECT SUM(charged_microusd) FROM media_processing_attempts WHERE job_id = ?1) WHERE id = ?1 AND EXISTS (SELECT 1 FROM media_processing_attempts WHERE job_id = ?1 AND charged_microusd IS NOT NULL)").bind(jobId).run();
+}
+
+/**
+ * How many consecutive uncertain outcomes `jobId` has had for the input
+ * identity of its latest attempt, counted back from that attempt. Any other
+ * recorded outcome of a send (a success, a refusal, a stale answer, a
+ * transient failure or a pause) ends the streak, and an attempt for another
+ * input identity starts a fresh count.
+ */
+async function uncertainStreak(db: AppDatabase, jobId: number): Promise<number> {
+  const recorded = await rows<{ outcome: AttemptOutcome | null; input_identity: string }>(db, "SELECT outcome, input_identity FROM media_processing_attempts WHERE job_id = ? ORDER BY attempt DESC", jobId);
+  let streak = 0;
+  for (const attempt of recorded) {
+    if (attempt.outcome !== "uncertain" || attempt.input_identity !== recorded[0]!.input_identity) break;
+    streak += 1;
+  }
+  return streak;
+}
+
+/**
+ * Acts on an uncertain outcome of `job`'s send: the provider may have
+ * received it, so its outcome is unknown. The attempt is recorded uncertain.
+ * The item returns to the queue, under the provider and identity it now
+ * waits with, and is resent under the transient backoff and Credit pauses.
+ * After `MAX_UNCERTAIN_SENDS` consecutive uncertain outcomes for one input
+ * identity it ends `uncertain_exhausted`, and only a correction set resends
+ * it. A retained row is history: it stays `uncertain` and never waits.
+ */
+async function returnUncertainItem(advance: QueueAdvance, job: JobRow, reason: string, detail: string | null = null): Promise<void> {
+  const { db, now } = advance;
+  await transaction(db, async () => {
+    const current = await first<{ status: JobStatus; retained: number; attempt_count: number }>(db, "SELECT status, retained, attempt_count FROM media_processing_jobs WHERE id = ?", job.id);
+    if (!current || (current.status !== "uncertain" && current.status !== "submitted")) return;
+    if (current.retained === 1) {
+      await db.prepare("UPDATE media_processing_jobs SET status = 'uncertain', error = ? WHERE id = ?").bind(detail ?? `uncertain:${reason}`, job.id).run();
+      return;
+    }
+    await recordLegacyAttempt(db, job.id);
+    await closeAttempt(db, job.id, "uncertain", `uncertain:${reason}`);
+    if (await uncertainStreak(db, job.id) >= MAX_UNCERTAIN_SENDS) {
+      await db.prepare("UPDATE media_processing_jobs SET status = 'uncertain_exhausted', error = ?, provider_batch_id = NULL, next_attempt_at = NULL, completed_at = ? WHERE id = ?").bind(`uncertain_exhausted:${reason}`, now.toISOString(), job.id).run();
+      await countOutputs(db, job.run_id, "skipped");
+      return;
+    }
+    const failures = current.attempt_count + 1;
+    const queued = await queuedIdentity(db, job);
+    await db.prepare("UPDATE media_processing_jobs SET status = 'queued', provider = ?, model = ?, config_version = ?, max_output_tokens = ?, input_identity = ?, provider_batch_id = NULL, submitted_at = NULL, attempt_count = ?, next_attempt_at = ?, error = ? WHERE id = ?")
+      .bind(queued.provider, queued.model, queued.config_version, queued.max_output_tokens, queued.input_identity, failures, transientRetryAt(failures, now, null).toISOString(), `uncertain:${reason}`, job.id).run();
+  });
+  noteReason(advance, job.run_id, "uncertain_submission");
+}
+
+/**
+ * Items found uncertain when an advance starts: advances never overlap, so
+ * an item still in flight was sent by a process that stopped before
+ * recording its answer, and any other was held uncertain before uncertain
+ * items were resent automatically. Each is acted on as an uncertain outcome.
+ */
+async function recoverUncertainItems(advance: QueueAdvance): Promise<void> {
+  const found = await rows<JobRow>(advance.db, `SELECT ${JOB_COLUMNS} FROM media_processing_jobs WHERE status = 'uncertain' AND retained = 0 ORDER BY id`);
+  for (const job of found) {
+    const reason = job.error === IN_FLIGHT ? IN_FLIGHT_AT_STARTUP : (job.error ?? "no_response").replace(/^uncertain:/, "");
+    await returnUncertainItem(advance, job, reason);
+  }
+}
 
 /** Refuses `job` for its input identity with `reason`, counting it skipped once. */
 async function refuseItem(db: AppDatabase, job: JobRow, reason: string, now: Date): Promise<void> {
   await transaction(db, async () => {
     const refused = await db.prepare(`UPDATE media_processing_jobs SET status = 'refused', error = ?, next_attempt_at = NULL, completed_at = ? WHERE id = ? AND ${WAITING} OR (id = ? AND status = 'uncertain' AND error = '${IN_FLIGHT}')`).bind(reason, now.toISOString(), job.id, job.id).run();
     if (refused.meta.changes === 1) await countOutputs(db, job.run_id, "skipped");
+    await closeAttempt(db, job.id, "refused", reason);
   });
 }
 
-/** Removes a waiting item whose work turned out to need no provider: it never cost anything. */
+/**
+ * Resolves a waiting item whose work turned out to need no provider. An item
+ * never sent never cost anything and is removed; one with recorded attempts
+ * ends `stale`, so its attempts and their cost stay reported.
+ */
 async function resolveItemWithoutProvider(db: AppDatabase, job: JobRow): Promise<void> {
+  await db.prepare(`UPDATE media_processing_jobs SET status = 'stale', next_attempt_at = NULL, completed_at = CURRENT_TIMESTAMP WHERE id = ? AND ${WAITING} AND EXISTS (SELECT 1 FROM media_processing_attempts WHERE job_id = ?1)`).bind(job.id).run();
   await db.prepare(`DELETE FROM media_processing_jobs WHERE id = ? AND ${WAITING}`).bind(job.id).run();
 }
 
@@ -946,6 +1099,7 @@ async function resolveItemWithoutProvider(db: AppDatabase, job: JobRow): Promise
  */
 async function holdItem(advance: QueueAdvance, job: JobRow, outcome: Exclude<ProviderOutcome, { class: "success" }>): Promise<void> {
   const { db, now } = advance;
+  if (outcome.class === "uncertain") return returnUncertainItem(advance, job, outcome.reason);
   if (outcome.class === "refusal") {
     await refuseItem(db, job, outcome.reason, now);
     noteReason(advance, job.run_id, outcome.reason === "input_token_cap" ? "input_token_cap" : "provider_refusal");
@@ -954,6 +1108,7 @@ async function holdItem(advance: QueueAdvance, job: JobRow, outcome: Exclude<Pro
   if (outcome.class === "credit_pause" || outcome.class === "missing_configuration") {
     await transaction(db, async () => {
       await db.prepare(`UPDATE media_processing_jobs SET status = 'queued', error = NULL, submitted_at = NULL WHERE id = ? AND status = 'uncertain' AND error = '${IN_FLIGHT}'`).bind(job.id).run();
+      await closeAttempt(db, job.id, outcome.class, outcome.reason);
       await pauseProvider(db, job.provider, outcome.reason, now);
     });
     advance.paused.add(job.provider);
@@ -962,7 +1117,10 @@ async function holdItem(advance: QueueAdvance, job: JobRow, outcome: Exclude<Pro
   // A transient failure, or a free request that may simply be retried.
   const failures = job.attempt_count + 1;
   const retryAt = transientRetryAt(failures, now, outcome.class === "transient" ? outcome.retryAfterMs : null);
-  await db.prepare(`UPDATE media_processing_jobs SET status = 'queued', attempt_count = ?, next_attempt_at = ?, error = ?, submitted_at = NULL WHERE id = ? AND (${WAITING} OR (status = 'uncertain' AND error = '${IN_FLIGHT}'))`).bind(failures, retryAt.toISOString(), `transient:${outcome.reason}`, job.id).run();
+  await transaction(db, async () => {
+    await db.prepare(`UPDATE media_processing_jobs SET status = 'queued', attempt_count = ?, next_attempt_at = ?, error = ?, submitted_at = NULL WHERE id = ? AND (${WAITING} OR (status = 'uncertain' AND error = '${IN_FLIGHT}'))`).bind(failures, retryAt.toISOString(), `transient:${outcome.reason}`, job.id).run();
+    await closeAttempt(db, job.id, attemptOutcome(outcome), `transient:${outcome.reason}`);
+  });
   noteReason(advance, job.run_id, "transient_provider_failure");
 }
 
@@ -991,8 +1149,7 @@ async function sendItem(advance: QueueAdvance, job: JobRow, model: string, reque
   if (!Number.isInteger(counted) || counted < 0 || counted > maxInputTokens) {
     return holdItem(advance, job, { class: "refusal", reason: "input_token_cap" });
   }
-  const marked = await db.prepare(`UPDATE media_processing_jobs SET status = 'uncertain', error = '${IN_FLIGHT}', max_input_tokens = ?, submitted_at = ? WHERE id = ? AND ${WAITING}`).bind(counted, now.toISOString(), job.id).run();
-  if (marked.meta.changes !== 1) return;
+  if (!await markInFlight(db, job, counted, now)) return;
   let result: { name: string } | null = null;
   let outcome: ProviderOutcome;
   try {
@@ -1000,19 +1157,17 @@ async function sendItem(advance: QueueAdvance, job: JobRow, model: string, reque
     outcome = classifyGeminiOutcome("submit", null);
   } catch (error) {
     outcome = classifyGeminiOutcome("submit", error);
-    if (outcome.class === "uncertain") {
-      await db.prepare("UPDATE media_processing_jobs SET error = ? WHERE id = ? AND status = 'uncertain'").bind(boundedError(error, advance.secrets), job.id).run();
-      noteReason(advance, job.run_id, "uncertain_submission");
-      return;
-    }
   }
   if (outcome.class !== "success") return holdItem(advance, job, outcome);
-  if (!result?.name) {
-    await db.prepare("UPDATE media_processing_jobs SET error = ? WHERE id = ? AND status = 'uncertain'").bind("Gemini submission returned no batch identifier", job.id).run();
-    return;
-  }
-  const update = await db.prepare("UPDATE media_processing_jobs SET status = 'submitted', provider_batch_id = ?, error = NULL WHERE id = ? AND status = 'uncertain' AND provider_batch_id IS NULL").bind(result.name, job.id).run();
-  if (update.meta.changes === 1) advance.submitted.set(job.run_id, (advance.submitted.get(job.run_id) ?? 0) + 1);
+  // Accepted without a batch to poll: whether it runs, and is charged, is unknown.
+  if (!result?.name) return returnUncertainItem(advance, job, "no_batch_identifier");
+  let submitted = false;
+  await transaction(db, async () => {
+    const update = await db.prepare("UPDATE media_processing_jobs SET status = 'submitted', provider_batch_id = ?, error = NULL WHERE id = ? AND status = 'uncertain' AND provider_batch_id IS NULL").bind(result.name, job.id).run();
+    submitted = update.meta.changes === 1;
+    if (submitted) await recordAttemptBatch(db, job.id, result.name);
+  });
+  if (submitted) advance.submitted.set(job.run_id, (advance.submitted.get(job.run_id) ?? 0) + 1);
 }
 
 /**
@@ -1030,8 +1185,7 @@ async function sendTextItem(advance: QueueAdvance, job: JobRow, request: OpenRou
   if (!openRouter) return holdItem(advance, job, { class: "missing_configuration", reason: "missing_key" });
   const estimated = estimatedInputTokens(request);
   if (estimated > OPENROUTER_MAX_INPUT_TOKENS) return holdItem(advance, job, { class: "refusal", reason: "input_token_cap" });
-  const marked = await db.prepare(`UPDATE media_processing_jobs SET status = 'uncertain', error = '${IN_FLIGHT}', max_input_tokens = ?, submitted_at = ? WHERE id = ? AND ${WAITING}`).bind(estimated, now.toISOString(), job.id).run();
-  if (marked.meta.changes !== 1) return;
+  if (!await markInFlight(db, job, estimated, now)) return;
   let completion: OpenRouterCompletion | null = null;
   let outcome: ProviderOutcome;
   try {
@@ -1040,12 +1194,7 @@ async function sendTextItem(advance: QueueAdvance, job: JobRow, request: OpenRou
   } catch (error) {
     outcome = classifyOpenRouterOutcome(error);
     // An error answer can still report a generation and a charge.
-    if (error instanceof OpenRouterHttpError && error.answer) await recordAnswer(db, job, error.answer);
-  }
-  if (outcome.class === "uncertain") {
-    await db.prepare(`UPDATE media_processing_jobs SET error = ? WHERE id = ? AND status = 'uncertain' AND error = '${IN_FLIGHT}'`).bind(`uncertain:${outcome.reason}`, job.id).run();
-    noteReason(advance, job.run_id, "uncertain_submission");
-    return;
+    if (error instanceof OpenRouterHttpError && error.answer) await recordAnswer(db, job, error.answer, now);
   }
   if (outcome.class !== "success") return holdItem(advance, job, outcome);
   advance.submitted.set(job.run_id, (advance.submitted.get(job.run_id) ?? 0) + 1);
@@ -1062,16 +1211,17 @@ function reportedCharge(completion: OpenRouterCompletion): { microusd: number; s
 }
 
 /**
- * Records what an OpenRouter answer to `job` reported: its token usage,
- * generation id, routed provider and model, and its cost, added to the cost
- * of any earlier answer to the same item, so a retried item keeps every
- * charge.
+ * Records what an OpenRouter answer to `job` reported on its attempt in
+ * flight: its token usage, generation id, routed provider and model, and its
+ * cost. The job keeps the latest answer's identifiers and usage, and the cost
+ * of all its attempts, so a resent item keeps every charge.
  */
-async function recordAnswer(db: AppDatabase, job: JobRow, answer: OpenRouterCompletion): Promise<void> {
+async function recordAnswer(db: AppDatabase, job: JobRow, answer: OpenRouterCompletion, now: Date): Promise<void> {
   const charge = reportedCharge(answer);
-  const usage = { promptTokens: answer.usage.promptTokens, completionTokens: answer.usage.completionTokens };
-  await db.prepare("UPDATE media_processing_jobs SET usage_json = ?, charged_microusd = COALESCE(charged_microusd, 0) + ?, cost_source = CASE WHEN cost_source = 'provider_reported' THEN cost_source ELSE ? END, generation_id = ?, routed_provider = ?, routed_model = ? WHERE id = ?")
-    .bind(JSON.stringify(usage), charge.microusd, charge.source, answer.generationId, answer.provider, answer.model, job.id).run();
+  const usageJson = JSON.stringify({ promptTokens: answer.usage.promptTokens, completionTokens: answer.usage.completionTokens });
+  await db.prepare("UPDATE media_processing_jobs SET usage_json = ?, cost_source = CASE WHEN cost_source = 'provider_reported' THEN cost_source ELSE ? END, generation_id = ?, routed_provider = ?, routed_model = ? WHERE id = ?")
+    .bind(usageJson, charge.source, answer.generationId, answer.provider, answer.model, job.id).run();
+  await recordAttemptCharge(db, job.id, { usageJson, microusd: charge.microusd, source: charge.source, generationId: answer.generationId, routedProvider: answer.provider, routedModel: answer.model }, now);
 }
 
 /**
@@ -1082,12 +1232,13 @@ async function recordAnswer(db: AppDatabase, job: JobRow, answer: OpenRouterComp
  */
 function settleCompletion(db: AppDatabase, job: JobRow, completion: OpenRouterCompletion, now: Date): Promise<SettledStatus> {
   return writeTransaction(db, async () => {
-    await recordAnswer(db, job, completion);
+    await recordAnswer(db, job, completion, now);
     await db.prepare("UPDATE media_processing_jobs SET error = NULL, completed_at = ? WHERE id = ?").bind(now.toISOString(), job.id).run();
     const status = job.stage === "extraction"
       ? await persistExtraction(db, job, completion.content, now)
       : await persistOverview(db, job, completion.content, now);
     if (status === "refused" || status === "stale") await countOutputs(db, job.run_id, "skipped");
+    await closeAttempt(db, job.id, status);
     return status;
   });
 }
@@ -1338,15 +1489,24 @@ function reconcileJob(db: AppDatabase, job: JobRow, result: GeminiBatchPoll & { 
   return writeTransaction(db, async () => {
     const status = await settleJob(db, job, result, now, secrets);
     if ((status === "refused" || status === "stale") && job.stage !== "explanation") await countOutputs(db, job.run_id, "skipped");
+    await closeAttempt(db, job.id, status);
     return status;
   });
 }
 
-async function settleJob(db: AppDatabase, job: JobRow, result: GeminiBatchPoll & { state: "succeeded" | "failed" }, now: Date, secrets: readonly (string | undefined)[]): Promise<SettledStatus> {
+/** Records the usage and estimated cost a polled batch reported, on `job` and its attempt. */
+async function recordBatchCharge(db: AppDatabase, job: JobRow, result: GeminiBatchPoll, now: Date): Promise<void> {
   const usageJson = result.usage ? JSON.stringify(result.usage) : "{}";
   const charge = settledCharge(job, result.usage ?? null);
+  await recordLegacyAttempt(db, job.id);
+  await db.prepare("UPDATE media_processing_jobs SET usage_json = ?, charged_microusd = ?, cost_source = ? WHERE id = ?").bind(usageJson, charge.microusd, charge.source, job.id).run();
+  await recordAttemptCharge(db, job.id, { usageJson, microusd: charge.microusd, source: charge.source }, now);
+}
+
+async function settleJob(db: AppDatabase, job: JobRow, result: GeminiBatchPoll & { state: "succeeded" | "failed" }, now: Date, secrets: readonly (string | undefined)[]): Promise<SettledStatus> {
   // A retained row keeps its reserved amount and reservation flag as history.
-  await db.prepare("UPDATE media_processing_jobs SET usage_json = ?, charged_microusd = ?, cost_source = ?, completed_at = ? WHERE id = ?").bind(usageJson, charge.microusd, charge.source, now.toISOString(), job.id).run();
+  await recordBatchCharge(db, job, result, now);
+  await db.prepare("UPDATE media_processing_jobs SET completed_at = ? WHERE id = ?").bind(now.toISOString(), job.id).run();
   if (result.state === "failed") {
     await db.prepare("UPDATE media_processing_jobs SET status = 'refused', error = ? WHERE id = ?").bind(boundedError(result.error, secrets), job.id).run();
     return "refused";
@@ -1408,10 +1568,11 @@ type SubmittedPollSummary = {
  * provider is paused. Every answer is classified once: a transient failure
  * keeps the batch submitted for the next poll; a Credit pause or
  * configuration error pauses the provider and keeps the batch submitted; an
- * error about the batch itself leaves it uncertain. A batch the provider
- * ended for exhausted credit returns its item to the queue with no attempt
- * counted; one it expired or cancelled returns it with backoff, like a
- * transient failure.
+ * error about the batch itself, or a batch that failed after acceptance,
+ * makes it uncertain, so it is resent under `returnUncertainItem`. A batch
+ * the provider ended for exhausted credit returns its item to the queue with
+ * no attempt counted; one it expired or cancelled returns it with backoff,
+ * like a transient failure.
  */
 async function pollSubmittedJobs(advance: QueueAdvance, jobs: readonly JobRow[]): Promise<SubmittedPollSummary> {
   const { db, now, transport, secrets } = advance;
@@ -1423,6 +1584,7 @@ async function pollSubmittedJobs(advance: QueueAdvance, jobs: readonly JobRow[])
       summary.uncertain += 1;
       continue;
     }
+    await recordLegacyAttempt(db, job.id);
     let result: GeminiBatchPoll;
     try {
       result = await transport.pollBatch(job.provider_batch_id);
@@ -1432,8 +1594,12 @@ async function pollSubmittedJobs(advance: QueueAdvance, jobs: readonly JobRow[])
         await pauseProvider(db, job.provider, outcome.reason, now);
         advance.paused.add(job.provider);
       }
-      const status = outcome.class === "uncertain" || outcome.class === "refusal" ? "uncertain" : "submitted";
-      await db.prepare("UPDATE media_processing_jobs SET status = ?, error = ? WHERE id = ? AND status = 'submitted'").bind(status, boundedError(error, secrets), job.id).run();
+      if (outcome.class === "uncertain" || outcome.class === "refusal") {
+        // An error about the batch itself: whether it ran is unknown.
+        await returnUncertainItem(advance, job, outcome.reason, boundedError(error, secrets));
+      } else {
+        await db.prepare("UPDATE media_processing_jobs SET error = ? WHERE id = ? AND status = 'submitted'").bind(boundedError(error, secrets), job.id).run();
+      }
       summary.uncertain += 1;
       continue;
     }
@@ -1448,6 +1614,7 @@ async function pollSubmittedJobs(advance: QueueAdvance, jobs: readonly JobRow[])
         // nothing was produced, so the item waits again, with no attempt
         // counted.
         await transaction(db, async () => {
+          await closeAttempt(db, job.id, outcome.class, outcome.reason);
           await returnUnrunBatch(db, job, { attemptCount: job.attempt_count, nextAttemptAt: null, error: null }, now);
           await pauseProvider(db, job.provider, outcome.reason, now);
         });
@@ -1459,8 +1626,19 @@ async function pollSubmittedJobs(advance: QueueAdvance, jobs: readonly JobRow[])
         // The provider ended the batch without running it: the item waits
         // again and retries with backoff.
         const failures = job.attempt_count + 1;
-        await returnUnrunBatch(db, job, { attemptCount: failures, nextAttemptAt: transientRetryAt(failures, now, null).toISOString(), error: `transient:${outcome.reason}` }, now);
+        await transaction(db, async () => {
+          await closeAttempt(db, job.id, "transient", `transient:${outcome.reason}`);
+          await returnUnrunBatch(db, job, { attemptCount: failures, nextAttemptAt: transientRetryAt(failures, now, null).toISOString(), error: `transient:${outcome.reason}` }, now);
+        });
         noteReason(advance, job.run_id, "transient_provider_failure");
+        summary.uncertain += 1;
+        continue;
+      }
+      if (outcome.class === "uncertain") {
+        // The batch was accepted and then failed: it may have run and been
+        // charged. Its reported usage is recorded, and the item is resent.
+        await transaction(db, () => recordBatchCharge(db, job, result, now));
+        await returnUncertainItem(advance, job, outcome.reason, boundedError(result.error ?? "batch failed", secrets));
         summary.uncertain += 1;
         continue;
       }
@@ -1968,10 +2146,10 @@ async function finishRun(advance: QueueAdvance, run: OpenAuthorization): Promise
     db,
     `SELECT COALESCE(SUM(status = 'succeeded'), 0) AS succeeded,
        COALESCE(SUM(status IN ('failed', 'refused', 'stale')), 0) AS failed,
-       COALESCE(SUM(status = 'uncertain'), 0) AS uncertain,
+       COALESCE(SUM(status IN ('uncertain', 'uncertain_exhausted') OR (${WAITING} AND error LIKE 'uncertain:%')), 0) AS uncertain,
        COALESCE(SUM(status IN ('submitted', 'uncertain') OR ${WAITING}), 0) AS pending,
        COUNT(*) AS jobs,
-       COALESCE(SUM(status = 'failed' OR (status = 'refused' AND submitted_at IS NOT NULL)), 0) AS hard,
+       COALESCE(SUM(status IN ('failed', 'uncertain_exhausted') OR (status = 'refused' AND submitted_at IS NOT NULL)), 0) AS hard,
        COALESCE(SUM(${WAITING}), 0) AS waiting
      FROM media_processing_jobs WHERE run_id = ?`,
     auth.run_id,
@@ -2100,9 +2278,7 @@ async function advanceMediaProcessingNow(db: AppDatabase, options: MediaProcessi
     reasons: new Map(),
     submitted: new Map(),
   };
-  // Advances never overlap, so an item still marked in flight was sent by a
-  // process that stopped before recording its answer.
-  await db.prepare(`UPDATE media_processing_jobs SET error = ? WHERE status = 'uncertain' AND error = '${IN_FLIGHT}'`).bind(IN_FLIGHT_AT_STARTUP).run();
+  await recoverUncertainItems(advance);
   const pollOnly = options.pollOnly === true;
   const probing = new Set(pollOnly ? [] : [...(options.probe ?? []), ...(await runDailyCreditCheck(db, now, creditChecks(openRouter)) ?? [])]);
   for (const provider of PAID_PROVIDERS) if ((await providerState(db, provider)).paused) advance.paused.add(provider);

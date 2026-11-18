@@ -311,6 +311,14 @@ export function transientRetryAt(failures: number, now: Date, retryAfterMs: numb
   return new Date(now.getTime() + Math.max(backoff, retryAfterMs ?? 0));
 }
 
+/**
+ * How many consecutive sends of one item and input identity may end
+ * uncertain. Each uncertain outcome returns the item to the queue under the
+ * transient backoff; the last one ends it as `uncertain_exhausted`, and only a
+ * correction set resends it.
+ */
+export const MAX_UNCERTAIN_SENDS = 3;
+
 export interface ProviderState {
   provider: PaidProvider;
   paused: boolean;
@@ -471,13 +479,20 @@ export interface PaidWorkCost {
   /** The UTC calendar month that `monthToDateMicrousd` covers, as `YYYY-MM`. */
   month: string;
   providers: Record<PaidProvider, { monthToDateMicrousd: number; allTimeMicrousd: number }>;
-  /** Paid items submitted without an answer, including retained ones; their old reservations are not cost. */
+  /**
+   * Paid items whose latest request may have been charged without an answer:
+   * in flight, waiting to be resent after an uncertain outcome, or ended
+   * `uncertain_exhausted`, including retained ones. Their old reservations
+   * are not cost.
+   */
   uncertain: number;
 }
 
 /**
- * Reports recorded cost: every settled charge, by the UTC month it settled
- * in. Reservations, active or not, are never cost.
+ * Reports recorded cost: every attempt's settled charge, by the UTC month it
+ * settled in, on the provider the attempt was sent to. A job recorded before
+ * per-attempt records existed counts as its own one attempt. Reservations,
+ * active or not, are never cost.
  */
 export async function paidWorkCost(db: AppDatabase, now: Date): Promise<PaidWorkCost> {
   const monthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
@@ -486,13 +501,21 @@ export async function paidWorkCost(db: AppDatabase, now: Date): Promise<PaidWork
   for (const provider of PAID_PROVIDERS) {
     const row = await db.prepare(
       `SELECT
-         COALESCE(SUM(charged_microusd), 0) AS all_time,
-         COALESCE(SUM(CASE WHEN julianday(completed_at) >= julianday(?2) AND julianday(completed_at) < julianday(?3) THEN charged_microusd ELSE 0 END), 0) AS month_to_date
-       FROM media_processing_jobs
-       WHERE provider = ?1 AND charged_microusd IS NOT NULL`,
+         COALESCE(SUM(charged), 0) AS all_time,
+         COALESCE(SUM(CASE WHEN julianday(settled_at) >= julianday(?2) AND julianday(settled_at) < julianday(?3) THEN charged ELSE 0 END), 0) AS month_to_date
+       FROM (
+         SELECT charged_microusd AS charged, settled_at FROM media_processing_attempts
+         WHERE provider = ?1 AND charged_microusd IS NOT NULL
+         UNION ALL
+         SELECT charged_microusd, completed_at FROM media_processing_jobs AS job
+         WHERE provider = ?1 AND charged_microusd IS NOT NULL
+           AND NOT EXISTS (SELECT 1 FROM media_processing_attempts AS attempt WHERE attempt.job_id = job.id)
+       )`,
     ).bind(provider, monthStart.toISOString(), nextMonth.toISOString()).first<{ all_time: number; month_to_date: number }>();
     providers[provider] = { monthToDateMicrousd: Number(row?.month_to_date ?? 0), allTimeMicrousd: Number(row?.all_time ?? 0) };
   }
-  const uncertain = await db.prepare("SELECT COUNT(*) AS count FROM media_processing_jobs WHERE status = 'uncertain'").first<{ count: number }>();
+  const uncertain = await db.prepare(
+    "SELECT COUNT(*) AS count FROM media_processing_jobs WHERE status IN ('uncertain', 'uncertain_exhausted') OR (status = 'queued' AND retained = 0 AND error LIKE 'uncertain:%')",
+  ).first<{ count: number }>();
   return { reportingOnly: true, month: monthStart.toISOString().slice(0, 7), providers, uncertain: Number(uncertain?.count ?? 0) };
 }

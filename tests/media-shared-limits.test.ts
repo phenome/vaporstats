@@ -460,7 +460,11 @@ describe("processing limits across passes", () => {
     expect(summary.stopReasons).toContain("IGN:daily_attempt_cap");
 
     await advance(DAY_TWO);
-    expect(fetched).toHaveLength(3);
+    // The controlled provider never answers, so the first article's extraction
+    // was uncertain: day two fetches it again for its resend, with the two
+    // articles the cap held.
+    expect(fetched).toHaveLength(4);
+    expect(fetched.filter((url) => url === fetched[0])).toHaveLength(2);
   });
 
   test("an article fetch's attempt is recorded before the outlet is contacted", async () => {

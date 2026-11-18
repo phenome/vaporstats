@@ -22,6 +22,7 @@ import {
   OPENROUTER_WORKSPACE_BUDGET,
   openRouterKeyLimit,
   oversizedArticleHtml,
+  processingArticleHtml,
   runMediaTick,
   seedApps,
   stableJson,
@@ -68,6 +69,13 @@ function tick(database: TestDatabase, providers: Apis, at: string, options: Medi
 function textJobs(database: TestDatabase) {
   return database.native.query<{ stage: string; provider: string; model: string; status: string; attempt_count: number; next_attempt_at: string | null; error: string | null }, []>(
     "SELECT stage, provider, model, status, attempt_count, next_attempt_at, error FROM media_processing_jobs WHERE stage IN ('extraction', 'synthesis') ORDER BY id",
+  ).all();
+}
+
+/** Every recorded paid-work attempt, in order, with its item's stage. */
+function attempts(database: TestDatabase) {
+  return database.native.query<{ stage: string; attempt: number; provider: string; outcome: string | null; generation_id: string | null; charged_microusd: number | null; error: string | null }, []>(
+    "SELECT j.stage, a.attempt, a.provider, a.outcome, a.generation_id, a.charged_microusd, a.error FROM media_processing_attempts AS a JOIN media_processing_jobs AS j ON j.id = a.job_id ORDER BY a.id",
   ).all();
 }
 
@@ -214,20 +222,41 @@ describe("OpenRouter classifier", () => {
   ).get();
 
   for (const code of [408, 500, 502, 524]) {
-    test(`a 200 whose body reports a ${code} after the provider accepted the request is uncertain, never resent automatically, and records its generation id, usage and cost`, async () => {
+    test(`a 200 whose body reports a ${code} after the provider accepted the request is uncertain: the attempt records its generation id, usage and cost, and the item is resent with backoff`, async () => {
       const { database } = await authorizedGames();
       const providers = apis();
       providers.openRouter.reply("chat", acceptedError(code));
 
       const uncertain = await tick(database, providers, "2026-11-18T07:00:00.000Z");
-      await tick(database, providers, "2026-11-19T06:00:00.000Z");
 
-      expect(answerRecord(database)).toEqual({ status: "uncertain", error: `uncertain:accepted_http_${code}`, generation_id: "gen-accepted", charged_microusd: 100, cost_source: "provider_reported", usage_json: JSON.stringify({ promptTokens: 1_000, completionTokens: 0 }) });
+      expect(answerRecord(database)).toEqual({ status: "queued", error: `uncertain:accepted_http_${code}`, generation_id: "gen-accepted", charged_microusd: 100, cost_source: "provider_reported", usage_json: JSON.stringify({ promptTokens: 1_000, completionTokens: 0 }) });
+      expect(attempts(database)).toEqual([{ stage: "extraction", attempt: 1, provider: "openrouter", outcome: "uncertain", generation_id: "gen-accepted", charged_microusd: 100, error: `uncertain:accepted_http_${code}` }]);
       expect(uncertain.mediaProcessing?.cost.uncertain).toBe(1);
       expect(uncertain.mediaProcessing?.cost.providers.openrouter.allTimeMicrousd).toBe(100);
-      expect(providers.openRouter.requests.filter((request) => request.stage === "extraction")).toHaveLength(1);
+
+      const resent = await tick(database, providers, "2026-11-18T07:15:00.000Z");
+      expect(providers.openRouter.requests.filter((request) => request.stage === "extraction")).toHaveLength(2);
+      expect(answerRecord(database)).toMatchObject({ status: "succeeded", generation_id: "gen-2", charged_microusd: 250 });
+      expect(attempts(database).filter(({ stage }) => stage === "extraction").map(({ generation_id, charged_microusd }) => ({ generation_id, charged_microusd }))).toEqual([
+        { generation_id: "gen-accepted", charged_microusd: 100 },
+        { generation_id: "gen-2", charged_microusd: 150 },
+      ]);
+      // Cost reporting sums every attempt: both extraction attempts and the Overview.
+      expect(resent.mediaProcessing?.cost.providers.openrouter).toEqual({ monthToDateMicrousd: 400, allTimeMicrousd: 400 });
     });
   }
+
+  test("month-to-date cost counts each attempt in the UTC month its cost was recorded, and all-time cost counts every attempt", async () => {
+    const { database } = await authorizedGames();
+    const providers = apis();
+    providers.openRouter.reply("chat", acceptedError(502));
+
+    await tick(database, providers, "2026-11-30T23:50:00.000Z");
+    const december = await tick(database, providers, "2026-12-01T00:05:00.000Z");
+
+    expect(attempts(database).filter(({ provider }) => provider === "openrouter").map(({ charged_microusd }) => charged_microusd)).toEqual([100, 150, 150]);
+    expect(december.mediaProcessing?.cost).toMatchObject({ month: "2026-12", providers: { openrouter: { monthToDateMicrousd: 300, allTimeMicrousd: 400 } } });
+  });
 
   test("a 200 whose body reports another code keeps that code's class, and its generation id and cost are recorded", async () => {
     const refused = await authorizedGames();
@@ -264,7 +293,7 @@ describe("OpenRouter classifier", () => {
     const failing = apis();
     failing.openRouter.reply("chat", choiceError(502));
     await tick(failed.database, failing, "2026-11-18T07:00:00.000Z");
-    expect(answerRecord(failed.database)).toMatchObject({ status: "uncertain", error: "uncertain:accepted_http_502", generation_id: "gen-accepted", charged_microusd: 100 });
+    expect(answerRecord(failed.database)).toMatchObject({ status: "queued", error: "uncertain:accepted_http_502", generation_id: "gen-accepted", charged_microusd: 100 });
 
     const refused = await authorizedGames();
     const refusing = apis();
@@ -277,17 +306,18 @@ describe("OpenRouter classifier", () => {
     ["a body that is not JSON", { status: 200, raw: "<html><body>upstream reset</body></html>" }],
     ["a JSON body without choices", { status: 200, body: { id: "gen-empty", object: "chat.completion" } }],
   ] as Array<[string, OpenRouterReply]>) {
-    test(`a 200 with ${name} came after the provider accepted the request, so the item is uncertain and never resent automatically`, async () => {
+    test(`a 200 with ${name} came after the provider accepted the request, so the item is uncertain and resent with backoff`, async () => {
       const { database } = await authorizedGames();
       const providers = apis();
       providers.openRouter.reply("chat", reply);
 
       const uncertain = await tick(database, providers, "2026-11-18T07:00:00.000Z");
-      await tick(database, providers, "2026-11-19T06:00:00.000Z");
 
-      expect(answerRecord(database)).toMatchObject({ status: "uncertain", error: "uncertain:accepted_without_answer" });
+      expect(answerRecord(database)).toMatchObject({ status: "queued", error: "uncertain:accepted_without_answer" });
       expect(uncertain.mediaProcessing?.outputs.skipped).toBe(0);
-      expect(providers.openRouter.requests.filter((request) => request.stage === "extraction")).toHaveLength(1);
+      await tick(database, providers, "2026-11-18T07:15:00.000Z");
+      expect(providers.openRouter.requests.filter((request) => request.stage === "extraction")).toHaveLength(2);
+      expect(answerRecord(database)).toMatchObject({ status: "succeeded" });
     });
   }
 
@@ -407,64 +437,139 @@ describe("request lifecycle", () => {
     expect(textJobs(database).map(({ status }) => status)).toEqual(["succeeded", "succeeded"]);
   });
 
-  test("a client timeout after the request was sent leaves the item uncertain: reported, never resent automatically, and resent through a correction set", async () => {
+  test("a client timeout after the request was sent is uncertain: the item returns to the queue, is resent with backoff, settles, and each attempt keeps its own record", async () => {
     const { database } = await authorizedGames();
     const providers = apis();
     providers.openRouter.reply("chat", { hang: true });
 
     const sent = await tick(database, providers, "2026-11-18T07:00:00.000Z", { openRouterTimeoutMs: 20 });
 
-    expect(textJobs(database).map(({ stage, status, error }) => ({ stage, status, error }))).toEqual([{ stage: "extraction", status: "uncertain", error: "uncertain:timeout" }]);
+    expect(textJobs(database).map(({ stage, status, attempt_count, next_attempt_at, error }) => ({ stage, status, attempt_count, next_attempt_at, error }))).toEqual([
+      { stage: "extraction", status: "queued", attempt_count: 1, next_attempt_at: "2026-11-18T07:15:00.000Z", error: "uncertain:timeout" },
+    ]);
     expect(sent.mediaProcessing?.cost.uncertain).toBe(1);
     expect(sent.mediaProcessing?.stopReasons).toContain("uncertain_submission");
-    for (const at of ["2026-11-18T07:15:00.000Z", "2026-11-19T06:00:00.000Z"]) {
-      const later = await tick(database, providers, at);
-      expect(later.mediaProcessing?.cost.uncertain).toBe(1);
-    }
-    expect(providers.openRouter.requests).toHaveLength(1);
+    expect(sent.mediaProcessing?.outputs.skipped).toBe(0);
 
-    // An authorized correction set covering the article resends it.
-    const sourceId = database.native.query<{ id: number }, []>("SELECT id FROM media_sources").get()!.id;
-    await authorizeMediaProcessing(database.db, insertCompletedRun(database.native, "initial:openrouter:correction", [CYBERPUNK]), { affectedSourceIds: [sourceId] });
-    await tick(database, providers, "2026-11-19T07:00:00.000Z");
+    const resent = await tick(database, providers, "2026-11-18T07:15:00.000Z");
+
     expect(providers.openRouter.requests.map((request) => request.stage)).toEqual(["extraction", "extraction", "synthesis"]);
-    expect(textJobs(database).map(({ status }) => status)).toEqual(["uncertain", "succeeded", "succeeded"]);
+    expect(textJobs(database).map(({ status }) => status)).toEqual(["succeeded", "succeeded"]);
+    expect(resent.mediaProcessing?.cost.uncertain).toBe(0);
+    expect(attempts(database).filter(({ provider }) => provider === "openrouter")).toEqual([
+      { stage: "extraction", attempt: 1, provider: "openrouter", outcome: "uncertain", generation_id: null, charged_microusd: null, error: "uncertain:timeout" },
+      { stage: "extraction", attempt: 2, provider: "openrouter", outcome: "succeeded", generation_id: "gen-2", charged_microusd: 150, error: null },
+      { stage: "synthesis", attempt: 1, provider: "openrouter", outcome: "succeeded", generation_id: "gen-3", charged_microusd: 150, error: null },
+    ]);
   });
 
-  test("an uncertain Overview request is never resent automatically, and is resent through a correction set covering its game", async () => {
+  test("an uncertain Overview request is resent automatically with backoff", async () => {
     const { database } = await authorizedGames();
     const providers = apis();
     providers.openRouter.reply("chat", { status: 200, body: { id: "gen-ok", provider: "Anthropic", model: HAIKU, choices: [{ message: { content: JSON.stringify({ contributions: [{ text: "The combat supports flexible builds", category: "Gameplay & systems" }], traits: ["build experimentation"], qualifications: [], provenance: [] }) } }], usage: { cost: 0.0001 } } }, { hang: true });
 
     await tick(database, providers, "2026-11-18T07:00:00.000Z", { openRouterTimeoutMs: 20 });
-    await tick(database, providers, "2026-11-19T06:00:00.000Z");
-    expect(textJobs(database).map(({ stage, status }) => ({ stage, status }))).toEqual([{ stage: "extraction", status: "succeeded" }, { stage: "synthesis", status: "uncertain" }]);
-    expect(providers.openRouter.requests).toHaveLength(2);
-
-    const sourceId = database.native.query<{ id: number }, []>("SELECT id FROM media_sources").get()!.id;
-    await authorizeMediaProcessing(database.db, insertCompletedRun(database.native, "initial:openrouter:correction", [CYBERPUNK]), { affectedSourceIds: [sourceId] });
-    await tick(database, providers, "2026-11-19T07:00:00.000Z");
-
-    // The unchanged article keeps its extraction; only the Overview is resent.
-    expect(providers.openRouter.requests.map((request) => request.stage)).toEqual(["extraction", "synthesis", "synthesis"]);
-    expect(textJobs(database).map(({ stage, status }) => ({ stage, status }))).toEqual([
-      { stage: "extraction", status: "succeeded" },
-      { stage: "synthesis", status: "uncertain" },
-      { stage: "synthesis", status: "succeeded" },
+    expect(textJobs(database).map(({ stage, status, next_attempt_at }) => ({ stage, status, next_attempt_at }))).toEqual([
+      { stage: "extraction", status: "succeeded", next_attempt_at: null },
+      { stage: "synthesis", status: "queued", next_attempt_at: "2026-11-18T07:15:00.000Z" },
     ]);
+    await tick(database, providers, "2026-11-18T07:15:00.000Z");
+
+    expect(providers.openRouter.requests.map((request) => request.stage)).toEqual(["extraction", "synthesis", "synthesis"]);
+    expect(textJobs(database).map(({ stage, status }) => ({ stage, status }))).toEqual([{ stage: "extraction", status: "succeeded" }, { stage: "synthesis", status: "succeeded" }]);
     expect(await detailOverview(database, CYBERPUNK)).not.toBeNull();
   });
 
-  test("a connection lost after the request was sent leaves the item uncertain", async () => {
+  test("a resent item whose work no longer needs a provider ends stale and keeps its attempts and their cost", async () => {
+    const { database } = await authorizedGames();
+    const providers = apis();
+    const extracted = { status: 200, body: { id: "gen-ok", provider: "Anthropic", model: HAIKU, choices: [{ message: { content: JSON.stringify({ contributions: [{ text: "The combat supports flexible builds", category: "Gameplay & systems" }], traits: ["build experimentation"], qualifications: [], provenance: [] }) } }], usage: { cost: 0.00015 } } };
+    providers.openRouter.reply("chat", extracted, { status: 200, body: { id: "gen-overview", usage: { prompt_tokens: 1_000, completion_tokens: 0, cost: 0.0001 }, error: { code: 502, message: "Provider returned error" } } });
+    await tick(database, providers, "2026-11-18T07:00:00.000Z");
+    expect(textJobs(database).map(({ stage, status }) => ({ stage, status }))).toEqual([{ stage: "extraction", status: "succeeded" }, { stage: "synthesis", status: "queued" }]);
+
+    // A new article changes the game's contributions before the Overview is resent.
+    insertSources(database.native, CYBERPUNK, "initial", 1, MEDIA_OUTLETS[1]);
+    await authorizeMediaProcessing(database.db, insertCompletedRun(database.native, "initial:openrouter:new-article", [CYBERPUNK]));
+    const settled = await tick(database, providers, "2026-11-18T07:15:00.000Z");
+
+    expect(textJobs(database).map(({ stage, status }) => ({ stage, status }))).toEqual([
+      { stage: "extraction", status: "succeeded" },
+      { stage: "synthesis", status: "stale" },
+      { stage: "extraction", status: "succeeded" },
+      { stage: "synthesis", status: "succeeded" },
+    ]);
+    expect(attempts(database).filter(({ stage }) => stage === "synthesis").map(({ attempt, outcome, generation_id, charged_microusd }) => ({ attempt, outcome, generation_id, charged_microusd }))).toEqual([
+      { attempt: 1, outcome: "uncertain", generation_id: "gen-overview", charged_microusd: 100 },
+      { attempt: 1, outcome: "succeeded", generation_id: "gen-4", charged_microusd: 150 },
+    ]);
+    expect(settled.mediaProcessing?.cost.providers.openrouter.allTimeMicrousd).toBe(150 + 100 + 150 + 150);
+  });
+
+  test("a connection lost after the request was sent is uncertain and the item returns to the queue with backoff", async () => {
     const { database } = await authorizedGames();
     const providers = apis();
     providers.openRouter.reply("chat", { network: "socket closed before the response" });
 
     await tick(database, providers, "2026-11-18T07:00:00.000Z");
-    await tick(database, providers, "2026-11-18T07:15:00.000Z");
 
-    expect(textJobs(database).map(({ status, error }) => ({ status, error }))).toEqual([{ status: "uncertain", error: "uncertain:no_response" }]);
+    expect(textJobs(database).map(({ status, attempt_count, next_attempt_at, error }) => ({ status, attempt_count, next_attempt_at, error }))).toEqual([
+      { status: "queued", attempt_count: 1, next_attempt_at: "2026-11-18T07:15:00.000Z", error: "uncertain:no_response" },
+    ]);
     expect(providers.openRouter.requests).toHaveLength(1);
+  });
+
+  test("three consecutive uncertain outcomes for one input identity end the item as uncertain_exhausted: never resent automatically, and resent through a correction set", async () => {
+    const { database } = await authorizedGames();
+    const providers = apis();
+    providers.openRouter.reply("chat", { hang: true }, { hang: true }, { hang: true });
+    const options = { openRouterTimeoutMs: 20 };
+
+    // Backoff doubles from one tick: 07:15, then 07:45.
+    await tick(database, providers, "2026-11-18T07:00:00.000Z", options);
+    await tick(database, providers, "2026-11-18T07:15:00.000Z", options);
+    expect(textJobs(database).map(({ status, attempt_count, next_attempt_at }) => ({ status, attempt_count, next_attempt_at }))).toEqual([{ status: "queued", attempt_count: 2, next_attempt_at: "2026-11-18T07:45:00.000Z" }]);
+    await tick(database, providers, "2026-11-18T07:30:00.000Z", options);
+    expect(providers.openRouter.requests).toHaveLength(2);
+    const exhausted = await tick(database, providers, "2026-11-18T07:45:00.000Z", options);
+
+    expect(textJobs(database).map(({ status, next_attempt_at, error }) => ({ status, next_attempt_at, error }))).toEqual([{ status: "uncertain_exhausted", next_attempt_at: null, error: "uncertain_exhausted:timeout" }]);
+    expect(exhausted.mediaProcessing?.cost.uncertain).toBe(1);
+    expect(exhausted.mediaProcessing?.outputs.skipped).toBe(1);
+    for (const at of ["2026-11-18T09:00:00.000Z", "2026-11-19T06:00:00.000Z", "2026-11-20T06:00:00.000Z"]) await tick(database, providers, at);
+    expect(providers.openRouter.requests).toHaveLength(3);
+    expect(attempts(database).map(({ attempt, outcome }) => ({ attempt, outcome }))).toEqual([1, 2, 3].map((attempt) => ({ attempt, outcome: "uncertain" })));
+
+    // Only an authorized correction set covering the article resends it.
+    const sourceId = database.native.query<{ id: number }, []>("SELECT id FROM media_sources").get()!.id;
+    await authorizeMediaProcessing(database.db, insertCompletedRun(database.native, "initial:openrouter:correction", [CYBERPUNK]), { affectedSourceIds: [sourceId] });
+    await tick(database, providers, "2026-11-20T07:00:00.000Z");
+    expect(providers.openRouter.requests.map((request) => request.stage)).toEqual(["extraction", "extraction", "extraction", "extraction", "synthesis"]);
+    expect(textJobs(database).map(({ status }) => status)).toEqual(["uncertain_exhausted", "succeeded", "succeeded"]);
+  });
+
+  test("a new input identity starts a fresh uncertain count, and any other outcome ends the streak", async () => {
+    const { database } = await authorizedGames();
+    const providers = apis();
+    const options = { openRouterTimeoutMs: 20 };
+    providers.openRouter.reply("chat", { hang: true }, { hang: true });
+    await tick(database, providers, "2026-11-18T07:00:00.000Z", options);
+    await tick(database, providers, "2026-11-18T07:15:00.000Z", options);
+
+    // The article's cleaned text changes: the next send has a new input identity.
+    providers.openRouter.reply("chat", { hang: true }, { status: 503, body: { error: { code: 503, message: "Unavailable" } } }, { hang: true }, { hang: true });
+    const changed = { ...options, outlet: () => new Response(processingArticleHtml(CYBERPUNK).replace("flexible combat", "deliberate tactical combat")) };
+    await tick(database, providers, "2026-11-18T07:45:00.000Z", changed);
+    expect(textJobs(database).map(({ status, error }) => ({ status, error }))).toEqual([{ status: "queued", error: "uncertain:timeout" }]);
+    // A transient answer ends the streak: two more uncertain outcomes still leave the item queued.
+    await tick(database, providers, "2026-11-18T09:00:00.000Z", changed);
+    await tick(database, providers, "2026-11-18T12:00:00.000Z", changed);
+    await tick(database, providers, "2026-11-19T06:00:00.000Z", changed);
+    expect(attempts(database).map(({ outcome }) => outcome)).toEqual(["uncertain", "uncertain", "uncertain", "transient", "uncertain", "uncertain"]);
+    expect(textJobs(database).map(({ status, error }) => ({ status, error }))).toEqual([{ status: "queued", error: "uncertain:timeout" }]);
+
+    await tick(database, providers, "2026-11-20T06:00:00.000Z", changed);
+    expect(textJobs(database).map(({ status }) => status)).toEqual(["succeeded", "succeeded"]);
   });
 
   for (const [name, code] of [["DNS", "ENOTFOUND"], ["connect", "ECONNREFUSED"], ...TLS_FAILURE_CODES.map((tls) => [`TLS ${tls}`, tls] as const)]) {
@@ -482,7 +587,7 @@ describe("request lifecycle", () => {
     });
   }
 
-  test("a restart with the database reopened while a request is in flight leaves the item uncertain and sends no second request", async () => {
+  test("a restart with the database reopened while a request is in flight makes the item uncertain: it returns to the queue and is resent once with backoff", async () => {
     const { database } = await authorizedGames();
     const providers = apis();
     // The process stops while the request is in flight: its database handle closes before any answer is recorded.
@@ -495,32 +600,39 @@ describe("request lifecycle", () => {
     expect(stopped.status).toBe("error");
     providers.openRouter.onChat = undefined;
 
-    const restarted = await tick(database, providers, "2026-11-18T07:15:00.000Z");
-    await tick(database, providers, "2026-11-19T06:00:00.000Z");
+    const restarted = await tick(database, providers, "2026-11-18T07:05:00.000Z");
 
     expect(providers.openRouter.requests).toHaveLength(1);
-    expect(textJobs(database).map(({ status, error }) => ({ status, error }))).toEqual([{ status: "uncertain", error: "uncertain:in_flight_at_startup" }]);
+    expect(textJobs(database).map(({ status, attempt_count, next_attempt_at, error }) => ({ status, attempt_count, next_attempt_at, error }))).toEqual([
+      { status: "queued", attempt_count: 1, next_attempt_at: "2026-11-18T07:20:00.000Z", error: "uncertain:in_flight_at_startup" },
+    ]);
     expect(restarted.mediaProcessing?.cost.uncertain).toBe(1);
+
+    await tick(database, providers, "2026-11-18T07:20:00.000Z");
+    expect(providers.openRouter.requests.map((request) => request.stage)).toEqual(["extraction", "extraction", "synthesis"]);
+    expect(attempts(database).filter(({ stage }) => stage === "extraction").map(({ attempt, outcome, error }) => ({ attempt, outcome, error }))).toEqual([
+      { attempt: 1, outcome: "uncertain", error: "uncertain:in_flight_at_startup" },
+      { attempt: 2, outcome: "succeeded", error: null },
+    ]);
   });
 
-  test("an uncertain extraction does not block its game's Overview, which is built from the other current articles", async () => {
+  test("a game's Overview waits for the resend of an uncertain extraction, then cites every article", async () => {
     const { database } = await authorizedGames({ [CYBERPUNK]: 2 });
     const providers = apis();
     providers.openRouter.reply("chat", { network: "socket closed before the response" });
-    const [uncertainUrl, settledUrl] = sourceUrls(database);
+    const urls = sourceUrls(database);
 
-    const result = await tick(database, providers, "2026-11-18T07:00:00.000Z");
+    await tick(database, providers, "2026-11-18T07:00:00.000Z");
 
     expect(textJobs(database).map(({ stage, status }) => ({ stage, status }))).toEqual([
-      { stage: "extraction", status: "uncertain" },
+      { stage: "extraction", status: "queued" },
       { stage: "extraction", status: "succeeded" },
-      { stage: "synthesis", status: "succeeded" },
     ]);
-    const synthesis = providers.openRouter.requests.find((request) => request.stage === "synthesis")!;
-    expect(synthesis.urls).toEqual([settledUrl]);
-    expect(JSON.stringify(synthesis.body)).not.toContain(uncertainUrl);
-    expect((await detailOverview(database, CYBERPUNK))?.statements[0]?.sourceUrls).toEqual([settledUrl]);
-    expect(result.mediaProcessing?.cost.uncertain).toBe(1);
+    await tick(database, providers, "2026-11-18T07:15:00.000Z");
+    const synthesis = providers.openRouter.requests.filter((request) => request.stage === "synthesis");
+    expect(synthesis).toHaveLength(1);
+    expect([...synthesis[0]!.urls].sort()).toEqual([...urls].sort());
+    expect([...(await detailOverview(database, CYBERPUNK))!.statements[0]!.sourceUrls].sort()).toEqual([...urls].sort());
   });
 });
 
@@ -981,7 +1093,8 @@ describe("credentials and private details", () => {
     }
 
     // Every failure class above was recorded.
-    expect(textJobs(database).map(({ status }) => status).sort()).toEqual(["queued", "refused", "uncertain"]);
+    expect(textJobs(database).map(({ status }) => status).sort()).toEqual(["queued", "queued", "refused"]);
+    expect(textJobs(database).map(({ error }) => error)).toContain("uncertain:no_response");
     expect((results[1] as { mediaProcessing: { providers: { openrouter: { reason: string } } } }).mediaProcessing.providers.openrouter.reason).toBe("invalid_key");
     const recorded = JSON.stringify([
       logged,
