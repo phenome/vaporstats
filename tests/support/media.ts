@@ -654,3 +654,106 @@ export function insertSubmittedGeminiExtraction(native: Database, options: { run
   ).run(options.runId, source.appid, options.sourceId, `extraction:${options.sourceId}:run:${options.runId}`, identity, options.batch ?? "batches/test-1");
   return native.query<{ id: number }, []>("SELECT id FROM media_processing_jobs ORDER BY id DESC LIMIT 1").get()!.id;
 }
+
+/**
+ * Where a paid provider's response comes from, which bounds the classes it
+ * may take (see `tests/media-provider-contract.test.ts`):
+ *
+ * - `provider_wide`: about the account, key, project or model, never the
+ *   item: a Credit pause or a configuration pause, never a refusal;
+ * - `item_content`: about the request itself: a definite refusal;
+ * - `pre_send_network`: a connection failure before the request was fully
+ *   sent: transient;
+ * - `post_accept`: the provider accepted the request, then failed, ended it
+ *   or answered without a result: uncertain, or transient only when a resend
+ *   cannot repeat a charge (a free poll, a batch the provider ended unrun);
+ * - `post_send_timeout`: sent, with no answer: uncertain.
+ *
+ * Rate limits and in-flight budgets are transient and provider-wide; they
+ * have their own tests and no scope here.
+ */
+export const PROVIDER_RESPONSE_SCOPES = ["provider_wide", "item_content", "pre_send_network", "post_accept", "post_send_timeout"] as const;
+export type ProviderResponseScope = (typeof PROVIDER_RESPONSE_SCOPES)[number];
+
+/** A provider's fixtures by response scope, each named; omitting a scope fails to compile. */
+export type ScopedProviderFixtures<Fixture> = { readonly [Scope in ProviderResponseScope]: Readonly<Record<string, Fixture>> };
+
+/** One Gemini request kind and the controlled API's reply to it. A poll reply is the batch's whole state. */
+export interface GeminiScopedFixture {
+  call: GeminiCall;
+  reply: GeminiReply;
+}
+
+const geminiBatch = (state: string, error?: string): GeminiReply => ({ status: 200, body: { metadata: { state }, ...(error ? { error: { message: error } } : {}) } });
+
+/** Gemini responses by scope, through the real batch transport. */
+export const GEMINI_SCOPED_FIXTURES: ScopedProviderFixtures<GeminiScopedFixture> = {
+  provider_wide: {
+    "submit 402 Prepay depleted": { call: "submit", reply: GEMINI_PREPAY_DEPLETED },
+    "submit 429 spend cap": { call: "submit", reply: GEMINI_SPEND_CAP },
+    "submit 400 API key invalid": { call: "submit", reply: GEMINI_KEY_INVALID },
+    "submit 400 billing not enabled": { call: "submit", reply: GEMINI_BILLING_DISABLED },
+    "submit 404 model not found": { call: "submit", reply: GEMINI_MODEL_NOT_FOUND },
+    "count 404 model not found": { call: "count", reply: GEMINI_MODEL_NOT_FOUND },
+    "submit 401": { call: "submit", reply: { status: 401, body: { error: { code: 401, status: "UNAUTHENTICATED", message: "Request had invalid authentication credentials." } } } },
+    "submit 403 permission denied": { call: "submit", reply: { status: 403, body: { error: { code: 403, status: "PERMISSION_DENIED", message: "Generative Language API has not been used in this project." } } } },
+    "count 403 permission denied": { call: "count", reply: { status: 403, body: { error: { code: 403, status: "PERMISSION_DENIED", message: "Permission denied." } } } },
+    "poll 402 Prepay depleted": { call: "poll", reply: GEMINI_PREPAY_DEPLETED },
+    "poll batch failed: Prepay depleted": { call: "poll", reply: geminiBatch("BATCH_STATE_FAILED", "Your prepayment credits are depleted.") },
+  },
+  item_content: {
+    "submit 400 invalid argument": { call: "submit", reply: { status: 400, body: { error: { code: 400, status: "INVALID_ARGUMENT", message: "Request contains an invalid argument." } } } },
+    "count 400 invalid argument": { call: "count", reply: { status: 400, body: { error: { code: 400, status: "INVALID_ARGUMENT", message: "Request contains an invalid argument." } } } },
+    "poll inline response error": { call: "poll", reply: { status: 200, body: { metadata: { state: "BATCH_STATE_SUCCEEDED" }, response: { inlinedResponses: { inlinedResponses: [{ error: { code: 400, message: "Invalid content." } }] } } } } },
+  },
+  pre_send_network: Object.fromEntries(["ECONNREFUSED", "ENOTFOUND", ...TLS_FAILURE_CODES].map((code) => [`submit ${code}`, { call: "submit", reply: { network: "connect failed", code } }])),
+  post_accept: {
+    "poll 404 batch not found": { call: "poll", reply: { status: 404, body: { error: { code: 404, status: "NOT_FOUND", message: "Requested entity was not found." } } } },
+    "poll 500": { call: "poll", reply: { status: 500, body: { error: { code: 500, status: "INTERNAL", message: "Internal error." } } } },
+    "poll connection lost": { call: "poll", reply: { network: "socket closed" } },
+    "poll batch expired": { call: "poll", reply: geminiBatch("BATCH_STATE_EXPIRED") },
+    "poll batch cancelled": { call: "poll", reply: geminiBatch("BATCH_STATE_CANCELLED") },
+    "poll batch failed": { call: "poll", reply: geminiBatch("BATCH_STATE_FAILED", "Internal error encountered.") },
+  },
+  post_send_timeout: {
+    "submit connection lost after sending": { call: "submit", reply: { network: "socket closed" } },
+    "submit ECONNRESET": { call: "submit", reply: { network: "connection reset", code: "ECONNRESET" } },
+  },
+};
+
+/** OpenRouter chat-completion answers by scope, through the real OpenRouter transport. */
+export const OPENROUTER_SCOPED_FIXTURES: ScopedProviderFixtures<OpenRouterReply> = {
+  provider_wide: {
+    "402 key limit": openRouterKeyLimit(402),
+    "403 key limit": openRouterKeyLimit(403),
+    "402 credits": OPENROUTER_CREDITS,
+    "402 without a limit source": { status: 402, body: { error: { code: 402, message: "Payment required" } } },
+    "403 guardrail budget": OPENROUTER_GUARDRAIL_BUDGET,
+    "403 workspace budget": OPENROUTER_WORKSPACE_BUDGET,
+    "403 permission denied": OPENROUTER_PERMISSION_DENIED,
+    "403 without metadata": { status: 403, body: { error: { code: 403, message: "Forbidden" } } },
+    "401 invalid key": OPENROUTER_INVALID_KEY,
+    "404 model unavailable": { status: 404, body: { error: { code: 404, message: "No endpoints found for anthropic/claude-haiku-5.5." } } },
+    "200 accepted, then 402 credits": { status: 200, body: { error: { code: 402, message: "Insufficient credits", metadata: { limit_source: "openrouter_credits" } } } },
+  },
+  item_content: {
+    "400 invalid request": { status: 400, body: { error: { code: 400, message: "Invalid request" } } },
+    "403 moderation": OPENROUTER_MODERATION,
+    "403 content policy": { status: 403, body: { error: { code: 403, message: "Blocked", metadata: { error_type: "content_policy_violation" } } } },
+    "200 accepted, then 400 on the first choice": { status: 200, body: { id: "gen-1", choices: [{ index: 0, finish_reason: "error", error: { code: 400, message: "Invalid request" } }] } },
+  },
+  pre_send_network: Object.fromEntries(["ECONNREFUSED", "ENOTFOUND", "EAI_AGAIN", ...TLS_FAILURE_CODES].map((code) => [code, { network: "connect failed", code }])),
+  post_accept: {
+    "200 accepted, then 502": { status: 200, body: { error: { code: 502, message: "Provider returned error" } } },
+    "200 accepted, then 408": { status: 200, body: { error: { code: 408, message: "Provider timed out" } } },
+    "200 accepted, finish_reason error without a code": { status: 200, body: { id: "gen-1", choices: [{ index: 0, finish_reason: "error", message: { role: "assistant", content: "" } }] } },
+    "200 not JSON": { status: 200, raw: "data: partial" },
+    "200 without choices": { status: 200, body: { id: "gen-1" } },
+  },
+  post_send_timeout: {
+    "no answer before the client timeout": { hang: true },
+    "connection lost after sending": { network: "socket closed" },
+    "ECONNRESET": { network: "connection reset", code: "ECONNRESET" },
+    "timeout error": { network: "The operation timed out.", name: "TimeoutError" },
+  },
+};
