@@ -1,51 +1,14 @@
 import { describe, expect, it } from "bun:test";
 import { handleRequest } from "../src/server";
-import { closeDb, getDb } from "../src/lib/db";
-import {
-} from "../src/lib/media-processing";
-import { chmod, copyFile, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { getDb } from "../src/lib/db";
+import { chmod, copyFile, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
 const root = dirname(import.meta.dir);
 const wrapperPath = join(root, "scripts", "remote-command.sh");
-const workflowPath = join(root, ".github", "workflows", "media-discovery.yml");
+const workflowDirectory = join(root, ".github", "workflows");
 const shell = process.platform === "win32" ? process.env.GIT_BASH_PATH ?? "C:\\Program Files\\Git\\bin\\bash.exe" : "bash";
-async function withIsolatedTriggerDb<T>(work: (discoveryCalls: string[]) => Promise<T>): Promise<T> {
-  const previousDatabasePath = process.env.DATABASE_PATH;
-  const previousFetch = globalThis.fetch;
-  await closeDb();
-  const directory = await mkdtemp(join(tmpdir(), "vaporstats-media-trigger-db-"));
-  process.env.DATABASE_PATH = join(directory, "trigger.sqlite");
-  const discoveryCalls: string[] = [];
-  globalThis.fetch = (async (input: RequestInfo | URL) => {
-    const url = String(input);
-    discoveryCalls.push(url);
-    if (url.endsWith("/usage")) {
-      return Response.json({
-        account: { current_plan: "free" },
-        plan_usage: 0,
-        plan_limit: 100,
-        paygo_usage: 0,
-        paygo_limit: 0,
-      });
-    }
-    if (url.endsWith("/search")) {
-      return Response.json({ results: [], usage: { credits_used: 0 } });
-    }
-    throw new Error(`unexpected provider request: ${url}`);
-  }) as typeof fetch;
-  try {
-    return await work(discoveryCalls);
-  } finally {
-    await closeDb();
-    globalThis.fetch = previousFetch;
-    if (previousDatabasePath === undefined) delete process.env.DATABASE_PATH;
-    else process.env.DATABASE_PATH = previousDatabasePath;
-    await rm(directory, { recursive: true, force: true });
-  }
-}
-
 async function makeHarness() {
   const directory = await mkdtemp(join(tmpdir(), "vaporstats-media-trigger-"));
   const tracePath = join(directory, "children.log");
@@ -108,36 +71,36 @@ async function runWrapper(
   return { exitCode, stdout, stderr, trace: await readFile(tracePath, "utf8") };
 }
 
-describe("forced media/deploy remote command", () => {
-  it("executes only the exact deploy and media command forms", async () => {
+// The manual `media initial` and `media later` triggers are retired: daily
+// media discovery and paid work run only in the ingestion tick. No layer
+// (the dispatch workflow, the restricted remote command, or the server)
+// accepts a media form, and none reaches a shell or starts media work.
+
+const RETIRED_MEDIA_FORMS = [
+  "media initial all",
+  "media initial cyberpunk-2077",
+  "media initial baldurs-gate-3",
+  "media initial hades-ii",
+  "media later all",
+  "media later cyberpunk-2077",
+  "media status",
+  "media",
+];
+
+describe("restricted remote command", () => {
+  it("executes only the exact deploy form", async () => {
     const harness = await makeHarness();
     try {
       const commit = "0123456789abcdef0123456789abcdef01234567";
-      const deploy = await runWrapper(
-        harness.directory,
-        harness.tracePath,
-        `deploy ${commit}`,
-      );
+      const deploy = await runWrapper(harness.directory, harness.tracePath, `deploy ${commit}`);
       expect(deploy.exitCode).toBe(0);
       expect(deploy.trace).toBe(`deploy:${commit}\n`);
-
-      for (const game of ["all", "cyberpunk-2077", "baldurs-gate-3", "hades-ii"]) {
-        const media = await runWrapper(
-          harness.directory,
-          harness.tracePath,
-          `media initial ${game}`,
-        );
-        expect(media.exitCode).toBe(0);
-        expect(media.stdout).toBe('{"accepted":true}\n');
-        expect(media.trace).toContain(`docker:exec|vaporstats|bun|-e|`);
-        expect(media.trace.endsWith(`|${game}\n`)).toBe(true);
-      }
     } finally {
       await rm(harness.directory, { recursive: true, force: true });
     }
   });
 
-  it("rejects missing, malformed, unsupported, and shell-like commands before spawning children", async () => {
+  it("rejects every media form, and missing, malformed, unsupported, and shell-like commands, before spawning children", async () => {
     const harness = await makeHarness();
     try {
       const commit = "0123456789abcdef0123456789abcdef01234567";
@@ -150,24 +113,17 @@ describe("forced media/deploy remote command", () => {
         `deploy ${commit} `,
         `deploy ${commit};touch ${sentinelPath}`,
         `deploy ${commit.toUpperCase()}; echo nope`,
-        "media initial",
-        "media initial all ",
-        "media initial initial",
-        "media initial cyberpunk",
+        ...RETIRED_MEDIA_FORMS,
         "media initial all; echo nope",
+        `media initial all;touch ${sentinelPath}`,
         "media initial all\n",
         " MEDIA initial all",
-        "media later all",
-        "media later cyberpunk-2077",
       ];
 
       for (const command of invalidCommands) {
-        const result = await runWrapper(
-          harness.directory,
-          harness.tracePath,
-          command,
-        );
-        expect(result.exitCode).not.toBe(0);
+        const result = await runWrapper(harness.directory, harness.tracePath, command);
+        expect(result.exitCode).toBe(64);
+        expect(result.stderr).toBe("invalid remote command\n");
         expect(result.trace).toBe("");
       }
       expect(await Bun.file(sentinelPath).exists()).toBe(false);
@@ -176,295 +132,71 @@ describe("forced media/deploy remote command", () => {
     }
   });
 
-  it("keeps the wrapper and dispatch workflow free of shell evaluation and free-text commands", async () => {
+  it("keeps the wrapper free of shell evaluation and of any media command", async () => {
     const wrapper = await readFile(wrapperPath, "utf8");
-    const workflow = await readFile(workflowPath, "utf8");
     expect(wrapper).not.toContain("eval ");
     expect(wrapper).not.toContain("2>/dev/null");
     expect(wrapper).toContain("SSH_ORIGINAL_COMMAND");
-    expect(wrapper).toContain("exec docker exec vaporstats");
-    expect(wrapper).toContain("http://127.0.0.1:3000/internal/media-discovery");
-    expect(wrapper).toContain("MEDIA_TRIGGER_TOKEN");
-    expect(wrapper).toContain('Authorization: `Bearer ${token}`');
-    expect(wrapper).toContain('"Content-Type": "application/json"');
-    expect(wrapper).toContain("if (!response.ok) process.exitCode = 1;");
-    for (const game of ["all", "cyberpunk-2077", "baldurs-gate-3", "hades-ii"]) {
-      expect(wrapper).toContain(`"media initial ${game}"`);
-    }
-
-    expect(workflow).toContain("workflow_dispatch:");
-    expect(workflow).toContain("options: [initial]");
-    expect(workflow).not.toContain("later");
-    for (const game of ["all", "cyberpunk-2077", "baldurs-gate-3", "hades-ii"]) {
-      expect(workflow).toContain(game);
-    }
-    expect(workflow).toContain("BatchMode=yes");
-    expect(workflow).toContain("IdentitiesOnly=yes");
-    expect(workflow).toContain("StrictHostKeyChecking=yes");
-    expect(workflow).toContain("GlobalKnownHostsFile=/dev/null");
-    expect(workflow).toContain("DEPLOY_KEY");
-    expect(workflow).toContain("GITHUB_STEP_SUMMARY");
-    expect(workflow).toContain("media discovery result:");
-    expect(workflow).toContain("stderr_file");
-    expect(workflow).toContain("[redacted host]");
-    expect(workflow).not.toContain("2>/dev/null");
+    expect(wrapper).not.toMatch(/"media |media_game|MEDIA_DISCOVERY_SCRIPT|internal\/media-discovery/);
+    expect(wrapper).not.toContain("docker exec");
+    expect(wrapper).not.toContain("MEDIA_TRIGGER_TOKEN");
   });
 });
 
-describe("media trigger network origin", () => {
-  const request = (
-    headers: Record<string, string>,
-    body = "{\"pass\":\"later\",\"game\":\"unknown\"}",
-  ) =>
-    new Request("http://127.0.0.1/internal/media-discovery", {
-      method: "POST",
-      headers,
-      body,
-    });
-
-  it("requires a verified loopback peer instead of trusting Host", async () => {
-    const previousToken = process.env.MEDIA_TRIGGER_TOKEN;
-    process.env.MEDIA_TRIGGER_TOKEN = "test-trigger-token";
-    try {
-      expect(
-        (
-          await handleRequest(
-            request({
-              Authorization: "Bearer test-trigger-token",
-              "Content-Type": "application/json",
-            }),
-            "127.0.0.1",
-          )
-        ).status,
-      ).toBe(400);
-      expect(
-        (
-          await handleRequest(
-            request({
-              Authorization: "Bearer test-trigger-token",
-              "Content-Type": "application/json",
-            }),
-            "::1",
-          )
-        ).status,
-      ).toBe(400);
-      expect(
-        (
-          await handleRequest(
-            request({
-              Authorization: "Bearer test-trigger-token",
-              "Content-Type": "application/json",
-              Host: "127.0.0.1",
-            }),
-            "203.0.113.7",
-          )
-        ).status,
-      ).toBe(404);
-      expect(
-        (
-          await handleRequest(
-            request({
-              Authorization: "Bearer test-trigger-token",
-              "Content-Type": "application/json",
-              Host: "127.0.0.1",
-            }),
-          )
-        ).status,
-      ).toBe(404);
-    } finally {
-      if (previousToken === undefined) delete process.env.MEDIA_TRIGGER_TOKEN;
-      else process.env.MEDIA_TRIGGER_TOKEN = previousToken;
+describe("dispatch workflows", () => {
+  it("offer no media form", async () => {
+    const workflows = await readdir(workflowDirectory);
+    expect(workflows).not.toContain("media-discovery.yml");
+    for (const name of workflows) {
+      const workflow = await readFile(join(workflowDirectory, name), "utf8");
+      expect(workflow).not.toMatch(/media (initial|later)/);
+      expect(workflow).not.toContain("remote_pass");
+      expect(workflow).not.toContain("internal/media-discovery");
     }
   });
+});
 
-  it("keeps bearer, content-type, body, and input validation behind the peer guard", async () => {
-    const previousToken = process.env.MEDIA_TRIGGER_TOKEN;
-    process.env.MEDIA_TRIGGER_TOKEN = "test-trigger-token";
-    try {
-      const peer = "127.0.0.1";
-      expect(
-        (
-          await handleRequest(
-            request({ "Content-Type": "application/json" }),
-            peer,
-          )
-        ).status,
-      ).toBe(401);
-      expect(
-        (
-          await handleRequest(
-            request({
-              Authorization: "Bearer wrong",
-              "Content-Type": "application/json",
-            }),
-            peer,
-          )
-        ).status,
-      ).toBe(401);
-      expect(
-        (
-          await handleRequest(
-            request({
-              Authorization: "Bearer test-trigger-token",
-              "Content-Type": "text/plain",
-            }),
-            peer,
-          )
-        ).status,
-      ).toBe(415);
-      expect(
-        (
-          await handleRequest(
-            request(
-              {
-                Authorization: "Bearer test-trigger-token",
-                "Content-Type": "application/json",
-                "Content-Length": "4097",
-              },
-              "x".repeat(4097),
-            ),
-            peer,
-          )
-        ).status,
-      ).toBe(413);
-      expect(
-        (
-          await handleRequest(
-            request({
-              Authorization: "Bearer test-trigger-token",
-              "Content-Type": "application/json",
-            }, "{"),
-            peer,
-          )
-        ).status,
-      ).toBe(400);
-      expect(
-        (
-          await handleRequest(
-            request({
-              Authorization: "Bearer test-trigger-token",
-              "Content-Type": "application/json",
-            }, "{\"pass\":\"later\",\"game\":\"unknown\"}"),
-            peer,
-          )
-        ).status,
-      ).toBe(400);
-    } finally {
-      if (previousToken === undefined) delete process.env.MEDIA_TRIGGER_TOKEN;
-      else process.env.MEDIA_TRIGGER_TOKEN = previousToken;
-    }
-  });
-
-  it("rejects invalid requests before any database processing", async () => {
+describe("server", () => {
+  it("rejects the retired media trigger's requests before any database or provider work, whatever their origin and credentials", async () => {
     const previousToken = process.env.MEDIA_TRIGGER_TOKEN;
     process.env.MEDIA_TRIGGER_TOKEN = "test-trigger-token";
     const db = await getDb();
     const originalPrepare = db.prepare;
-    let prepareCalls = 0;
+    const originalFetch = globalThis.fetch;
+    const work: string[] = [];
     db.prepare = ((query: string) => {
-      prepareCalls += 1;
+      work.push(query);
       throw new Error(`unexpected database work: ${query}`);
     }) as typeof db.prepare;
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      work.push(String(input));
+      throw new Error(`unexpected provider request: ${String(input)}`);
+    }) as unknown as typeof fetch;
     try {
-      const response = await handleRequest(
-        request({
-          Authorization: "Bearer test-trigger-token",
-          "Content-Type": "application/json",
-        }, "{\"pass\":\"initial\",\"game\":\"not-a-game\"}"),
-        "127.0.0.1",
-      );
-      expect(response.status).toBe(400);
-      expect(prepareCalls).toBe(0);
-    } finally {
-      db.prepare = originalPrepare;
-      if (previousToken === undefined) delete process.env.MEDIA_TRIGGER_TOKEN;
-      else process.env.MEDIA_TRIGGER_TOKEN = previousToken;
-    }
-  });
-
-  it("returns only sanitized processing, provider, and cost state when the provider keys are missing", async () => {
-    await withIsolatedTriggerDb(async (discoveryCalls) => {
-      const previousToken = process.env.MEDIA_TRIGGER_TOKEN;
-      const previousTavilyKey = process.env.TAVILY_API_KEY;
-      const previousGeminiKey = process.env.GEMINI_API_KEY;
-      const previousOpenRouterKey = process.env.OPENROUTER_API_KEY;
-      process.env.MEDIA_TRIGGER_TOKEN = "test-trigger-token";
-      process.env.TAVILY_API_KEY = "tavily-provider-secret";
-      delete process.env.GEMINI_API_KEY;
-      delete process.env.OPENROUTER_API_KEY;
-      try {
-        const response = await handleRequest(
-          request({
-            Authorization: "Bearer test-trigger-token",
-            "Content-Type": "application/json",
-          }, "{\"pass\":\"initial\",\"game\":\"cyberpunk-2077\"}"),
-          "127.0.0.1",
-        );
-        const body = await response.json() as {
-          runId: number;
-          processing?: Record<string, unknown>;
-        };
-        expect(response.status).toBe(200);
-        // Discovery accepted no article, so the paused provider has nothing to hold.
-        expect(body.processing).toEqual({
-          runId: body.runId,
-          status: "completed",
-          submitted: 0,
-          completed: 0,
-          outputs: { new: 0, reused: 0, replaced: 0, invalidated: 0, skipped: 0 },
-          stopReasons: [],
-          queued: { gemini: 0, openrouter: 0 },
-          providers: {
-            gemini: { provider: "gemini", paused: true, reason: "missing_key", pausedAt: expect.any(String), checkedAt: expect.anything(), checkOutcome: expect.anything() },
-            openrouter: { provider: "openrouter", paused: true, reason: "missing_key", pausedAt: expect.any(String), checkedAt: expect.anything(), checkOutcome: expect.anything() },
-          },
-          cost: { reportingOnly: true, month: expect.any(String), providers: { gemini: { monthToDateMicrousd: 0, allTimeMicrousd: 0 }, openrouter: { monthToDateMicrousd: 0, allTimeMicrousd: 0 } }, uncertain: 0 },
-        });
-        expect(discoveryCalls.length).toBeGreaterThan(0);
-        expect(discoveryCalls.every((url) => url.startsWith("https://api.tavily.com/"))).toBe(true);
-        expect(discoveryCalls.some((url) => url.includes("generativelanguage.googleapis.com") || url.includes("openrouter.ai"))).toBe(false);
-        const serialized = JSON.stringify(body);
-        expect(serialized).not.toContain("test-trigger-token");
-        expect(serialized).not.toContain("tavily-provider-secret");
-      } finally {
-        if (previousToken === undefined) delete process.env.MEDIA_TRIGGER_TOKEN;
-        else process.env.MEDIA_TRIGGER_TOKEN = previousToken;
-        if (previousTavilyKey === undefined) delete process.env.TAVILY_API_KEY;
-        else process.env.TAVILY_API_KEY = previousTavilyKey;
-        if (previousGeminiKey === undefined) delete process.env.GEMINI_API_KEY;
-        else process.env.GEMINI_API_KEY = previousGeminiKey;
-        if (previousOpenRouterKey === undefined) delete process.env.OPENROUTER_API_KEY;
-        else process.env.OPENROUTER_API_KEY = previousOpenRouterKey;
+      const bodies = [
+        { pass: "initial", game: "all" },
+        { pass: "initial", game: "cyberpunk-2077" },
+        { pass: "later", game: "all" },
+        { pass: "later", game: "hades-ii" },
+      ];
+      for (const body of bodies) {
+        for (const origin of ["http://127.0.0.1", "http://[::1]", "https://vaporstats.com"]) {
+          const response = await handleRequest(new Request(`${origin}/internal/media-discovery`, {
+            method: "POST",
+            headers: { Authorization: "Bearer test-trigger-token", "Content-Type": "application/json" },
+            body: JSON.stringify(body),
+          }));
+          expect(response.status).toBe(404);
+          expect(await response.text()).toBe("Not Found");
+        }
       }
-    });
-  });
-
-  it("does not expose endpoint exceptions in the response body", async () => {
-    const previousToken = process.env.MEDIA_TRIGGER_TOKEN;
-    process.env.MEDIA_TRIGGER_TOKEN = "test-trigger-token";
-    const db = await getDb();
-    const originalPrepare = db.prepare;
-    db.prepare = (() => {
-      throw new Error("Bearer endpoint-secret https://private.example/request");
-    }) as typeof db.prepare;
-    try {
-      const response = await handleRequest(
-        request(
-          {
-            Authorization: "Bearer test-trigger-token",
-            "Content-Type": "application/json",
-          },
-          "{\"pass\":\"initial\",\"game\":\"cyberpunk-2077\"}",
-        ),
-        "127.0.0.1",
-      );
-      const body = await response.text();
-      expect(response.status).toBe(500);
-      expect(body).toBe('{"error":"Media discovery failed"}');
-      expect(body).not.toContain("endpoint-secret");
-      expect(body).not.toContain("private.example");
+      for (const path of ["/internal", "/internal/", "/internal/media-status", "/internal/media-discovery/"]) {
+        expect((await handleRequest(new Request(`http://127.0.0.1${path}`, { method: "GET" }))).status).toBe(404);
+      }
+      expect(work).toEqual([]);
     } finally {
       db.prepare = originalPrepare;
+      globalThis.fetch = originalFetch;
       if (previousToken === undefined) delete process.env.MEDIA_TRIGGER_TOKEN;
       else process.env.MEDIA_TRIGGER_TOKEN = previousToken;
     }

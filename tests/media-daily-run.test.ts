@@ -326,7 +326,7 @@ describe("article ceilings in automatic runs", () => {
     ]);
     // Baldur's Gate 3 and Hades II are at their ceilings: no query for them.
     expect(providers.tavily.searches.filter((search) => search.startsWith("Baldur") || search.startsWith("Hades"))).toEqual([]);
-    const newSources = database.native.query<{ id: number }, []>("SELECT id FROM media_sources WHERE processing_run_id IS NOT ? OR processing_run_id IS NULL ORDER BY id").all(processed);
+    const newSources = database.native.query<{ id: number }, [number]>("SELECT id FROM media_sources WHERE processing_run_id IS NOT ? OR processing_run_id IS NULL ORDER BY id").all(processed);
     expect(newSources).toHaveLength(7);
     const extractionItems = database.native.query<{ source_id: number }, []>("SELECT source_id FROM media_processing_jobs WHERE stage = 'extraction' ORDER BY source_id").all();
     expect(extractionItems.map(({ source_id }) => source_id)).toEqual(newSources.map(({ id }) => id));

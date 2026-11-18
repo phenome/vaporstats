@@ -5,7 +5,6 @@ import {
   runAuthorizedMediaDiscovery,
   runSerializedMediaDiscovery,
 } from "../src/lib/media-discovery";
-import { handleRequest } from "../src/server";
 import { openTestDatabase } from "./support/db";
 import {
   BALDURS_GATE,
@@ -448,23 +447,6 @@ describe("bounded media discovery", () => {
     cleanup();
   });
 
-  test("protects the loopback media trigger before database work", async () => {
-    const previousToken = process.env.MEDIA_TRIGGER_TOKEN;
-    process.env.MEDIA_TRIGGER_TOKEN = "test-trigger-token";
-    const request = (url: string, headers: Record<string, string>, body = "{\"pass\":\"initial\",\"game\":\"cyberpunk-2077\"}") => new Request(url, { method: "POST", headers, body });
-    try {
-      expect((await handleRequest(request("https://public.example/internal/media-discovery", { Authorization: "Bearer test-trigger-token", "Content-Type": "application/json", Host: "public.example" }), "203.0.113.7")).status).toBe(404);
-      expect((await handleRequest(request("http://127.0.0.1/internal/media-discovery", { "Content-Type": "application/json", Host: "127.0.0.1" }), "127.0.0.1")).status).toBe(401);
-      expect((await handleRequest(request("http://127.0.0.1/internal/media-discovery", { Authorization: "Bearer wrong", "Content-Type": "application/json", Host: "127.0.0.1" }), "127.0.0.1")).status).toBe(401);
-      expect((await handleRequest(request("http://127.0.0.1/internal/media-discovery", { Authorization: "Bearer test-trigger-token", "Content-Type": "text/plain", Host: "127.0.0.1" }), "127.0.0.1")).status).toBe(415);
-      expect((await handleRequest(request("http://127.0.0.1/internal/media-discovery", { Authorization: "Bearer test-trigger-token", "Content-Type": "application/json", "Content-Length": "4097", Host: "127.0.0.1" }, "x".repeat(4097)), "127.0.0.1")).status).toBe(413);
-      expect((await handleRequest(request("http://127.0.0.1/internal/media-discovery", { Authorization: "Bearer test-trigger-token", "Content-Type": "application/json", Host: "127.0.0.1" }, "{\"pass\":\"later\",\"game\":\"unknown\"}"), "127.0.0.1")).status).toBe(400);
-      expect((await handleRequest(request("http://127.0.0.1/internal/media-discovery", { Authorization: "Bearer test-trigger-token", "Content-Type": "application/json", Host: "127.0.0.1" }, "{\"pass\":\"later\",\"game\":\"all\"}"), "127.0.0.1")).status).toBe(400);
-    } finally {
-      if (previousToken === undefined) delete process.env.MEDIA_TRIGGER_TOKEN;
-      else process.env.MEDIA_TRIGGER_TOKEN = previousToken;
-    }
-  });
   test("does not retry terminal 401/403 outlets after a newly authorized rerun", async () => {
     for (const denialStatus of [401, 403] as const) {
       const { db, cleanup } = fixture();

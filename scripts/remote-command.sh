@@ -1,33 +1,9 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-readonly MEDIA_DISCOVERY_SCRIPT='const game = Bun.argv.at(-1);
-const token = process.env.MEDIA_TRIGGER_TOKEN;
-if (typeof game !== "string" || !token) {
-  console.error("media discovery authorization is unavailable");
-  process.exit(1);
-}
-try {
-  const response = await fetch("http://127.0.0.1:3000/internal/media-discovery", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${token}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({ pass: "initial", game }),
-  });
-  const body = await response.text();
-  process.stdout.write(body.slice(0, 8192));
-  if (!response.ok) process.exitCode = 1;
-} catch (error) {
-  const message = (error instanceof Error ? error.message : String(error))
-    .replace(/Bearer\s+\S+/gi, "Bearer [redacted]")
-    .replace(/https?:\/\/[^\s/]+/gi, "[redacted endpoint]")
-    .replace(/[\r\n]+/g, " ")
-    .slice(0, 256);
-  console.error(`media discovery request failed: ${message}`);
-  process.exit(1);
-}'
+# The deployment key's forced command. It accepts only the exact deploy form;
+# every other command, including the retired media triggers, is rejected
+# before anything is spawned. Media ingestion runs inside the application.
 
 original_command=${SSH_ORIGINAL_COMMAND-}
 if [[ "$original_command" == *$'\n'* || "$original_command" == *$'\r'* || "$original_command" == *$'\t'* ]]; then
@@ -41,16 +17,5 @@ if [[ "$original_command" =~ ^deploy\ ([0-9a-fA-F]{40})$ ]]; then
   exec "$script_dir/deploy.sh" "${BASH_REMATCH[1]}"
 fi
 
-media_game=
-case "$original_command" in
-  "media initial all") media_game=all ;;
-  "media initial cyberpunk-2077") media_game=cyberpunk-2077 ;;
-  "media initial baldurs-gate-3") media_game=baldurs-gate-3 ;;
-  "media initial hades-ii") media_game=hades-ii ;;
-  *)
-    printf '%s\n' 'invalid remote command' >&2
-    exit 64
-    ;;
-esac
-
-exec docker exec vaporstats bun -e "$MEDIA_DISCOVERY_SCRIPT" "$media_game"
+printf '%s\n' 'invalid remote command' >&2
+exit 64
