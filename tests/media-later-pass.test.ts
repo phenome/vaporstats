@@ -162,9 +162,10 @@ describe("when the later pass is due", () => {
 const [IGN, EUROGAMER, GAMESPOT, PC_GAMER, KOTAKU, GAMESRADAR] = MEDIA_OUTLETS;
 const PHANTOM_LIBERTY = 2138330;
 
-function reviewPage(appid: number, title: string, options: { date?: string | null; canonical?: string } = {}): string {
+function reviewPage(appid: number, title: string, options: { date?: string | null; updated?: string; canonical?: string } = {}): string {
   const canonical = options.canonical ? `<meta property="og:url" content="${options.canonical}">` : "";
-  return discoveryArticleHtml(appid, title, { date: options.date, author: "Later critic" }).replace("<head>", `<head>${canonical}`);
+  const updated = options.updated ? `<meta property="article:modified_time" content="${options.updated}">` : "";
+  return discoveryArticleHtml(appid, title, { date: options.date, author: "Later critic", body: `${title} examines the game at length with detailed observations about its systems. `.repeat(5) }).replace("<head>", `<head>${canonical}${updated}`);
 }
 
 describe("the automatic media ingestion switch", () => {
@@ -211,6 +212,7 @@ describe("later-pass selection", () => {
     // Published before Eurogamer's initial review of 2026-11-10.
     page(articleUrl(CYBERPUNK, EUROGAMER, "-earlier"), reviewPage(CYBERPUNK, "Cyberpunk 2077 Review in Progress", { date: "2026-11-05T00:00:00.000Z" }));
     page(articleUrl(CYBERPUNK, GAMESPOT, "-undated"), reviewPage(CYBERPUNK, "Cyberpunk 2077 Review Revisited", { date: null }));
+    page(articleUrl(CYBERPUNK, PC_GAMER, "-revisited"), reviewPage(CYBERPUNK, "Cyberpunk 2077 Review Revisited", { date: "2026-11-19T00:00:00.000Z", updated: "2026-11-20T09:30:00.000Z" }));
 
     await tick(database, "2026-11-20T06:00:00.000Z");
     await tick(database, "2026-11-21T06:00:00.000Z");
@@ -224,11 +226,11 @@ describe("later-pass selection", () => {
     expect(fetched.filter((url) => url === articleUrl(CYBERPUNK, IGN))).toHaveLength(2);
     const { sources } = await detail(database, CYBERPUNK);
     const laterSources = sources.filter(({ originalUrl }) => !MEDIA_OUTLETS.some((outlet) => originalUrl === articleUrl(CYBERPUNK, outlet)));
-    expect(laterSources.map(({ outlet, originalUrl, publishedAt }): { outlet: string; originalUrl: string; publishedAt: string | null } => ({ outlet, originalUrl, publishedAt })).sort((a, b) => a.originalUrl.localeCompare(b.originalUrl))).toEqual([
-      { outlet: "GameSpot", originalUrl: articleUrl(CYBERPUNK, GAMESPOT, "-undated"), publishedAt: null },
-      { outlet: "GamesRadar+", originalUrl: articleUrl(CYBERPUNK, GAMESRADAR, "-revisited"), publishedAt: "2026-11-19T00:00:00.000Z" },
-      { outlet: "IGN", originalUrl: articleUrl(CYBERPUNK, IGN, "-revisited"), publishedAt: "2026-11-19T00:00:00.000Z" },
-      { outlet: "PC Gamer", originalUrl: articleUrl(CYBERPUNK, PC_GAMER, "-revisited"), publishedAt: "2026-11-19T00:00:00.000Z" },
+    expect(laterSources.map(({ outlet, originalUrl, publishedAt, updatedAt }): { outlet: string; originalUrl: string; publishedAt: string | null; updatedAt: string | null } => ({ outlet, originalUrl, publishedAt, updatedAt })).sort((a, b) => a.originalUrl.localeCompare(b.originalUrl))).toEqual([
+      { outlet: "GameSpot", originalUrl: articleUrl(CYBERPUNK, GAMESPOT, "-undated"), publishedAt: null, updatedAt: null },
+      { outlet: "GamesRadar+", originalUrl: articleUrl(CYBERPUNK, GAMESRADAR, "-revisited"), publishedAt: "2026-11-19T00:00:00.000Z", updatedAt: null },
+      { outlet: "IGN", originalUrl: articleUrl(CYBERPUNK, IGN, "-revisited"), publishedAt: "2026-11-19T00:00:00.000Z", updatedAt: null },
+      { outlet: "PC Gamer", originalUrl: articleUrl(CYBERPUNK, PC_GAMER, "-revisited"), publishedAt: "2026-11-19T00:00:00.000Z", updatedAt: "2026-11-20T09:30:00.000Z" },
     ].sort((a, b) => a.originalUrl.localeCompare(b.originalUrl)));
     expect((await detail(database, PHANTOM_LIBERTY)).sources).toEqual([]);
   });
@@ -446,5 +448,32 @@ describe("the later pass end to end", () => {
     await ticks("2026-11-22", ["06:00", "06:15", "06:30"]);
     expect({ articles: (await Promise.all(EXPERIMENT.map(async (appid) => (await detail(database, appid)).sources.length))), fetched: fetched.length, openRouter: openRouter.requests.length, gemini: gemini.submitted.length }).toEqual(before);
     expect(queries(tavily)).toHaveLength(36);
+  });
+});
+
+describe("settled source rules in the later pass", () => {
+  test("an Outlet denial an outlet returned after its initial article was accepted holds for the later pass, which never contacts it", async () => {
+    const database = experimentCatalog();
+    const { tavily, fetched, pages, tick } = world();
+    // IGN serves each initial article to discovery, then denies every later request.
+    for (const appid of EXPERIMENT) {
+      let served = false;
+      pages.set(articleUrl(appid, IGN), () => {
+        if (served) return new Response("Forbidden", { status: 403 });
+        served = true;
+        return new Response(discoveryArticleHtml(appid, `${GAME_NAMES[appid]} Review`, { date: "2026-11-10T00:00:00.000Z" }));
+      });
+    }
+    await tick(database, "2026-11-20T06:00:00.000Z");
+    await tick(database, "2026-11-20T06:15:00.000Z");
+    const ignFetches = fetched.filter((url) => url.startsWith("https://ign.com/")).length;
+
+    for (const day of ["2026-11-21", "2026-11-22"]) await tick(database, `${day}T06:00:00.000Z`);
+
+    // Every entity has an IGN initial article, but the later pass never asks IGN.
+    expect(queries(tavily).filter((query) => query.endsWith("@ign.com") && query.includes(" review revisited@"))).toEqual([]);
+    expect(fetched.filter((url) => url.startsWith("https://ign.com/")).length).toBe(ignFetches);
+    expect(queries(tavily).filter((query) => query.includes(" review revisited@"))).toHaveLength(15);
+    for (const appid of EXPERIMENT) expect((await detail(database, appid)).sources.map(({ outlet }) => outlet)).toContain("IGN");
   });
 });
