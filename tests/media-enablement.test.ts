@@ -205,4 +205,20 @@ describe("embedding holds over the production-like state", () => {
     const overview = database.native.query<{ input_identity: string }, []>(`SELECT input_identity FROM media_game_overviews WHERE appid = ${CP} AND active = 1`).get()!;
     expect(database.native.query(`SELECT dimension, overview_input_identity FROM media_game_embeddings WHERE appid = ${CP} AND active = 1`).all()).toEqual([{ dimension: "gameplay", overview_input_identity: overview.input_identity }]);
   });
+
+  test("while OpenRouter is paused, Cyberpunk 2077's new extractions wait, and no embedding of the Overview they will replace is even queued", async () => {
+    const database = productionLike();
+    const world = experimentWorld();
+    // No OpenRouter key: text generation pauses for missing_key, which lifts once a key is configured.
+    for (const time of TIMES) await runMediaTick(database, world, `2026-11-19T${time}:00.000Z`, { outlet: world.outlet, openRouterApiKey: "" });
+
+    expect(database.native.query(`SELECT stage, status FROM media_processing_jobs WHERE appid = ${CP} AND retained = 0 GROUP BY stage, status`).all()).toEqual([{ stage: "extraction", status: "queued" }]);
+    expect(database.native.query("SELECT COUNT(*) AS count FROM media_processing_jobs WHERE stage = 'embedding'").get()).toEqual({ count: 0 });
+    expect(world.gemini.calls).toEqual([]);
+
+    for (const time of TIMES) await runMediaTick(database, world, `2026-11-20T${time}:00.000Z`, { outlet: world.outlet });
+    const overview = database.native.query<{ input_identity: string }, []>(`SELECT input_identity FROM media_game_overviews WHERE appid = ${CP} AND active = 1`).get()!;
+    expect(database.native.query(`SELECT status, COUNT(*) AS count FROM media_processing_jobs WHERE appid = ${CP} AND stage = 'embedding' GROUP BY status`).all()).toEqual([{ status: "succeeded", count: 1 }]);
+    expect(database.native.query(`SELECT overview_input_identity FROM media_game_embeddings WHERE appid = ${CP} AND active = 1`).all()).toEqual([{ overview_input_identity: overview.input_identity }]);
+  });
 });
