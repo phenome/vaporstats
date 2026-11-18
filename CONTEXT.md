@@ -203,7 +203,7 @@ An access refusal (HTTP 401 or 403) an outlet returns to its own article fetch. 
 _Avoid_: Block, ban, outlet failure
 
 **Outlet day stop**:
-An outlet closed for the rest of a UTC day because it reached its daily attempt cap (30 attempts shared by every pass, stage, and run, counting the searches, fetches, redirects, and failures it served) or returned a rate limit (HTTP 429) to an article fetch. It reopens on the next UTC day and is distinct from an Outlet denial. An attempt a restart interrupted still counts: a discovery fetch so interrupted is never sent again, while a processing fetch is sent again, once per restart, because article text is never retained. For the same reason, each automatic resend of an uncertain extraction fetches its article again, and that fetch counts too (2026-11-18, [#80](https://github.com/phenome/vaporstats/issues/80)).
+An outlet closed for the rest of a UTC day because it reached its daily attempt cap (30 attempts shared by every pass, stage, and run, counting the searches, fetches, redirects, and failures it served; 30 is the project's own default and the `MEDIA_OUTLET_DAILY_ATTEMPTS` setting replaces it) or returned a rate limit (HTTP 429) to an article fetch. It reopens on the next UTC day and is distinct from an Outlet denial. An attempt a restart interrupted still counts: a discovery fetch so interrupted is never sent again, while a processing fetch is sent again, once per restart, because article text is never retained. For the same reason, each automatic resend of an uncertain extraction fetches its article again, and that fetch counts too (2026-11-18, [#80](https://github.com/phenome/vaporstats/issues/80)).
 _Avoid_: Outlet throttle, outlet cooldown
 
 **Provider stop**:

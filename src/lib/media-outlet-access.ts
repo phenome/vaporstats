@@ -9,7 +9,22 @@ import type { MediaOutlet, MediaPass } from "./media-discovery";
  * source for whether an outlet may be contacted.
  */
 
-const MAX_ATTEMPTS_PER_OUTLET_DAY = 30;
+const DEFAULT_ATTEMPTS_PER_OUTLET_DAY = 30;
+
+/**
+ * Setting that replaces the daily attempt cap per outlet. The default of 30
+ * is VaporStats' own conservative policy, not an allowance an outlet granted.
+ * An Outlet denial and an outlet's own rate limit apply whatever the cap is.
+ */
+export const MEDIA_OUTLET_DAILY_ATTEMPTS_ENV = "MEDIA_OUTLET_DAILY_ATTEMPTS";
+
+/** The daily attempt cap per outlet: the setting when it is a positive whole number, otherwise 30. */
+export function outletDailyAttemptCap(
+  env: Record<string, string | undefined> = typeof process !== "undefined" ? process.env : {},
+): number {
+  const value = env[MEDIA_OUTLET_DAILY_ATTEMPTS_ENV];
+  return value !== undefined && /^[1-9]\d*$/.test(value) ? Number(value) : DEFAULT_ATTEMPTS_PER_OUTLET_DAY;
+}
 
 function dayKey(date: Date): string {
   return date.toISOString().slice(0, 10);
@@ -60,7 +75,7 @@ async function outletDenial(db: AppDatabase, outlet: MediaOutlet): Promise<strin
  * returned to an article fetch that day. Both reopen on the next UTC day.
  */
 async function outletDayStop(db: AppDatabase, outlet: MediaOutlet, date: Date): Promise<string | null> {
-  if ((await attemptsToday(db, outlet, date)) >= MAX_ATTEMPTS_PER_OUTLET_DAY) return "daily_attempt_cap";
+  if ((await attemptsToday(db, outlet, date)) >= outletDailyAttemptCap()) return "daily_attempt_cap";
   const limited = await first<{ id: number }>(
     db,
     "SELECT id FROM media_discovery_attempts WHERE outlet = ? AND day = ? AND kind = 'fetch' AND status_code = 429 LIMIT 1",
