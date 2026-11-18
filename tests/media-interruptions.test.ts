@@ -8,6 +8,8 @@ import {
   PROCESSING_FETCH_RESENT_AFTER_RESTART,
   seedApps,
   sweepInterruptions,
+  THROWING_ITEM_RETRY,
+  throwingResponse,
   UNCERTAIN_PAID_RESEND,
   type InterruptionInvariants,
   type InterruptionScenario,
@@ -46,6 +48,24 @@ function lostAnswerWorld() {
     if (record.stage === "extraction" && messages.includes("Cyberpunk 2077 offers") && messages.includes("as IGN's first assessment")) {
       world.openRouter.reply("chat", { network: "socket closed before the response" });
     }
+  };
+  return world;
+}
+
+/**
+ * `experimentWorld`, except that handling Cyberpunk 2077's IGN review throws
+ * whenever it is fetched for processing, as the 2026-11-18 incident's
+ * articles did: its discovery fetch, the first, is answered normally.
+ */
+function throwingItemWorld() {
+  const world = experimentWorld();
+  const review = "https://ign.com/articles/1091500-ign-com";
+  let fetches = 0;
+  const outlet = world.outlet!;
+  world.outlet = (url) => {
+    if (url !== review) return outlet(url);
+    fetches += 1;
+    return fetches === 1 ? outlet(url) : throwingResponse("Cannot destructure property 'firstElementChild' from null or undefined value");
   };
   return world;
 }
@@ -121,6 +141,19 @@ const SCENARIOS: Registered[] = [
     invariants: { restarts: ["openrouter"], sample: 8 },
     baseline: { search: 18, outlet_fetch: 73, openrouter: 21, gemini_submit: 2 },
   },
+  {
+    // The initial pass, but handling Cyberpunk 2077's IGN review throws at
+    // every processing fetch (the incident of 2026-11-18). Each occurrence is
+    // caught at the item's boundary and backs it off; the third, on the
+    // following day, ends it client_error_exhausted. Cyberpunk 2077's
+    // Overview waits for it, so the swept day makes 17 extractions, 2
+    // Overviews and 2 embeddings, and 73 outlet fetches (the 72 of the
+    // initial pass and one retry of the throwing item). Every tick completes
+    // with no media error, and every other item progresses.
+    scenario: { name: "an extraction whose handling always throws", seed: (native) => seedApps(native, EXPERIMENT), world: throwingItemWorld, ticks: FIRST_DAY, days: 1 },
+    invariants: { restarts: ["outlet_fetch"], sample: 8 },
+    baseline: { search: 18, outlet_fetch: 73, openrouter: 19, gemini_submit: 2 },
+  },
 ];
 
 describe("interruption sweeps", () => {
@@ -150,6 +183,11 @@ describe("interruption sweeps", () => {
       if (invariants.restarts?.some((kind) => kind === "openrouter" || kind === "gemini_submit") && baseline.openrouter > 0) {
         expect(report.resentAfterUncertain.some((resend) => resend.includes(" openrouter "))).toBe(true);
         expect(report.resentAfterUncertain.every((resend) => resend.includes(UNCERTAIN_PAID_RESEND.name))).toBe(true);
+      }
+      // An item whose handling throws is taken again under its backoff, so
+      // the sweep observes its retries, never more than three fetches.
+      if (scenario.world === throwingItemWorld) {
+        expect(report.retriedAfterItemError.some((retry) => retry.includes(THROWING_ITEM_RETRY.name))).toBe(true);
       }
       if (invariants.restarts?.includes("gemini_submit") && baseline.gemini_submit > 0) {
         expect(report.resentAfterUncertain.some((resend) => resend.includes(" gemini_submit "))).toBe(true);

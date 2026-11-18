@@ -4,7 +4,7 @@ import { runIngestionTick, type IngestionTickOptions } from "../../workers/inges
 import { copyTestDatabase, openTestDatabase, type TestDatabase } from "./db";
 import type { GeminiBatchPoll, GeminiBatchTransport } from "../../src/lib/media-processing";
 import { createOpenRouterTransport, type OpenRouterTransport } from "../../src/lib/media-openrouter";
-import { GeminiHttpError, MAX_UNCERTAIN_SENDS } from "../../src/lib/media-paid-providers";
+import { GeminiHttpError, MAX_CLIENT_ERROR_PAUSES, MAX_UNCERTAIN_SENDS } from "../../src/lib/media-paid-providers";
 import { MEDIA_OUTLETS, type MediaPass } from "../../src/lib/media-discovery";
 
 export const CYBERPUNK = 1091500;
@@ -879,6 +879,19 @@ export const UNCERTAIN_PAID_RESEND = {
   refetchesPerResend: 1,
 } as const;
 
+/**
+ * The retry of a waiting item whose handling threw (2026-11-18): it backs off
+ * and is taken again, so the processing fetch of its article is sent again,
+ * at most `MAX_CLIENT_ERROR_PAUSES` times in all, after which it ends
+ * `client_error_exhausted`. Each occurrence is counted on its item.
+ */
+export const THROWING_ITEM_RETRY = {
+  name: "processing fetch of an item whose handling threw",
+  applies: (call: Pick<OutboundCall, "kind" | "identity">) => call.kind === "outlet_fetch" && call.identity.startsWith("processing:"),
+  /** Sends allowed per article in all. */
+  maxSends: MAX_CLIENT_ERROR_PAUSES,
+} as const;
+
 /** A media world: the controlled providers and outlets one sweep run uses. */
 export interface MediaWorld {
   tavily: ReturnType<typeof controlledTavilyApi>;
@@ -920,15 +933,18 @@ export interface InterruptionScenario {
  * run, whatever its faults, is checked for the same invariants:
  *
  * - send once: no request identity is sent twice, except under
- *   `PROCESSING_FETCH_RESENT_AFTER_RESTART` and `UNCERTAIN_PAID_RESEND`; a
- *   request a fault answered with HTTP 429 never reached its outlet and is
- *   not counted as sent;
+ *   `PROCESSING_FETCH_RESENT_AFTER_RESTART`, `UNCERTAIN_PAID_RESEND` and
+ *   `THROWING_ITEM_RETRY`; a request a fault answered with HTTP 429 never
+ *   reached its outlet and is not counted as sent;
+ * - every tick that no restart stopped completes and reports no media error,
+ *   so an exception while one item is handled stays at that item;
  * - at most one accepted article per entity and query (entity, pass and outlet);
  * - at most 30 attempts per outlet per UTC day, as recorded and as observed;
  * - every query a day-scoped stop held at the end of the swept day completes
  *   on a later day;
  * - every accepted article is extracted, unless its extraction ended
- *   `uncertain_exhausted` (#80: uncertain work is resent at most three times).
+ *   `uncertain_exhausted` (#80: uncertain work is resent at most three times)
+ *   or, after its handling threw three times, `client_error_exhausted`.
  */
 export interface InterruptionInvariants {
   /**
@@ -962,6 +978,8 @@ export interface InterruptionReport {
   resentUnderException: string[];
   /** Paid requests, and their articles' processing fetches, a run sent again under `UNCERTAIN_PAID_RESEND`. */
   resentAfterUncertain: string[];
+  /** Processing fetches a run sent again under `THROWING_ITEM_RETRY`. */
+  retriedAfterItemError: string[];
   violations: string[];
 }
 
@@ -1016,6 +1034,8 @@ function sweepDriver(database: TestDatabase, scenario: InterruptionScenario, wor
   const inner = mediaTickFetch(apis, [], world.outlet);
   const calls: OutboundCall[] = [];
   const interrupted: OutboundCall[] = [];
+  /** Ticks that no restart stopped but that did not complete cleanly. */
+  const unclean: string[] = [];
   let phase: Fault["phase"] | null = null;
   let day = "";
   const counted = new Map<string, number>();
@@ -1041,7 +1061,13 @@ function sweepDriver(database: TestDatabase, scenario: InterruptionScenario, wor
   const tick = async (at: string, options = scenario.options) => {
     day = at.slice(0, 10);
     const before = calls.length;
-    await runMediaTick(database, apis, at, { ...options, customFetch });
+    const restartsBefore = interrupted.length;
+    const result = await runMediaTick(database, apis, at, { ...options, customFetch });
+    // A restart stops the tick by design; any other tick must complete, and
+    // an exception while one item is handled must not reach the media boundary.
+    if (interrupted.length === restartsBefore && (result.status !== "completed" || result.mediaError)) {
+      unclean.push(`tick ${at} ended ${result.status}: ${result.error ?? result.mediaError}`);
+    }
     return calls.length - before;
   };
   const untilQuiescent = async (from: string, options = scenario.options) => {
@@ -1055,6 +1081,7 @@ function sweepDriver(database: TestDatabase, scenario: InterruptionScenario, wor
   return {
     calls,
     interrupted,
+    unclean,
     tick,
     untilQuiescent,
     enter(next: Fault["phase"]) { phase = next; },
@@ -1114,6 +1141,11 @@ async function sweepRun(template: { database: TestDatabase; calls: OutboundCall[
        WHERE j.stage = 'extraction' AND EXISTS (SELECT 1 FROM media_processing_attempts AS p WHERE p.job_id = a.job_id AND p.attempt = a.attempt - 1 AND p.outcome = 'uncertain')
        GROUP BY s.original_url`,
     ).all()) refetches.set(`outlet_fetch processing:${original_url}`, resends * UNCERTAIN_PAID_RESEND.refetchesPerResend);
+    // Each later occurrence of an item whose handling threw fetches its article once more.
+    const itemRetries = new Map<string, number>();
+    for (const { original_url, occurrences } of database.native.query<{ original_url: string; occurrences: number }, []>(
+      "SELECT s.original_url, j.client_error_pauses AS occurrences FROM media_processing_jobs AS j JOIN media_sources AS s ON s.id = j.source_id WHERE j.stage = 'extraction' AND j.error LIKE '%item_error%'",
+    ).all()) itemRetries.set(`outlet_fetch processing:${original_url}`, Math.max(0, Math.min(occurrences, THROWING_ITEM_RETRY.maxSends) - 1));
     const sent = new Map<string, number>();
     const kindOf = new Map<string, OutboundCall>();
     for (const call of [...template.calls, ...driver.calls]) {
@@ -1122,6 +1154,7 @@ async function sweepRun(template: { database: TestDatabase; calls: OutboundCall[
     }
     const resentUnderException: string[] = [];
     const resentAfterUncertain: string[] = [];
+    const retriedAfterItemError: string[] = [];
     for (const [identity, count] of sent) {
       if (UNCERTAIN_PAID_RESEND.applies(kindOf.get(identity)!)) {
         if (count > UNCERTAIN_PAID_RESEND.maxSends) violations.push(`${label}: ${identity.slice(0, 160)} sent ${count} times, at most ${UNCERTAIN_PAID_RESEND.maxSends} allowed`);
@@ -1130,9 +1163,11 @@ async function sweepRun(template: { database: TestDatabase; calls: OutboundCall[
       }
       const restartAllowance = allowance.get(identity) ?? 0;
       const uncertainAllowance = refetches.get(identity) ?? 0;
-      const limit = 1 + restartAllowance + uncertainAllowance;
+      const itemErrorAllowance = itemRetries.get(identity) ?? 0;
+      const limit = 1 + restartAllowance + uncertainAllowance + itemErrorAllowance;
       if (count > limit) violations.push(`${label}: ${identity.slice(0, 160)} sent ${count} times, at most ${limit} allowed`);
-      else if (count > 1 + uncertainAllowance) resentUnderException.push(`${label}: ${PROCESSING_FETCH_RESENT_AFTER_RESTART.name}: ${identity}`);
+      else if (count > 1 + uncertainAllowance + itemErrorAllowance) resentUnderException.push(`${label}: ${PROCESSING_FETCH_RESENT_AFTER_RESTART.name}: ${identity}`);
+      else if (count > 1 + uncertainAllowance) retriedAfterItemError.push(`${label}: ${THROWING_ITEM_RETRY.name}: ${identity}`);
       else if (count > 1) resentAfterUncertain.push(`${label}: ${UNCERTAIN_PAID_RESEND.name}: ${identity}`);
     }
     // One accepted article per entity and query.
@@ -1153,13 +1188,16 @@ async function sweepRun(template: { database: TestDatabase; calls: OutboundCall[
         violations.push(`${label}: query ${row ? `${row.appid} ${row.pass}@${row.outlet}` : id} day-stopped on ${stopDay} ended ${row?.status ?? "missing"}${row?.stop_reason ? ` (${row.stop_reason})` : ""}`);
       }
     }
-    // Every accepted article is extracted, unless its extraction ended uncertain_exhausted.
-    for (const { original_url } of native.query<{ original_url: string }, []>("SELECT original_url FROM media_sources AS s WHERE NOT EXISTS (SELECT 1 FROM media_article_extractions AS e WHERE e.source_id = s.id AND e.active = 1) AND NOT EXISTS (SELECT 1 FROM media_processing_jobs AS j WHERE j.source_id = s.id AND j.stage = 'extraction' AND j.status = 'uncertain_exhausted')").all()) {
+    // Every tick that no restart stopped completed with no media error.
+    for (const tick of driver.unclean) violations.push(`${label}: ${tick}`);
+    // Every accepted article is extracted, unless its extraction ended
+    // uncertain_exhausted or, after an item error, client_error_exhausted.
+    for (const { original_url } of native.query<{ original_url: string }, []>("SELECT original_url FROM media_sources AS s WHERE NOT EXISTS (SELECT 1 FROM media_article_extractions AS e WHERE e.source_id = s.id AND e.active = 1) AND NOT EXISTS (SELECT 1 FROM media_processing_jobs AS j WHERE j.source_id = s.id AND j.stage = 'extraction' AND j.status IN ('uncertain_exhausted', 'client_error_exhausted'))").all()) {
       violations.push(`${label}: accepted ${original_url} was never extracted`);
     }
-    return { swept, violations, resentUnderException, resentAfterUncertain, dayStopped: stopped.length, peak: Math.max(0, ...recorded.map(({ attempts }) => attempts)) };
+    return { swept, violations, resentUnderException, resentAfterUncertain, retriedAfterItemError, dayStopped: stopped.length, peak: Math.max(0, ...recorded.map(({ attempts }) => attempts)) };
   } catch (error) {
-    return { swept: [], violations: [`${label}: ${error instanceof Error ? error.message : String(error)}`], resentUnderException: [], resentAfterUncertain: [], dayStopped: 0, peak: 0 };
+    return { swept: [], violations: [`${label}: ${error instanceof Error ? error.message : String(error)}`], resentUnderException: [], resentAfterUncertain: [], retriedAfterItemError: [], dayStopped: 0, peak: 0 };
   } finally {
     database.cleanup();
   }
@@ -1203,6 +1241,7 @@ export async function sweepInterruptions(scenario: InterruptionScenario, invaria
       peakOutletDayAttempts: Math.max(...results.map((result) => result.peak)),
       resentUnderException: results.flatMap((result) => result.resentUnderException),
       resentAfterUncertain: results.flatMap((result) => result.resentAfterUncertain),
+      retriedAfterItemError: results.flatMap((result) => result.retriedAfterItemError),
       violations: results.flatMap((result) => result.violations),
     };
   } finally {

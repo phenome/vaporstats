@@ -6,20 +6,27 @@ Every helper named below lives in [`tests/support/media.ts`](../../tests/support
 
 ## 1. Send-once across restarts
 
-A restart can happen between any outbound call and the write that records its outcome. No request identity (a search, a discovery or processing fetch, an OpenRouter request, a Gemini submission) is ever sent twice, in an uninterrupted run or an interrupted one, except under two exported constants:
+A restart can happen between any outbound call and the write that records its outcome. No request identity (a search, a discovery or processing fetch, an OpenRouter request, a Gemini submission) is ever sent twice, in an uninterrupted run or an interrupted one, except under three exported constants:
 
 - `PROCESSING_FETCH_RESENT_AFTER_RESTART` (ADR 0020): a processing fetch interrupted before its item was marked in flight is sent again, at most once per restart that interrupted it.
 - `UNCERTAIN_PAID_RESEND` (#80, ADRs 0017 and 0018, amended 2026-11-18): a paid request whose outcome is unknown, such as one a restart interrupted, is resent under the queue's backoff, so one OpenRouter request or Gemini submission identity is sent at most three times, never more. Each resend of an uncertain extraction fetches its article once more.
+- `THROWING_ITEM_RETRY` (2026-11-18): a waiting item whose handling threw an unexpected exception backs off and is taken again, so the processing fetch of its article is sent at most three times in all; the third occurrence ends it `client_error_exhausted`.
+
+Two further send-again cases are bounded outside the sweep, because the sweep's world never answers with them. Each sends one OpenRouter request identity, and for an extraction fetches its article, at most three times:
+
+- A cut-off answer (finish reason `length` or `max_tokens`) pauses OpenRouter and backs its item off; the item is sent again after the pause lifts, and its third cut-off answer ends it `client_error_exhausted`. Covered by "an answer cut off at the output cap" in [`tests/media-paid-work.test.ts`](../../tests/media-paid-work.test.ts).
+- An unrecognized client error pauses its provider and backs its item off; the item is sent again after the pause lifts, and its third such pause ends it `client_error_exhausted`. Cut-off answers and unrecognized client errors share one count. Covered by "an unrecognized client error tied to one item" in the same file.
 
 A request answered with HTTP 429 by an injected day stop never reached its outlet and is not counted as sent.
 
 - Covered by `sweepInterruptions(scenario, { restarts })` in [`tests/media-interruptions.test.ts`](../../tests/media-interruptions.test.ts). It restarts after the k-th swept call of each kind, for every k (or `sample` evenly spaced k), then ticks until quiescent.
-- Every run of every scenario, whatever its faults, is checked for every invariant of probes 1 and 2. Every accepted article must end extracted, unless its extraction ended `uncertain_exhausted`.
+- Every run of every scenario, whatever its faults, is checked for every invariant of probes 1 and 2. Every accepted article must end extracted, unless its extraction ended `uncertain_exhausted`, or `client_error_exhausted` after its handling threw three times.
 - A scenario that restarts during paid requests must show resends under `UNCERTAIN_PAID_RESEND`, so the sweep observes them at all.
 - The "an extraction whose answer is always lost" scenario resends one extraction until it ends `uncertain_exhausted`, so the three-send limit itself is swept: a fourth send of that identity is a violation.
 - A scenario's `before` ticks run once into a template database that every run copies, so they are never interrupted; they must be ticks another registered scenario sweeps, which the test asserts.
 - A change that adds an outbound call, or a new stage or pass that sends one, registers a scenario in `SCENARIOS` that reaches it, with the expected baseline call counts.
 - A new kind of outbound call extends `OUTBOUND_KINDS` and the sweep's call classifier, rather than adding a test outside the sweep.
+- Every tick of every run that no restart stopped must complete with no media error. The "an extraction whose handling always throws" scenario sweeps an item whose handling throws at every processing fetch (probe 7).
 
 ## 2. Resume invariants
 
@@ -70,3 +77,12 @@ A rule the specification does not settle is a gap, not a design choice (CODING_S
 - Record a known mismatch between code and specification as a known failure (`test.failing`, `knownFailure`, or `KNOWN_VIOLATIONS`) with its reason, rather than asserting the current behavior as correct.
 - Open gaps currently recorded in tests: none. #80 settled the two earlier ones on 2026-11-18: a Gemini batch that failed after acceptance is uncertain, and an unrecognized 4xx pauses its provider with `unrecognized_client_error`.
 - Open gap, not recorded in tests (2026-11-18): the usable-article threshold. An article is usable when its cleaned text has at least 120 characters (`cleanArticle` in `src/lib/media-processing.ts`, and the same bound in discovery's article check in `src/lib/media-discovery.ts`). The first live run sent an article whose text was a few hundred tokens of mostly non-review content (job B, a 642-token prompt), and its complete answer was legitimately empty. Refusing such an article before sending would need a substantially higher bound or a different measure of a usable review, which the specification does not settle. The threshold is unchanged.
+
+## 7. Exceptions stay at their item and at the media boundary
+
+On 2026-11-18 an article with no root element made every ingestion tick throw before it recorded anything: the item looped silently, the queue behind it never moved, and the tick's later non-media work never ran. An unexpected exception must stay where it happened:
+
+- Fetched content no parser can turn into a document (an empty or whitespace body, plain text, JSON, a lone comment, binary content) is an unusable article, in discovery and in processing alike. Every parse of fetched HTML goes through `parseArticleDocument`. Covered by `MALFORMED_ARTICLE_BODIES` in [`tests/media-tick-isolation.test.ts`](../../tests/media-tick-isolation.test.ts).
+- An exception while one paid-work item is taken or polled, or one discovery candidate is handled, is caught at that item's boundary: it is recorded with a bounded reason, the outlet attempt ends with an outcome, and the advance's other items progress. A waiting item backs off and its third occurrence ends it `client_error_exhausted`; an item in flight or submitted becomes uncertain; a candidate is skipped. Covered by `throwingResponse` in the same test file and by the "an extraction whose handling always throws" sweep scenario.
+- An exception that reaches the media part of a tick is logged as a `media_error` and the tick completes, with every non-media part reported. Covered in the same test file.
+- A change that adds an item or candidate loop, or a stage of the media part, wraps it at the same boundaries and extends these tests.
