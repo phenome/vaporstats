@@ -34,6 +34,7 @@ import {
   GeminiMissingKeyError,
   OpenRouterHttpError,
   liftProviderPause,
+  MAX_UNCERTAIN_OUTCOMES_PER_JOB,
   MAX_UNCERTAIN_SENDS,
   paidWorkCost,
   pauseProvider,
@@ -1008,21 +1009,31 @@ async function recordAttemptCharge(db: AppDatabase, jobId: number, charge: { usa
   await db.prepare("UPDATE media_processing_jobs SET charged_microusd = (SELECT SUM(charged_microusd) FROM media_processing_attempts WHERE job_id = ?1) WHERE id = ?1 AND EXISTS (SELECT 1 FROM media_processing_attempts WHERE job_id = ?1 AND charged_microusd IS NOT NULL)").bind(jobId).run();
 }
 
+/** Outcomes that settle what a send did, and so end an uncertain streak. */
+const DEFINITE_OUTCOMES: ReadonlySet<AttemptOutcome> = new Set(["succeeded", "refused", "stale"]);
+
 /**
- * How many consecutive uncertain outcomes `jobId` has had for the input
- * identity of its latest attempt, counted back from that attempt. Any other
- * recorded outcome of a send (a success, a refusal, a stale answer, a
- * transient failure or a pause) ends the streak, and an attempt for another
- * input identity starts a fresh count.
+ * How many uncertain outcomes `jobId` has had for the input identity of its
+ * latest attempt since its last definite outcome, counted back from that
+ * attempt, and how many it has had in its lifetime. Only a definite outcome
+ * (a success, a refusal or a stale answer) ends the streak; a transient
+ * failure, a Credit pause or a configuration pause does not. An attempt for
+ * another input identity starts a fresh streak but not a fresh lifetime count.
  */
-async function uncertainStreak(db: AppDatabase, jobId: number): Promise<number> {
+async function uncertainOutcomes(db: AppDatabase, jobId: number): Promise<{ streak: number; lifetime: number }> {
   const recorded = await rows<{ outcome: AttemptOutcome | null; input_identity: string }>(db, "SELECT outcome, input_identity FROM media_processing_attempts WHERE job_id = ? ORDER BY attempt DESC", jobId);
   let streak = 0;
   for (const attempt of recorded) {
-    if (attempt.outcome !== "uncertain" || attempt.input_identity !== recorded[0]!.input_identity) break;
-    streak += 1;
+    if (attempt.input_identity !== recorded[0]!.input_identity) break;
+    if (attempt.outcome !== null && DEFINITE_OUTCOMES.has(attempt.outcome)) break;
+    if (attempt.outcome === "uncertain") streak += 1;
   }
-  return streak;
+  return { streak, lifetime: recorded.filter((attempt) => attempt.outcome === "uncertain").length };
+}
+
+/** Whether an item with these uncertain outcomes must stop as `uncertain_exhausted` instead of being resent. */
+function uncertainLimitReached({ streak, lifetime }: { streak: number; lifetime: number }): boolean {
+  return streak >= MAX_UNCERTAIN_SENDS || lifetime >= MAX_UNCERTAIN_OUTCOMES_PER_JOB;
 }
 
 /**
@@ -1030,8 +1041,9 @@ async function uncertainStreak(db: AppDatabase, jobId: number): Promise<number> 
  * received it, so its outcome is unknown. The attempt is recorded uncertain.
  * The item returns to the queue, under the provider and identity it now
  * waits with, and is resent under the transient backoff and Credit pauses.
- * After `MAX_UNCERTAIN_SENDS` consecutive uncertain outcomes for one input
- * identity it ends `uncertain_exhausted`, and only a correction set resends
+ * At `MAX_UNCERTAIN_SENDS` uncertain outcomes for one input identity without
+ * a definite outcome between them, or `MAX_UNCERTAIN_OUTCOMES_PER_JOB` in its
+ * lifetime, it ends `uncertain_exhausted`, and only a correction set resends
  * it. A retained row is history: it stays `uncertain` and never waits.
  */
 async function returnUncertainItem(advance: QueueAdvance, job: JobRow, reason: string, detail: string | null = null): Promise<void> {
@@ -1045,7 +1057,7 @@ async function returnUncertainItem(advance: QueueAdvance, job: JobRow, reason: s
     }
     await recordLegacyAttempt(db, job.id);
     await closeAttempt(db, job.id, "uncertain", `uncertain:${reason}`);
-    if (await uncertainStreak(db, job.id) >= MAX_UNCERTAIN_SENDS) {
+    if (uncertainLimitReached(await uncertainOutcomes(db, job.id))) {
       await db.prepare("UPDATE media_processing_jobs SET status = 'uncertain_exhausted', error = ?, provider_batch_id = NULL, next_attempt_at = NULL, completed_at = ? WHERE id = ?").bind(`uncertain_exhausted:${reason}`, now.toISOString(), job.id).run();
       await countOutputs(db, job.run_id, "skipped");
       return;

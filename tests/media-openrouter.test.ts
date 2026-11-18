@@ -1,6 +1,7 @@
 import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, test } from "bun:test";
 import { authorizeMediaProcessing } from "../src/lib/media-processing";
+import { MAX_UNCERTAIN_OUTCOMES_PER_JOB } from "../src/lib/media-paid-providers";
 import { handleGameDetailRequest } from "../src/routes/api.games.$appid.detail";
 import { createHash } from "node:crypto";
 import { openTestDatabase, openUpgradedTestDatabase, type TestDatabase } from "./support/db";
@@ -548,7 +549,7 @@ describe("request lifecycle", () => {
     expect(textJobs(database).map(({ status }) => status)).toEqual(["uncertain_exhausted", "succeeded", "succeeded"]);
   });
 
-  test("a new input identity starts a fresh uncertain count, and any other outcome ends the streak", async () => {
+  test("a new input identity starts a fresh uncertain count, and a transient outcome does not end the streak", async () => {
     const { database } = await authorizedGames();
     const providers = apis();
     const options = { openRouterTimeoutMs: 20 };
@@ -561,15 +562,63 @@ describe("request lifecycle", () => {
     const changed = { ...options, outlet: () => new Response(processingArticleHtml(CYBERPUNK).replace("flexible combat", "deliberate tactical combat")) };
     await tick(database, providers, "2026-11-18T07:45:00.000Z", changed);
     expect(textJobs(database).map(({ status, error }) => ({ status, error }))).toEqual([{ status: "queued", error: "uncertain:timeout" }]);
-    // A transient answer ends the streak: two more uncertain outcomes still leave the item queued.
     await tick(database, providers, "2026-11-18T09:00:00.000Z", changed);
     await tick(database, providers, "2026-11-18T12:00:00.000Z", changed);
+    expect(textJobs(database).map(({ status }) => status)).toEqual(["queued"]);
+    // The 503 did not end the streak: this is the new identity's third uncertain outcome.
     await tick(database, providers, "2026-11-19T06:00:00.000Z", changed);
     expect(attempts(database).map(({ outcome }) => outcome)).toEqual(["uncertain", "uncertain", "uncertain", "transient", "uncertain", "uncertain"]);
-    expect(textJobs(database).map(({ status, error }) => ({ status, error }))).toEqual([{ status: "queued", error: "uncertain:timeout" }]);
-
+    expect(textJobs(database).map(({ status, error }) => ({ status, error }))).toEqual([{ status: "uncertain_exhausted", error: "uncertain_exhausted:timeout" }]);
     await tick(database, providers, "2026-11-20T06:00:00.000Z", changed);
-    expect(textJobs(database).map(({ status }) => status)).toEqual(["succeeded", "succeeded"]);
+    expect(providers.openRouter.requests).toHaveLength(6);
+  });
+
+  test("uncertain outcomes alternating with 503s end the item after the third uncertain one", async () => {
+    const { database } = await authorizedGames();
+    const providers = apis();
+    const lost = { network: "socket closed before the response" };
+    const unavailable = { status: 503, body: { error: { code: 503, message: "Unavailable" } } };
+    providers.openRouter.reply("chat", lost, unavailable, lost, unavailable, lost);
+
+    for (const at of ["07:00", "07:15", "07:45", "08:45", "10:45", "16:00"]) await tick(database, providers, `2026-11-18T${at}:00.000Z`);
+    await tick(database, providers, "2026-11-19T06:00:00.000Z");
+
+    expect(attempts(database).map(({ outcome }) => outcome)).toEqual(["uncertain", "transient", "uncertain", "transient", "uncertain"]);
+    expect(textJobs(database).map(({ status }) => status)).toEqual(["uncertain_exhausted"]);
+    expect(providers.openRouter.requests).toHaveLength(5);
+  });
+
+  test("uncertain outcomes alternating with 402 Credit pauses end the item after the third uncertain one", async () => {
+    const { database } = await authorizedGames();
+    const providers = apis();
+    const lost = { network: "socket closed before the response" };
+    providers.openRouter.reply("chat", lost, OPENROUTER_CREDITS, lost, OPENROUTER_CREDITS, lost);
+
+    for (const at of ["2026-11-18T07:00", "2026-11-18T07:15", "2026-11-19T06:00", "2026-11-19T06:30", "2026-11-20T06:00", "2026-11-21T06:00"]) await tick(database, providers, `${at}:00.000Z`);
+
+    expect(attempts(database).map(({ outcome }) => outcome)).toEqual(["uncertain", "credit_pause", "uncertain", "credit_pause", "uncertain"]);
+    expect(textJobs(database).map(({ status }) => status)).toEqual(["uncertain_exhausted"]);
+    expect(providers.openRouter.requests).toHaveLength(5);
+  });
+
+  test(`input identity churn reaches the per-job ceiling of ${MAX_UNCERTAIN_OUTCOMES_PER_JOB} uncertain outcomes`, async () => {
+    const { database } = await authorizedGames();
+    const providers = apis();
+    const lost = { network: "socket closed before the response" };
+    providers.openRouter.reply("chat", lost, lost, lost, lost, lost, lost, lost);
+    // Two uncertain outcomes per article text, below the per-identity limit, then the text changes.
+    const text = (version: number) => ({ outlet: () => new Response(processingArticleHtml(CYBERPUNK).replace("flexible combat", `combat revision ${version}`)) });
+    const ticks: Array<[string, number]> = [
+      ["2026-11-18T07:00", 1], ["2026-11-18T08:00", 1],
+      ["2026-11-18T10:00", 2], ["2026-11-18T14:00", 2],
+      ["2026-11-19T07:00", 3], ["2026-11-20T07:00", 3],
+      ["2026-11-21T07:00", 4], ["2026-11-22T07:00", 4],
+    ];
+    for (const [at, version] of ticks) await tick(database, providers, `${at}:00.000Z`, text(version));
+
+    expect(attempts(database).map(({ outcome }) => outcome)).toEqual(Array(MAX_UNCERTAIN_OUTCOMES_PER_JOB).fill("uncertain"));
+    expect(textJobs(database).map(({ status }) => status)).toEqual(["uncertain_exhausted"]);
+    expect(providers.openRouter.requests).toHaveLength(MAX_UNCERTAIN_OUTCOMES_PER_JOB);
   });
 
   for (const [name, code] of [["DNS", "ENOTFOUND"], ["connect", "ECONNREFUSED"], ...TLS_FAILURE_CODES.map((tls) => [`TLS ${tls}`, tls] as const)]) {

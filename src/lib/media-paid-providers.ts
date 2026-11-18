@@ -311,12 +311,21 @@ export function transientRetryAt(failures: number, now: Date, retryAfterMs: numb
 }
 
 /**
- * How many consecutive sends of one item and input identity may end
- * uncertain. Each uncertain outcome returns the item to the queue under the
+ * How many uncertain outcomes one item may have for one input identity before
+ * a definite outcome (a success, a refusal or a stale answer). A transient
+ * failure, a Credit pause or a configuration pause between them does not end
+ * the streak. Each uncertain outcome returns the item to the queue under the
  * transient backoff; the last one ends it as `uncertain_exhausted`, and only a
  * correction set resends it.
  */
 export const MAX_UNCERTAIN_SENDS = 3;
+
+/**
+ * How many uncertain outcomes one item may have in its lifetime, across all
+ * its input identities. Reaching it ends the item as `uncertain_exhausted`,
+ * so input identity churn cannot resend possibly charged work without bound.
+ */
+export const MAX_UNCERTAIN_OUTCOMES_PER_JOB = 6;
 
 export interface ProviderState {
   provider: PaidProvider;
