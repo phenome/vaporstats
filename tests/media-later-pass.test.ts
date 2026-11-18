@@ -131,3 +131,60 @@ describe("when the later pass is due", () => {
     expect(queries(tavily)).toHaveLength(36);
   });
 });
+
+const [IGN, EUROGAMER, GAMESPOT, PC_GAMER, KOTAKU, GAMESRADAR] = MEDIA_OUTLETS;
+const PHANTOM_LIBERTY = 2138330;
+
+function reviewPage(appid: number, title: string, options: { date?: string | null; canonical?: string } = {}): string {
+  const canonical = options.canonical ? `<meta property="og:url" content="${options.canonical}">` : "";
+  return discoveryArticleHtml(appid, title, { date: options.date, author: "Later critic" }).replace("<head>", `<head>${canonical}`);
+}
+
+describe("later-pass selection", () => {
+  test("follows the 2026-11-16 decision: only outlets with an accepted initial article, a URL new to the entity, a dated article published after that outlet's initial article, and an undated article kept undated", async () => {
+    const database = experimentCatalog();
+    // Phantom Liberty is its own entity; its initial searches find nothing.
+    database.native.prepare("INSERT INTO apps (appid, name, slug, type, is_eligible, is_playable, parent_appid) VALUES (?, 'Cyberpunk 2077: Phantom Liberty', 'phantom-liberty', 'expansion', 1, 1, ?)").run(PHANTOM_LIBERTY, CYBERPUNK);
+    const later = (url: string) => ({ url });
+    const { tavily, fetched, page, pages, tick } = world({
+      later: (appid, outlet) => {
+        if (appid !== CYBERPUNK) return [];
+        if (outlet === IGN) return [later(articleUrl(CYBERPUNK, IGN)), later(articleUrl(CYBERPUNK, IGN, "-canonical")), later(articleUrl(CYBERPUNK, IGN, "-revisited"))];
+        if (outlet === EUROGAMER) return [later(articleUrl(CYBERPUNK, EUROGAMER, "-earlier"))];
+        if (outlet === GAMESPOT) return [later(articleUrl(CYBERPUNK, GAMESPOT, "-undated"))];
+        if (outlet === PC_GAMER) return [later(articleUrl(CYBERPUNK, PC_GAMER, "-expansion")), later(articleUrl(CYBERPUNK, PC_GAMER, "-revisited"))];
+        return [later(articleUrl(CYBERPUNK, outlet, "-revisited"))];
+      },
+    });
+    // Kotaku's initial search finds no qualifying article for Cyberpunk 2077.
+    pages.set(articleUrl(CYBERPUNK, KOTAKU), () => new Response("Not Found", { status: 404 }));
+    // A new URL whose canonical address is the IGN article it already has,
+    // published before IGN's genuine later review.
+    page(articleUrl(CYBERPUNK, IGN, "-canonical"), reviewPage(CYBERPUNK, "Cyberpunk 2077 Review", { date: "2026-11-15T00:00:00.000Z", canonical: articleUrl(CYBERPUNK, IGN) }));
+    // Phantom Liberty has no initial article from PC Gamer.
+    page(articleUrl(CYBERPUNK, PC_GAMER, "-expansion"), reviewPage(CYBERPUNK, "Cyberpunk 2077: Phantom Liberty Review", { date: "2026-11-19T00:00:00.000Z" }));
+    // Published before Eurogamer's initial review of 2026-11-10.
+    page(articleUrl(CYBERPUNK, EUROGAMER, "-earlier"), reviewPage(CYBERPUNK, "Cyberpunk 2077 Review in Progress", { date: "2026-11-05T00:00:00.000Z" }));
+    page(articleUrl(CYBERPUNK, GAMESPOT, "-undated"), reviewPage(CYBERPUNK, "Cyberpunk 2077 Review Revisited", { date: null }));
+
+    await tick(database, "2026-11-20T06:00:00.000Z");
+    await tick(database, "2026-11-21T06:00:00.000Z");
+
+    // Kotaku has no initial article for Cyberpunk 2077, so the later pass does not ask it.
+    expect(queries(tavily).filter((query) => query.startsWith("Cyberpunk 2077 review revisited@")).sort()).toEqual(
+      [IGN, EUROGAMER, GAMESPOT, PC_GAMER, GAMESRADAR].map(({ domain }) => `Cyberpunk 2077 review revisited@${domain}`).sort(),
+    );
+    // The IGN article it already has is not fetched by the later pass: one
+    // discovery fetch and one processing fetch.
+    expect(fetched.filter((url) => url === articleUrl(CYBERPUNK, IGN))).toHaveLength(2);
+    const { sources } = await detail(database, CYBERPUNK);
+    const laterSources = sources.filter(({ originalUrl }) => !MEDIA_OUTLETS.some((outlet) => originalUrl === articleUrl(CYBERPUNK, outlet)));
+    expect(laterSources.map(({ outlet, originalUrl, publishedAt }) => ({ outlet, originalUrl, publishedAt })).sort((a, b) => a.originalUrl.localeCompare(b.originalUrl))).toEqual([
+      { outlet: "GameSpot", originalUrl: articleUrl(CYBERPUNK, GAMESPOT, "-undated"), publishedAt: null },
+      { outlet: "GamesRadar+", originalUrl: articleUrl(CYBERPUNK, GAMESRADAR, "-revisited"), publishedAt: "2026-11-19T00:00:00.000Z" },
+      { outlet: "IGN", originalUrl: articleUrl(CYBERPUNK, IGN, "-revisited"), publishedAt: "2026-11-19T00:00:00.000Z" },
+      { outlet: "PC Gamer", originalUrl: articleUrl(CYBERPUNK, PC_GAMER, "-revisited"), publishedAt: "2026-11-19T00:00:00.000Z" },
+    ].sort((a, b) => a.originalUrl.localeCompare(b.originalUrl)));
+    expect((await detail(database, PHANTOM_LIBERTY)).sources).toEqual([]);
+  });
+});
