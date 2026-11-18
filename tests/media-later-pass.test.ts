@@ -335,3 +335,38 @@ describe("undated articles in Sources", () => {
     ]);
   });
 });
+
+describe("fairness between due passes", () => {
+  test("due passes run oldest due time first and then by entity within the day's free credits, initial and later passes compete only by due time, a pass not yet due waits, and leftover passes come first the next day until none waits", async () => {
+    const database = experimentCatalog();
+    // Due times: Hades II's initial pass from November 18, Cyberpunk 2077's
+    // from November 19, and Baldur's Gate 3's from November 20 at 12:00.
+    const enroll = database.native.prepare("INSERT INTO media_enrollments (appid, reason, enrolled_at) VALUES (?, 'experiment', ?)");
+    enroll.run(HADES_II, "2026-11-18T06:00:00.000Z");
+    enroll.run(CYBERPUNK, "2026-11-19T06:00:00.000Z");
+    enroll.run(BALDURS_GATE, "2026-11-20T12:00:00.000Z");
+    const { tavily, tick } = world();
+    const days: string[][] = [];
+    // November 20 has 18 free credits; every later day has six.
+    for (let day = 20; day <= 26; day += 1) {
+      tavily.remaining = day === 20 ? 18 : 6;
+      const before = tavily.requests.length;
+      await tick(database, `2026-11-${day}T06:00:00.000Z`);
+      const searched = queries(tavily).slice(before).map((query) => query.split("@")[0]!);
+      days.push([...new Set(searched)].map((pass) => `${pass} ×${searched.filter((query) => query === pass).length}`));
+    }
+
+    expect(days).toEqual([
+      // Baldur's Gate 3's initial pass is not due until 12:00, so six credits stay unused.
+      ["Hades II review preview ×6", "Cyberpunk 2077 review preview ×6"],
+      // Both later passes have been due since November 20 at 06:00, before
+      // Baldur's Gate 3's initial pass; the earlier entity goes first.
+      ["Cyberpunk 2077 review revisited ×6"],
+      ["Hades II review revisited ×6"],
+      ["Baldur's Gate 3 review preview ×6"],
+      ["Baldur's Gate 3 review revisited ×6"],
+      [],
+      [],
+    ]);
+  });
+});

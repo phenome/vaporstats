@@ -428,7 +428,8 @@ async function duePasses(db: AppDatabase, targets: readonly MediaTarget[], asOf:
     const ownProgress = (pass: MediaPass) => progress.filter((row) => row.appid === target.appid && row.pass === pass);
     const initialFinishedAt = passFinishedAt(ownProgress("initial"), MEDIA_OUTLETS.map(({ name }) => name));
     if (initialFinishedAt === null) {
-      due.push({ target, pass: "initial", dueAt: isoTimestamp(enrollment.enrolled_at) });
+      const dueAt = isoTimestamp(enrollment.enrolled_at);
+      if (dueAt <= asOf) due.push({ target, pass: "initial", dueAt });
       continue;
     }
     const laterOutlets = MEDIA_OUTLETS.map(({ name }) => name).filter((outlet) => represented.some((row) => row.appid === target.appid && row.outlet === outlet));
