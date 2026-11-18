@@ -126,10 +126,12 @@ describe("automatic media ingestion over the production-like state", () => {
   // PC Gamer resume at their recorded candidate without a new search and,
   // having admitted their article before the cap, admit no other. Every
   // source new to processing is queued. Cyberpunk 2077's active Overview has
-  // similarity inputs and no vector, so both its dimensions are embedded
-  // before the later articles change it, and the new Overview's gameplay
-  // input once more. Day 2: Hades II's initial pass finished on day 1, so its
-  // later pass asks its five represented outlets. Day 3: nothing is due.
+  // similarity inputs and no vector, but its later articles are queued for
+  // extraction in the same advance and will replace it, so its embedding
+  // work waits (#80, 2026-11-18): it gets one embedding round, for the
+  // replacement Overview's gameplay input only. Day 2: Hades II's initial
+  // pass finished on day 1, so its later pass asks its five represented
+  // outlets. Day 3: nothing is due.
   test("switched on, day 1 takes the Baldur's Gate 3 and Cyberpunk 2077 later passes and resumes Hades II's capped queries without a new search or a second article, day 2 the Hades II later pass, and day 3 searches nothing", async () => {
     const database = productionLike();
     const world = experimentWorld();
@@ -153,7 +155,7 @@ describe("automatic media ingestion over the production-like state", () => {
       {
         searches: [...at(BG3, ["IGN", "GamesRadar+"]), ...at(CP, ["IGN", "Eurogamer", "PC Gamer"]), ...at(H2, ["GamesRadar+"])],
         enqueued: [
-          `embedding ${name(BG3)} ×1`, `embedding ${name(CP)} ×3`, `embedding ${name(H2)} ×1`,
+          `embedding ${name(BG3)} ×1`, `embedding ${name(CP)} ×1`, `embedding ${name(H2)} ×1`,
           `extraction ${name(BG3)} ×4`, `extraction ${name(CP)} ×3`, `extraction ${name(H2)} ×5`,
           `synthesis ${name(BG3)} ×1`, `synthesis ${name(CP)} ×1`, `synthesis ${name(H2)} ×1`,
         ],
@@ -182,6 +184,8 @@ describe("automatic media ingestion over the production-like state", () => {
     // GameSpot stays denied; retained Gemini jobs are never touched.
     expect(fetched.filter((url) => url.includes("gamespot.com"))).toEqual([]);
     expect(database.native.query("SELECT * FROM media_processing_jobs WHERE retained = 1 ORDER BY id").all()).toEqual(retained);
-    expect(database.native.query("SELECT status, COUNT(*) AS count FROM media_processing_jobs WHERE retained = 0 GROUP BY status").all()).toEqual([{ status: "succeeded", count: 26 }]);
+    expect(database.native.query("SELECT status, COUNT(*) AS count FROM media_processing_jobs WHERE retained = 0 GROUP BY status").all()).toEqual([{ status: "succeeded", count: 24 }]);
+    // Every embedding Cyberpunk 2077 got embeds its replacement Overview, which is active.
+    expect(database.native.query(`SELECT e.dimension, e.overview_input_identity = o.input_identity AS current FROM media_game_embeddings AS e JOIN media_game_overviews AS o ON o.appid = e.appid AND o.active = 1 WHERE e.appid = ${CP} ORDER BY e.id`).all()).toEqual([{ dimension: "gameplay", current: 1 }]);
   });
 });

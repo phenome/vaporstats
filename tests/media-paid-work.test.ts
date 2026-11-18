@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { authorizeMediaProcessing } from "../src/lib/media-processing";
 import { getMediaOverview } from "../src/lib/media-overview";
+import { MEDIA_OUTLETS } from "../src/lib/media-discovery";
 import { openTestDatabase, openUpgradedTestDatabase, type TestDatabase } from "./support/db";
 import {
   BALDURS_GATE,
@@ -546,6 +547,33 @@ describe("transient failures", () => {
     apis.gemini.reply("submit", { status: 500 });
     await tick(database, apis, "2026-11-10T03:15:00.000Z");
     expect(embeddingJobs(database)[0]).toMatchObject({ status: "queued", attempt_count: 21, next_attempt_at: "2026-11-11T03:15:00.000Z" });
+  });
+});
+
+describe("embedding order", () => {
+  test("a queued embedding waits while its game's Overview rebuild is pending, and only the replacement Overview is embedded", async () => {
+    const { database } = await authorizedGames();
+    const apis = providers();
+    // Gemini has no key: the first Overview's embedding waits in the queue.
+    await tick(database, apis, "2026-11-10T03:00:00.000Z", { geminiApiKey: "" });
+    const waiting = embeddingJobs(database);
+    expect(waiting.map(({ status }) => status)).toEqual(["queued"]);
+
+    // A new article arrives; its extraction meets a transient failure, so the Overview rebuild is pending.
+    insertSources(database.native, CYBERPUNK, "initial", 1, MEDIA_OUTLETS[1]);
+    await authorizeMediaProcessing(database.db, insertCompletedRun(database.native, "initial:paid-work:new-article", [CYBERPUNK]));
+    apis.openRouter.reply("chat", { status: 503, body: { error: { code: 503, message: "Unavailable" } } });
+    await tick(database, apis, "2026-11-10T03:15:00.000Z");
+
+    expect(apis.gemini.calls.filter((call) => call.kind === "submit")).toEqual([]);
+    expect(embeddingJobs(database).map(({ request_key, status }) => ({ request_key, status }))).toEqual([{ request_key: waiting[0]!.request_key, status: "queued" }]);
+
+    await tick(database, apis, "2026-11-10T03:30:00.000Z");
+
+    const overview = database.native.query<{ input_identity: string }, []>(`SELECT input_identity FROM media_game_overviews WHERE appid = ${CYBERPUNK} AND active = 1`).get()!;
+    expect(apis.gemini.submitted).toHaveLength(1);
+    expect(apis.gemini.submitted[0]).toContain(`:${overview.input_identity}:`);
+    expect(embeddingJobs(database).map(({ status }) => status)).toEqual(["succeeded"]);
   });
 });
 

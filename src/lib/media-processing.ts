@@ -1831,6 +1831,17 @@ async function hasPendingExtractions(db: AppDatabase, appid: number): Promise<bo
 }
 
 /**
+ * Whether `appid`'s active Overview is about to be replaced: an Overview
+ * rebuild is queued, waiting or submitted, or extraction work that will
+ * change its contributions is. Its embedding work then waits until the new
+ * Overview is active, so no embedding is submitted for an Overview the same
+ * advance replaces (#80).
+ */
+async function overviewReplacementPending(db: AppDatabase, appid: number): Promise<boolean> {
+  return (await first<{ pending: number }>(db, `SELECT 1 AS pending FROM media_processing_jobs WHERE appid = ? AND stage IN ('extraction', 'synthesis') AND (status = 'submitted' OR ${WAITING}) LIMIT 1`, appid)) !== null;
+}
+
+/**
  * Queues an extraction for every source run `runId` takes: sources new to
  * processing, and the sources of its authorized `affected` set. Taking the source and
  * queuing its item is one write; the article is fetched only when the item
@@ -1891,7 +1902,11 @@ async function enqueueOverviewWork(advance: QueueAdvance, runId: number, entitie
   await enqueueEmbeddings(advance, runId, scopeGames, automatic);
 }
 
-/** Queues an embedding for each dimension whose `similarityInputs` changed in an active Overview of `scopeGames`. */
+/**
+ * Queues an embedding for each dimension whose `similarityInputs` changed in
+ * an active Overview of `scopeGames`, unless that Overview is about to be
+ * replaced.
+ */
 async function enqueueEmbeddings(advance: QueueAdvance, runId: number, scopeGames: readonly number[], automatic: boolean): Promise<void> {
   const { db, now } = advance;
   const overviews = await rows<{ appid: number; input_identity: string; output_json: string }>(
@@ -1904,6 +1919,7 @@ async function enqueueEmbeddings(advance: QueueAdvance, runId: number, scopeGame
       await db.prepare("UPDATE media_game_embeddings SET active = 0 WHERE appid = ? AND active = 1").bind(overview.appid).run();
       continue;
     }
+    if (await overviewReplacementPending(db, overview.appid)) continue;
     for (const dimension of SIMILARITY_DIMENSIONS) {
       const input = overviewSimilarityInput(overview.output_json, dimension);
       const identity = input.length > 0 ? similarityInputIdentity(dimension, input) : null;
@@ -2051,6 +2067,8 @@ async function takeEmbeddingTurn(advance: QueueAdvance, job: JobRow): Promise<bo
     await resolveItemWithoutProvider(db, job);
     return false;
   }
+  // The Overview it embeds is about to be replaced: the item waits.
+  if (await overviewReplacementPending(db, job.appid)) return false;
   await sendItem(advance, job, GEMINI_EMBEDDING_MODEL, makeEmbeddingRequest(input), MAX_EMBEDDING_INPUT_TOKENS);
   return true;
 }
