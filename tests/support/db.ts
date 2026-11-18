@@ -1,9 +1,9 @@
 import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { tmpdir } from "node:os";
 import { Database } from "bun:sqlite";
 import { openSqliteAppDatabase, type AppDatabase } from "../../src/lib/db";
 import { applyMigrations } from "../../src/lib/migrations";
+import { testTemporaryRoot } from "./tmpdir";
 
 export interface TestDatabaseHandle {
   native: Database;
@@ -25,7 +25,7 @@ export interface TestDatabase extends TestDatabaseHandle {
  * application's adapter, pragmas (foreign keys on) and migration procedure.
  */
 export function openTestDatabase(prefix = "vaporstats-test-"): TestDatabase {
-  const directory = mkdtempSync(join(tmpdir(), prefix));
+  const directory = mkdtempSync(join(testTemporaryRoot(), prefix));
   return openTestDatabaseIn(directory);
 }
 
@@ -35,7 +35,7 @@ export function openTestDatabase(prefix = "vaporstats-test-"): TestDatabase {
  * path, which applies `tag` and every later migration as an upgrade does.
  */
 export function openUpgradedTestDatabase(tag: string, seed: (native: Database) => void, prefix = "vaporstats-upgrade-"): TestDatabase {
-  const directory = mkdtempSync(join(tmpdir(), prefix));
+  const directory = mkdtempSync(join(testTemporaryRoot(), prefix));
   const migrations = resolve(import.meta.dir, "../../migrations");
   const journal = JSON.parse(readFileSync(join(migrations, "meta", "_journal.json"), "utf8")) as { entries: Array<{ tag: string }> };
   const index = journal.entries.findIndex((entry) => entry.tag === tag);

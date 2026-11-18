@@ -1,10 +1,10 @@
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { tmpdir } from "node:os";
 import { Database } from "bun:sqlite";
 import { readMigrationFiles } from "drizzle-orm/migrator";
 import { applyMigrations, DRIZZLE_MIGRATION_TABLE, MIGRATION_TABLE } from "../src/lib/migrations";
 import { openSqliteAppDatabase } from "../src/lib/db";
+import { testTemporaryRoot } from "../tests/support/tmpdir";
 import {
   advanceMediaProcessing,
   type GeminiBatchTransport,
@@ -51,7 +51,7 @@ const expectedTables = [
   "media_sources",
   "media_tag_memberships",
 ];
-const temporaryDirectory = mkdtempSync(join(tmpdir(), "vaporstats-sqlite-check-"));
+const temporaryDirectory = mkdtempSync(join(testTemporaryRoot(), "vaporstats-sqlite-check-"));
 const databasePath = join(temporaryDirectory, "check.sqlite");
 const legacyDatabasePath = join(temporaryDirectory, "legacy.sqlite");
 const migrationDirectory = resolve(process.cwd(), "migrations");
