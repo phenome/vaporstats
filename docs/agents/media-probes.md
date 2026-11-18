@@ -6,10 +6,16 @@ Every helper named below lives in [`tests/support/media.ts`](../../tests/support
 
 ## 1. Send-once across restarts
 
-A restart can happen between any outbound call and the write that records its outcome. No request identity (a search, a discovery or processing fetch, an OpenRouter request, a Gemini submission) is ever sent twice, in an uninterrupted run or an interrupted one. The one exception is the exported constant `PROCESSING_FETCH_RESENT_AFTER_RESTART` (ADR 0020): a processing fetch interrupted before its item was marked in flight is sent again, at most once per restart that interrupted it. A request answered with HTTP 429 by an injected day stop never reached its outlet and is not counted as sent.
+A restart can happen between any outbound call and the write that records its outcome. No request identity (a search, a discovery or processing fetch, an OpenRouter request, a Gemini submission) is ever sent twice, in an uninterrupted run or an interrupted one, except under two exported constants:
+
+- `PROCESSING_FETCH_RESENT_AFTER_RESTART` (ADR 0020): a processing fetch interrupted before its item was marked in flight is sent again, at most once per restart that interrupted it.
+- `UNCERTAIN_PAID_RESEND` (#80, ADRs 0017 and 0018, amended 2026-11-18): a paid request whose outcome is unknown, such as one a restart interrupted, is resent under the queue's backoff, so one OpenRouter request or Gemini submission identity is sent at most three times, never more. Each resend of an uncertain extraction fetches its article once more.
+
+A request answered with HTTP 429 by an injected day stop never reached its outlet and is not counted as sent.
 
 - Covered by `sweepInterruptions(scenario, { restarts })` in [`tests/media-interruptions.test.ts`](../../tests/media-interruptions.test.ts). It restarts after the k-th swept call of each kind, for every k (or `sample` evenly spaced k), then ticks until quiescent.
-- Every run of every scenario, whatever its faults, is checked for every invariant of probes 1 and 2.
+- Every run of every scenario, whatever its faults, is checked for every invariant of probes 1 and 2. Every accepted article must end extracted, unless its extraction ended `uncertain_exhausted`.
+- A scenario that restarts during paid requests must show resends under `UNCERTAIN_PAID_RESEND`, so the sweep observes them at all.
 - A scenario's `before` ticks run once into a template database that every run copies, so they are never interrupted; they must be ticks another registered scenario sweeps, which the test asserts.
 - A change that adds an outbound call, or a new stage or pass that sends one, registers a scenario in `SCENARIOS` that reaches it, with the expected baseline call counts.
 - A new kind of outbound call extends `OUTBOUND_KINDS` and the sweep's call classifier, rather than adding a test outside the sweep.
@@ -29,10 +35,10 @@ Each paid provider classifies every response in one classifier (CODING_STANDARDS
 
 | Scope | Allowed classes |
 |---|---|
-| `provider_wide` | Credit pause, configuration pause; never a refusal |
+| `provider_wide` | Credit pause, configuration pause (an unrecognized 4xx included); never a refusal |
 | `item_content` | Definite refusal |
 | `pre_send_network` | Transient |
-| `post_accept_charged` | Uncertain: accepted and possibly charged, so never resent |
+| `post_accept_charged` | Uncertain: accepted and possibly charged, so resent at most three consecutive times |
 | `ended_unrun` | Transient or uncertain: a batch the provider ended without running it, or a failed free poll |
 | `post_send_timeout` | Uncertain |
 | `provider_transient` | Transient: a rate limit, an in-flight budget, a timeout response or a server error; never a refusal or a pause |
@@ -61,6 +67,4 @@ A rule the specification does not settle is a gap, not a design choice (CODING_S
 
 - Put the choice behind one named function or constant, and list it first in the change description.
 - Record a known mismatch between code and specification as a known failure (`test.failing`, `knownFailure`, or `KNOWN_VIOLATIONS`) with its reason, rather than asserting the current behavior as correct.
-- Open gaps currently recorded in tests:
-  - A Gemini batch that the provider accepted and then ended as `BATCH_STATE_FAILED` with a generic error is a definite refusal, while CONTEXT.md defines an item that its provider accepted and then failed as uncertain (`KNOWN_VIOLATIONS`, tracked in #80).
-  - An unrecognized 4xx (such as 405, 409, 410, 413 or 422) is a definite refusal for both paid providers. This is an open decision tracked in #80; the contract test's "unrecognized 4xx answers" suite pins the current behavior so that #80 changes it deliberately, and does not endorse it.
+- Open gaps currently recorded in tests: none. #80 settled the two earlier ones on 2026-11-18: a Gemini batch that failed after acceptance is uncertain, and an unrecognized 4xx pauses its provider with `unrecognized_client_error`.

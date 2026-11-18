@@ -46,3 +46,12 @@ OpenRouter answers 200 once a provider has accepted the request, and prompt proc
 - The local estimate refuses some inputs a real count would accept, mainly long non-Latin articles; such articles are reported as `input_token_cap`.
 - Cleanup used to cut an article's text at 120,000 characters. An article longer than that now has a different content hash, so a run that takes its source again extracts it from its whole text, or refuses it as `input_token_cap`.
 - OpenRouter's key limit and budgets are the spending authority for text generation, as the Google project's billing is for embeddings.
+
+## Amendment (2026-11-18): uncertain requests are resent, and unrecognized client errors pause
+
+Decided in [#80](https://github.com/phenome/vaporstats/issues/80); see the amendment of the same date in [ADR 0017](0017-provider-credit-pauses.md).
+
+- A request whose outcome is unknown is no longer held for a correction set. A client timeout, a connection lost after sending, an item found in flight when an advance starts, and a 200 that reports a provider failure or timeout, or holds no JSON or no choices, return the item to the queue under the transient backoff. It is resent at most three consecutive times for one input identity, and then ends `uncertain_exhausted`; only a correction set resends it. Article text is never retained, so each resend of an extraction fetches its article again, counted against the outlet's daily cap.
+- Each request is an attempt with its own generation id, routing, token usage and `usage.cost`. An item's cost is the sum of its attempts, and cost reports count each attempt in the month it settled in.
+- An uncertain extraction now holds back its game's Overview like any waiting extraction, because it will be resent. The Overview is built once the resend settles, or from the other current extractions once the item ends `uncertain_exhausted`.
+- In the classifier table, a 4xx other than 400, 401, 402, 403, 404, 408 and 429, sent or reported after acceptance, is a configuration pause `unrecognized_client_error`, lifted by the daily key check. It never refuses an item.
