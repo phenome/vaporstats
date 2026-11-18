@@ -409,3 +409,21 @@ describe("settled source rules in automatic runs", () => {
     expect(request).toMatchObject({ search_depth: "basic", max_results: 10, include_answer: false, include_raw_content: false });
   });
 });
+
+describe("experiment progress", () => {
+  test("the experiment games' unfinished initial-pass queries are due at the first daily media run, and a query the experiment already served is never repeated", async () => {
+    const database = experimentCatalog();
+    // The manual experiment searched Cyberpunk 2077 on IGN; its Eurogamer
+    // query was kept by a Provider stop.
+    const experimentRun = insertCompletedRun(database.native, "initial:experiment", [CYBERPUNK]);
+    database.native.prepare("INSERT INTO media_discovery_progress (run_id, appid, pass, outlet, status, query_attempted_at, candidate_urls, candidate_index) VALUES (?, ?, 'initial', 'IGN', 'completed', '2026-09-01T00:00:00.000Z', '[]', 0)").run(experimentRun, CYBERPUNK);
+    database.native.prepare("INSERT INTO media_discovery_progress (run_id, appid, pass, outlet, status, stop_reason) VALUES (?, ?, 'initial', 'Eurogamer', 'queued', 'tavily_credits_exhausted')").run(experimentRun, CYBERPUNK);
+    const providers = apis();
+
+    await tick(database, providers, "2026-11-20T06:00:00.000Z");
+
+    const cyberpunk = providers.tavily.searches.filter((search) => search.startsWith("Cyberpunk 2077@"));
+    expect(cyberpunk.sort()).toEqual(MEDIA_OUTLETS.filter(({ name }) => name !== "IGN").map(({ domain }) => `Cyberpunk 2077@${domain}`).sort());
+    expect(providers.tavily.searches).toHaveLength(17);
+  });
+});
