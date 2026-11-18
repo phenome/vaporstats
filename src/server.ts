@@ -1,8 +1,13 @@
 import { realpath, stat } from "node:fs/promises";
+import { isIP } from "node:net";
+import { createHash, timingSafeEqual } from "node:crypto";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import serverEntry from "@tanstack/react-start/server-entry";
 import { startIngestionScheduler } from "../workers/ingestion";
+import { MEDIA_GAME_CHOICES } from "./lib/media-discovery";
+import type { MediaProcessingSummary } from "./lib/media-processing";
 import { CACHE_POLICIES } from "./lib/cache";
+import { PAID_PROVIDERS } from "./lib/media-paid-providers";
 import { getDb } from "./lib/db";
 import { ensureReceptionPublicationReady } from "./lib/reception-publication";
 export const API_RATE_LIMIT_MAX_REQUESTS = 30;
@@ -196,17 +201,156 @@ async function serveStaticAsset(url: URL): Promise<Response | null> {
   }
 }
 /**
- * VaporStats serves no internal endpoint. Media discovery and paid work run
- * only in the ingestion tick, so no HTTP request starts them; the retired
- * manual media trigger's path is rejected with every other internal path.
+ * The internal media endpoint, reachable only from the loopback peer through
+ * the restricted remote command, with a bearer token, a JSON body of at most
+ * 4 KiB, and exact keys. No media form is supported: media discovery and paid
+ * work run only in the ingestion tick, so no request starts them. The retired
+ * `initial` and `later` passes are rejected as retired, any other input as
+ * invalid, and every other internal path with 404, all before any database or
+ * provider work. Later slices add their forms here.
  */
+const INTERNAL_MEDIA_PATH = "/internal/media-discovery";
+
+function loopbackPeer(address: string | undefined): boolean {
+  if (!address) return false;
+  const normalized = address.trim().toLowerCase();
+  if (isIP(normalized) === 4) return normalized.startsWith("127.");
+  if (normalized === "::1") return true;
+  if (normalized.startsWith("::ffff:")) {
+    const mapped = normalized.slice("::ffff:".length);
+    return isIP(mapped) === 4 && mapped.startsWith("127.");
+  }
+  return false;
+}
+
+function sameSecret(expected: string, provided: string): boolean {
+  const expectedHash = createHash("sha256").update(expected).digest();
+  const providedHash = createHash("sha256").update(provided).digest();
+  return timingSafeEqual(expectedHash, providedHash);
+}
+
+function internalMediaResponse(status: number, body: Record<string, unknown>): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: {
+      "Content-Type": "application/json; charset=utf-8",
+      "Cache-Control": CACHE_POLICIES.noStore,
+    },
+  });
+}
+/**
+ * The processing stop reasons a media form may report as they are; any other
+ * reason is reported as `provider_failure`. With
+ * `sanitizeMediaProcessingSummary`, this bounds what a response can carry
+ * once a form that reports processing state is supported.
+ */
+const SAFE_MEDIA_PROCESSING_STOP_REASONS: Record<string, true> = {
+  input_token_cap: true,
+  provider_refusal: true,
+  terminal_failure: true,
+  transient_provider_failure: true,
+  uncertain_submission: true,
+  missing_gemini_embedding_batch: true,
+  "provider_paused:gemini:missing_key": true,
+  "provider_paused:gemini:rejected_key": true,
+  "provider_paused:gemini:failed_precondition": true,
+  "provider_paused:gemini:model_unavailable": true,
+  "provider_paused:gemini:prepay_depleted": true,
+  "provider_paused:gemini:spend_cap": true,
+  "provider_paused:openrouter:missing_key": true,
+  "provider_paused:openrouter:invalid_key": true,
+  "provider_paused:openrouter:permission_denied": true,
+  "provider_paused:openrouter:forbidden": true,
+  "provider_paused:openrouter:model_unavailable": true,
+  "provider_paused:openrouter:key_limit": true,
+  "provider_paused:openrouter:credits": true,
+  "provider_paused:openrouter:guardrail_budget": true,
+  "provider_paused:openrouter:workspace_budget": true,
+};
+
+function safeNonNegativeInteger(value: number): number {
+  return Number.isSafeInteger(value) && value >= 0 ? value : 0;
+}
+
+function sanitizeMediaProcessingSummary(summary: MediaProcessingSummary): Pick<
+  MediaProcessingSummary,
+  "runId" | "status" | "submitted" | "completed" | "outputs" | "stopReasons" | "queued" | "providers" | "cost"
+> {
+  return {
+    runId: summary.runId,
+    status: summary.status,
+    submitted: safeNonNegativeInteger(summary.submitted),
+    completed: safeNonNegativeInteger(summary.completed),
+    outputs: {
+      new: safeNonNegativeInteger(summary.outputs.new),
+      reused: safeNonNegativeInteger(summary.outputs.reused),
+      replaced: safeNonNegativeInteger(summary.outputs.replaced),
+      invalidated: safeNonNegativeInteger(summary.outputs.invalidated),
+      skipped: safeNonNegativeInteger(summary.outputs.skipped),
+    },
+    stopReasons: [...new Set(summary.stopReasons.map((reason) =>
+      Object.prototype.hasOwnProperty.call(SAFE_MEDIA_PROCESSING_STOP_REASONS, reason) ? reason : "provider_failure"
+    ))],
+    queued: Object.fromEntries(PAID_PROVIDERS.map((provider) => [provider, safeNonNegativeInteger(summary.queued[provider])])) as MediaProcessingSummary["queued"],
+    providers: Object.fromEntries(PAID_PROVIDERS.map((provider) => {
+      const state = summary.providers[provider];
+      return [provider, { provider, paused: state.paused, reason: state.reason, pausedAt: state.pausedAt, checkedAt: state.checkedAt, checkOutcome: state.checkOutcome }];
+    })) as MediaProcessingSummary["providers"],
+    cost: {
+      reportingOnly: true,
+      month: summary.cost.month,
+      providers: Object.fromEntries(PAID_PROVIDERS.map((provider) => [provider, {
+        monthToDateMicrousd: safeNonNegativeInteger(summary.cost.providers[provider].monthToDateMicrousd),
+        allTimeMicrousd: safeNonNegativeInteger(summary.cost.providers[provider].allTimeMicrousd),
+      }])) as MediaProcessingSummary["cost"]["providers"],
+      uncertain: safeNonNegativeInteger(summary.cost.uncertain),
+    },
+  };
+}
+
+async function handleInternalMediaRequest(request: Request, peerAddress?: string): Promise<Response> {
+  if (!loopbackPeer(peerAddress)) return internalMediaResponse(404, { error: "Not Found" });
+  if (request.method !== "POST") return internalMediaResponse(405, { error: "Method Not Allowed" });
+  const configuredToken = process.env.MEDIA_TRIGGER_TOKEN;
+  const authorization = request.headers.get("authorization") ?? "";
+  if (!configuredToken || !authorization.startsWith("Bearer ") || !sameSecret(configuredToken, authorization.slice(7))) {
+    return internalMediaResponse(401, { error: "Unauthorized" });
+  }
+  const contentType = request.headers.get("content-type")?.split(";", 1)[0].trim().toLowerCase();
+  if (contentType !== "application/json") return internalMediaResponse(415, { error: "Content-Type must be application/json" });
+  const declaredLength = Number(request.headers.get("content-length") ?? 0);
+  if (declaredLength > 4096) return internalMediaResponse(413, { error: "Request body too large" });
+  let body: unknown;
+  try {
+    const text = await request.text();
+    if (text.length > 4096) return internalMediaResponse(413, { error: "Request body too large" });
+    body = JSON.parse(text);
+  } catch {
+    return internalMediaResponse(400, { error: "Invalid JSON" });
+  }
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    return internalMediaResponse(400, { error: "Invalid request" });
+  }
+  const keys = Object.keys(body);
+  if (keys.length !== 2 || !keys.includes("pass") || !keys.includes("game")) {
+    return internalMediaResponse(400, { error: "Invalid request" });
+  }
+  const input = body as { pass?: unknown; game?: unknown };
+  const knownGame = typeof input.game === "string" && (input.game === "all" || Object.prototype.hasOwnProperty.call(MEDIA_GAME_CHOICES, input.game));
+  if ((input.pass === "initial" || input.pass === "later") && knownGame) {
+    return internalMediaResponse(410, { error: "Retired media form: media discovery runs in the daily media run" });
+  }
+  return internalMediaResponse(400, { error: "Invalid request" });
+}
+
 function isInternalPath(pathname: string): boolean {
   return pathname === "/internal" || pathname.startsWith("/internal/");
 }
 
-export async function handleRequest(request: Request): Promise<Response> {
+export async function handleRequest(request: Request, peerAddress?: string): Promise<Response> {
   const url = new URL(request.url);
-  if (isInternalPath(url.pathname)) return new Response("Not Found", { status: 404, headers: { "Cache-Control": "no-store" } });
+  if (url.pathname === INTERNAL_MEDIA_PATH) return handleInternalMediaRequest(request, peerAddress);
+  if (isInternalPath(url.pathname)) return internalMediaResponse(404, { error: "Not Found" });
 
   if (url.hostname === "www.vaporstats.com") {
     url.protocol = "https:";
@@ -253,7 +397,7 @@ export function startServer(options: StartServerOptions = {}) {
     const server = Bun.serve({
       hostname: options.hostname ?? process.env.HOST ?? "0.0.0.0",
       port: options.port ?? getPort(),
-      fetch: (request) => handleRequest(request),
+      fetch: (request, server) => handleRequest(request, server.requestIP(request)?.address),
     });
     if (options.ingestion !== false) {
       startIngestionScheduler({
