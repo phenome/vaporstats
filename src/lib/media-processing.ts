@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { Readability } from "@mozilla/readability";
-import { parseHTML } from "linkedom";
+import { parseArticleDocument } from "./article-document";
 import type { AppDatabase } from "./db";
 import { writeTransaction } from "./db-transaction";
 import {
@@ -476,13 +476,13 @@ function cleanLine(value: string): string {
  * is never extracted from a silently shortened text.
  */
 function cleanArticle(html: string): { content: string; hash: string } | null {
-  let document: Document;
-  try { document = parseHTML(html).document as unknown as Document; } catch { return null; }
+  const document = parseArticleDocument(html);
+  if (!document) return null;
   for (const node of Array.from(document.querySelectorAll("script,style,noscript,template,nav,header,footer,aside,form,iframe,svg,[aria-label*='ad' i],[class*='ad' i],[id*='ad' i]"))) node.remove();
   let root: Element | null = document.querySelector("article");
   try {
     const readable = new Readability(document).parse() as { content?: string; textContent?: string } | null;
-    if (readable?.content) root = parseHTML(`<!doctype html><html><body>${readable.content}</body></html>`).document.body;
+    if (readable?.content) root = parseArticleDocument(`<!doctype html><html><body>${readable.content}</body></html>`)?.body ?? root;
     if (!root && readable?.textContent) {
       const text = readable.textContent.split(/\n+/).map(cleanLine).filter(Boolean).join("\n");
       return text.length >= 120 ? { content: text, hash: sha256(text) } : null;
@@ -2057,9 +2057,9 @@ async function takeExtractionTurn(advance: QueueAdvance, job: JobRow): Promise<b
     if (isOutletDenialStop(body.outletStop)) await refuseItem(db, job, "outlet_denied", now);
     return true;
   }
-  const cleaned = body ? cleanArticle(body) : null;
+  const cleaned = body === null ? null : cleanArticle(body);
   if (!cleaned) {
-    const reason = body ? "article_unusable" : "article_unreachable";
+    const reason = body === null ? "article_unreachable" : "article_unusable";
     await refuseItem(db, job, reason, now);
     noteReason(advance, job.run_id, `${source.outlet}:${reason}`);
     return true;

@@ -230,6 +230,20 @@ export function oversizedArticleHtml(appid: number): string {
   return `<!doctype html><html><body><article><h1>${GAME_NAMES[appid]} Review</h1><p>${"戦闘".repeat(60_000)}</p></article></body></html>`;
 }
 
+/**
+ * Bodies an outlet can serve with HTTP 200 that hold no root element, so no
+ * HTML parser turns them into a document with a body (incident of
+ * 2026-11-18). Each must be handled as an unusable article.
+ */
+export const MALFORMED_ARTICLE_BODIES = {
+  "an empty body": "",
+  "only whitespace": " \n\t ",
+  "plain text": "Moved permanently. Please follow the redirect to continue reading this review.",
+  "a JSON document": JSON.stringify({ error: "not found", detail: "The requested review is not available in this region." }),
+  "only an HTML comment": "<!-- served by the edge cache -->",
+  "binary content": "%PDF-1.7\n\u0000\u0001\u0002 binary stream",
+} as const;
+
 /** Key-sorted JSON, matching how processing input identities serialize values. */
 export function stableJson(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;

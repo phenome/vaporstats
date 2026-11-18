@@ -1,5 +1,6 @@
 import { Readability } from "@mozilla/readability";
 import { parseHTML } from "linkedom";
+import { parseArticleDocument } from "./article-document";
 import type { AppDatabase } from "./db";
 import type { StoredSteamEvent } from "./reception-store";
 
@@ -591,13 +592,8 @@ export function extractReaderContent(
   }
 
   // 2. Mozilla Readability for generic article pages
-  let document: Document;
-  try {
-    const parsed = parseHTML(html);
-    document = parsed.document as unknown as Document;
-  } catch {
-    return null;
-  }
+  const document = parseArticleDocument(html);
+  if (!document) return null;
 
   const scripts = Array.from(document.querySelectorAll("script, style, noscript"));
   for (const s of scripts) {

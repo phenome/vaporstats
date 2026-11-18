@@ -1,5 +1,5 @@
 import { Readability } from "@mozilla/readability";
-import { parseHTML } from "linkedom";
+import { parseArticleDocument } from "./article-document";
 import type { AppDatabase } from "./db";
 import { writeTransaction } from "./db-transaction";
 import { mainReleasedDate, type MainReleasedFields } from "./lifecycle-history";
@@ -584,12 +584,8 @@ function meta(document: Document, ...names: string[]): string | null {
 }
 
 function parseSource(html: string, finalUrl: string, target: MediaTarget, targets: readonly MediaTarget[], outlet: MediaOutlet, retrievedAt: string): MediaSource | null {
-  let document: Document;
-  try {
-    document = parseHTML(html).document as unknown as Document;
-  } catch {
-    return null;
-  }
+  const document = parseArticleDocument(html);
+  if (!document) return null;
   for (const element of Array.from(document.querySelectorAll("script,style,noscript,template"))) element.remove();
   const titleMeta = meta(document, "og:title", "twitter:title");
   const authorMeta = meta(document, "author", "article:author");
