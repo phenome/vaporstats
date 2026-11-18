@@ -453,9 +453,10 @@ async function duePasses(db: AppDatabase, targets: readonly MediaTarget[], asOf:
  * Whether a later-pass article qualifies for its entity: the entity has an
  * accepted initial article from the same outlet, the article's URL is not
  * already one of the entity's sources, and a dated article was published
- * after each of that outlet's initial articles for the entity. An undated
- * article qualifies otherwise and keeps its unknown date; an undated initial
- * article gives a dated one no known date to follow.
+ * after each of that outlet's dated initial articles for the entity. An
+ * undated initial article imposes no constraint, and the order between it and
+ * the later article stays unknown. An undated article qualifies otherwise and
+ * keeps its unknown date.
  */
 async function qualifiesForLaterPass(db: AppDatabase, source: MediaSource): Promise<boolean> {
   const existing = await rows<{ pass: MediaPass; outlet: MediaOutlet; original_url: string; discovery_url: string | null; published_at: string | null }>(
@@ -469,7 +470,7 @@ async function qualifiesForLaterPass(db: AppDatabase, source: MediaSource): Prom
   if (initial.length === 0) return false;
   if (source.publishedAt === null) return true;
   const publishedAt = source.publishedAt;
-  return initial.every((row) => row.published_at !== null && Date.parse(row.published_at) < Date.parse(publishedAt));
+  return initial.every((row) => row.published_at === null || Date.parse(row.published_at) < Date.parse(publishedAt));
 }
 
 /** The one query an entity's pass sends to each outlet's domain. */

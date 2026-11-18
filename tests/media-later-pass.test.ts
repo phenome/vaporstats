@@ -234,6 +234,40 @@ describe("later-pass selection", () => {
     ].sort((a, b) => a.originalUrl.localeCompare(b.originalUrl)));
     expect((await detail(database, PHANTOM_LIBERTY)).sources).toEqual([]);
   });
+
+  test("follows the 2026-11-17 decision: an undated initial article leaves a later article from that outlet eligible, dated or not, and a dated one need only follow the outlet's dated initial articles", async () => {
+    const database = experimentCatalog();
+    const { page, tick } = world({
+      later: (appid, outlet) => {
+        if (appid !== CYBERPUNK) return [];
+        if (outlet === KOTAKU) return [{ url: articleUrl(CYBERPUNK, KOTAKU, "-undated") }];
+        if (outlet === EUROGAMER) return [{ url: articleUrl(CYBERPUNK, EUROGAMER, "-earlier") }];
+        return [{ url: articleUrl(CYBERPUNK, outlet, "-revisited") }];
+      },
+    });
+    // GameSpot's and Kotaku's only initial reviews are undated.
+    page(articleUrl(CYBERPUNK, GAMESPOT), reviewPage(CYBERPUNK, "Cyberpunk 2077 Review", { date: null }));
+    page(articleUrl(CYBERPUNK, KOTAKU), reviewPage(CYBERPUNK, "Cyberpunk 2077 Review", { date: null }));
+    page(articleUrl(CYBERPUNK, KOTAKU, "-undated"), reviewPage(CYBERPUNK, "Cyberpunk 2077 Review Revisited", { date: null }));
+    // Published before Eurogamer's dated initial review of 2026-11-10.
+    page(articleUrl(CYBERPUNK, EUROGAMER, "-earlier"), reviewPage(CYBERPUNK, "Cyberpunk 2077 Review in Progress", { date: "2026-11-05T00:00:00.000Z" }));
+
+    await tick(database, "2026-11-20T06:00:00.000Z");
+    // IGN and Eurogamer each also have an undated initial article, beside
+    // their initial reviews of 2026-11-10.
+    const insert = database.native.prepare("INSERT INTO media_sources (appid, pass, original_url, title, outlet, retrieved_at, type) VALUES (?, 'initial', ?, 'Cyberpunk 2077 Preview', ?, '2026-11-20T06:00:00.000Z', 'preview')");
+    for (const outlet of [IGN, EUROGAMER]) insert.run(CYBERPUNK, articleUrl(CYBERPUNK, outlet, "-preview"), outlet.name);
+    await tick(database, "2026-11-21T06:00:00.000Z");
+
+    const { sources } = await detail(database, CYBERPUNK);
+    expect(sources.filter(({ originalUrl }) => /-(revisited|undated|earlier)$/.test(originalUrl)).map(({ outlet, originalUrl, publishedAt }) => ({ outlet, originalUrl, publishedAt })).sort((a, b) => a.originalUrl.localeCompare(b.originalUrl))).toEqual([
+      { outlet: "GameSpot", originalUrl: articleUrl(CYBERPUNK, GAMESPOT, "-revisited"), publishedAt: "2026-11-19T00:00:00.000Z" },
+      { outlet: "GamesRadar+", originalUrl: articleUrl(CYBERPUNK, GAMESRADAR, "-revisited"), publishedAt: "2026-11-19T00:00:00.000Z" },
+      { outlet: "IGN", originalUrl: articleUrl(CYBERPUNK, IGN, "-revisited"), publishedAt: "2026-11-19T00:00:00.000Z" },
+      { outlet: "Kotaku", originalUrl: articleUrl(CYBERPUNK, KOTAKU, "-undated"), publishedAt: null },
+      { outlet: "PC Gamer", originalUrl: articleUrl(CYBERPUNK, PC_GAMER, "-revisited"), publishedAt: "2026-11-19T00:00:00.000Z" },
+    ].sort((a, b) => a.originalUrl.localeCompare(b.originalUrl)));
+  });
 });
 
 describe("later-pass article rules", () => {

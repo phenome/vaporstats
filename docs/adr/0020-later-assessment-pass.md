@@ -18,8 +18,10 @@ Each enrolled entity gets one initial and one later assessment pass. The later p
 
 - its entity must have an accepted initial article from the same outlet;
 - its canonical URL and discovery URL must be new to its entity;
-- if it is dated, it must be published after each of that outlet's initial articles for the entity. An undated initial article gives it no known date to follow, so the dated article does not qualify;
+- if it is dated, it must be published after each of that outlet's dated initial articles for the entity. An undated initial article imposes no constraint;
 - if it is undated, it qualifies otherwise and keeps an unknown date.
+
+Under the decision of 2026-11-17 recorded on #75, an outlet whose initial article for the entity is undated still has later articles collected, dated or not, under the same URL, exact-subject and article-type rules. The order between such an initial article and a later one stays unknown and is never inferred.
 
 Like the initial pass, each query admits at most one article per entity: a review before a preview, the earliest dated first, and undated last.
 
