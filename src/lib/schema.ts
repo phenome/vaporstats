@@ -941,6 +941,8 @@ export const mediaDiscoveryProgress = sqliteTable(
     creditsUsed: integer("credits_used"),
     usage: text("usage").notNull().default("{}"),
     stopReason: text("stop_reason"),
+    /** When a day-scoped stop (an Outlet day stop or the search provider's rate limit) stopped this query, by the run's clock. */
+    stoppedAt: text("stopped_at"),
     updatedAt: text("updated_at").notNull().default(currentTimestamp),
   },
   (table) => [

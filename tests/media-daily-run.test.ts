@@ -385,6 +385,43 @@ describe("settled source rules in automatic runs", () => {
     expect(extractionStatus(database, eurogamerArticle!)).toEqual(["succeeded"]);
   });
 
+  test.each([
+    ["the 30-attempt cap", "daily_attempt_cap"],
+    ["an outlet rate limit", "fetch_http_429"],
+  ] as const)("a query stopped by an Outlet day stop at %s reopens in the next daily media run even after the queue fetched from that outlet earlier that UTC day", async (_, stopReason) => {
+    const database = experimentCatalog();
+    const eurogamer = MEDIA_OUTLETS[1];
+    // An unprocessed Eurogamer article carried over from the experiment keeps
+    // the paid-work queue fetching from Eurogamer in every tick.
+    insertSources(database.native, CYBERPUNK, "initial", 1, eurogamer);
+    if (stopReason === "daily_attempt_cap") {
+      const seed = database.native.prepare("INSERT INTO media_discovery_attempts (appid, outlet, pass, day, kind, succeeded, attempted_at) VALUES (?, 'Eurogamer', 'initial', '2026-11-20', 'fetch', 1, '2026-11-20T00:00:00.000Z')");
+      for (let index = 0; index < 29; index += 1) seed.run(CYBERPUNK);
+    }
+    let rateLimited = stopReason === "fetch_http_429";
+    const outlet = (url: string) => rateLimited && new URL(url).hostname === eurogamer.domain ? new Response("Too Many Requests", { status: 429 }) : undefined;
+    const providers = apis();
+    const eurogamerQueries = () => database.native.query<{ status: string; stop_reason: string | null }, []>("SELECT status, stop_reason FROM media_discovery_progress WHERE outlet = 'Eurogamer' ORDER BY id").all();
+
+    await tick(database, providers, "2026-11-20T06:00:00.000Z", { outlet });
+    expect(eurogamerQueries()).toEqual([{ status: "stopped", stop_reason: stopReason }]);
+
+    // Before November 21's daily media run, the queue fetches from Eurogamer.
+    rateLimited = false;
+    const fetched: string[] = [];
+    await tick(database, providers, "2026-11-21T00:00:00.000Z", { outlet, fetched });
+    expect(fetched.filter((url) => new URL(url).hostname === eurogamer.domain)).not.toEqual([]);
+    expect(attempts(database, "Eurogamer").filter(({ day }) => day === "2026-11-21")).not.toEqual([]);
+
+    await tick(database, providers, "2026-11-21T06:00:00.000Z", { outlet });
+
+    // The stopped query is served in November 21's daily media run, along
+    // with the other entities' Eurogamer queries, and none is repeated.
+    expect(eurogamerQueries()).toEqual(Array(3).fill({ status: "completed", stop_reason: null }));
+    expect(providers.tavily.searches.filter((search) => search.endsWith(`@${eurogamer.domain}`))).toHaveLength(3);
+    expect(repeatedSearches(providers)).toEqual([]);
+  });
+
   test("searches stay on Tavily's free plan with paid overage disabled, and take at most 10 candidates per query", async () => {
     const paid = experimentCatalog();
     const paidProviders = apis();

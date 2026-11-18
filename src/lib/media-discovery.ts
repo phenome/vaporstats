@@ -313,6 +313,14 @@ async function prepareProgressForAuthorization(
   ).bind(runId, pass, gamesJson).run();
 }
 
+/**
+ * Reopens the queries of `pass` for `games` that a day-scoped stop held on
+ * an earlier UTC day than `day`: an Outlet day stop (the daily attempt cap or
+ * an outlet rate limit) or the search provider's rate limit. Reopening
+ * depends only on the day of the stop; whether a search or fetch is then
+ * admitted is decided by the outlet's rules for `day`. An Outlet denial never
+ * reopens.
+ */
 async function reopenDayScopedProgress(
   db: AppDatabase,
   runId: number,
@@ -326,34 +334,14 @@ async function reopenDayScopedProgress(
      SET run_id = ?,
          status = CASE WHEN query_attempted_at IS NULL THEN 'queued' ELSE 'fetching' END,
          stop_reason = NULL,
+         stopped_at = NULL,
          updated_at = CURRENT_TIMESTAMP
      WHERE pass = ?
        AND appid IN (SELECT value FROM json_each(?))
        AND status = 'stopped'
-       AND (
-         (
-           stop_reason IN ('daily_attempt_cap', 'search_http_429', 'fetch_http_429')
-           AND (
-             SELECT MAX(attempt.day)
-             FROM media_discovery_attempts AS attempt
-             WHERE attempt.outlet = media_discovery_progress.outlet
-           ) < ?
-         )
-         OR (
-           stop_reason = 'tavily_search_http_429'
-           AND NOT EXISTS (
-             SELECT 1
-             FROM media_discovery_attempts AS attempt
-             WHERE attempt.appid = media_discovery_progress.appid
-               AND attempt.outlet = media_discovery_progress.outlet
-               AND attempt.pass = media_discovery_progress.pass
-               AND attempt.kind = 'search'
-               AND attempt.status_code = 429
-               AND attempt.day >= ?
-           )
-         )
-       )`,
-  ).bind(runId, pass, gamesJson, day, day).run();
+       AND stop_reason IN ('daily_attempt_cap', 'search_http_429', 'fetch_http_429', 'tavily_search_http_429')
+       AND (stopped_at IS NULL OR substr(stopped_at, 1, 10) < ?)`,
+  ).bind(runId, pass, gamesJson, day).run();
 }
 
 async function authorizeMediaRunNow(
@@ -569,8 +557,9 @@ function usageDetails(value: unknown): { plan: "free" | "rejected" | "unknown"; 
   return { plan, remainingCredits: remaining, planUsage, planLimit, paygoUsage, paygoLimit, valid };
 }
 
-async function stopProgress(db: AppDatabase, progressId: number, reason: string): Promise<void> {
-  await db.prepare("UPDATE media_discovery_progress SET status = 'stopped', stop_reason = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(reason.slice(0, 128), progressId).run();
+/** Stops a query for `reason` at `at`, the run's clock, which decides when a day-scoped stop reopens. */
+async function stopProgress(db: AppDatabase, progressId: number, reason: string, at: Date): Promise<void> {
+  await db.prepare("UPDATE media_discovery_progress SET status = 'stopped', stop_reason = ?, stopped_at = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(reason.slice(0, 128), at.toISOString(), progressId).run();
 }
 
 /**
@@ -579,8 +568,8 @@ async function stopProgress(db: AppDatabase, progressId: number, reason: string)
  * issued again. No search was served, so the entity, outlet and pass keep
  * their one query.
  */
-async function releaseRefusedQuery(db: AppDatabase, progressId: number, status: "queued" | "stopped", reason: string): Promise<void> {
-  await db.prepare("UPDATE media_discovery_progress SET status = ?, stop_reason = ?, query_attempted_at = NULL, candidate_urls = '[]', candidate_index = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(status, reason, progressId).run();
+async function releaseRefusedQuery(db: AppDatabase, progressId: number, status: "queued" | "stopped", reason: string, at: Date): Promise<void> {
+  await db.prepare("UPDATE media_discovery_progress SET status = ?, stop_reason = ?, stopped_at = ?, query_attempted_at = NULL, candidate_urls = '[]', candidate_index = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(status, reason, status === "stopped" ? at.toISOString() : null, progressId).run();
 }
 
 /**
@@ -779,7 +768,7 @@ export async function runAuthorizedMediaDiscovery(db: AppDatabase, options: Medi
             // No credit is left for this query: stop searching for the rest of
             // the run as a provider stop and keep the query for the next
             // authorized run.
-            await releaseRefusedQuery(db, progressId, "queued", "tavily_credits_exhausted");
+            await releaseRefusedQuery(db, progressId, "queued", "tavily_credits_exhausted", clock());
             stopReasons.add("tavily_credits_exhausted");
             searchesStopped = true;
             continue;
@@ -792,7 +781,7 @@ export async function runAuthorizedMediaDiscovery(db: AppDatabase, options: Medi
           const attemptNow = clock();
           const reservation = await reserveOutletAttempt(db, { runId: run.id, appid, outlet: outlet.name, kind: "search", url: null, date: attemptNow });
           if ("stop" in reservation) {
-            await stopProgress(db, progressId, reservation.stop);
+            await stopProgress(db, progressId, reservation.stop, attemptNow);
             stoppedOutlets.add(outlet.name);
             stopReasons.add(`${outlet.name}:${reservation.stop}`);
             continue;
@@ -814,7 +803,7 @@ export async function runAuthorizedMediaDiscovery(db: AppDatabase, options: Medi
             // stop searching for the rest of the run as a provider stop, leave
             // every outlet open, and keep the query for the next authorized run.
             await finishOutletAttempt(db, attemptId, { kind: "search", statusCode: null, succeeded: false, error: boundedError(error) });
-            await releaseRefusedQuery(db, progressId, "queued", "tavily_search_error");
+            await releaseRefusedQuery(db, progressId, "queued", "tavily_search_error", attemptNow);
             stopReasons.add("tavily_search_error");
             searchesStopped = true;
             continue;
@@ -825,7 +814,7 @@ export async function runAuthorizedMediaDiscovery(db: AppDatabase, options: Medi
             // whole run as a provider stop, leave every outlet open, and keep
             // the unserved query for the next authorized run.
             const reason = `tavily_search_http_${response.status}`;
-            await releaseRefusedQuery(db, progressId, "queued", reason);
+            await releaseRefusedQuery(db, progressId, "queued", reason, attemptNow);
             stopReasons.add(reason);
             break;
           }
@@ -833,7 +822,7 @@ export async function runAuthorizedMediaDiscovery(db: AppDatabase, options: Medi
             // The search provider's rate limit, not the outlet's: stop searching
             // for the rest of the run and retry this query on the next UTC day.
             const reason = "tavily_search_http_429";
-            await releaseRefusedQuery(db, progressId, "stopped", reason);
+            await releaseRefusedQuery(db, progressId, "stopped", reason, attemptNow);
             stopReasons.add(reason);
             searchesStopped = true;
             continue;
@@ -843,7 +832,7 @@ export async function runAuthorizedMediaDiscovery(db: AppDatabase, options: Medi
             // the rest of the run as a provider stop, leave every outlet open,
             // and keep the query for the next authorized run.
             const reason = `tavily_search_http_${response.status}`;
-            await releaseRefusedQuery(db, progressId, "queued", reason);
+            await releaseRefusedQuery(db, progressId, "queued", reason, attemptNow);
             stopReasons.add(reason);
             searchesStopped = true;
             continue;
@@ -868,7 +857,7 @@ export async function runAuthorizedMediaDiscovery(db: AppDatabase, options: Medi
             // A candidate the outlet answered is done; one refused before any
             // request is retried when the outlet reopens.
             if (fetched.contacted) await db.prepare("UPDATE media_discovery_progress SET candidate_index = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(index + 1, progressId).run();
-            await stopProgress(db, progressId, fetched.stop);
+            await stopProgress(db, progressId, fetched.stop, clock());
             stoppedOutlets.add(outlet.name);
             stopReasons.add(`${outlet.name}:${fetched.stop}`);
             break;

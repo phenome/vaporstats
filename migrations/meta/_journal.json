@@ -176,6 +176,13 @@
       "when": 1794994518520,
       "tag": "0024_media_enrollment",
       "breakpoints": true
+    },
+    {
+      "idx": 25,
+      "version": "6",
+      "when": 1794995911417,
+      "tag": "0025_media_discovery_stopped_at",
+      "breakpoints": true
     }
   ]
 }

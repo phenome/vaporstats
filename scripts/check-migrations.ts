@@ -410,6 +410,8 @@ function verifyRetainedMediaRowsSurviveUpgrade(): void {
         VALUES (41, 'initial', 'retained-media-run', '[900003]', 'completed', 2, 1, 3, '["req-1"]', '{"credits":2}', '{"accepted":1}', '2026-10-01T00:00:00.000Z', '2026-10-01T00:05:00.000Z')`,
       `INSERT INTO media_discovery_progress (id, run_id, appid, pass, outlet, status, query_attempted_at, candidate_urls, candidate_index, provider_request_id, credits_used, usage, stop_reason)
         VALUES (42, 41, 900003, 'initial', 'IGN', 'completed', '2026-10-01T00:01:00.000Z', '["https://www.ign.com/articles/retained"]', 1, 'req-1', 2, '{"credits":2}', 'accepted')`,
+      `INSERT INTO media_discovery_progress (id, run_id, appid, pass, outlet, status, stop_reason, updated_at)
+        VALUES (142, 41, 900003, 'initial', 'Eurogamer', 'stopped', 'daily_attempt_cap', '2026-10-01 00:03:00')`,
       `INSERT INTO media_discovery_attempts (id, appid, outlet, pass, day, kind, url, status_code, succeeded, error, attempted_at)
         VALUES (43, 900003, 'IGN', 'initial', '2026-10-01', 'fetch', 'https://www.ign.com/articles/retained', 200, 1, NULL, '2026-10-01T00:02:00.000Z')`,
       `INSERT INTO media_sources (id, appid, pass, original_url, discovery_url, title, outlet, author, published_at, updated_at, retrieved_at, type, hands_on, affiliation, platform, build_context, normalized_content_hash, cleanup_version, processing_content, processing_input_identity)
@@ -555,6 +557,12 @@ function verifyRetainedMediaRowsSurviveUpgrade(): void {
     const enrollments = retained.query<{ count: number }, []>("SELECT COUNT(*) AS count FROM media_enrollments").get()?.count ?? 0;
     const startDate = retained.query<{ count: number }, []>("SELECT COUNT(*) AS count FROM checkpoints WHERE key = 'media:enrollment-start-date'").get()?.count ?? 0;
     if (enrollments !== 0 || startDate !== 0) throw new Error("Migrations seeded media enrollment");
+    // A query stopped before its stop time was recorded keeps its last update
+    // as that time, so it reopens on a later UTC day.
+    const stops = retained.query<{ id: number; stopped_at: string | null }, []>("SELECT id, stopped_at FROM media_discovery_progress ORDER BY id").all();
+    if (JSON.stringify(stops) !== JSON.stringify([{ id: 42, stopped_at: null }, { id: 142, stopped_at: "2026-10-01 00:03:00" }])) {
+      throw new Error("Migrations misrecorded when retained discovery queries stopped: " + JSON.stringify(stops));
+    }
     verifyMediaPassesAccepted(retained);
   } finally {
     retained.close(true);
