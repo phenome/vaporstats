@@ -197,7 +197,7 @@ describe("the daily media run", () => {
     // never repeated; its candidate is skipped with that reason.
     const crashedOutlet = MEDIA_OUTLETS.find(({ domain }) => new URL(crashedFetch!).hostname === domain)!;
     expect(resumed.mediaDiscovery?.stopReasons).toContain(`${crashedOutlet.name}:fetch_interrupted`);
-    expect(fetched.filter((url) => url === crashedFetch)).toEqual([crashedFetch]);
+    expect(fetched.filter((url) => url === crashedFetch)).toEqual([crashedFetch!]);
     // Its attempt, reserved before the restart, records that it was interrupted.
     expect(database.native.query("SELECT kind, status_code, error FROM media_discovery_attempts WHERE url = ?").all(crashedFetch!)).toEqual([{ kind: "failure", status_code: null, error: "interrupted_by_restart" }]);
     expect((await getMediaSources(database.db, CYBERPUNK)).map(({ originalUrl }) => originalUrl)).not.toContain(crashedFetch);

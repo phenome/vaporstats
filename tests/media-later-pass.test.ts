@@ -260,7 +260,7 @@ describe("later-pass selection", () => {
     await tick(database, "2026-11-21T06:00:00.000Z");
 
     const { sources } = await detail(database, CYBERPUNK);
-    expect(sources.filter(({ originalUrl }) => /-(revisited|undated|earlier)$/.test(originalUrl)).map(({ outlet, originalUrl, publishedAt }) => ({ outlet, originalUrl, publishedAt })).sort((a, b) => a.originalUrl.localeCompare(b.originalUrl))).toEqual([
+    expect(sources.filter(({ originalUrl }) => /-(revisited|undated|earlier)$/.test(originalUrl)).map(({ outlet, originalUrl, publishedAt }): { outlet: string; originalUrl: string; publishedAt: string | null } => ({ outlet, originalUrl, publishedAt })).sort((a, b) => a.originalUrl.localeCompare(b.originalUrl))).toEqual([
       { outlet: "GameSpot", originalUrl: articleUrl(CYBERPUNK, GAMESPOT, "-revisited"), publishedAt: "2026-11-19T00:00:00.000Z" },
       { outlet: "GamesRadar+", originalUrl: articleUrl(CYBERPUNK, GAMESRADAR, "-revisited"), publishedAt: "2026-11-19T00:00:00.000Z" },
       { outlet: "IGN", originalUrl: articleUrl(CYBERPUNK, IGN, "-revisited"), publishedAt: "2026-11-19T00:00:00.000Z" },
