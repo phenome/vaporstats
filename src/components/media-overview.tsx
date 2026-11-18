@@ -73,7 +73,7 @@ export function MediaOverviewSection({
   });
 
   return (
-    <section id="media-overview" aria-labelledby="media-overview-title" className="min-w-0 space-y-3 scroll-mt-28">
+    <section id="media-overview" aria-labelledby="media-overview-title" className="min-w-0 space-y-3">
       <div className="flex items-baseline justify-between gap-3 border-b border-zinc-800 pb-2">
         <h2 id="media-overview-title" className="font-mono text-xs font-semibold uppercase tracking-wider text-zinc-200">
           Overview

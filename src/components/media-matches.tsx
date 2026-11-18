@@ -37,7 +37,7 @@ export function MediaMatchesSection({
   if (visibleMatches.length === 0) return null;
 
   return (
-    <section id="media-matches" aria-labelledby="media-matches-title" className="min-w-0 space-y-4 scroll-mt-28">
+    <section id="media-matches" aria-labelledby="media-matches-title" className="min-w-0 space-y-4">
       <div className="flex items-baseline justify-between gap-3 border-b border-zinc-800 pb-2">
         <h2 id="media-matches-title" className="font-mono text-xs font-semibold uppercase tracking-wider text-zinc-200">
           Media matches

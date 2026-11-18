@@ -35,7 +35,7 @@ export function MediaSources({ sources }: { sources: MediaSource[] }) {
       </div>
       <ol className="grid gap-3 md:grid-cols-2">
         {sources.map((source, index) => (
-          <li id={`media-source-${index + 1}`} key={source.originalUrl} className="min-w-0 scroll-mt-28 border border-zinc-800 bg-zinc-950 p-4">
+          <li id={`media-source-${index + 1}`} key={source.originalUrl} className="min-w-0 border border-zinc-800 bg-zinc-950 p-4">
             <div className="flex min-w-0 items-start justify-between gap-3">
               <div className="min-w-0">
                 <p className="font-mono text-xs font-semibold uppercase tracking-wider text-orange-400">{source.outlet}</p>

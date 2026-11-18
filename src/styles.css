@@ -467,7 +467,10 @@
 #player-history,
 #price-history,
 #related-content,
-#media-sources {
+#media-overview,
+#media-sources,
+#media-matches,
+[id^="media-source-"] {
   scroll-margin-top: calc(56px + var(--hero-compact-height, 50px) + 31px);
 }
 
@@ -476,7 +479,10 @@
   #player-history,
   #price-history,
   #related-content,
-  #media-sources {
+  #media-overview,
+  #media-sources,
+  #media-matches,
+  [id^="media-source-"] {
     scroll-margin-top: calc(102px + var(--hero-compact-height, 50px) + 31px);
   }
 }
