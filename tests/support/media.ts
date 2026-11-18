@@ -1,4 +1,5 @@
 import type { Database } from "bun:sqlite";
+import { createHash } from "node:crypto";
 import { runIngestionTick, type IngestionTickOptions } from "../../workers/ingestion";
 import { openTestDatabase, type TestDatabase } from "./db";
 import type { GeminiBatchPoll, GeminiBatchTransport } from "../../src/lib/media-processing";
@@ -1045,11 +1046,11 @@ function experimentArticleUrl(appid: number, domain: string, suffix = ""): strin
 }
 
 /**
- * The experiment games' media world. Each entity's first search on an
+ * The experiment games' media world. Each initial-pass search on an
  * outlet finds three candidates: a preview published 2026-10-01
  * (`<initial URL>-preview`), the initial review published 2026-11-10, which
  * the query prefers, and a second preview published 2026-10-15
- * (`-preview-again`). Every later search finds three later reviews,
+ * (`-preview-again`). Every later-pass search finds three later reviews,
  * `<initial URL>-revisited` published 2026-11-19, `-revisited-again`
  * published 2026-11-21 and `-revisited-late` published 2026-11-25; the
  * earliest is preferred. Every article has its own text, and every provider
@@ -1058,11 +1059,8 @@ function experimentArticleUrl(appid: number, domain: string, suffix = ""): strin
  */
 export function experimentWorld(): MediaWorld {
   const tavily = controlledTavilyApi();
-  const searches = new Map<string, number>();
-  tavily.results = ({ appid, domain }) => {
-    const count = (searches.get(`${appid}@${domain}`) ?? 0) + 1;
-    searches.set(`${appid}@${domain}`, count);
-    const suffixes = count === 1 ? ["-preview", "", "-preview-again"] : ["-revisited", "-revisited-again", "-revisited-late"];
+  tavily.results = ({ appid, query, domain }) => {
+    const suffixes = query.endsWith(" review revisited") ? ["-revisited", "-revisited-again", "-revisited-late"] : ["-preview", "", "-preview-again"];
     return suffixes.map((suffix) => ({ url: experimentArticleUrl(appid, domain, suffix) }));
   };
   const pages = new Map<string, string>();
@@ -1088,4 +1086,131 @@ export function experimentWorld(): MediaWorld {
       return html === undefined ? undefined : new Response(html);
     },
   };
+}
+
+/** The SHA-256 of `value`'s key-sorted JSON: how processing records an input identity. */
+function recordedIdentity(value: unknown): string {
+  return createHash("sha256").update(stableJson(value)).digest("hex");
+}
+
+/** The production database's media state on 2026-11-18, as `seedProductionLike` reproduces it. */
+export const PRODUCTION_LIKE = {
+  /** Outlets with an accepted initial article, the same for each experiment game. */
+  representedOutlets: ["IGN", "Eurogamer", "PC Gamer"],
+  /** Initial queries the daily attempt cap stopped in September, never searched. */
+  dayCappedQueries: [[BALDURS_GATE, "Kotaku"], [BALDURS_GATE, "GamesRadar+"], [HADES_II, "Kotaku"], [HADES_II, "GamesRadar+"]] as ReadonlyArray<readonly [number, string]>,
+  /** The Overview Gemini synthesized for Cyberpunk 2077, with its similarity inputs. */
+  cyberpunkSimilarityInputs: { gameplay: ["Open-world action role-playing with flexible builds"], storyWorld: ["A dense neon megacity shaped by corporate power"] },
+} as const;
+
+/**
+ * Reproduces the production media state as of 2026-11-18, before automatic
+ * media ingestion was switched on:
+ *
+ * - the experiment games in the catalog and no media enrollment, enrollment
+ *   start date or daily media run;
+ * - 9 initial-pass sources, one per game on IGN, Eurogamer and PC Gamer,
+ *   at the URLs `experimentWorld` serves as initial reviews. Cyberpunk
+ *   2077's 3 were processed under Gemini text generation and have active
+ *   extractions, an active Overview and active embeddings; the 6 Baldur's
+ *   Gate 3 and Hades II sources were discovered only;
+ * - 3 GameSpot Outlet denials (`fetch_http_403`), one per game;
+ * - 4 Baldur's Gate 3 and Hades II initial queries (Kotaku, GamesRadar+)
+ *   stopped by the daily attempt cap on 2026-09-14, never searched;
+ *   every other initial query completed;
+ * - 8 retained Gemini jobs: 6 succeeded (3 extractions, the Overview, 2
+ *   embeddings) and 2 stale extractions;
+ * - 7 authorized discovery runs, each with a completed processing
+ *   authorization.
+ *
+ * Identities are recorded as processing recorded them, so the outputs are
+ * current for the inputs they were built from.
+ */
+export function seedProductionLike(native: Database): void {
+  const games = [CYBERPUNK, BALDURS_GATE, HADES_II];
+  seedApps(native, games);
+  const gemini = "gemini-3.1-flash-lite";
+  const extractionConfig = "media-extraction-2026-09-13-v3";
+  const synthesisConfig = "media-synthesis-2026-09-13-v2";
+  const cleanup = "media-cleanup-2026-09-11-v1";
+  // Runs 1–3: each game's initial discovery; 4–5: Baldur's Gate 3 and Hades II
+  // resumed until the daily cap stopped them; 6–7: Cyberpunk 2077 corrections.
+  const runs: Array<[number, readonly number[], string]> = [
+    [1, [CYBERPUNK], "2026-09-10"], [2, [BALDURS_GATE], "2026-09-11"], [3, [HADES_II], "2026-09-12"],
+    [4, [BALDURS_GATE], "2026-09-14"], [5, [HADES_II], "2026-09-14"], [6, [CYBERPUNK], "2026-09-15"], [7, [CYBERPUNK], "2026-09-16"],
+  ];
+  for (const [id, selected, day] of runs) {
+    native.prepare("INSERT INTO media_discovery_runs (id, pass, identity_key, selected_games, status, origin, started_at, finished_at, created_at) VALUES (?, 'initial', ?, ?, 'completed', 'authorized', ?, ?, ?)")
+      .run(id, `initial:${selected.join(",")}:run-${id}`, JSON.stringify(selected), `${day}T10:00:00.000Z`, `${day}T10:30:00.000Z`, `${day} 10:00:00`);
+    native.prepare("INSERT INTO media_processing_authorizations (run_id, status, billing_confirmation, authorized_at, updated_at) VALUES (?, 'completed', 'confirmed', ?, ?)").run(id, `${day} 10:00:00`, `${day} 11:00:00`);
+  }
+  const discoveryRun: Record<number, number> = { [CYBERPUNK]: 1, [BALDURS_GATE]: 4, [HADES_II]: 5 };
+  const discoveryDay: Record<number, string> = { [CYBERPUNK]: "2026-09-10", [BALDURS_GATE]: "2026-09-14", [HADES_II]: "2026-09-14" };
+  const attempt = native.prepare("INSERT INTO media_discovery_attempts (appid, outlet, pass, day, kind, url, status_code, succeeded, error, attempted_at) VALUES (?, ?, 'initial', ?, ?, ?, ?, ?, ?, ?)");
+  const sourceIds: Record<number, number[]> = { [CYBERPUNK]: [], [BALDURS_GATE]: [], [HADES_II]: [] };
+  for (const appid of games) {
+    const day = discoveryDay[appid]!;
+    for (const outlet of MEDIA_OUTLETS) {
+      const url = experimentArticleUrl(appid, outlet.domain);
+      const capped = PRODUCTION_LIKE.dayCappedQueries.some(([game, name]) => game === appid && name === outlet.name);
+      const represented = (PRODUCTION_LIKE.representedOutlets as readonly string[]).includes(outlet.name);
+      if (capped) {
+        native.prepare("INSERT INTO media_discovery_progress (run_id, appid, pass, outlet, status, stop_reason, stopped_at) VALUES (?, ?, 'initial', ?, 'stopped', 'daily_attempt_cap', ?)")
+          .run(discoveryRun[appid]!, appid, outlet.name, `${day}T10:20:00.000Z`);
+        continue;
+      }
+      const at = `${day}T10:05:00.000Z`;
+      attempt.run(appid, outlet.name, day, "search", null, 200, 1, null, at);
+      attempt.run(appid, outlet.name, day, "fetch", url, outlet.name === "GameSpot" ? 403 : 200, outlet.name === "GameSpot" ? 0 : 1, outlet.name === "GameSpot" ? "HTTP 403" : null, at);
+      if (outlet.name === "GameSpot") {
+        native.prepare("INSERT INTO media_discovery_progress (run_id, appid, pass, outlet, status, query_attempted_at, candidate_urls, candidate_index, stop_reason, stopped_at) VALUES (?, ?, 'initial', ?, 'stopped', ?, ?, 1, 'fetch_http_403', ?)")
+          .run(discoveryRun[appid]!, appid, outlet.name, at, JSON.stringify([{ url, publishedDate: null }]), at);
+        continue;
+      }
+      native.prepare("INSERT INTO media_discovery_progress (run_id, appid, pass, outlet, status, query_attempted_at, candidate_urls, candidate_index, completed_at) VALUES (?, ?, 'initial', ?, 'completed', ?, ?, 1, ?)")
+        .run(discoveryRun[appid]!, appid, outlet.name, at, JSON.stringify([{ url, publishedDate: null }]), at);
+      if (!represented) continue;
+      native.prepare("INSERT INTO media_sources (appid, pass, original_url, discovery_url, title, outlet, author, published_at, retrieved_at, type) VALUES (?, 'initial', ?, ?, ?, ?, ?, '2025-01-01T00:00:00.000Z', ?, 'review')")
+        .run(appid, url, url, `${GAME_NAMES[appid]} Review`, outlet.name, `${outlet.name} critic`, at);
+      sourceIds[appid]!.push(native.query<{ id: number }, []>("SELECT last_insert_rowid() AS id").get()!.id);
+    }
+  }
+  // The daily attempt cap filled Kotaku's and GamesRadar+'s attempts on 2026-09-14.
+  for (const outlet of ["Kotaku", "GamesRadar+"]) {
+    const used = native.query<{ count: number }, [string]>("SELECT COUNT(*) AS count FROM media_discovery_attempts WHERE outlet = ? AND day = '2026-09-14'").get(outlet)!.count;
+    for (let index = used; index < 30; index += 1) attempt.run(BALDURS_GATE, outlet, "2026-09-14", "fetch", `https://example.invalid/${outlet}/${index}`, 200, 1, null, "2026-09-14T09:00:00.000Z");
+  }
+
+  // Cyberpunk 2077's processing under Gemini text generation.
+  const job = native.prepare(
+    `INSERT INTO media_processing_jobs (run_id, stage, appid, dimension, source_id, request_key, input_identity, model, config_version, max_input_tokens, max_output_tokens, reserved_microusd, charged_microusd, reservation_active, status, provider, enqueued_at, retained, cost_source, provider_batch_id, usage_json, submitted_at, completed_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 100000, ?, 500, ?, 0, ?, 'gemini', ?, 1, ?, ?, '{}', ?, ?)`,
+  );
+  const extractions: Array<{ sourceId: number; identity: string }> = [];
+  for (const sourceId of sourceIds[CYBERPUNK]!) {
+    const source = native.query<Record<string, unknown>, [number]>("SELECT * FROM media_sources WHERE id = ?").get(sourceId)!;
+    const hash = recordedIdentity({ content: source.original_url });
+    const metadata = { appid: source.appid, originalUrl: source.original_url, title: source.title, outlet: source.outlet, author: source.author, publishedAt: source.published_at, updatedAt: source.updated_at, type: source.type, handsOn: source.hands_on, affiliation: source.affiliation, platform: source.platform, buildContext: source.build_context };
+    const identity = recordedIdentity({ stage: "extraction", hash, cleanupVersion: cleanup, model: gemini, configVersion: extractionConfig, metadata });
+    native.prepare("UPDATE media_sources SET normalized_content_hash = ?, cleanup_version = ?, processing_input_identity = ?, processing_run_id = 1, contribution_run_id = 1 WHERE id = ?").run(hash, cleanup, identity, sourceId);
+    const output = { ...extractionOutput(), contributions: [{ text: "The combat supports flexible builds", category: "Gameplay & systems", sourceIdentity: identity }], provenance: [{ sourceIdentity: identity, sourceUrl: source.original_url }] };
+    native.prepare("INSERT INTO media_article_extractions (source_id, input_identity, content_hash, cleanup_version, model, config_version, output_json, active, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, 1, '2026-09-10T11:00:00.000Z')")
+      .run(sourceId, identity, hash, cleanup, gemini, extractionConfig, JSON.stringify(output));
+    job.run(1, "extraction", CYBERPUNK, null, sourceId, `extraction:${sourceId}:run:1`, identity, gemini, extractionConfig, 1200, 120, "succeeded", "2026-09-10T10:40:00.000Z", "estimated", `batches/extraction-${sourceId}`, "2026-09-10T10:41:00.000Z", "2026-09-10T11:00:00.000Z");
+    // A correction set on 2026-09-16 took the source again; its batch's input went stale.
+    if (extractions.length < 2) job.run(7, "extraction", CYBERPUNK, null, sourceId, `extraction:${sourceId}:run:7`, `stale-${identity}`, gemini, extractionConfig, 1200, null, "stale", "2026-09-16T10:40:00.000Z", "unknown", `batches/extraction-${sourceId}-7`, "2026-09-16T10:41:00.000Z", "2026-09-16T11:00:00.000Z");
+    extractions.push({ sourceId, identity });
+  }
+  const overviewIdentity = recordedIdentity({ stage: "synthesis", appid: CYBERPUNK, model: gemini, configVersion: synthesisConfig, extractions: extractions.map(({ sourceId, identity }) => ({ sourceId, inputIdentity: identity })).sort((a, b) => a.sourceId - b.sourceId) });
+  const urls = sourceIds[CYBERPUNK]!.map((id) => native.query<{ original_url: string }, [number]>("SELECT original_url FROM media_sources WHERE id = ?").get(id)!.original_url);
+  native.prepare("INSERT INTO media_game_overviews (appid, input_identity, model, config_version, output_json, active, created_at) VALUES (?, ?, ?, ?, ?, 1, '2026-09-10T12:00:00.000Z')")
+    .run(CYBERPUNK, overviewIdentity, gemini, synthesisConfig, JSON.stringify({ ...overviewOutputForUrls(urls), similarityInputs: PRODUCTION_LIKE.cyberpunkSimilarityInputs }));
+  job.run(1, "synthesis", CYBERPUNK, null, null, `synthesis:${CYBERPUNK}:${overviewIdentity}`, overviewIdentity, gemini, synthesisConfig, 2400, 240, "succeeded", "2026-09-10T11:10:00.000Z", "estimated", "batches/synthesis-cyberpunk", "2026-09-10T11:11:00.000Z", "2026-09-10T12:00:00.000Z");
+  for (const [dimension, input] of [["gameplay", PRODUCTION_LIKE.cyberpunkSimilarityInputs.gameplay], ["story_world", PRODUCTION_LIKE.cyberpunkSimilarityInputs.storyWorld]] as const) {
+    const identity = recordedIdentity({ stage: "embedding", dimension, input: [...input], model: "gemini-embedding-2", dimensions: 3072, configVersion: "media-embedding-2026-09-13-v1" });
+    const vector = new Uint8Array(new Float32Array(Array.from({ length: 3072 }, (_, index) => ((index % 7) + 1) / 7)).buffer);
+    native.prepare("INSERT INTO media_game_embeddings (appid, dimension, input_identity, overview_input_identity, model, dimensions, config_version, vector, active, created_at) VALUES (?, ?, ?, ?, 'gemini-embedding-2', 3072, 'media-embedding-2026-09-13-v1', ?, 1, '2026-09-15T12:00:00.000Z')")
+      .run(CYBERPUNK, dimension, identity, overviewIdentity, vector);
+    job.run(6, "embedding", CYBERPUNK, dimension, null, `embedding:${CYBERPUNK}:${dimension}:${overviewIdentity}:${identity}`, identity, "gemini-embedding-2", "media-embedding-2026-09-13-v1", 1, 3, "succeeded", "2026-09-15T11:00:00.000Z", "estimated", `batches/embedding-${dimension}`, "2026-09-15T11:01:00.000Z", "2026-09-15T12:00:00.000Z");
+  }
 }
