@@ -943,6 +943,8 @@ export const mediaDiscoveryProgress = sqliteTable(
     stopReason: text("stop_reason"),
     /** When a day-scoped stop (an Outlet day stop or the search provider's rate limit) stopped this query, by the run's clock. */
     stoppedAt: text("stopped_at"),
+    /** When this query completed, by the run's clock; with a lasting stop, it marks when its pass's discovery finished. */
+    completedAt: text("completed_at"),
     updatedAt: text("updated_at").notNull().default(currentTimestamp),
   },
   (table) => [

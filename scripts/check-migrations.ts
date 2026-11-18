@@ -563,6 +563,12 @@ function verifyRetainedMediaRowsSurviveUpgrade(): void {
     if (JSON.stringify(stops) !== JSON.stringify([{ id: 42, stopped_at: null }, { id: 142, stopped_at: "2026-10-01 00:03:00" }])) {
       throw new Error("Migrations misrecorded when retained discovery queries stopped: " + JSON.stringify(stops));
     }
+    // A query completed before its completion time was recorded keeps the
+    // time of its search as that time; a stopped query has none.
+    const completions = retained.query<{ id: number; completed_at: string | null }, []>("SELECT id, completed_at FROM media_discovery_progress ORDER BY id").all();
+    if (JSON.stringify(completions) !== JSON.stringify([{ id: 42, completed_at: "2026-10-01T00:01:00.000Z" }, { id: 142, completed_at: null }])) {
+      throw new Error("Migrations misrecorded when retained discovery queries completed: " + JSON.stringify(completions));
+    }
     verifyMediaPassesAccepted(retained);
   } finally {
     retained.close(true);

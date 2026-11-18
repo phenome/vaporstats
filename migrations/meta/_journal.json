@@ -183,6 +183,13 @@
       "when": 1794995911417,
       "tag": "0025_media_discovery_stopped_at",
       "breakpoints": true
+    },
+    {
+      "idx": 26,
+      "version": "6",
+      "when": 1794997235358,
+      "tag": "0026_media_discovery_completed_at",
+      "breakpoints": true
     }
   ]
 }
