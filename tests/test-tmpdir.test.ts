@@ -34,3 +34,22 @@ test("temporary SQLite files fall back to the system temporary directory", () =>
   process.env.VAPORSTATS_TEST_TMPDIR = "";
   expect(testTemporaryRoot()).toBe(tmpdir());
 });
+
+test("a copy of a test database keeps its rows, written to its own file, and later writes stay separate", async () => {
+  const { copyTestDatabase } = await import("./support/db");
+  const original = openTestDatabase();
+  try {
+    original.native.exec("INSERT INTO apps (appid, name, slug) VALUES (10, 'Copied', 'copied')");
+    const copy = copyTestDatabase(original);
+    try {
+      expect(copy.databasePath).not.toBe(original.databasePath);
+      expect(copy.native.query("SELECT name FROM apps WHERE appid = 10").get()).toEqual({ name: "Copied" });
+      copy.native.exec("INSERT INTO apps (appid, name, slug) VALUES (11, 'Only copy', 'only-copy')");
+      expect(original.native.query("SELECT COUNT(*) AS count FROM apps WHERE appid = 11").get()).toEqual({ count: 0 });
+    } finally {
+      copy.cleanup();
+    }
+  } finally {
+    original.cleanup();
+  }
+});

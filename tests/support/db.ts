@@ -83,3 +83,16 @@ export function openMemoryDatabase(): TestDatabaseHandle & { close(): void } {
   const database = openSqliteAppDatabase(":memory:");
   return { native: database.native, db: database, close: () => database.close() };
 }
+
+/**
+ * A new temporary file database holding `database`'s current contents, as a
+ * restored file copy does: it skips migration and seeding for each run that
+ * starts from the same state. Writes to either stay separate.
+ */
+export function copyTestDatabase(database: TestDatabase, prefix = "vaporstats-copy-"): TestDatabase {
+  // WAL mode keeps recent commits beside the file until a checkpoint.
+  database.native.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+  const directory = mkdtempSync(join(testTemporaryRoot(), prefix));
+  copyFileSync(database.databasePath, join(directory, "test.sqlite"));
+  return openTestDatabaseIn(directory);
+}
