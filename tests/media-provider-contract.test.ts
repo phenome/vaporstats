@@ -39,10 +39,7 @@ const NOT_APPLICABLE: Record<string, readonly ProviderResponseScope[]> = { openr
  * Fixtures whose current class breaks the contract, with the reason. Each
  * is asserted with `test.failing`, so it reports once behavior changes.
  */
-const KNOWN_VIOLATIONS: Record<string, string> = {
-  "gemini post_accept_charged poll batch failed after acceptance":
-    "A batch Gemini accepted and then ended as BATCH_STATE_FAILED with a generic error is classified as a definite refusal (`batch_failed`), while CONTEXT.md defines an item whose provider accepted it and then failed as uncertain. Tracked in #80, which changes this classification.",
-};
+const KNOWN_VIOLATIONS: Record<string, string> = {};
 
 async function geminiOutcome({ call, reply }: GeminiScopedFixture): Promise<ProviderOutcome> {
   const api = controlledGeminiApi();
@@ -112,17 +109,24 @@ describe("paid-provider classifier contract", () => {
   });
 });
 
-// An open decision, tracked in #80: an unrecognized 4xx carries no scope,
-// since nothing says whether it concerns the item or the provider. Both
-// classifiers currently refuse the item for it. These tests pin today's
-// behavior so that #80 changes it deliberately; they do not endorse it.
-describe("unrecognized 4xx answers: open decision tracked in #80 (current behavior)", () => {
+// Decided in #80 (2026-11-18): a 4xx the provider's classifier does not
+// recognize is a configuration problem on the project side. It pauses that
+// provider with `unrecognized_client_error` until the next daily check, and
+// never refuses an item.
+describe("unrecognized 4xx answers pause the provider", () => {
+  const paused = { class: "missing_configuration", reason: "unrecognized_client_error" };
   for (const status of [405, 409, 410, 413, 422]) {
-    test(`Gemini submit ${status} is a refusal`, async () => {
-      expect(await geminiOutcome({ call: "submit", reply: { status, body: { error: { code: status, message: "Unrecognized" } } } })).toEqual({ class: "refusal", reason: `http_${status}` });
+    test(`Gemini submit ${status} pauses Gemini and refuses nothing`, async () => {
+      expect(await geminiOutcome({ call: "submit", reply: { status, body: { error: { code: status, message: "Unrecognized" } } } })).toEqual(paused);
     });
-    test(`OpenRouter ${status} is a refusal`, async () => {
-      expect(await openRouterOutcome({ status, body: { error: { code: status, message: "Unrecognized" } } })).toEqual({ class: "refusal", reason: `http_${status}` });
+    test(`Gemini count ${status} pauses Gemini and refuses nothing`, async () => {
+      expect(await geminiOutcome({ call: "count", reply: { status, body: { error: { code: status, message: "Unrecognized" } } } })).toEqual(paused);
+    });
+    test(`OpenRouter ${status} pauses OpenRouter and refuses nothing`, async () => {
+      expect(await openRouterOutcome({ status, body: { error: { code: status, message: "Unrecognized" } } })).toEqual(paused);
+    });
+    test(`OpenRouter 200 accepted, then ${status}, pauses OpenRouter and refuses nothing`, async () => {
+      expect(await openRouterOutcome({ status: 200, body: { error: { code: status, message: "Unrecognized" } } })).toEqual(paused);
     });
   }
 });

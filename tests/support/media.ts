@@ -704,6 +704,7 @@ export const GEMINI_SCOPED_FIXTURES: ScopedProviderFixtures<GeminiScopedFixture>
     "count 403 permission denied": { call: "count", reply: { status: 403, body: { error: { code: 403, status: "PERMISSION_DENIED", message: "Permission denied." } } } },
     "poll 402 Prepay depleted": { call: "poll", reply: GEMINI_PREPAY_DEPLETED },
     "poll batch failed: Prepay depleted": { call: "poll", reply: geminiBatch("BATCH_STATE_FAILED", "Your prepayment credits are depleted.") },
+    ...Object.fromEntries([405, 409, 410, 413, 422].map((status) => [`submit ${status} unrecognized`, { call: "submit", reply: { status, body: { error: { code: status, message: "Unrecognized." } } } }])),
   },
   item_content: {
     "submit 400 invalid argument": { call: "submit", reply: { status: 400, body: { error: { code: 400, status: "INVALID_ARGUMENT", message: "Request contains an invalid argument." } } } },
@@ -748,6 +749,7 @@ export const OPENROUTER_SCOPED_FIXTURES: ScopedProviderFixtures<OpenRouterReply>
     "401 invalid key": OPENROUTER_INVALID_KEY,
     "404 model unavailable": { status: 404, body: { error: { code: 404, message: "No endpoints found for anthropic/claude-haiku-5.5." } } },
     "200 accepted, then 402 credits": { status: 200, body: { error: { code: 402, message: "Insufficient credits", metadata: { limit_source: "openrouter_credits" } } } },
+    ...Object.fromEntries([405, 409, 410, 413, 422].map((status) => [`${status} unrecognized`, { status, body: { error: { code: status, message: "Unrecognized" } } }])),
   },
   item_content: {
     "400 invalid request": { status: 400, body: { error: { code: 400, message: "Invalid request" } } },

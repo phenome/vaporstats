@@ -257,6 +257,7 @@ const SAFE_MEDIA_PROCESSING_STOP_REASONS: Record<string, true> = {
   "provider_paused:gemini:model_unavailable": true,
   "provider_paused:gemini:prepay_depleted": true,
   "provider_paused:gemini:spend_cap": true,
+  "provider_paused:gemini:unrecognized_client_error": true,
   "provider_paused:openrouter:missing_key": true,
   "provider_paused:openrouter:invalid_key": true,
   "provider_paused:openrouter:permission_denied": true,
@@ -266,6 +267,7 @@ const SAFE_MEDIA_PROCESSING_STOP_REASONS: Record<string, true> = {
   "provider_paused:openrouter:credits": true,
   "provider_paused:openrouter:guardrail_budget": true,
   "provider_paused:openrouter:workspace_budget": true,
+  "provider_paused:openrouter:unrecognized_client_error": true,
 };
 
 function safeNonNegativeInteger(value: number): number {

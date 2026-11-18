@@ -23,12 +23,13 @@ export type PaidProviderCall = "count" | "submit" | "poll";
  *   until the next daily credit check, and no item counts an attempt.
  * - `refusal`: the request itself is unacceptable; the item is refused for
  *   its input identity and retried only within a correction set.
- * - `uncertain`: the request may have been charged without an answer; it is
- *   never resubmitted blindly.
+ * - `uncertain`: the provider may have received the request and its outcome
+ *   is unknown; the item returns to the queue and is resent with backoff, at
+ *   most `MAX_UNCERTAIN_SENDS` consecutive times for one input identity.
  * - `missing_configuration`: the provider cannot be used as configured (no
  *   key, a rejected key, a key without permission, a project precondition
- *   such as billing, or a model it no longer serves); it pauses and nothing
- *   fails or is refused.
+ *   such as billing, a model it no longer serves, or a 4xx the classifier does
+ *   not recognize); it pauses and nothing fails or is refused.
  */
 export type ProviderOutcome =
   | { class: "success" }
@@ -41,7 +42,7 @@ export type ProviderOutcome =
 export type CreditPauseReason =
   | "prepay_depleted" | "spend_cap"
   | "key_limit" | "credits" | "guardrail_budget" | "workspace_budget";
-export type ConfigurationPauseReason = "missing_key" | "rejected_key" | "invalid_key" | "permission_denied" | "forbidden" | "failed_precondition" | "model_unavailable";
+export type ConfigurationPauseReason = "missing_key" | "rejected_key" | "invalid_key" | "permission_denied" | "forbidden" | "failed_precondition" | "model_unavailable" | "unrecognized_client_error";
 export type ProviderPauseReason = CreditPauseReason | ConfigurationPauseReason;
 
 /** A non-OK Gemini HTTP response, as the batch transport receives it. */
@@ -100,6 +101,10 @@ const REJECTED_KEY_REASONS = new Set(["API_KEY_INVALID", "API_KEY_EXPIRED", "API
 const REJECTED_KEY = /api[\s_-]*key\s+(?:not\s+valid|invalid|expired)/i;
 /** Batches the provider ended without running them: their items wait again. */
 const ENDED_UNRUN_BATCH = /EXPIRE|CANCEL/i;
+/** Batches the provider accepted and then ended as failed: whether they ran, and were charged, is unknown. */
+const FAILED_AFTER_ACCEPTANCE_BATCH = /FAIL|ERROR/i;
+/** The pause of a 4xx a classifier does not recognize: a configuration problem on the project side, never an item refusal (#80). */
+const UNRECOGNIZED_CLIENT_ERROR: ProviderOutcome = { class: "missing_configuration", reason: "unrecognized_client_error" };
 const CREDIT_DEPLETED = /prepay|credits?\s+(?:are\s+|is\s+)?(?:depleted|exhausted)|spend(?:ing)?[\s_-]*(?:cap|limit)/i;
 
 function retryAfterFrom(error: GeminiHttpError): number | null {
@@ -124,7 +129,10 @@ export function classifyGeminiOutcome(call: PaidProviderCall, error: unknown): P
   if (error instanceof GeminiBatchFailure) {
     if (CREDIT_DEPLETED.test(error.message)) return { class: "credit_pause", reason: SPEND_CAP.test(error.message) ? "spend_cap" : "prepay_depleted" };
     if (error.batchState !== null && ENDED_UNRUN_BATCH.test(error.batchState)) return { class: "transient", reason: `batch_${error.batchState.replace(/^(?:BATCH|JOB)_STATE_/i, "").toLowerCase()}`, retryAfterMs: null };
-    return { class: "refusal", reason: "batch_failed" };
+    // An accepted batch that failed with a generic error may have run.
+    if (error.batchState !== null && FAILED_AFTER_ACCEPTANCE_BATCH.test(error.batchState)) return { class: "uncertain", reason: "batch_failed" };
+    // A batch that succeeded with an error in place of its one response: the request itself was refused.
+    return { class: "refusal", reason: "inline_response_error" };
   }
   if (error instanceof GeminiHttpError) {
     const status = error.status;
@@ -141,7 +149,9 @@ export function classifyGeminiOutcome(call: PaidProviderCall, error: unknown): P
     if (error.apiStatus === "FAILED_PRECONDITION") return { class: "missing_configuration", reason: "failed_precondition" };
     if (call === "poll" && status >= 400) return { class: "uncertain", reason: `http_${status}` };
     if (status === 404) return { class: "missing_configuration", reason: "model_unavailable" };
-    if (status >= 400) return { class: "refusal", reason: `http_${status}` };
+    // Google answers an unacceptable request with 400 INVALID_ARGUMENT.
+    if (status === 400) return { class: "refusal", reason: `http_${status}` };
+    if (status >= 400) return UNRECOGNIZED_CLIENT_ERROR;
     return { class: "transient", reason: `http_${status}`, retryAfterMs: null };
   }
   // A connection failure or timeout without an HTTP response. Counts and
@@ -239,7 +249,10 @@ export function classifyOpenRouterOutcome(error: unknown): ProviderOutcome {
     if (status === 403 && !error.moderated && !(error.errorType !== null && OPENROUTER_CONTENT_REFUSAL.test(error.errorType))) {
       return { class: "missing_configuration", reason: error.errorType === "permission_denied" ? "permission_denied" : "forbidden" };
     }
-    if (status >= 400) return { class: "refusal", reason: `http_${status}` };
+    // A 400 invalid request and a 403 content refusal concern the request
+    // itself; any other 4xx is a configuration problem on the project side.
+    if (status === 400 || status === 403) return { class: "refusal", reason: `http_${status}` };
+    if (status >= 400) return UNRECOGNIZED_CLIENT_ERROR;
     return { class: "transient", reason: `http_${status}`, retryAfterMs };
   }
   const code = typeof (error as { code?: unknown })?.code === "string" ? (error as { code: string }).code : "";

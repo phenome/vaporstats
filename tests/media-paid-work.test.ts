@@ -250,6 +250,52 @@ describe("project-level provider errors", () => {
     }
   }
 
+  // #80 (2026-11-18): an unrecognized 4xx is a configuration problem on the project side.
+  for (const status of [405, 409, 410, 413, 422]) {
+    test(`an unrecognized ${status} pauses Gemini with reason unrecognized_client_error, refuses nothing, keeps the queue intact, and lifts at the daily check`, async () => {
+      const { database } = await authorizedGames({ [CYBERPUNK]: 1, [BALDURS_GATE]: 1 });
+      const apis = providers();
+      apis.gemini.reply("submit", { status, body: { error: { code: status, message: "Unrecognized" } } });
+
+      const paused = await tick(database, apis, "2026-11-10T07:00:00.000Z");
+
+      expect(paused.mediaProcessing?.providers.gemini).toMatchObject({ paused: true, reason: "unrecognized_client_error", pausedAt: "2026-11-10T07:00:00.000Z" });
+      expect(paused.mediaProcessing?.providers.openrouter.paused).toBe(false);
+      expect(embeddingJobs(database).map(({ status: state, attempt_count, error }) => ({ state, attempt_count, error }))).toEqual(Array(2).fill({ state: "queued", attempt_count: 0, error: null }));
+      expect(jobs(database).some((job) => job.status === "refused")).toBe(false);
+      expect(paused.mediaProcessing?.outputs.skipped).toBe(0);
+      expect(paused.mediaProcessing?.stopReasons).toContain("provider_paused:gemini:unrecognized_client_error");
+
+      const submits = apis.gemini.calls.filter((call) => call.kind === "submit").length;
+      expect((await tick(database, apis, "2026-11-11T05:45:00.000Z")).mediaProcessing?.providers.gemini.paused).toBe(true);
+      expect(apis.gemini.calls.filter((call) => call.kind === "submit")).toHaveLength(submits);
+
+      const resumed = await tick(database, apis, "2026-11-11T06:00:00.000Z");
+      expect(resumed.mediaProcessing?.providers.gemini.paused).toBe(false);
+      expect(embeddingJobs(database).map(({ status: state }) => state)).toEqual(["succeeded", "succeeded"]);
+    });
+
+    test(`an unrecognized ${status} pauses OpenRouter with reason unrecognized_client_error, refuses nothing, keeps the queue intact, and lifts at the daily check`, async () => {
+      const { database } = await authorizedGames({ [CYBERPUNK]: 1, [BALDURS_GATE]: 1 });
+      const apis = providers();
+      apis.openRouter.reply("chat", { status, body: { error: { code: status, message: "Unrecognized" } } });
+
+      const paused = await tick(database, apis, "2026-11-10T07:00:00.000Z");
+
+      expect(paused.mediaProcessing?.providers.openrouter).toMatchObject({ paused: true, reason: "unrecognized_client_error", pausedAt: "2026-11-10T07:00:00.000Z" });
+      expect(jobs(database).map(({ stage, status: state, attempt_count, error }) => ({ stage, state, attempt_count, error }))).toEqual(Array(2).fill({ stage: "extraction", state: "queued", attempt_count: 0, error: null }));
+      expect(paused.mediaProcessing?.outputs.skipped).toBe(0);
+      expect(paused.mediaProcessing?.stopReasons).toContain("provider_paused:openrouter:unrecognized_client_error");
+
+      expect((await tick(database, apis, "2026-11-11T05:45:00.000Z")).mediaProcessing?.providers.openrouter.paused).toBe(true);
+      expect(apis.openRouter.requests).toHaveLength(1);
+
+      const resumed = await tick(database, apis, "2026-11-11T06:00:00.000Z");
+      expect(resumed.mediaProcessing?.providers.openrouter.paused).toBe(false);
+      expect(jobs(database).filter((job) => job.stage !== "embedding").map(({ status: state }) => state)).toEqual(["succeeded", "succeeded", "succeeded", "succeeded"]);
+    });
+  }
+
   test("an invalid API key at a poll pauses Gemini and keeps the batch submitted, not uncertain", async () => {
     const { database } = await authorizedGames();
     const apis = providers();
