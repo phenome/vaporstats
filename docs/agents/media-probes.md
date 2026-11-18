@@ -36,7 +36,7 @@ Each paid provider classifies every response in one classifier (CODING_STANDARDS
 
 | Scope | Allowed classes |
 |---|---|
-| `provider_wide` | Credit pause, configuration pause (an unrecognized 4xx included); never a refusal |
+| `provider_wide` | Credit pause, configuration pause (an unrecognized 4xx and an answer cut off at the output cap included); never a refusal |
 | `item_content` | Definite refusal |
 | `pre_send_network` | Transient |
 | `post_accept_charged` | Uncertain: accepted and possibly charged, so resent at most three consecutive times |
@@ -69,3 +69,4 @@ A rule the specification does not settle is a gap, not a design choice (CODING_S
 - Put the choice behind one named function or constant, and list it first in the change description.
 - Record a known mismatch between code and specification as a known failure (`test.failing`, `knownFailure`, or `KNOWN_VIOLATIONS`) with its reason, rather than asserting the current behavior as correct.
 - Open gaps currently recorded in tests: none. #80 settled the two earlier ones on 2026-11-18: a Gemini batch that failed after acceptance is uncertain, and an unrecognized 4xx pauses its provider with `unrecognized_client_error`.
+- Open gap, not recorded in tests (2026-11-18): the usable-article threshold. An article is usable when its cleaned text has at least 120 characters (`cleanArticle` in `src/lib/media-processing.ts`, and the same bound in discovery's article check in `src/lib/media-discovery.ts`). The first live run sent an article whose text was a few hundred tokens of mostly non-review content (job B, a 642-token prompt), and its complete answer was legitimately empty. Refusing such an article before sending would need a substantially higher bound or a different measure of a usable review, which the specification does not settle. The threshold is unchanged.
