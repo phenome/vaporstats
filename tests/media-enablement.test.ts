@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import type { Database } from "bun:sqlite";
-import { openTestDatabase, type TestDatabase } from "./support/db";
-import { BALDURS_GATE, CYBERPUNK, experimentWorld, GAME_NAMES, HADES_II, productionCandidateUrl, runMediaTick, seedProductionLike, type MediaWorld } from "./support/media";
+import { openTestDatabase, openUpgradedTestDatabase, type TestDatabase } from "./support/db";
+import { BALDURS_GATE, CYBERPUNK, experimentWorld, GAME_NAMES, HADES_II, productionCandidateUrl, runMediaTick, seedFirstLiveRunRefusals, seedProductionLike, type MediaWorld } from "./support/media";
 
 // Switching automatic media ingestion off and on over the production media
 // state of 2026-11-18, at the ingestion-tick seam, with a temporary SQLite
@@ -220,5 +220,77 @@ describe("embedding holds over the production-like state", () => {
     const overview = database.native.query<{ input_identity: string }, []>(`SELECT input_identity FROM media_game_overviews WHERE appid = ${CP} AND active = 1`).get()!;
     expect(database.native.query(`SELECT status, COUNT(*) AS count FROM media_processing_jobs WHERE appid = ${CP} AND stage = 'embedding' GROUP BY status`).all()).toEqual([{ status: "succeeded", count: 1 }]);
     expect(database.native.query(`SELECT overview_input_identity FROM media_game_embeddings WHERE appid = ${CP} AND active = 1`).all()).toEqual([{ overview_input_identity: overview.input_identity }]);
+  });
+});
+
+// The first live run (2026-11-18) refused extraction job A because Claude Haiku
+// 5.5's reasoning used up its 1,200-token cap and cut its answer off; job B's
+// complete answer was legitimately empty. Migration 0028 returns every
+// OpenRouter extraction refused as invalid output whose completion tokens
+// equal its cap to the paid-work queue under the corrected 3,200-token cap,
+// keeping its attempts and cost, and touches no other row.
+describe("repair of the first live run's cut-off extractions (migration 0028)", () => {
+  const MIGRATION = "0028_requeue_truncated_extractions";
+  const otherRows = (native: Database, except: number) => ({
+    jobs: native.query(`SELECT * FROM media_processing_jobs WHERE id <> ${except} ORDER BY id`).all(),
+    attempts: native.query("SELECT * FROM media_processing_attempts ORDER BY id").all(),
+    sources: native.query("SELECT * FROM media_sources ORDER BY id").all(),
+    extractions: native.query("SELECT * FROM media_article_extractions ORDER BY id").all(),
+    overviews: native.query("SELECT * FROM media_game_overviews ORDER BY id").all(),
+  });
+
+  test("returns the cut-off extraction to the queue under the corrected cap with its attempt history and cost, leaves the complete refusal and every other row as they were, and the queue extracts it once more without a correction set", async () => {
+    let ids = { truncated: 0, complete: 0 };
+    let before: ReturnType<typeof otherRows> | null = null;
+    const database = openUpgradedTestDatabase(MIGRATION, (native) => {
+      seedProductionLike(native);
+      ids = seedFirstLiveRunRefusals(native);
+      before = otherRows(native, ids.truncated);
+    }, "vaporstats-media-repair-");
+    cleanups.push(database.cleanup);
+    const { native } = database;
+
+    expect(native.query("SELECT status, max_output_tokens, error, next_attempt_at, completed_at, attempt_count, charged_microusd, usage_json, generation_id FROM media_processing_jobs WHERE id = ?").get(ids.truncated)).toEqual({
+      status: "queued",
+      max_output_tokens: 3_200,
+      error: null,
+      next_attempt_at: null,
+      completed_at: null,
+      attempt_count: 0,
+      charged_microusd: 900,
+      usage_json: JSON.stringify({ promptTokens: 3_081, completionTokens: 1_200 }),
+      generation_id: "gen-live-a",
+    });
+    expect(otherRows(native, ids.truncated)).toEqual(before!);
+    expect(native.query("SELECT status, error, max_output_tokens FROM media_processing_jobs WHERE id = ?").get(ids.complete)).toEqual({ status: "refused", error: "invalid_output: no supported contributions", max_output_tokens: 1_200 });
+
+    // The next tick, before the daily run, extracts it once more with the corrected request.
+    const world = experimentWorld();
+    await runMediaTick(database, world, "2026-11-19T00:15:00.000Z", { outlet: world.outlet });
+    const extractions = world.openRouter.requests.filter((request) => request.stage === "extraction");
+    expect(extractions.map((request) => ({ appid: JSON.stringify(request.body.messages).includes(`Steam app ${BALDURS_GATE}`), max_tokens: request.body.max_tokens, reasoning: request.body.reasoning }))).toEqual([
+      { appid: true, max_tokens: 3_200, reasoning: { effort: "low" } },
+    ]);
+    expect(native.query("SELECT status, charged_microusd FROM media_processing_jobs WHERE id = ?").get(ids.truncated)).toEqual({ status: "succeeded", charged_microusd: 1_050 });
+    expect(native.query("SELECT attempt, outcome, charged_microusd FROM media_processing_attempts WHERE job_id = ? ORDER BY attempt").all(ids.truncated)).toEqual([
+      { attempt: 1, outcome: "refused", charged_microusd: 900 },
+      { attempt: 2, outcome: "succeeded", charged_microusd: 150 },
+    ]);
+    expect(native.query("SELECT active FROM media_article_extractions WHERE source_id = 1").all()).toEqual([{ active: 1 }]);
+    expect(native.query("SELECT status FROM media_processing_jobs WHERE id = ?").get(ids.complete)).toEqual({ status: "refused" });
+  });
+
+  test("applies to an empty database and to the production-like state without the live run's rows, changing nothing", () => {
+    const empty = openUpgradedTestDatabase(MIGRATION, () => {}, "vaporstats-media-repair-empty-");
+    cleanups.push(empty.cleanup);
+    expect(empty.native.query("SELECT COUNT(*) AS count FROM media_processing_jobs").get()).toEqual({ count: 0 });
+
+    let before: unknown = null;
+    const production = openUpgradedTestDatabase(MIGRATION, (native) => {
+      seedProductionLike(native);
+      before = mediaState(native);
+    }, "vaporstats-media-repair-production-");
+    cleanups.push(production.cleanup);
+    expect(mediaState(production.native)).toEqual(before as Record<string, unknown[]>);
   });
 });

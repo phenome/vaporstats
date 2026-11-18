@@ -1367,3 +1367,35 @@ export function seedProductionLike(native: Database): void {
     job.run(runId, "synthesis", CP, null, `synthesis:${CP}:stale-${runId}`, `stale-synthesis-${runId}`, gemini, synthesisConfig, 2400, null, "stale", `2026-09-1${runId}T12:30:00.000Z`, "unknown", `batches/synthesis-${runId}`, `2026-09-1${runId}T12:31:00.000Z`, `2026-09-1${runId}T13:00:00.000Z`);
   }
 }
+
+/**
+ * Adds to `seedProductionLike` the extraction refusals of the first live run
+ * on 2026-11-18, under the scheduled discovery run of that day (run 8). Both
+ * were sent to Claude Haiku 5.5 with the 1,200-token cap that reasoning
+ * starved, and refused as `invalid_output: no supported contributions`:
+ * - job A, Baldur's Gate 3's IGN source 1: 1,200 completion tokens, the whole
+ *   cap, finish reason `length`; its answer was cut off. US$0.0009.
+ * - job B, Baldur's Gate 3's GamesRadar+ source 3: 911 completion tokens and
+ *   finish reason `stop`; its complete answer was legitimately empty.
+ * Usage recorded before reasoning tokens were stored has none. Returns the
+ * two job ids.
+ */
+export function seedFirstLiveRunRefusals(native: Database): { truncated: number; complete: number } {
+  native.prepare("INSERT INTO media_discovery_runs (id, pass, identity_key, selected_games, status, origin, started_at, finished_at, created_at) VALUES (8, 'initial', 'scheduled:2026-11-18', ?, 'completed', 'scheduled', '2026-11-18T06:00:00.000Z', '2026-11-18T06:20:00.000Z', '2026-11-18 06:00:00')")
+    .run(JSON.stringify([CYBERPUNK, BALDURS_GATE, HADES_II]));
+  const refused = (sourceId: number, generation: string, usage: { promptTokens: number; completionTokens: number }, charged: number) => {
+    const identity = recordedIdentity({ live: "2026-11-18", sourceId });
+    native.prepare("UPDATE media_sources SET processing_input_identity = ?, processing_run_id = 8 WHERE id = ?").run(identity, sourceId);
+    const id = Number(native.prepare(
+      `INSERT INTO media_processing_jobs (run_id, stage, appid, source_id, request_key, input_identity, model, config_version, max_input_tokens, max_output_tokens, reserved_microusd, charged_microusd, reservation_active, status, provider, enqueued_at, attempt_count, retained, cost_source, generation_id, routed_provider, routed_model, usage_json, error, submitted_at, completed_at)
+       VALUES (8, 'extraction', ?, ?, ?, ?, 'anthropic/claude-haiku-5.5', 'media-extraction-2026-09-13-v3', 1500, 1200, 0, ?, 0, 'refused', 'openrouter', '2026-11-18T06:05:00.000Z', 0, 0, 'provider_reported', ?, 'Claude Platform on AWS', 'anthropic/claude-haiku-5.5', ?, 'invalid_output: no supported contributions', '2026-11-18T06:10:00.000Z', '2026-11-18T06:10:30.000Z')`,
+    ).run(BALDURS_GATE, sourceId, `extraction:${sourceId}:run:8`, identity, charged, generation, JSON.stringify(usage)).lastInsertRowid);
+    native.prepare("INSERT INTO media_processing_attempts (job_id, attempt, provider, input_identity, sent_at, outcome, generation_id, routed_provider, routed_model, usage_json, charged_microusd, cost_source, settled_at, error) VALUES (?, 1, 'openrouter', ?, '2026-11-18T06:10:00.000Z', 'refused', ?, 'Claude Platform on AWS', 'anthropic/claude-haiku-5.5', ?, ?, 'provider_reported', '2026-11-18T06:10:30.000Z', NULL)")
+      .run(id, identity, generation, JSON.stringify(usage), charged);
+    return id;
+  };
+  return {
+    truncated: refused(1, "gen-live-a", { promptTokens: 3_081, completionTokens: 1_200 }, 900),
+    complete: refused(3, "gen-live-b", { promptTokens: 642, completionTokens: 911 }, 500),
+  };
+}
