@@ -11,19 +11,9 @@ function Question({ id, title, children }: { id: string; title: string; children
   );
 }
 
-function Limit({ title, children }: { title: string; children: React.ReactNode }) {
-  return (
-    <li className="space-y-1">
-      <h3 className="font-mono text-xs font-semibold uppercase tracking-wider text-zinc-200">{title}</h3>
-      <p>{children}</p>
-    </li>
-  );
-}
-
 /**
- * Explains how the media sections of a game page are produced and what their
- * evidence can and cannot show. Game pages link here instead of labelling
- * each summary or match.
+ * Explains how the media sections of a game page are produced. Game pages
+ * link here instead of labelling each summary or match.
  */
 export function MediaMethodologyView(): React.JSX.Element {
   return (
@@ -32,8 +22,7 @@ export function MediaMethodologyView(): React.JSX.Element {
         <div className="font-mono text-xs uppercase tracking-widest text-zinc-500">VaporStats Methodology</div>
         <h1 className="text-2xl font-bold tracking-tight text-zinc-100 sm:text-3xl">How media coverage works</h1>
         <p className="text-sm text-zinc-400">
-          How game pages summarize published coverage, what that coverage can and cannot tell you, and how media
-          matches are found.
+          How game pages summarize published coverage and how media matches are found.
         </p>
       </header>
 
@@ -74,35 +63,6 @@ export function MediaMethodologyView(): React.JSX.Element {
           Sources also show each article's type, such as a review or a preview, and whether its writer played the
           game when the article states it.
         </p>
-      </Question>
-
-      <Question id="evidence-limits" title="What are the limits of this evidence?">
-        <ul className="space-y-4">
-          <Limit title="Few sources">
-            A game may have only a few articles, sometimes one. An Overview built from one article reflects one
-            writer's view, and a statement with a single note comes from a single article. It is not a consensus.
-            Search is bounded, with at most 15 articles per game, so it does not find every article an outlet has
-            published.
-          </Limit>
-          <Limit title="Previews and announcements">
-            Previews and announcements describe a game before release, often an unfinished build or plans that may
-            change. The summary is written to keep that context and not to present it as experience of the released
-            game, but it can still get this wrong. Check the article type under Sources.
-          </Limit>
-          <Limit title="Outlets that refuse access">
-            When an outlet refuses automated access to its articles, VaporStats does not work around the refusal and
-            does not replace that outlet with another publication. Its coverage is then missing, and the Overview
-            may leave out views that its articles hold.
-          </Limit>
-          <Limit title="Separate products">
-            Coverage of DLC, expansions, and separately reviewed editions stays on their own pages and does not
-            change the base game's Overview, tags, or matches.
-          </Limit>
-          <Limit title="Automated summaries can be wrong">
-            An automated summary can misread, overstate, or leave out what an article says. Treat the Overview as a
-            starting point; the linked articles remain the authority on what each outlet wrote.
-          </Limit>
-        </ul>
       </Question>
 
       <Question id="results-change" title="Results change as coverage changes">

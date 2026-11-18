@@ -41,25 +41,19 @@ describe("media methodology page", () => {
     expect(questions).toEqual([
       "how-overviews-are-written",
       "where-statements-come-from",
-      "evidence-limits",
       "results-change",
       "media-matches",
       "media-discovery-tags",
     ]);
   });
 
-  test("covers synthesis, evidence limits, revision, both match dimensions and original articles", () => {
+  test("covers synthesis, revision, both match dimensions and original articles", () => {
     const text = methodologyText();
     // Automatic synthesis from attributed outlet coverage.
     expect(text).toContain("written automatically");
     for (const outlet of ["IGN", "Eurogamer", "GameSpot", "PC Gamer", "Kotaku", "GamesRadar+"]) {
       expect(text).toContain(outlet);
     }
-    // Evidence limits.
-    expect(text).toContain("Few sources");
-    expect(text).toContain("single article");
-    expect(text).toContain("Previews and announcements");
-    expect(text).toContain("Outlets that refuse access");
     // Revisable results.
     expect(text).toContain("Results change as coverage changes");
     // Similarity by dimension.
