@@ -58,7 +58,9 @@ async function authorizeRun(database: TestDatabase, key: string, affectedSourceI
 
 /**
  * `db`, except that the first write whose statement matches `write` fails, as
- * if the process stopped at that point.
+ * if the process stopped at that point. A stopped process does nothing more,
+ * so every later statement fails too: an item or media boundary that catches
+ * the failure cannot record anything after it.
  */
 function crashingOnWrite(db: AppDatabase, write: RegExp): AppDatabase {
   let crashed = false;
@@ -69,8 +71,9 @@ function crashingOnWrite(db: AppDatabase, write: RegExp): AppDatabase {
         return typeof value === "function" ? value.bind(target) : value;
       }
       return (query: string) => {
+        if (crashed) throw new Error("process stopped");
         const statement = target.prepare(query);
-        if (crashed || !write.test(query)) return statement;
+        if (!write.test(query)) return statement;
         statement.run = async () => {
           crashed = true;
           throw new Error("process stopped");

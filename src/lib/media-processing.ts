@@ -17,7 +17,7 @@ import {
   type MediaOutlet,
   type MediaPass,
 } from "./media-discovery";
-import { finishOutletAttempt, isOutletDenialStop, reserveOutletAttempt } from "./media-outlet-access";
+import { finishAnsweredAttempt, finishOutletAttempt, isOutletDenialStop, reserveOutletAttempt } from "./media-outlet-access";
 import {
   createOpenRouterTransport,
   type OpenRouterChatRequest,
@@ -865,10 +865,9 @@ async function fetchArticle(db: AppDatabase, source: SourceRow, runId: number, f
       await finishOutletAttempt(db, reservation.attemptId, { kind: "fetch", statusCode: 200, succeeded: true, error: null });
       return response;
     }
-    const isRedirect = response.status >= 300 && response.status < 400;
-    await finishOutletAttempt(db, reservation.attemptId, { kind: isRedirect ? "redirect" : "fetch", statusCode: response.status, succeeded: response.ok, error: response.ok ? null : `HTTP ${response.status}` });
-    if (response.status === 401 || response.status === 403 || response.status === 429) return { outletStop: `fetch_http_${response.status}` };
-    if (isRedirect) {
+    const answered = await finishAnsweredAttempt(db, reservation.attemptId, response);
+    if (answered.status === 401 || answered.status === 403 || answered.status === 429) return { outletStop: `fetch_http_${answered.status}` };
+    if (answered.redirect) {
       const location = response.headers.get("location");
       if (!location || redirect === MAX_REDIRECTS) return null;
       const next = new URL(location, current).toString();
@@ -876,7 +875,7 @@ async function fetchArticle(db: AppDatabase, source: SourceRow, runId: number, f
       current = next;
       continue;
     }
-    if (!response.ok) return null;
+    if (!answered.ok) return null;
     return response.text();
   }
   return null;
@@ -1189,6 +1188,56 @@ async function holdClientError(advance: QueueAdvance, job: JobRow, outcome: Extr
       .bind(failures, transientRetryAt(failures, now, null).toISOString(), `client_error:${outcome.reason}`, pauses, current.input_identity, job.id).run();
   });
   advance.paused.add(job.provider);
+}
+
+/** Why an item was held after an unexpected exception while it was handled. */
+const ITEM_ERROR = "item_error";
+
+/**
+ * Acts on an unexpected exception while `job` was handled: one no
+ * classifier anticipated, such as a defect in handling its article. It is
+ * caught at the item's boundary, so the advance's other items still
+ * progress.
+ *
+ * - An item in flight or submitted may have reached its provider: it is
+ *   uncertain, and returns to the queue under `returnUncertainItem`, which
+ *   stops it after three sends as `uncertain_exhausted`.
+ * - A waiting item is a problem on the project side, like an unrecognized
+ *   client error: it is recorded with the bounded reason and backed off like
+ *   a transient failure, and its `MAX_CLIENT_ERROR_PAUSES`-th occurrence for
+ *   one input identity, counted with its client-error pauses, ends it
+ *   `client_error_exhausted`, which only a correction set resends. It
+ *   pauses no provider.
+ *
+ * A failure to record this outcome propagates to the media boundary.
+ */
+async function holdThrowingItem(advance: QueueAdvance, job: JobRow, error: unknown): Promise<void> {
+  const { db, now } = advance;
+  const reason = boundedError(error, advance.secrets);
+  noteReason(advance, job.run_id, ITEM_ERROR);
+  const state = await first<{ status: JobStatus; error: string | null }>(db, "SELECT status, error FROM media_processing_jobs WHERE id = ?", job.id);
+  if (state && ((state.status === "uncertain" && state.error === IN_FLIGHT) || state.status === "submitted")) {
+    await returnUncertainItem(advance, job, `${ITEM_ERROR}:${reason}`);
+    return;
+  }
+  await transaction(db, async () => {
+    const current = await first<{ attempt_count: number; input_identity: string; client_error_pauses: number; client_error_identity: string | null }>(
+      db,
+      `SELECT attempt_count, input_identity, client_error_pauses, client_error_identity FROM media_processing_jobs WHERE id = ? AND ${WAITING}`,
+      job.id,
+    );
+    if (!current) return;
+    const occurrences = (current.client_error_identity === current.input_identity ? current.client_error_pauses : 0) + 1;
+    if (occurrences >= MAX_CLIENT_ERROR_PAUSES) {
+      await db.prepare("UPDATE media_processing_jobs SET status = 'client_error_exhausted', error = ?, next_attempt_at = NULL, completed_at = ?, client_error_pauses = ?, client_error_identity = ? WHERE id = ?")
+        .bind(`client_error_exhausted:${ITEM_ERROR}`, now.toISOString(), occurrences, current.input_identity, job.id).run();
+      await countOutputs(db, job.run_id, "skipped");
+      return;
+    }
+    const failures = current.attempt_count + 1;
+    await db.prepare("UPDATE media_processing_jobs SET attempt_count = ?, next_attempt_at = ?, error = ?, client_error_pauses = ?, client_error_identity = ? WHERE id = ?")
+      .bind(failures, transientRetryAt(failures, now, null).toISOString(), `${ITEM_ERROR}:${reason}`, occurrences, current.input_identity, job.id).run();
+  });
 }
 
 /** Counts `request`'s input tokens, or returns the classified failure. A count is free and never uncertain. */
@@ -1648,79 +1697,91 @@ type SubmittedPollSummary = {
  * like a transient failure.
  */
 async function pollSubmittedJobs(advance: QueueAdvance, jobs: readonly JobRow[]): Promise<SubmittedPollSummary> {
-  const { db, now, transport, secrets } = advance;
+  const { transport } = advance;
   const summary: SubmittedPollSummary = { polled: new Set(), succeeded: 0, failed: 0, uncertain: 0 };
   if (!transport) return summary;
   for (const job of jobs) {
     summary.polled.add(job.id);
-    if (!job.provider_batch_id) {
-      summary.uncertain += 1;
-      continue;
-    }
-    await recordLegacyAttempt(db, job.id);
-    let result: GeminiBatchPoll;
     try {
-      result = await transport.pollBatch(job.provider_batch_id);
+      await pollSubmittedJob(advance, job, summary);
     } catch (error) {
-      const outcome = classifyGeminiOutcome("poll", error);
-      if (outcome.class === "credit_pause" || outcome.class === "missing_configuration") {
-        await pauseProvider(db, job.provider, outcome.reason, now);
-        advance.paused.add(job.provider);
-      }
-      if (outcome.class === "uncertain" || outcome.class === "refusal") {
-        // An error about the batch itself: whether it ran is unknown.
-        await returnUncertainItem(advance, job, outcome.reason, boundedError(error, secrets));
-      } else {
-        await db.prepare("UPDATE media_processing_jobs SET error = ? WHERE id = ? AND status = 'submitted'").bind(boundedError(error, secrets), job.id).run();
-      }
+      await holdThrowingItem(advance, job, error);
       summary.uncertain += 1;
-      continue;
     }
-    if (result.state === "pending") {
-      summary.uncertain += 1;
-      continue;
-    }
-    if (result.state === "failed") {
-      const outcome = classifyGeminiOutcome("poll", new GeminiBatchFailure(boundedError(result.error ?? "batch failed", secrets), result.batchState ?? null));
-      if (outcome.class === "credit_pause" || outcome.class === "missing_configuration") {
-        // The provider declined the batch for credit or configuration:
-        // nothing was produced, so the item waits again, with no attempt
-        // counted.
-        await transaction(db, async () => {
-          await closeAttempt(db, job.id, outcome.class, outcome.reason);
-          await returnUnrunBatch(db, job, { attemptCount: job.attempt_count, nextAttemptAt: null, error: null }, now);
-          await pauseProvider(db, job.provider, outcome.reason, now);
-        });
-        advance.paused.add(job.provider);
-        summary.uncertain += 1;
-        continue;
-      }
-      if (outcome.class === "transient") {
-        // The provider ended the batch without running it: the item waits
-        // again and retries with backoff.
-        const failures = job.attempt_count + 1;
-        await transaction(db, async () => {
-          await closeAttempt(db, job.id, "transient", `transient:${outcome.reason}`);
-          await returnUnrunBatch(db, job, { attemptCount: failures, nextAttemptAt: transientRetryAt(failures, now, null).toISOString(), error: `transient:${outcome.reason}` }, now);
-        });
-        noteReason(advance, job.run_id, "transient_provider_failure");
-        summary.uncertain += 1;
-        continue;
-      }
-      if (outcome.class === "uncertain") {
-        // The batch was accepted and then failed: it may have run and been
-        // charged. Its reported usage is recorded, and the item is resent.
-        await transaction(db, () => recordBatchCharge(db, job, result, now));
-        await returnUncertainItem(advance, job, outcome.reason, boundedError(result.error ?? "batch failed", secrets));
-        summary.uncertain += 1;
-        continue;
-      }
-    }
-    const status = await reconcileJob(db, job, result as GeminiBatchPoll & { state: "succeeded" | "failed" }, now, secrets);
-    if (status === "succeeded") summary.succeeded += 1;
-    else summary.failed += 1;
   }
   return summary;
+}
+
+/** Polls one submitted batch and acts on its classified answer, adding it to `summary`. */
+async function pollSubmittedJob(advance: QueueAdvance, job: JobRow, summary: SubmittedPollSummary): Promise<void> {
+  const { db, now, transport, secrets } = advance;
+  if (!transport) return;
+  if (!job.provider_batch_id) {
+    summary.uncertain += 1;
+    return;
+  }
+  await recordLegacyAttempt(db, job.id);
+  let result: GeminiBatchPoll;
+  try {
+    result = await transport.pollBatch(job.provider_batch_id);
+  } catch (error) {
+    const outcome = classifyGeminiOutcome("poll", error);
+    if (outcome.class === "credit_pause" || outcome.class === "missing_configuration") {
+      await pauseProvider(db, job.provider, outcome.reason, now);
+      advance.paused.add(job.provider);
+    }
+    if (outcome.class === "uncertain" || outcome.class === "refusal") {
+      // An error about the batch itself: whether it ran is unknown.
+      await returnUncertainItem(advance, job, outcome.reason, boundedError(error, secrets));
+    } else {
+      await db.prepare("UPDATE media_processing_jobs SET error = ? WHERE id = ? AND status = 'submitted'").bind(boundedError(error, secrets), job.id).run();
+    }
+    summary.uncertain += 1;
+    return;
+  }
+  if (result.state === "pending") {
+    summary.uncertain += 1;
+    return;
+  }
+  if (result.state === "failed") {
+    const outcome = classifyGeminiOutcome("poll", new GeminiBatchFailure(boundedError(result.error ?? "batch failed", secrets), result.batchState ?? null));
+    if (outcome.class === "credit_pause" || outcome.class === "missing_configuration") {
+      // The provider declined the batch for credit or configuration:
+      // nothing was produced, so the item waits again, with no attempt
+      // counted.
+      await transaction(db, async () => {
+        await closeAttempt(db, job.id, outcome.class, outcome.reason);
+        await returnUnrunBatch(db, job, { attemptCount: job.attempt_count, nextAttemptAt: null, error: null }, now);
+        await pauseProvider(db, job.provider, outcome.reason, now);
+      });
+      advance.paused.add(job.provider);
+      summary.uncertain += 1;
+      return;
+    }
+    if (outcome.class === "transient") {
+      // The provider ended the batch without running it: the item waits
+      // again and retries with backoff.
+      const failures = job.attempt_count + 1;
+      await transaction(db, async () => {
+        await closeAttempt(db, job.id, "transient", `transient:${outcome.reason}`);
+        await returnUnrunBatch(db, job, { attemptCount: failures, nextAttemptAt: transientRetryAt(failures, now, null).toISOString(), error: `transient:${outcome.reason}` }, now);
+      });
+      noteReason(advance, job.run_id, "transient_provider_failure");
+      summary.uncertain += 1;
+      return;
+    }
+    if (outcome.class === "uncertain") {
+      // The batch was accepted and then failed: it may have run and been
+      // charged. Its reported usage is recorded, and the item is resent.
+      await transaction(db, () => recordBatchCharge(db, job, result, now));
+      await returnUncertainItem(advance, job, outcome.reason, boundedError(result.error ?? "batch failed", secrets));
+      summary.uncertain += 1;
+      return;
+    }
+  }
+  const status = await reconcileJob(db, job, result as GeminiBatchPoll & { state: "succeeded" | "failed" }, now, secrets);
+  if (status === "succeeded") summary.succeeded += 1;
+  else summary.failed += 1;
 }
 
 const SUPPORTED_MEDIA_GAMES = new Set(Object.values(MEDIA_GAME_CHOICES));
@@ -2224,7 +2285,14 @@ async function submitQueuedWork(advance: QueueAdvance, probing: Set<PaidProvider
     }
     for (const job of turns) {
       if (advance.paused.has(provider) || advance.remaining[provider] <= 0 || advance.outOfTime()) break;
-      if (await takeTurn(advance, job)) {
+      let took: boolean;
+      try {
+        took = await takeTurn(advance, job);
+      } catch (error) {
+        await holdThrowingItem(advance, job, error);
+        took = true;
+      }
+      if (took) {
         advance.remaining[provider] -= 1;
         entityTurns.last.set(job.appid, entityTurns.next);
         entityTurns.next += 1;

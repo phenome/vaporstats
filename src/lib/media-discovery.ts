@@ -3,7 +3,7 @@ import { parseArticleDocument } from "./article-document";
 import type { AppDatabase } from "./db";
 import { writeTransaction } from "./db-transaction";
 import { mainReleasedDate, type MainReleasedFields } from "./lifecycle-history";
-import { finishOutletAttempt, reserveOutletAttempt } from "./media-outlet-access";
+import { finishAnsweredAttempt, finishOutletAttempt, reserveOutletAttempt } from "./media-outlet-access";
 import { parsePreciseReleaseDate } from "./releases";
 import { ELIGIBLE_MEDIA_ENTITY_SQL } from "./media-similarity";
 
@@ -740,10 +740,9 @@ async function fetchManual(fetchFn: MediaFetch, url: string, outlet: (typeof MED
       await finishOutletAttempt(db, reservation.attemptId, { kind: "failure", statusCode: null, succeeded: false, error: boundedError(error) });
       return null;
     }
-    const isRedirect = response.status >= 300 && response.status < 400;
-    await finishOutletAttempt(db, reservation.attemptId, { kind: isRedirect ? "redirect" : "fetch", statusCode: response.status, succeeded: response.ok, error: response.ok ? null : `HTTP ${response.status}` });
-    if (response.status === 401 || response.status === 403 || response.status === 429) return { stop: `fetch_http_${response.status}`, contacted: true };
-    if (isRedirect) {
+    const answered = await finishAnsweredAttempt(db, reservation.attemptId, response);
+    if (answered.status === 401 || answered.status === 403 || answered.status === 429) return { stop: `fetch_http_${answered.status}`, contacted: true };
+    if (answered.redirect) {
       const location = response.headers.get("location");
       if (!location || redirect === MAX_REDIRECTS) return null;
       const next = new URL(location, current).toString();
@@ -751,7 +750,7 @@ async function fetchManual(fetchFn: MediaFetch, url: string, outlet: (typeof MED
       current = next;
       continue;
     }
-    if (!response.ok) return null;
+    if (!answered.ok) return null;
     return { html: await response.text(), finalUrl: current };
   }
   return null;
@@ -778,6 +777,39 @@ async function closeInterruptedFetch(db: AppDatabase, pass: MediaPass, appid: nu
     "UPDATE media_discovery_attempts SET kind = 'failure', error = ? WHERE appid = ? AND outlet = ? AND pass = ? AND kind = 'fetch' AND status_code IS NULL AND error IS NULL AND id >= ?",
   ).bind(INTERRUPTED_FETCH, appid, outlet, pass, started.id).run();
   return true;
+}
+
+/** Why a candidate was skipped after an unexpected exception while it was handled. */
+const CANDIDATE_ERROR = "candidate_error";
+
+/**
+ * Skips a candidate whose handling threw an exception no classifier
+ * anticipated, such as a defect in parsing its article, so the query's other
+ * candidates and the run's other queries still progress. The query moves past
+ * it, so it is never fetched again: one occurrence ends it. Its last outlet
+ * attempt records the bounded reason and counts as a source failure; an
+ * attempt left without a status is recorded as a failure.
+ */
+async function skipThrowingCandidate(
+  db: AppDatabase,
+  candidate: { progressId: number; index: number; pass: MediaPass; appid: number; outlet: MediaOutlet; url: string },
+  reason: string,
+): Promise<void> {
+  await transaction(db, async () => {
+    await db.prepare("UPDATE media_discovery_progress SET candidate_index = MAX(candidate_index, ?), updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(candidate.index + 1, candidate.progressId).run();
+    const started = await first<{ id: number }>(
+      db,
+      "SELECT id FROM media_discovery_attempts WHERE appid = ? AND outlet = ? AND pass = ? AND kind <> 'search' AND url = ? ORDER BY id DESC LIMIT 1",
+      candidate.appid,
+      candidate.outlet,
+      candidate.pass,
+      candidate.url,
+    );
+    if (!started) return;
+    await db.prepare(
+      "UPDATE media_discovery_attempts SET kind = CASE WHEN status_code IS NULL THEN 'failure' ELSE kind END, succeeded = 0, error = ? WHERE id = (SELECT MAX(id) FROM media_discovery_attempts WHERE appid = ? AND outlet = ? AND pass = ? AND kind <> 'search' AND id >= ?)",
+    ).bind(`${CANDIDATE_ERROR}:${reason}`, candidate.appid, candidate.outlet, candidate.pass, started.id).run();
+  });
 }
 
 /** The recorded outcome of a fetch attempt a restart interrupted. */
@@ -1061,22 +1093,30 @@ export async function runAuthorizedMediaDiscovery(db: AppDatabase, options: Medi
             stopReasons.add(`${outlet.name}:fetch_interrupted`);
             continue;
           }
-          const fetched = await fetchManual(fetchFn, candidates[index]!.url, outlet, db, run.id, pass, appid, clock, issued);
-          if (fetched && "stop" in fetched) {
-            // A candidate the outlet answered is done; one refused before any
-            // request is retried when the outlet reopens.
-            if (fetched.contacted) await db.prepare("UPDATE media_discovery_progress SET candidate_index = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(index + 1, progressId).run();
-            await stopProgress(db, progressId, fetched.stop, clock());
-            stoppedOutlets.add(outlet.name);
-            stopReasons.add(`${outlet.name}:${fetched.stop}`);
-            break;
+          let fetched: Awaited<ReturnType<typeof fetchManual>>;
+          let source: MediaSource | null;
+          try {
+            fetched = await fetchManual(fetchFn, candidates[index]!.url, outlet, db, run.id, pass, appid, clock, issued);
+            if (fetched && "stop" in fetched) {
+              // A candidate the outlet answered is done; one refused before any
+              // request is retried when the outlet reopens.
+              if (fetched.contacted) await db.prepare("UPDATE media_discovery_progress SET candidate_index = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(index + 1, progressId).run();
+              await stopProgress(db, progressId, fetched.stop, clock());
+              stoppedOutlets.add(outlet.name);
+              stopReasons.add(`${outlet.name}:${fetched.stop}`);
+              break;
+            }
+            await db.prepare("UPDATE media_discovery_progress SET candidate_index = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(index + 1, progressId).run();
+            if (!fetched) continue;
+            source = parseSource(fetched.html, fetched.finalUrl, target, discoveryTargets, outlet.name, clock().toISOString());
+            if (!source) continue;
+            source.discoveryUrl = candidates[index]!.url;
+            if (pass === "later" && !await qualifiesForLaterPass(db, source)) continue;
+          } catch (error) {
+            await skipThrowingCandidate(db, { progressId, index, pass, appid, outlet: outlet.name, url: candidates[index]!.url }, boundedError(error, apiKey));
+            stopReasons.add(`${outlet.name}:${CANDIDATE_ERROR}`);
+            continue;
           }
-          await db.prepare("UPDATE media_discovery_progress SET candidate_index = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(index + 1, progressId).run();
-          if (!fetched) continue;
-          const source = parseSource(fetched.html, fetched.finalUrl, target, discoveryTargets, outlet.name, clock().toISOString());
-          if (!source) continue;
-          source.discoveryUrl = candidates[index]!.url;
-          if (pass === "later" && !await qualifiesForLaterPass(db, source)) continue;
           if (admitted.has(source.appid)) continue;
           const selection = selections.get(source.appid) ?? { review: null, preview: null };
           if (source.type === "review") {

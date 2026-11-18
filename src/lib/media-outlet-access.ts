@@ -136,3 +136,28 @@ export async function finishOutletAttempt(
   await db.prepare("UPDATE media_discovery_attempts SET kind = ?, status_code = ?, succeeded = ?, error = ? WHERE id = ?")
     .bind(outcome.kind, outcome.statusCode, outcome.succeeded ? 1 : 0, outcome.error, attemptId).run();
 }
+
+/**
+ * Records how reserved attempt `attemptId` ended from the outlet's
+ * `response`, and returns its status. Reading the response is part of the
+ * attempt: if it throws, the attempt is recorded as a failure with the
+ * bounded reason before the exception propagates, so no attempt is left
+ * without an outcome.
+ */
+export async function finishAnsweredAttempt(
+  db: AppDatabase,
+  attemptId: number,
+  response: Response,
+): Promise<{ status: number; ok: boolean; redirect: boolean }> {
+  let answered: { status: number; ok: boolean; redirect: boolean };
+  try {
+    const status = response.status;
+    answered = { status, ok: response.ok, redirect: status >= 300 && status < 400 };
+  } catch (error) {
+    const message = (error instanceof Error ? error.message : String(error)).replace(/[\r\n]+/g, " ").slice(0, 256);
+    await finishOutletAttempt(db, attemptId, { kind: "failure", statusCode: null, succeeded: false, error: message });
+    throw error;
+  }
+  await finishOutletAttempt(db, attemptId, { kind: answered.redirect ? "redirect" : "fetch", statusCode: answered.status, succeeded: answered.ok, error: answered.ok ? null : `HTTP ${answered.status}` });
+  return answered;
+}

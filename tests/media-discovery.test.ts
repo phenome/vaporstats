@@ -340,9 +340,35 @@ describe("bounded media discovery", () => {
     cleanup();
   });
 
+  test("a candidate whose article body fails mid-read is skipped with its redacted reason, and the run completes", async () => {
+    const { db, cleanup } = fixture();
+    const failing = "https://ign.com/articles/1091500-ign-com";
+    const fetchFn = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const url = String(input);
+      if (url.endsWith("/usage")) return Response.json({ account: { current_plan: "free" }, plan_usage: 1, plan_limit: 100, paygo_usage: 0, paygo_limit: 0 });
+      if (url.endsWith("/search")) {
+        const payload = JSON.parse(String(init?.body)) as { include_domains: string[] };
+        const domain = payload.include_domains[0]!;
+        return Response.json({ request_id: `search-${domain}`, usage: { credits_used: 1 }, results: [{ url: `https://${domain}/articles/1091500-${domain.replaceAll(".", "-")}` }] });
+      }
+      if (url === failing) {
+        return new Response(new ReadableStream<Uint8Array>({ start(controller) { controller.error(new Error("unexpected article failure test-key")); } }));
+      }
+      return new Response(html(1091500, "Cyberpunk 2077 Review"));
+    };
+    const authorization = await authorizeMediaRun(db, { pass: "initial", games: [1091500] });
+    const summary = await runAuthorizedMediaDiscovery(db, { runId: authorization.runId, tavilyApiKey: "test-key", fetch: fetchFn, now: new Date("2026-09-10T00:00:00.000Z") });
+    expect(summary.status).toBe("completed");
+    expect(summary.stopReasons).toContain("IGN:candidate_error");
+    expect(summary.articles).toBe(5);
+    const attempt = await db.prepare("SELECT kind, status_code, succeeded, error FROM media_discovery_attempts WHERE url = ?").bind(failing).first();
+    expect(attempt).toEqual({ kind: "fetch", status_code: 200, succeeded: 0, error: "candidate_error:unexpected article failure [redacted]" });
+    cleanup();
+  });
+
   test("atomically records unexpected failure and reopens progress without repeating a search", async () => {
     const { db, reopen, cleanup } = fixture();
-    let throwArticleBody = true;
+    let throwSearchAnswer = true;
     const searchCalls: string[] = [];
     const fetchFn = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
       const url = String(input);
@@ -351,16 +377,13 @@ describe("bounded media discovery", () => {
         searchCalls.push(String(init?.body));
         const payload = JSON.parse(String(init?.body)) as { include_domains: string[] };
         const domain = payload.include_domains[0]!;
-        return Response.json({ request_id: `search-${domain}`, usage: { credits_used: 1 }, results: [{ url: `https://${domain}/articles/1091500-${domain.replaceAll(".", "-")}` }] });
-      }
-      if (throwArticleBody) {
-        throwArticleBody = false;
-        const body = new ReadableStream<Uint8Array>({
-          start(controller) {
-            controller.error(new Error("unexpected article failure test-key"));
-          },
-        });
-        return new Response(body);
+        const response = Response.json({ request_id: `search-${domain}`, usage: { credits_used: 1 }, results: [{ url: `https://${domain}/articles/1091500-${domain.replaceAll(".", "-")}` }] });
+        // An unexpected failure outside any one candidate fails the run.
+        if (throwSearchAnswer) {
+          throwSearchAnswer = false;
+          Object.defineProperty(response, "status", { get() { throw new Error("unexpected search failure test-key"); } });
+        }
+        return response;
       }
       return new Response(html(1091500, "Cyberpunk 2077 Review"));
     };

@@ -244,6 +244,17 @@ export const MALFORMED_ARTICLE_BODIES = {
   "binary content": "%PDF-1.7\n\u0000\u0001\u0002 binary stream",
 } as const;
 
+/**
+ * An outlet answer whose handling throws `message` as soon as its status is
+ * read: it stands for any unexpected exception while one item or candidate
+ * is handled, which no classifier anticipates.
+ */
+export function throwingResponse(message: string): Response {
+  const response = new Response("<!doctype html><html><body></body></html>");
+  Object.defineProperty(response, "status", { get() { throw new Error(message); } });
+  return response;
+}
+
 /** Key-sorted JSON, matching how processing input identities serialize values. */
 export function stableJson(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
