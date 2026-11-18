@@ -83,19 +83,15 @@ export const DEFAULT_PAID_WORK_TIME_BUDGET_MS = 5 * 60 * 1_000;
  */
 const TEXT_REASONING: OpenRouterReasoning = { effort: "low" };
 /**
- * Output tokens a text request may spend reasoning before its answer starts.
- * Reasoning counts against the output cap, and adaptive thinking has no hard
- * budget, so each cap adds this allowance to the stage's answer budget. The
- * first live run's extraction reasoned 1,078 tokens at the default medium
- * effort; an answer cut short by a larger reasoning spend pauses OpenRouter
- * as `output_truncated` instead of refusing the item.
+ * The output caps of text requests, reasoning and answer combined (ADR 0018,
+ * amended 2026-11-18). Each is a guard against a runaway answer, not an
+ * answer budget: cost follows the tokens actually produced, and an answer cut
+ * off at its cap pauses OpenRouter as `output_truncated`. The live run after
+ * reasoning was set low produced an extraction answer of 1,240 tokens and cut
+ * a four-source Overview off at 5,200.
  */
-const TEXT_REASONING_ALLOWANCE_TOKENS = 2_000;
-/** The largest valid answer of an extraction and of an Overview. */
-const EXTRACTION_ANSWER_TOKENS = 1_200;
-const SYNTHESIS_ANSWER_TOKENS = 3_200;
-const EXTRACTION_MAX_OUTPUT_TOKENS = TEXT_REASONING_ALLOWANCE_TOKENS + EXTRACTION_ANSWER_TOKENS;
-const SYNTHESIS_MAX_OUTPUT_TOKENS = TEXT_REASONING_ALLOWANCE_TOKENS + SYNTHESIS_ANSWER_TOKENS;
+const EXTRACTION_MAX_OUTPUT_TOKENS = 8_000;
+const SYNTHESIS_MAX_OUTPUT_TOKENS = 16_000;
 const EMBEDDING_MAX_OUTPUT_TOKENS = 1;
 /**
  * The input cap of one OpenRouter request, in locally estimated tokens. It

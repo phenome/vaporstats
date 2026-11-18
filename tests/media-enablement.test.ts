@@ -264,14 +264,15 @@ describe("repair of the first live run's cut-off extractions (migration 0028)", 
     expect(otherRows(native, ids.truncated)).toEqual(before!);
     expect(native.query("SELECT status, error, max_output_tokens FROM media_processing_jobs WHERE id = ?").get(ids.complete)).toEqual({ status: "refused", error: "invalid_output: no supported contributions", max_output_tokens: 1_200 });
 
-    // The next tick, before the daily run, extracts it once more with the corrected request.
+    // The next tick, before the daily run, extracts it once more with the
+    // corrected request, under the cap current when it is sent.
     const world = experimentWorld();
     await runMediaTick(database, world, "2026-11-19T00:15:00.000Z", { outlet: world.outlet });
     const extractions = world.openRouter.requests.filter((request) => request.stage === "extraction");
     expect(extractions.map((request) => ({ appid: JSON.stringify(request.body.messages).includes(`Steam app ${BALDURS_GATE}`), max_tokens: request.body.max_tokens, reasoning: request.body.reasoning }))).toEqual([
-      { appid: true, max_tokens: 3_200, reasoning: { effort: "low" } },
+      { appid: true, max_tokens: 8_000, reasoning: { effort: "low" } },
     ]);
-    expect(native.query("SELECT status, charged_microusd FROM media_processing_jobs WHERE id = ?").get(ids.truncated)).toEqual({ status: "succeeded", charged_microusd: 1_050 });
+    expect(native.query("SELECT status, charged_microusd, max_output_tokens FROM media_processing_jobs WHERE id = ?").get(ids.truncated)).toEqual({ status: "succeeded", charged_microusd: 1_050, max_output_tokens: 8_000 });
     expect(native.query("SELECT attempt, outcome, charged_microusd FROM media_processing_attempts WHERE job_id = ? ORDER BY attempt").all(ids.truncated)).toEqual([
       { attempt: 1, outcome: "refused", charged_microusd: 900 },
       { attempt: 2, outcome: "succeeded", charged_microusd: 150 },
