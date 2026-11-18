@@ -665,15 +665,18 @@ export function insertSubmittedGeminiExtraction(native: Database, options: { run
  * - `item_content`: about the request itself: a definite refusal;
  * - `pre_send_network`: a connection failure before the request was fully
  *   sent: transient;
- * - `post_accept`: the provider accepted the request, then failed, ended it
- *   or answered without a result: uncertain, or transient only when a resend
- *   cannot repeat a charge (a free poll, a batch the provider ended unrun);
- * - `post_send_timeout`: sent, with no answer: uncertain.
- *
- * Rate limits and in-flight budgets are transient and provider-wide; they
- * have their own tests and no scope here.
+ * - `post_accept_charged`: the provider accepted a request that may have
+ *   been charged, then failed or answered without a result: uncertain, so it
+ *   is never resent;
+ * - `ended_unrun`: the provider ended an accepted batch without running it,
+ *   or a free poll failed: transient or uncertain, since a retry repeats no
+ *   charge;
+ * - `post_send_timeout`: sent, with no answer: uncertain;
+ * - `provider_transient`: a temporary provider-wide condition (a rate limit,
+ *   an in-flight budget, a timeout response, a server error): transient,
+ *   never a refusal or a pause.
  */
-export const PROVIDER_RESPONSE_SCOPES = ["provider_wide", "item_content", "pre_send_network", "post_accept", "post_send_timeout"] as const;
+export const PROVIDER_RESPONSE_SCOPES = ["provider_wide", "item_content", "pre_send_network", "post_accept_charged", "ended_unrun", "post_send_timeout", "provider_transient"] as const;
 export type ProviderResponseScope = (typeof PROVIDER_RESPONSE_SCOPES)[number];
 
 /** A provider's fixtures by response scope, each named; omitting a scope fails to compile. */
@@ -708,17 +711,26 @@ export const GEMINI_SCOPED_FIXTURES: ScopedProviderFixtures<GeminiScopedFixture>
     "poll inline response error": { call: "poll", reply: { status: 200, body: { metadata: { state: "BATCH_STATE_SUCCEEDED" }, response: { inlinedResponses: { inlinedResponses: [{ error: { code: 400, message: "Invalid content." } }] } } } } },
   },
   pre_send_network: Object.fromEntries(["ECONNREFUSED", "ENOTFOUND", ...TLS_FAILURE_CODES].map((code) => [`submit ${code}`, { call: "submit", reply: { network: "connect failed", code } }])),
-  post_accept: {
+  post_accept_charged: {
+    "poll batch failed after acceptance": { call: "poll", reply: geminiBatch("BATCH_STATE_FAILED", "Internal error encountered.") },
+  },
+  ended_unrun: {
+    "poll batch expired": { call: "poll", reply: geminiBatch("BATCH_STATE_EXPIRED") },
+    "poll batch cancelled": { call: "poll", reply: geminiBatch("BATCH_STATE_CANCELLED") },
     "poll 404 batch not found": { call: "poll", reply: { status: 404, body: { error: { code: 404, status: "NOT_FOUND", message: "Requested entity was not found." } } } },
     "poll 500": { call: "poll", reply: { status: 500, body: { error: { code: 500, status: "INTERNAL", message: "Internal error." } } } },
     "poll connection lost": { call: "poll", reply: { network: "socket closed" } },
-    "poll batch expired": { call: "poll", reply: geminiBatch("BATCH_STATE_EXPIRED") },
-    "poll batch cancelled": { call: "poll", reply: geminiBatch("BATCH_STATE_CANCELLED") },
-    "poll batch failed": { call: "poll", reply: geminiBatch("BATCH_STATE_FAILED", "Internal error encountered.") },
   },
   post_send_timeout: {
     "submit connection lost after sending": { call: "submit", reply: { network: "socket closed" } },
     "submit ECONNRESET": { call: "submit", reply: { network: "connection reset", code: "ECONNRESET" } },
+  },
+  provider_transient: {
+    "submit 429 rate limit": { call: "submit", reply: GEMINI_RATE_LIMIT },
+    "count 429 rate limit": { call: "count", reply: GEMINI_RATE_LIMIT },
+    "submit 408": { call: "submit", reply: { status: 408, body: { error: { code: 408, message: "Request timeout." } } } },
+    ...Object.fromEntries([500, 502, 503, 504].map((status) => [`submit ${status}`, { call: "submit", reply: { status, body: { error: { code: status, message: "Unavailable." } } } }])),
+    "count 503": { call: "count", reply: { status: 503, body: { error: { code: 503, message: "Unavailable." } } } },
   },
 };
 
@@ -744,7 +756,7 @@ export const OPENROUTER_SCOPED_FIXTURES: ScopedProviderFixtures<OpenRouterReply>
     "200 accepted, then 400 on the first choice": { status: 200, body: { id: "gen-1", choices: [{ index: 0, finish_reason: "error", error: { code: 400, message: "Invalid request" } }] } },
   },
   pre_send_network: Object.fromEntries(["ECONNREFUSED", "ENOTFOUND", "EAI_AGAIN", ...TLS_FAILURE_CODES].map((code) => [code, { network: "connect failed", code }])),
-  post_accept: {
+  post_accept_charged: {
     "200 accepted, then 502": { status: 200, body: { error: { code: 502, message: "Provider returned error" } } },
     "200 accepted, then 408": { status: 200, body: { error: { code: 408, message: "Provider timed out" } } },
     "200 accepted, finish_reason error without a code": { status: 200, body: { id: "gen-1", choices: [{ index: 0, finish_reason: "error", message: { role: "assistant", content: "" } }] } },
@@ -756,6 +768,14 @@ export const OPENROUTER_SCOPED_FIXTURES: ScopedProviderFixtures<OpenRouterReply>
     "connection lost after sending": { network: "socket closed" },
     "ECONNRESET": { network: "connection reset", code: "ECONNRESET" },
     "timeout error": { network: "The operation timed out.", name: "TimeoutError" },
+  },
+  // OpenRouter has no batches and no free poll: an answer is the request's only outcome.
+  ended_unrun: {},
+  provider_transient: {
+    "402 in-flight budget": OPENROUTER_IN_FLIGHT_BUDGET,
+    "408": { status: 408, body: { error: { code: 408, message: "Request timeout" } } },
+    "429": { status: 429, body: { error: { code: 429, message: "Rate limit exceeded" } } },
+    ...Object.fromEntries([500, 502, 503, 504].map((status) => [String(status), { status, body: { error: { code: status, message: "Provider unavailable" } } }])),
   },
 };
 

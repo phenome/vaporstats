@@ -26,17 +26,22 @@ const ALLOWED: Record<ProviderResponseScope, readonly OutcomeClass[]> = {
   provider_wide: ["credit_pause", "missing_configuration"],
   item_content: ["refusal"],
   pre_send_network: ["transient"],
-  post_accept: ["uncertain", "transient"],
+  post_accept_charged: ["uncertain"],
+  ended_unrun: ["transient", "uncertain"],
   post_send_timeout: ["uncertain"],
+  provider_transient: ["transient"],
 };
+
+/** Scopes a provider may leave empty, because it has no such response. */
+const NOT_APPLICABLE: Record<string, readonly ProviderResponseScope[]> = { openrouter: ["ended_unrun"] };
 
 /**
  * Fixtures whose current class breaks the contract, with the reason. Each
  * is asserted with `test.failing`, so it reports once behavior changes.
  */
 const KNOWN_VIOLATIONS: Record<string, string> = {
-  "gemini post_accept poll batch failed":
-    "A batch Gemini accepted and then ended as BATCH_STATE_FAILED with a generic error is classified as a definite refusal (`batch_failed`), while CONTEXT.md defines an item whose provider accepted it and then failed as uncertain. Needs a spec decision before the classifier changes.",
+  "gemini post_accept_charged poll batch failed after acceptance":
+    "A batch Gemini accepted and then ended as BATCH_STATE_FAILED with a generic error is classified as a definite refusal (`batch_failed`), while CONTEXT.md defines an item whose provider accepted it and then failed as uncertain. Tracked in #80, which changes this classification.",
 };
 
 async function geminiOutcome({ call, reply }: GeminiScopedFixture): Promise<ProviderOutcome> {
@@ -77,11 +82,14 @@ const PROVIDERS = [
 
 describe("paid-provider classifier contract", () => {
   test("every provider has fixtures for every response scope", () => {
-    for (const { fixtures } of PROVIDERS) {
-      for (const scope of PROVIDER_RESPONSE_SCOPES) expect(Object.keys(fixtures[scope]).length).toBeGreaterThan(0);
+    for (const { name, fixtures } of PROVIDERS) {
+      for (const scope of PROVIDER_RESPONSE_SCOPES) {
+        if (NOT_APPLICABLE[name]?.includes(scope)) expect(Object.keys(fixtures[scope])).toEqual([]);
+        else expect(Object.keys(fixtures[scope]).length).toBeGreaterThan(0);
+      }
     }
     // @ts-expect-error A provider's fixtures without a scope do not compile.
-    const missing: ScopedProviderFixtures<OpenRouterReply> = { provider_wide: {}, item_content: {}, pre_send_network: {}, post_accept: {} };
+    const missing: ScopedProviderFixtures<OpenRouterReply> = { provider_wide: {}, item_content: {}, pre_send_network: {}, post_accept_charged: {}, ended_unrun: {}, post_send_timeout: {} };
     expect(missing).toBeDefined();
   });
 
@@ -104,10 +112,11 @@ describe("paid-provider classifier contract", () => {
   });
 });
 
-// An unrecognized 4xx carries no scope: nothing says whether it concerns the
-// item or the provider. Both classifiers currently refuse the item for it,
-// which a policy change (pausing instead) would need a spec decision for.
-describe("unrecognized 4xx answers (current behavior, pending a spec decision)", () => {
+// An open decision, tracked in #80: an unrecognized 4xx carries no scope,
+// since nothing says whether it concerns the item or the provider. Both
+// classifiers currently refuse the item for it. These tests pin today's
+// behavior so that #80 changes it deliberately; they do not endorse it.
+describe("unrecognized 4xx answers: open decision tracked in #80 (current behavior)", () => {
   for (const status of [405, 409, 410, 413, 422]) {
     test(`Gemini submit ${status} is a refusal`, async () => {
       expect(await geminiOutcome({ call: "submit", reply: { status, body: { error: { code: status, message: "Unrecognized" } } } })).toEqual({ class: "refusal", reason: `http_${status}` });

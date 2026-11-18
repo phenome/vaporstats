@@ -28,8 +28,10 @@ Each paid provider classifies every response in one classifier (CODING_STANDARDS
 | `provider_wide` | Credit pause, configuration pause; never a refusal |
 | `item_content` | Definite refusal |
 | `pre_send_network` | Transient |
-| `post_accept` | Uncertain; transient only when a resend cannot repeat a charge |
+| `post_accept_charged` | Uncertain: accepted and possibly charged, so never resent |
+| `ended_unrun` | Transient or uncertain: a batch the provider ended without running it, or a failed free poll |
 | `post_send_timeout` | Uncertain |
+| `provider_transient` | Transient: a rate limit, an in-flight budget, a timeout response or a server error; never a refusal or a pause |
 
 - Covered by [`tests/media-provider-contract.test.ts`](../../tests/media-provider-contract.test.ts) over `GEMINI_SCOPED_FIXTURES` and `OPENROUTER_SCOPED_FIXTURES`. Their type, `ScopedProviderFixtures`, does not compile when a scope is missing.
 - A new response class or status code adds a fixture under its scope. A new provider exports its own scoped fixtures and joins `PROVIDERS` in the contract test.
@@ -56,5 +58,5 @@ A rule the specification does not settle is a gap, not a design choice (CODING_S
 - Put the choice behind one named function or constant, and list it first in the change description.
 - Record a known mismatch between code and specification as a known failure (`test.failing`, `knownFailure`, or `KNOWN_VIOLATIONS`) with its reason, rather than asserting the current behavior as correct.
 - Open gaps currently recorded in tests:
-  - A Gemini batch that the provider accepted and then ended as `BATCH_STATE_FAILED` with a generic error is a definite refusal, while CONTEXT.md defines an item that its provider accepted and then failed as uncertain (`KNOWN_VIOLATIONS`).
-  - An unrecognized 4xx (such as 405, 409, 410, 413 or 422) is a definite refusal for both paid providers. Pausing instead would be a policy change that needs a spec decision ("unrecognized 4xx answers" in the contract test).
+  - A Gemini batch that the provider accepted and then ended as `BATCH_STATE_FAILED` with a generic error is a definite refusal, while CONTEXT.md defines an item that its provider accepted and then failed as uncertain (`KNOWN_VIOLATIONS`, tracked in #80).
+  - An unrecognized 4xx (such as 405, 409, 410, 413 or 422) is a definite refusal for both paid providers. This is an open decision tracked in #80; the contract test's "unrecognized 4xx answers" suite pins the current behavior so that #80 changes it deliberately, and does not endorse it.
