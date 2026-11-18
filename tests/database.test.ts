@@ -105,6 +105,7 @@ describe("Bun SQLite persistence", () => {
       "media_enrollments",
       "media_game_embeddings",
       "media_game_overviews",
+      "media_processing_attempts",
       "media_processing_authorizations",
       "media_processing_jobs",
       "media_sources",
