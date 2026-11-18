@@ -881,6 +881,11 @@ export const mediaDiscoveryRuns = sqliteTable(
     usage: text("usage").notNull().default("{}"),
     stopReason: text("stop_reason"),
     summary: text("summary").notNull().default("{}"),
+    /**
+     * How the run started: `authorized` by a retired manual trigger, or
+     * `scheduled` by the daily media run.
+     */
+    origin: text("origin").notNull().default("authorized"),
     startedAt: text("started_at"),
     finishedAt: text("finished_at"),
     createdAt: text("created_at").notNull().default(currentTimestamp),
@@ -894,6 +899,25 @@ export const mediaDiscoveryRuns = sqliteTable(
     check("media_discovery_runs_resumed_check", sql`${table.resumed} IN (0, 1)`),
     check("media_discovery_runs_counts_check", sql`${table.queryCount} >= 0 AND ${table.articleCount} >= 0 AND ${table.attemptCount} >= 0`),
     uniqueIndex("uq_media_discovery_runs_identity").on(table.identityKey),
+  ],
+);
+
+/**
+ * A media enrollment: an exact entity that takes part in automatic media
+ * ingestion, with the reason it was first enrolled under and when. It is
+ * never removed automatically.
+ */
+export const mediaEnrollments = sqliteTable(
+  "media_enrollments",
+  {
+    appid: integer("appid")
+      .primaryKey()
+      .references(() => apps.appid, { onDelete: "cascade" }),
+    reason: text("reason").notNull(),
+    enrolledAt: text("enrolled_at").notNull(),
+  },
+  (table) => [
+    check("media_enrollments_reason_check", sql`${table.reason} IN ('experiment', 'new_release', 'watchlist')`),
   ],
 );
 

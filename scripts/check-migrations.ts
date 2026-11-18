@@ -44,6 +44,7 @@ const expectedTables = [
   "media_discovery_attempts",
   "media_discovery_progress",
   "media_discovery_runs",
+  "media_enrollments",
   "media_game_overviews",
   "media_processing_authorizations",
   "media_processing_jobs",
@@ -370,6 +371,12 @@ function seed(db: Database, statements: readonly string[]): void {
 }
 
 const mediaTables = expectedTables.filter((table) => table.startsWith("media_"));
+/**
+ * Media tables the retained fixture holds rows in. Enrollments postdate its
+ * schema: an upgrade must leave them empty, because the daily media run, not
+ * a migration, enrolls entities.
+ */
+const retainedMediaTables = mediaTables.filter((table) => table !== "media_enrollments");
 
 /** Applies committed migrations up to, but excluding, `tag` through the production procedure. */
 function migrateBefore(db: Database, tag: string): void {
@@ -451,7 +458,7 @@ function verifyRetainedMediaRowsSurviveUpgrade(): void {
       .run(new Uint8Array(12288).fill(7));
 
     const columns = new Map(
-      ["apps", ...mediaTables].map((table) => [
+      ["apps", ...retainedMediaTables].map((table) => [
         table,
         retained
           .query<{ name: string }, []>(`PRAGMA table_info(${table})`)
@@ -464,7 +471,7 @@ function verifyRetainedMediaRowsSurviveUpgrade(): void {
         .query(`SELECT ${columns.get(table)!.join(", ")} FROM ${table} ORDER BY rowid`)
         .all();
     const before = new Map([...columns.keys()].map((table) => [table, snapshot(table)]));
-    for (const table of mediaTables) {
+    for (const table of retainedMediaTables) {
       if (before.get(table)!.length === 0) throw new Error("Retained media fixture is missing " + table + " rows");
     }
     // Deleted rows above the retained ones leave each AUTOINCREMENT high-water
@@ -539,6 +546,15 @@ function verifyRetainedMediaRowsSurviveUpgrade(): void {
     if (JSON.stringify(queueFields) !== JSON.stringify(expectedQueueFields)) {
       throw new Error("Migrations misdescribed retained paid jobs as queue entries: " + JSON.stringify(queueFields));
     }
+    // Retained discovery runs were all started by the retired manual trigger,
+    // and no migration enrolls an entity or records an enrollment start date.
+    const origins = retained.query<{ origin: string }, []>("SELECT DISTINCT origin FROM media_discovery_runs").all();
+    if (JSON.stringify(origins) !== JSON.stringify([{ origin: "authorized" }])) {
+      throw new Error("Migrations misdescribed the origin of retained discovery runs: " + JSON.stringify(origins));
+    }
+    const enrollments = retained.query<{ count: number }, []>("SELECT COUNT(*) AS count FROM media_enrollments").get()?.count ?? 0;
+    const startDate = retained.query<{ count: number }, []>("SELECT COUNT(*) AS count FROM checkpoints WHERE key = 'media:enrollment-start-date'").get()?.count ?? 0;
+    if (enrollments !== 0 || startDate !== 0) throw new Error("Migrations seeded media enrollment");
     verifyMediaPassesAccepted(retained);
   } finally {
     retained.close(true);
