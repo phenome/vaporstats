@@ -130,6 +130,28 @@ describe("when the later pass is due", () => {
 
     expect(queries(tavily)).toHaveLength(36);
   });
+
+  test("an entity enrolled for another reason waits for its Main Released date to be at least 90 days old as well", async () => {
+    const database = experimentCatalog();
+    // Hades II is enrolled as a newly released game, released on 2026-09-01;
+    // its Main Released date is 90 days old on 2026-11-30.
+    database.native.prepare("UPDATE apps SET release_status = 'released', original_release_date = '2026-09-01' WHERE appid = ?").run(HADES_II);
+    database.native.prepare("INSERT INTO media_enrollments (appid, reason, enrolled_at) VALUES (?, 'new_release', '2026-11-19T06:00:00.000Z')").run(HADES_II);
+    const { tavily, tick } = world();
+    const laterQueries = (name: string) => queries(tavily).filter((query) => query.startsWith(`${name} review revisited@`));
+
+    await tick(database, "2026-11-20T06:00:00.000Z");
+    await tick(database, "2026-11-21T06:00:00.000Z");
+
+    expect(laterQueries("Cyberpunk 2077")).toHaveLength(6);
+    expect(laterQueries("Hades II")).toEqual([]);
+
+    for (let day = 22; day <= 29; day += 1) await tick(database, `2026-11-${day}T06:00:00.000Z`);
+    expect(laterQueries("Hades II")).toEqual([]);
+
+    await tick(database, "2026-11-30T06:00:00.000Z");
+    expect(laterQueries("Hades II")).toHaveLength(6);
+  });
 });
 
 const [IGN, EUROGAMER, GAMESPOT, PC_GAMER, KOTAKU, GAMESRADAR] = MEDIA_OUTLETS;
@@ -186,5 +208,36 @@ describe("later-pass selection", () => {
       { outlet: "PC Gamer", originalUrl: articleUrl(CYBERPUNK, PC_GAMER, "-revisited"), publishedAt: "2026-11-19T00:00:00.000Z" },
     ].sort((a, b) => a.originalUrl.localeCompare(b.originalUrl)));
     expect((await detail(database, PHANTOM_LIBERTY)).sources).toEqual([]);
+  });
+});
+
+describe("later-pass article rules", () => {
+  test("later candidates pass the exact-subject and article-type rules, and an entity's later query on an outlet is never reformulated or repeated when nothing qualifies", async () => {
+    const database = experimentCatalog();
+    const later = (outlet: Outlet, slug: string) => [{ url: articleUrl(CYBERPUNK, outlet, `-${slug}`) }];
+    const { tavily, page, tick } = world({
+      later: (appid, outlet) => appid !== CYBERPUNK ? [] : later(outlet, outlet === GAMESRADAR ? "revisited" : "candidate"),
+    });
+    const after = "2026-11-19T00:00:00.000Z";
+    page(articleUrl(CYBERPUNK, IGN, "-candidate"), reviewPage(CYBERPUNK, "Cyberpunk 2077 Patch Notes for Update 2.3", { date: after }));
+    page(articleUrl(CYBERPUNK, EUROGAMER, "-candidate"), reviewPage(CYBERPUNK, "Best Games Like Cyberpunk 2077", { date: after }));
+    page(articleUrl(CYBERPUNK, GAMESPOT, "-candidate"), reviewPage(CYBERPUNK, "Cyberpunk 2077 Versus Starfield: A Comparison", { date: after }));
+    page(articleUrl(CYBERPUNK, PC_GAMER, "-candidate"), reviewPage(BALDURS_GATE, "Baldur's Gate 3 Review", { date: after }));
+    page(articleUrl(CYBERPUNK, KOTAKU, "-candidate"), reviewPage(CYBERPUNK, "Cyberpunk 2077 Hands-On Preview", { date: after }));
+
+    await tick(database, "2026-11-20T06:00:00.000Z");
+    await tick(database, "2026-11-21T06:00:00.000Z");
+    await tick(database, "2026-11-22T06:00:00.000Z");
+
+    const { sources } = await detail(database, CYBERPUNK);
+    expect(sources.filter(({ publishedAt }) => publishedAt === after).map(({ outlet, type, handsOn }) => ({ outlet, type, handsOn })).sort((a, b) => a.outlet.localeCompare(b.outlet))).toEqual([
+      { outlet: "GamesRadar+", type: "review", handsOn: null },
+      { outlet: "Kotaku", type: "preview", handsOn: true },
+    ]);
+    // The Baldur's Gate 3 review found on Cyberpunk 2077's query is not attributed to either game.
+    expect((await detail(database, BALDURS_GATE)).sources.map(({ originalUrl }) => originalUrl)).not.toContain(articleUrl(CYBERPUNK, PC_GAMER, "-candidate"));
+    const cyberpunkQueries = queries(tavily).filter((query) => query.startsWith("Cyberpunk 2077 "));
+    expect(cyberpunkQueries.filter((query) => query.includes("review revisited"))).toHaveLength(6);
+    expect(cyberpunkQueries).toHaveLength(12);
   });
 });
