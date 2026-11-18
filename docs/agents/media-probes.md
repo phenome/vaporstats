@@ -16,6 +16,7 @@ A request answered with HTTP 429 by an injected day stop never reached its outle
 - Covered by `sweepInterruptions(scenario, { restarts })` in [`tests/media-interruptions.test.ts`](../../tests/media-interruptions.test.ts). It restarts after the k-th swept call of each kind, for every k (or `sample` evenly spaced k), then ticks until quiescent.
 - Every run of every scenario, whatever its faults, is checked for every invariant of probes 1 and 2. Every accepted article must end extracted, unless its extraction ended `uncertain_exhausted`.
 - A scenario that restarts during paid requests must show resends under `UNCERTAIN_PAID_RESEND`, so the sweep observes them at all.
+- The "an extraction whose answer is always lost" scenario resends one extraction until it ends `uncertain_exhausted`, so the three-send limit itself is swept: a fourth send of that identity is a violation.
 - A scenario's `before` ticks run once into a template database that every run copies, so they are never interrupted; they must be ticks another registered scenario sweeps, which the test asserts.
 - A change that adds an outbound call, or a new stage or pass that sends one, registers a scenario in `SCENARIOS` that reaches it, with the expected baseline call counts.
 - A new kind of outbound call extends `OUTBOUND_KINDS` and the sweep's call classifier, rather than adding a test outside the sweep.
