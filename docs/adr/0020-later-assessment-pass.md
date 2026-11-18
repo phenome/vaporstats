@@ -25,6 +25,10 @@ Under the decision of 2026-11-17 recorded on #75, an outlet whose initial articl
 
 Like the initial pass, each query admits at most one article per entity: a review before a preview, the earliest dated first, and undated last. This holds across resumes: when an Outlet day stop holds a query after it admitted an entity's article, the query resumes on a later UTC day without admitting another article for that entity.
 
+**A restart repeats no query, discovery fetch or submission.** Each outlet attempt is reserved in the attempt log before the outlet is contacted, so the log durably records that a candidate's fetch started. When a discovery run resumes a query whose next candidate already has an attempt, that fetch may have reached its outlet. It is never sent again, any of its attempts left with no outcome is recorded as interrupted by the restart, and the candidate is skipped with the `<outlet>:fetch_interrupted` reason, as an interrupted search is never repeated. This applies to both passes, which share the same discovery loop.
+
+The processing fetch of an accepted article is the one bounded exception. Article text is never retained, so a restart after the fetch started and before the item is marked in flight for its paid request leaves the item waiting, and it fetches the article again when it next takes a turn. That costs at most one extra outlet attempt per restart, plus its redirects, counted against the outlet's daily cap like any other attempt, and no paid model call, since none was sent.
+
 **Both passes feed results.** Processing, synthesis, the Overview's evidence map, Sources, citations and tag results read sources from both passes. Synthesis receives each article's pass and treats a missing publication date as unknown. A same-outlet later article counts toward its outlet's support once, so it never adds an outlet endorsement. Sources list dated articles by publication date and undated articles after them, never placed in time by their retrieval. The synthesis configuration version changes with this wording; under the rule of [#67](https://github.com/phenome/vaporstats/issues/67), that change alone queues no work.
 
 ## Consequences
@@ -33,3 +37,6 @@ Like the initial pass, each query admits at most one article per entity: a revie
 - An outlet with no accepted initial article for an entity is never asked in its later pass, and an outlet denied after its initial article stays denied.
 - The scheduled run's `pass` column keeps its `initial` default because the run serves both passes; per-query and per-attempt records carry the pass.
 - A search interrupted by a restart may have been served, so it is not repeated, and that entity's later article from that outlet is not collected.
+- A discovery fetch interrupted by a restart is not repeated either, so that candidate's article is not collected, and the outlet attempt it reserved still counts toward the daily cap.
+- A processing fetch interrupted by a restart is repeated, once per restart, within the outlet's daily cap; it never repeats a paid submission.
+- A query that admitted an entity's article before an Outlet day stop admits no other article for that entity when it resumes, even when a later candidate would have been preferred.

@@ -168,15 +168,17 @@ describe("the daily media run", () => {
     }
   });
 
-  test("a scheduled discovery run interrupted by a restart resumes in a later tick on the same UTC day without repeating a query, and a later tick that day starts no search", async () => {
+  test("a scheduled discovery run interrupted by a restart resumes in a later tick on the same UTC day without repeating a query or a fetch, and a later tick that day starts no search", async () => {
     const database = experimentCatalog();
     const providers = apis();
-    let articleFetches = 0;
+    const fetched: string[] = [];
+    let crashedFetch: string | null = null;
     // The process stops while it fetches the fourth discovered article.
     const crashed = await tick(database, providers, "2026-11-20T06:00:00.000Z", {
-      outlet: () => {
-        articleFetches += 1;
-        if (articleFetches === 4) {
+      fetched,
+      outlet: (url) => {
+        if (fetched.length === 4) {
+          crashedFetch = url;
           database.reopen();
           throw new Error("process stopped");
         }
@@ -187,10 +189,18 @@ describe("the daily media run", () => {
     expect(providers.tavily.searches).toHaveLength(4);
     expect(scheduledRuns(database)).toEqual([{ identity_key: "scheduled:2026-11-20", status: "running" }]);
 
-    const resumed = await tick(database, providers, "2026-11-20T06:15:00.000Z");
+    const resumed = await tick(database, providers, "2026-11-20T06:15:00.000Z", { fetched });
 
     expect(resumed.mediaDailyRun).toBeUndefined();
     expect(resumed.mediaDiscovery).toMatchObject({ status: "completed", queries: 18 });
+    // The fetch in flight at the restart may have reached its outlet, so it is
+    // never repeated; its candidate is skipped with that reason.
+    const crashedOutlet = MEDIA_OUTLETS.find(({ domain }) => new URL(crashedFetch!).hostname === domain)!;
+    expect(resumed.mediaDiscovery?.stopReasons).toContain(`${crashedOutlet.name}:fetch_interrupted`);
+    expect(fetched.filter((url) => url === crashedFetch)).toEqual([crashedFetch]);
+    // Its attempt, reserved before the restart, records that it was interrupted.
+    expect(database.native.query("SELECT kind, status_code, error FROM media_discovery_attempts WHERE url = ?").all(crashedFetch!)).toEqual([{ kind: "failure", status_code: null, error: "interrupted_by_restart" }]);
+    expect((await getMediaSources(database.db, CYBERPUNK)).map(({ originalUrl }) => originalUrl)).not.toContain(crashedFetch);
     expect(providers.tavily.searches).toHaveLength(18);
     expect(repeatedSearches(providers)).toEqual([]);
     expect(scheduledRuns(database)).toEqual([{ identity_key: "scheduled:2026-11-20", status: "completed" }]);

@@ -203,7 +203,7 @@ An access refusal (HTTP 401 or 403) an outlet returns to its own article fetch. 
 _Avoid_: Block, ban, outlet failure
 
 **Outlet day stop**:
-An outlet closed for the rest of a UTC day because it reached its daily attempt cap (30 attempts shared by every pass, stage, and run, counting the searches, fetches, redirects, and failures it served) or returned a rate limit (HTTP 429) to an article fetch. It reopens on the next UTC day and is distinct from an Outlet denial.
+An outlet closed for the rest of a UTC day because it reached its daily attempt cap (30 attempts shared by every pass, stage, and run, counting the searches, fetches, redirects, and failures it served) or returned a rate limit (HTTP 429) to an article fetch. It reopens on the next UTC day and is distinct from an Outlet denial. An attempt a restart interrupted still counts: a discovery fetch so interrupted is never sent again, while a processing fetch is sent again, once per restart, because article text is never retained.
 _Avoid_: Outlet throttle, outlet cooldown
 
 **Provider stop**:

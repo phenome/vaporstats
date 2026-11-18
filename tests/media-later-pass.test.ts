@@ -466,14 +466,17 @@ describe("fairness between due passes", () => {
 });
 
 describe("the later pass end to end", () => {
-  test("daily media run, later-pass discovery across a restart, the paid-work queue across a restart, then the Internal website API; a further daily media run with nothing new admits, fetches and submits nothing", async () => {
+  test("daily media run, later-pass discovery across restarts during a search and a fetch, the paid-work queue across a restart, then the Internal website API; a further daily media run with nothing new admits, fetches and submits nothing", async () => {
     const database = experimentCatalog();
-    const { tavily, openRouter, gemini, fetched, tick } = world();
+    const { tavily, openRouter, gemini, fetched, pages, tick } = world();
     const ticks = async (day: string, times: string[], options: MediaTickOptions = {}) => {
-      for (const time of times) await tick(database, `${day}T${time}:00.000Z`, options);
+      const results = [];
+      for (const time of times) results.push(await tick(database, `${day}T${time}:00.000Z`, options));
+      return results;
     };
     await ticks("2026-11-20", ["06:00", "06:15", "06:30"]);
     expect(queries(tavily)).toHaveLength(18);
+    const laterUrls = EXPERIMENT.flatMap((appid) => MEDIA_OUTLETS.map((outlet) => articleUrl(appid, outlet, "-revisited")));
 
     // The process stops during the fourth later-pass search on November 21.
     const answer = tavily.results!;
@@ -490,10 +493,31 @@ describe("the later pass end to end", () => {
     expect(interrupted.status).toBe("error");
     expect(crashed).toMatch(/ review revisited@/);
 
-    // A later tick that day resumes the scheduled run, then the queue
+    // The next tick that day resumes the scheduled run, and the process
+    // stops again while its first later-pass article fetch is in flight.
+    let crashedFetch: string | null = null;
+    for (const url of laterUrls) {
+      const serve = pages.get(url)!;
+      pages.set(url, () => {
+        if (crashedFetch === null) {
+          crashedFetch = url;
+          database.reopen();
+          throw new Error("process stopped");
+        }
+        return serve();
+      });
+    }
+    const [interruptedFetch] = await ticks("2026-11-21", ["06:15"], { paidSubmissionsPerTick: 4 });
+    expect(interruptedFetch!.status).toBe("error");
+    expect(crashedFetch).not.toBeNull();
+
+    // A later tick that day resumes the scheduled run again, then the queue
     // processes the later articles four requests a tick, restarting between ticks.
-    await ticks("2026-11-21", ["06:15"], { paidSubmissionsPerTick: 4 });
-    for (const time of ["06:30", "06:45", "07:00", "07:15", "07:30", "07:45"]) {
+    const [resumed] = await ticks("2026-11-21", ["06:30"], { paidSubmissionsPerTick: 4 });
+    // The fetch in flight at the restart may have reached its outlet, so it is
+    // never repeated; its candidate is skipped with that reason.
+    expect(resumed!.mediaDiscovery?.stopReasons).toContain(`${outletOf(crashedFetch!).name}:fetch_interrupted`);
+    for (const time of ["06:45", "07:00", "07:15", "07:30", "07:45", "08:00"]) {
       database.reopen();
       await ticks("2026-11-21", [time], { paidSubmissionsPerTick: 4 });
     }
@@ -501,19 +525,19 @@ describe("the later pass end to end", () => {
     const searched = queries(tavily);
     expect(searched).toHaveLength(36);
     expect(searched.filter((query, index) => searched.indexOf(query) !== index)).toEqual([]);
-    const laterUrls = EXPERIMENT.flatMap((appid) => MEDIA_OUTLETS.map((outlet) => articleUrl(appid, outlet, "-revisited")));
     const lost = laterUrls.find((url) => crashed === `${GAME_NAMES[Number(new URL(url).pathname.split("/")[2]!.split("-")[0])]} review revisited@${new URL(url).hostname}`)!;
     // Each later article was fetched once by discovery and once by processing;
-    // the crashed search may have been served, so it is never repeated.
-    for (const url of laterUrls) expect(fetched.filter((item) => item === url)).toHaveLength(url === lost ? 0 : 2);
+    // the crashed search may have been served, so it is never repeated, and
+    // the fetch in flight at the restart is never repeated either.
+    for (const url of laterUrls) expect(fetched.filter((item) => item === url)).toHaveLength(url === lost ? 0 : url === crashedFetch ? 1 : 2);
     const extractions = openRouter.requests.filter(({ stage }) => stage === "extraction");
-    expect(extractions).toHaveLength(18 + 17);
-    expect(new Set(extractions.map(({ body }) => JSON.stringify(body.messages))).size).toBe(35);
+    expect(extractions).toHaveLength(18 + 16);
+    expect(new Set(extractions.map(({ body }) => JSON.stringify(body.messages))).size).toBe(34);
 
     process.env.MEDIA_OVERVIEW_PUBLIC = "true";
     for (const appid of EXPERIMENT) {
       const { sources, mediaOverview } = await detail(database, appid);
-      const ownLater = laterUrls.filter((url) => url.includes(`/${appid}-`) && url !== lost);
+      const ownLater = laterUrls.filter((url) => url.includes(`/${appid}-`) && url !== lost && url !== crashedFetch);
       expect(sources.map(({ originalUrl }) => originalUrl)).toEqual(expect.arrayContaining(ownLater));
       expect(mediaOverview?.statements[0]?.sourceUrls).toEqual(expect.arrayContaining(ownLater));
     }

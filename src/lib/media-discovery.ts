@@ -761,6 +761,32 @@ async function fetchManual(fetchFn: MediaFetch, url: string, outlet: (typeof MED
   return null;
 }
 
+/**
+ * Whether the fetch of `url`, a candidate of `appid`'s query of `pass` on
+ * `outlet`, already started: its first attempt was reserved before a restart
+ * left the candidate unfinished. Any of its attempts the restart left with
+ * no recorded outcome is recorded as interrupted; it may have reached the
+ * outlet, so it still counts toward the outlet's daily cap.
+ */
+async function closeInterruptedFetch(db: AppDatabase, pass: MediaPass, appid: number, outlet: MediaOutlet, url: string): Promise<boolean> {
+  const started = await first<{ id: number }>(
+    db,
+    "SELECT id FROM media_discovery_attempts WHERE appid = ? AND outlet = ? AND pass = ? AND kind <> 'search' AND url = ? ORDER BY id LIMIT 1",
+    appid,
+    outlet,
+    pass,
+    url,
+  );
+  if (!started) return false;
+  await db.prepare(
+    "UPDATE media_discovery_attempts SET kind = 'failure', error = ? WHERE appid = ? AND outlet = ? AND pass = ? AND kind = 'fetch' AND status_code IS NULL AND error IS NULL AND id >= ?",
+  ).bind(INTERRUPTED_FETCH, appid, outlet, pass, started.id).run();
+  return true;
+}
+
+/** The recorded outcome of a fetch attempt a restart interrupted. */
+const INTERRUPTED_FETCH = "interrupted_by_restart";
+
 async function loadRun(db: AppDatabase, runId?: number): Promise<RunRow> {
   const run = runId
     ? await first<RunRow>(db, `SELECT ${RUN_COLUMNS} FROM media_discovery_runs WHERE id = ?`, runId)
@@ -1027,6 +1053,16 @@ export async function runAuthorizedMediaDiscovery(db: AppDatabase, options: Medi
           // A later candidate already among the entity's sources is not fetched again.
           if (pass === "later" && await first<{ id: number }>(db, "SELECT id FROM media_sources WHERE appid = ? AND (original_url = ? OR discovery_url = ?) LIMIT 1", appid, candidates[index]!.url, candidates[index]!.url)) {
             await db.prepare("UPDATE media_discovery_progress SET candidate_index = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(index + 1, progressId).run();
+            continue;
+          }
+          // fetchManual reserves each attempt before contacting the outlet, so
+          // that reservation durably records that this candidate's fetch
+          // started. Only the candidate a restart left unfinished can have
+          // started; it may have reached its outlet, so it is never fetched
+          // again and is skipped.
+          if (index === current.candidate_index && await closeInterruptedFetch(db, pass, appid, outlet.name, candidates[index]!.url)) {
+            await db.prepare("UPDATE media_discovery_progress SET candidate_index = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(index + 1, progressId).run();
+            stopReasons.add(`${outlet.name}:fetch_interrupted`);
             continue;
           }
           const fetched = await fetchManual(fetchFn, candidates[index]!.url, outlet, db, run.id, pass, appid, clock, issued);
