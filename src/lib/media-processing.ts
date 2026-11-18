@@ -1137,8 +1137,9 @@ async function countItemTokens(transport: GeminiBatchTransport, model: string, r
 /**
  * Counts and submits the Gemini embedding batch `request` for `job`. Before
  * the request is sent, the item is durably marked in flight with its send
- * time, so a restart never resends a request that may have been received.
- * Every outcome is classified once and acted on here. Without a transport
+ * time and recorded as an attempt, so a restart finds it uncertain and
+ * resends it only under `returnUncertainItem`'s bound. Every outcome is
+ * classified once and acted on here. Without a transport
  * that submits embedding batches, Gemini waits paused for its key.
  */
 async function sendItem(advance: QueueAdvance, job: JobRow, model: string, request: GeminiRequest, maxInputTokens: number): Promise<void> {
@@ -1176,8 +1177,9 @@ async function sendItem(advance: QueueAdvance, job: JobRow, model: string, reque
  * Before sending, the item is recorded in flight with its send time in a
  * committed write; its input identity is already recorded. No write
  * transaction is open while the request is in flight. A fully sent request
- * whose outcome is unknown leaves the item uncertain, never to be resent
- * automatically; every other outcome is classified once and acted on here.
+ * whose outcome is unknown is uncertain and returns the item to the queue
+ * under `returnUncertainItem`'s bound; every other outcome is classified
+ * once and acted on here.
  * Without an OpenRouter transport, OpenRouter waits paused for its key.
  */
 async function sendTextItem(advance: QueueAdvance, job: JobRow, request: OpenRouterChatRequest): Promise<void> {

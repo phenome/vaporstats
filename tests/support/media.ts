@@ -667,7 +667,7 @@ export function insertSubmittedGeminiExtraction(native: Database, options: { run
  *   sent: transient;
  * - `post_accept_charged`: the provider accepted a request that may have
  *   been charged, then failed or answered without a result: uncertain, so it
- *   is never resent;
+ *   is resent at most `MAX_UNCERTAIN_SENDS` consecutive times (#80);
  * - `ended_unrun`: the provider ended an accepted batch without running it,
  *   or a free poll failed: transient or uncertain, since a retry repeats no
  *   charge;

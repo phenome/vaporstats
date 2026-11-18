@@ -229,8 +229,7 @@ export function classifyOpenRouterOutcome(error: unknown): ProviderOutcome {
     const { status, limitSource } = error;
     const retryAfterMs = error.retryAfterMs !== null && Number.isFinite(error.retryAfterMs) && error.retryAfterMs >= 0 ? error.retryAfterMs : null;
     // After acceptance, a provider failure or timeout, or an answer without
-    // one, leaves unknown whether the request was charged, so it is never
-    // resent automatically.
+    // one, leaves unknown whether the request was charged: it is uncertain.
     if (error.accepted && status < 400) return { class: "uncertain", reason: "accepted_without_answer" };
     if (error.accepted && (status === 408 || status >= 500)) return { class: "uncertain", reason: `accepted_http_${status}` };
     if (status === 402 && limitSource === "openrouter_in_flight_budget") return { class: "transient", reason: "in_flight_budget", retryAfterMs };
