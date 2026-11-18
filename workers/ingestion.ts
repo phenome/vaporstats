@@ -32,6 +32,7 @@ import {
 } from "../src/lib/media-discovery";
 import {
   advanceMediaProcessing,
+  recheckPausedProvidersAtStartup,
   type MediaProcessingSummary,
 } from "../src/lib/media-processing";
 import {
@@ -276,6 +277,9 @@ async function advanceMedia(
     if (!submitted) return {};
     return { mediaProcessing: await advanceMediaProcessing(db, { ...providerOptions, pollOnly: true }) };
   }
+  // The first tick of a started process rechecks paused providers, so a fix
+  // deployed for a configuration pause need not wait for the daily check.
+  const rechecked = await recheckPausedProvidersAtStartup(db, anchorTime, providerOptions);
   const mediaDailyRun = await runDailyMediaRun(db, anchorTime, providerOptions) ?? undefined;
   let mediaDiscovery: MediaRunSummary | undefined;
   const scheduledRun = await openScheduledDiscovery(db, anchorTime);
@@ -299,7 +303,7 @@ async function advanceMedia(
     ...providerOptions,
     ...(pendingAuthorization ? { runId: pendingAuthorization.run_id } : {}),
     ...(automaticRunId !== null ? { automaticRunId } : {}),
-    probe: mediaDailyRun?.probe,
+    probe: [...rechecked, ...(mediaDailyRun?.probe ?? [])],
     submissionsPerTick: options.paidSubmissionsPerTick,
     paidWorkTimeBudgetMs: options.paidWorkTimeBudgetMs,
     paidWorkClock: options.paidWorkClock,

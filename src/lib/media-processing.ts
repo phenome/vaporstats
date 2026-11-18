@@ -46,6 +46,8 @@ import {
   readEntityTurns,
   writeEntityTurns,
   runDailyCreditCheck,
+  dailyCreditCheckDue,
+  recheckPausedProviders,
   transientRetryAt,
   type CreditChecks,
   type OpenRouterKeyCheck,
@@ -2467,15 +2469,51 @@ export function runMediaDailyCreditCheck(
   const next = mediaProcessingQueue
     .catch(() => undefined)
     .then(async () => {
-      let openRouter = options.openRouter ?? null;
-      if (!openRouter) {
-        try { openRouter = createOpenRouterTransport(options.openRouterApiKey, options.providerFetch as OpenRouterFetch | undefined, { timeoutMs: options.openRouterTimeoutMs }); }
-        catch { openRouter = null; }
-      }
-      return runDailyCreditCheck(db, now, creditChecks(openRouter), onRecorded);
+      return runDailyCreditCheck(db, now, creditChecks(textTransport(options)), onRecorded);
     });
   mediaProcessingQueue = next;
   return next;
+}
+
+/**
+ * Database handles whose process has run its startup recheck. One process
+ * keeps one handle, so a new handle is a new process: a restart, or a test
+ * that reopens its database.
+ */
+const rechecked = new WeakSet<AppDatabase>();
+
+/**
+ * On the first call for `db` in this process, rechecks every paused provider
+ * as the daily credit check does (2026-11-18), so a deployed fix for a
+ * configuration pause takes effect without waiting for 06:00 UTC: the
+ * OpenRouter key check, and Gemini's probe rule. When the daily credit check
+ * is due now it covers the recheck, which then does nothing. It never runs
+ * the daily media run or records the daily checkpoint. Returns the providers
+ * lifted to probe, which the next advance takes as `probe`. Serialized with
+ * every other queue write.
+ */
+export function recheckPausedProvidersAtStartup(
+  db: AppDatabase,
+  now: Date,
+  options: Pick<MediaProcessingOptions, "openRouter" | "openRouterApiKey" | "openRouterTimeoutMs" | "providerFetch"> = {},
+): Promise<PaidProvider[]> {
+  if (rechecked.has(db)) return Promise.resolve([]);
+  rechecked.add(db);
+  const next = mediaProcessingQueue
+    .catch(() => undefined)
+    .then(async () => {
+      if (await dailyCreditCheckDue(db, now)) return [];
+      return recheckPausedProviders(db, now, creditChecks(textTransport(options)));
+    });
+  mediaProcessingQueue = next;
+  return next;
+}
+
+/** The OpenRouter transport of `options`, or null when no key is configured. */
+function textTransport(options: Pick<MediaProcessingOptions, "openRouter" | "openRouterApiKey" | "openRouterTimeoutMs" | "providerFetch">): OpenRouterTransport | null {
+  if (options.openRouter) return options.openRouter;
+  try { return createOpenRouterTransport(options.openRouterApiKey, options.providerFetch as OpenRouterFetch | undefined, { timeoutMs: options.openRouterTimeoutMs }); }
+  catch { return null; }
 }
 
 export function advanceMediaProcessing(

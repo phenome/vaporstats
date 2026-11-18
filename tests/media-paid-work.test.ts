@@ -18,6 +18,7 @@ import {
   insertCompletedRun,
   insertSources,
   OPENROUTER_TRUNCATED,
+  openRouterKeyLimit,
   overviewOutputForUrls,
   processingArticleHtml,
   runMediaTick,
@@ -433,7 +434,10 @@ describe("Gemini Credit pause", () => {
     expect(embeddingJobs(limited.database).map(({ status, attempt_count, next_attempt_at }) => ({ status, attempt_count, next_attempt_at }))).toEqual([{ status: "queued", attempt_count: 1, next_attempt_at: "2026-11-10T07:15:00.000Z" }]);
   });
 
-  test("a restart with the database reopened while paused keeps the pause and every queued item", async () => {
+  // Since 2026-11-18 a restart rechecks paused providers under the daily
+  // check's rules: Gemini, which has no credit endpoint, is probed. Prepay
+  // still depleted pauses it again after one probe, and every item waits.
+  test("a restart with the database reopened while paused probes Gemini once, which pauses it again while Prepay is still depleted, and keeps every queued item", async () => {
     const { database } = await authorizedGames({ [CYBERPUNK]: 1, [BALDURS_GATE]: 1 });
     const apis = providers();
     apis.gemini.reply("submit", GEMINI_PREPAY_DEPLETED);
@@ -441,11 +445,12 @@ describe("Gemini Credit pause", () => {
     const before = jobs(database);
 
     database.reopen();
+    apis.gemini.reply("submit", GEMINI_PREPAY_DEPLETED);
     const restarted = await tick(database, apis, "2026-11-10T07:15:00.000Z");
 
-    expect(restarted.mediaProcessing?.providers.gemini).toMatchObject({ paused: true, reason: "prepay_depleted", pausedAt: "2026-11-10T07:00:00.000Z" });
+    expect(restarted.mediaProcessing?.providers.gemini).toMatchObject({ paused: true, reason: "prepay_depleted", pausedAt: "2026-11-10T07:15:00.000Z", checkOutcome: "probe" });
     expect(jobs(database)).toEqual(before);
-    expect(apis.gemini.calls.filter((call) => call.kind === "submit")).toHaveLength(1);
+    expect(apis.gemini.calls.filter((call) => call.kind === "submit")).toHaveLength(2);
   });
 });
 
@@ -721,6 +726,105 @@ describe("an answer cut off at the output cap", () => {
 
     expect(sent()).toBe(3);
     expect(item(database, BAD)).toMatchObject({ status: "client_error_exhausted", error: "client_error_exhausted:unrecognized_client_error" });
+  });
+});
+
+// Decided 2026-11-18, after a deployed fix for a cut-off Overview still waited
+// for the next daily check: on the first tick after the application starts,
+// every paused provider gets the check the daily credit check runs. A pause
+// whose cause is gone lifts; otherwise it stays. It runs no daily media run,
+// leaves the daily checkpoint as it is, and leaves each item's client-error
+// count unchanged. A restart is modeled by reopening the database.
+describe("recheck of paused providers when the application starts", () => {
+  const DAILY_CHECKPOINT = "SELECT value FROM checkpoints WHERE key = 'media:daily-credit-check'";
+  const keyChecks = (apis: Providers) => apis.openRouter.calls.filter((call) => call.kind === "key").length;
+  const extraction = (database: TestDatabase, appid: number) => database.native.query<{ status: string; error: string | null; client_error_pauses: number }, [number]>(
+    "SELECT status, error, client_error_pauses FROM media_processing_jobs WHERE stage = 'extraction' AND appid = ? ORDER BY id LIMIT 1",
+  ).get(appid);
+
+  test("an output_truncated pause stays through later ticks of the same process, and lifts on the first tick after a restart when the key check finds credit, without a daily run or a daily checkpoint change, keeping the item's one strike", async () => {
+    const { database } = await authorizedGames({ [CYBERPUNK]: 1 });
+    const apis = providers();
+    apis.openRouter.reply("chat", OPENROUTER_TRUNCATED);
+
+    await tick(database, apis, "2026-11-10T19:45:00.000Z");
+    expect((await tick(database, apis, "2026-11-10T20:00:00.000Z")).mediaProcessing?.providers.openrouter).toMatchObject({ paused: true, reason: "output_truncated" });
+    const checkpoint = database.native.query(DAILY_CHECKPOINT).get();
+    const checksBefore = keyChecks(apis);
+    expect(apis.openRouter.requests).toHaveLength(1);
+
+    database.reopen();
+    const restarted = await tick(database, apis, "2026-11-10T20:15:00.000Z");
+
+    expect(keyChecks(apis)).toBe(checksBefore + 1);
+    expect(restarted.mediaDailyRun).toBeUndefined();
+    expect(database.native.query(DAILY_CHECKPOINT).get()).toEqual(checkpoint);
+    expect(restarted.mediaProcessing?.providers.openrouter).toMatchObject({ paused: false, reason: null, checkedAt: "2026-11-10T20:15:00.000Z", checkOutcome: "credit_remaining" });
+    // The item, past its backoff, is sent again in the same tick and settles; its strike stays.
+    expect(apis.openRouter.requests.filter((request) => request.stage === "extraction")).toHaveLength(2);
+    expect(extraction(database, CYBERPUNK)).toEqual({ status: "succeeded", error: null, client_error_pauses: 1 });
+
+    // Later ticks of the restarted process check nothing more.
+    await tick(database, apis, "2026-11-10T20:30:00.000Z");
+    expect(keyChecks(apis)).toBe(checksBefore + 1);
+  });
+
+  test("a Credit pause whose key still has no credit stays paused after a restart, and nothing is sent", async () => {
+    const { database } = await authorizedGames({ [CYBERPUNK]: 1 });
+    const apis = providers();
+    apis.openRouter.reply("chat", openRouterKeyLimit(402));
+    await tick(database, apis, "2026-11-10T19:45:00.000Z");
+    const checkpoint = database.native.query(DAILY_CHECKPOINT).get();
+
+    database.reopen();
+    apis.openRouter.reply("key", { status: 200, body: { data: { label: "test", limit: 5, limit_remaining: 0, budgets: [], effective_budget: null, usage: 5 } } });
+    const restarted = await tick(database, apis, "2026-11-10T20:15:00.000Z");
+
+    expect(restarted.mediaProcessing?.providers.openrouter).toMatchObject({ paused: true, reason: "key_limit", pausedAt: "2026-11-10T19:45:00.000Z", checkOutcome: "key_limit" });
+    expect(apis.openRouter.requests).toHaveLength(1);
+    expect(restarted.mediaDailyRun).toBeUndefined();
+    expect(database.native.query(DAILY_CHECKPOINT).get()).toEqual(checkpoint);
+    expect(extraction(database, CYBERPUNK)?.status).toBe("queued");
+  });
+
+  test("an unrecognized_client_error pause of OpenRouter lifts after a restart when the key check finds credit, and the item keeps its strike", async () => {
+    const { database } = await authorizedGames({ [CYBERPUNK]: 1 });
+    const apis = providers();
+    apis.openRouter.reply("chat", { status: 422, body: { error: { code: 422, message: "Unrecognized" } } });
+    await tick(database, apis, "2026-11-10T19:45:00.000Z");
+    expect(extraction(database, CYBERPUNK)).toMatchObject({ status: "queued", client_error_pauses: 1 });
+
+    database.reopen();
+    const restarted = await tick(database, apis, "2026-11-10T20:15:00.000Z");
+
+    expect(restarted.mediaProcessing?.providers.openrouter).toMatchObject({ paused: false, checkOutcome: "credit_remaining" });
+    expect(extraction(database, CYBERPUNK)).toEqual({ status: "succeeded", error: null, client_error_pauses: 1 });
+  });
+
+  test("an unrecognized_client_error pause of Gemini lifts after a restart under the daily probe rule, and the next submission probes", async () => {
+    const { database } = await authorizedGames({ [CYBERPUNK]: 1 });
+    const apis = providers();
+    apis.gemini.reply("submit", { status: 422, body: { error: { code: 422, message: "Unrecognized" } } });
+    await tick(database, apis, "2026-11-10T19:45:00.000Z");
+    expect((await tick(database, apis, "2026-11-10T20:00:00.000Z")).mediaProcessing?.providers.gemini).toMatchObject({ paused: true, reason: "unrecognized_client_error" });
+    const checkpoint = database.native.query(DAILY_CHECKPOINT).get();
+
+    database.reopen();
+    const restarted = await tick(database, apis, "2026-11-10T20:15:00.000Z");
+
+    expect(restarted.mediaProcessing?.providers.gemini).toMatchObject({ paused: false, checkedAt: "2026-11-10T20:15:00.000Z", checkOutcome: "probe" });
+    expect(database.native.query(DAILY_CHECKPOINT).get()).toEqual(checkpoint);
+    // The item that triggered the pause is past its backoff, so it is the probe; it is submitted and settles.
+    expect(embeddingJobs(database).map(({ status }) => status)).toEqual(["succeeded"]);
+  });
+
+  test("a Gemini pause for a missing key stays after a restart, as at the daily check", async () => {
+    const { database } = await authorizedGames({ [CYBERPUNK]: 1 });
+    const apis = providers();
+    await tick(database, apis, "2026-11-10T19:45:00.000Z", { geminiApiKey: "" });
+    database.reopen();
+    const restarted = await tick(database, apis, "2026-11-10T20:15:00.000Z", { geminiApiKey: "" });
+    expect(restarted.mediaProcessing?.providers.gemini).toMatchObject({ paused: true, reason: "missing_key" });
   });
 });
 

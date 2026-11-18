@@ -440,41 +440,81 @@ export type CreditChecks = Partial<Record<PaidProvider, () => Promise<OpenRouter
 export async function runDailyCreditCheck(db: AppDatabase, now: Date, checks: CreditChecks = {}, onRecorded?: () => Promise<void>): Promise<PaidProvider[] | null> {
   if (!await dailyCreditCheckDue(db, now)) return null;
   const day = now.toISOString().slice(0, 10);
-  const answers = new Map<PaidProvider, OpenRouterKeyCheck>();
-  for (const provider of PAID_PROVIDERS) {
-    const check = checks[provider];
-    if (check) answers.set(provider, await check());
-  }
+  const answers = await askCreditChecks(PAID_PROVIDERS, checks);
   const lifted: PaidProvider[] = [];
   let recorded = false;
   await writeTransaction(db, async () => {
     if (await readCheckpoint(db, CREDIT_CHECK_KEY) === day) return;
     recorded = true;
     await writeCheckpoint(db, CREDIT_CHECK_KEY, day);
-    const checkedAt = now.toISOString();
     for (const provider of PAID_PROVIDERS) {
-      const state = await providerState(db, provider);
-      const answer = answers.get(provider);
-      if (!answer) {
-        const probe = state.paused && state.reason !== "missing_key";
-        if (probe) lifted.push(provider);
-        await writeProviderState(db, probe
-          ? { ...state, paused: false, reason: null, pausedAt: null, checkedAt, checkOutcome: "probe" }
-          : { ...state, checkedAt, checkOutcome: state.paused ? state.reason : "not_paused" });
-        continue;
-      }
-      if (answer.class === "credit_remaining") {
-        await writeProviderState(db, { ...state, paused: false, reason: null, pausedAt: null, checkedAt, checkOutcome: "credit_remaining" });
-      } else if (answer.class === "check_failed") {
-        await writeProviderState(db, { ...state, checkedAt, checkOutcome: `check_failed:${answer.reason}` });
-      } else {
-        const pausedAt = state.reason === answer.reason ? state.pausedAt : checkedAt;
-        await writeProviderState(db, { ...state, paused: true, reason: answer.reason, pausedAt, checkedAt, checkOutcome: answer.reason });
-      }
+      if (await applyCreditCheck(db, provider, answers.get(provider), now)) lifted.push(provider);
     }
     await onRecorded?.();
   });
   return recorded ? lifted : null;
+}
+
+/**
+ * Rechecks every paused provider, as the daily credit check does, when the
+ * application starts (2026-11-18): a provider with a credit endpoint in
+ * `checks` is asked, and a provider without one has every pause but a
+ * missing key's lifted so its next submission probes credit. A pause whose
+ * cause is gone lifts; otherwise it stays. It neither records nor reads the
+ * daily checkpoint, so the daily check and the daily media run still run at
+ * their time. Returns the providers lifted to probe.
+ */
+export async function recheckPausedProviders(db: AppDatabase, now: Date, checks: CreditChecks = {}): Promise<PaidProvider[]> {
+  const paused: PaidProvider[] = [];
+  for (const provider of PAID_PROVIDERS) if ((await providerState(db, provider)).paused) paused.push(provider);
+  if (paused.length === 0) return [];
+  const answers = await askCreditChecks(paused, checks);
+  const lifted: PaidProvider[] = [];
+  await writeTransaction(db, async () => {
+    for (const provider of paused) {
+      if ((await providerState(db, provider)).paused && await applyCreditCheck(db, provider, answers.get(provider), now)) lifted.push(provider);
+    }
+  });
+  return lifted;
+}
+
+/** Asks the credit endpoint of each of `providers` that has one, outside any write transaction. */
+async function askCreditChecks(providers: readonly PaidProvider[], checks: CreditChecks): Promise<Map<PaidProvider, OpenRouterKeyCheck>> {
+  const answers = new Map<PaidProvider, OpenRouterKeyCheck>();
+  for (const provider of providers) {
+    const check = checks[provider];
+    if (check) answers.set(provider, await check());
+  }
+  return answers;
+}
+
+/**
+ * Applies one provider's credit check at `now`, the daily check's and the
+ * startup recheck's alike, and records its time and outcome. With an
+ * `answer` from its credit endpoint: credit lifts the pause, no credit or a
+ * configuration problem pauses it, and no usable answer keeps the state.
+ * Without one, every pause but a missing key's is lifted so the next
+ * submission probes credit. Returns whether it lifted the provider to probe.
+ */
+async function applyCreditCheck(db: AppDatabase, provider: PaidProvider, answer: OpenRouterKeyCheck | undefined, now: Date): Promise<boolean> {
+  const state = await providerState(db, provider);
+  const checkedAt = now.toISOString();
+  if (!answer) {
+    const probe = state.paused && state.reason !== "missing_key";
+    await writeProviderState(db, probe
+      ? { ...state, paused: false, reason: null, pausedAt: null, checkedAt, checkOutcome: "probe" }
+      : { ...state, checkedAt, checkOutcome: state.paused ? state.reason : "not_paused" });
+    return probe;
+  }
+  if (answer.class === "credit_remaining") {
+    await writeProviderState(db, { ...state, paused: false, reason: null, pausedAt: null, checkedAt, checkOutcome: "credit_remaining" });
+  } else if (answer.class === "check_failed") {
+    await writeProviderState(db, { ...state, checkedAt, checkOutcome: `check_failed:${answer.reason}` });
+  } else {
+    const pausedAt = state.reason === answer.reason ? state.pausedAt : checkedAt;
+    await writeProviderState(db, { ...state, paused: true, reason: answer.reason, pausedAt, checkedAt, checkOutcome: answer.reason });
+  }
+  return false;
 }
 
 /**
