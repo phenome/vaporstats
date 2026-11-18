@@ -268,7 +268,7 @@ export async function getMediaOverview(
      FROM media_sources AS source
      LEFT JOIN media_article_extractions AS extraction
        ON extraction.source_id = source.id AND extraction.active = 1
-     WHERE source.appid = ? AND source.pass = 'initial'`,
+     WHERE source.appid = ?`,
     appid,
   );
   const sources = new Map(sourceRows.map((source) => {
