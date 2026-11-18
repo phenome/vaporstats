@@ -39,6 +39,22 @@ interface StoredLifecyclePlan {
   observed_at: string;
 }
 
+export type MainReleasedFields = Pick<LifecycleAppRow, "release_status" | "release_date" | "release_date_source" | "steam_release_date" | "original_release_date">;
+
+/**
+ * A released app's Main Released date and its release provenance, under ADR
+ * 0003 source precedence: original_release_date, then steam_release_date, then
+ * Storefront appdetails.release_date. Null for an app that is not released or
+ * has none of them.
+ */
+export function mainReleasedDate(app: MainReleasedFields): { date: string; source: "original_release_date" | "steam_release_date" | "appdetails" } | null {
+  if (app.release_status !== "released") return null;
+  if (app.original_release_date) return { date: app.original_release_date, source: "original_release_date" };
+  if (app.steam_release_date) return { date: app.steam_release_date, source: "steam_release_date" };
+  if (app.release_date_source === "appdetails" && app.release_date) return { date: app.release_date, source: "appdetails" };
+  return null;
+}
+
 /**
  * Returns the complete lifecycle history for one catalog app.
  * Dated release facts are projected from the current catalog row and supported
@@ -126,20 +142,9 @@ export async function getLifecycleHistory(
   }
 
   if (app.release_status === "released") {
-    const mainReleaseDate =
-      app.original_release_date ??
-      app.steam_release_date ??
-      (app.release_date_source === "appdetails" ? app.release_date : null);
-    const mainReleaseSource =
-      app.original_release_date
-        ? "original_release_date"
-        : app.steam_release_date
-          ? "steam_release_date"
-          : app.release_date_source === "appdetails"
-            ? "appdetails"
-            : null;
-    if (mainReleaseDate && mainReleaseSource) {
-      addEvent("release", mainReleaseDate, mainReleaseSource);
+    const mainReleased = mainReleasedDate(app);
+    if (mainReleased) {
+      addEvent("release", mainReleased.date, mainReleased.source);
     }
 
     const steamAvailabilityDate =
