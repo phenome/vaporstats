@@ -225,6 +225,20 @@ test("keeps distinct evidence without connecting past an intervening formula or 
   ]);
 });
 
+test("connects adjacent daily intervals and breaks when an interior day is missing", () => {
+  const previous = reconstructed("2026-09-07", "2026-09-08");
+  const middle = evidence("2026-09-08", "2026-09-09");
+  const last = reconstructed("2026-09-09", "2026-09-10");
+  for (const includeMiddle of [true, false]) {
+    const intervals = [...previous.current_evidence_intervals, ...(includeMiddle ? middle.current_evidence_intervals : []), ...last.current_evidence_intervals];
+    const points = buildScoreHistoryChartData({
+      ...EMPTY_HISTORY, range_end: last.score_at,
+      reconstructed_scores: [previous, { ...last, current_evidence_intervals: intervals }],
+    });
+    expect(points.map((point) => point.run)).toEqual([0, includeMiddle ? 0 : 1]);
+  }
+});
+
 test("ALL follows monthly, weekly and daily evidence and splits at missing intervals", () => {
   const data = buildScoreHistoryChartData({
     ...EMPTY_HISTORY,

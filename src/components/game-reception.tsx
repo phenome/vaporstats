@@ -140,7 +140,7 @@ function canConnectScorePoints(previous: ChartPoint, next: ChartPoint): boolean 
   const previousEnd = before.evidence_end ? Date.parse(before.evidence_end) : previous.timestamp;
   const nextEnd = after.evidence_end ? Date.parse(after.evidence_end) : NaN;
   if (Number.isFinite(nextEnd)) {
-    return nextEnd > previousEnd && after.current_evidence_intervals.some((interval) =>
+    return nextEnd > previousEnd && mergeIntervals(after.current_evidence_intervals).some((interval) =>
       Date.parse(interval.end) === nextEnd && Date.parse(interval.start) <= previousEnd);
   }
 
@@ -521,7 +521,10 @@ function ScoreChart({
           <Area dataKey="score" name="Player score" stroke="none" fill="none"
             dot={(props) => {
               const point: ChartPoint = props.payload;
-              if (runSizes.get(point.run) !== 1) return <g />;
+              if (runSizes.get(point.run) !== 1) {
+                if ((pointsByTimestamp.get(point.timestamp)?.length ?? 0) < 2) return <g />;
+                return <circle key={point.id} data-score-point={point.id} cx={props.cx} cy={props.cy} r={5} fill="transparent" />;
+              }
               return <circle key={point.id} data-score-point={point.id} cx={props.cx} cy={props.cy} r={3} fill="var(--color-score)" />;
             }}
             activeDot={false} isAnimationActive={false}
