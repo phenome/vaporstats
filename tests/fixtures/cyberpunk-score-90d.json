@@ -1,0 +1,891 @@
+{
+  "range_start": "2026-08-21T10:23:00.000Z",
+  "range_end": "2026-11-19T10:23:00.000Z",
+  "recorded": [
+    {
+      "observation_id": 106,
+      "observed_at": "2026-09-08T05:00:00.003Z",
+      "formula_version": "steam-player-v1",
+      "value": 94.76519135135517,
+      "evidence_end": "2026-09-08T00:00:00.000Z",
+      "current_evidence_intervals": [
+        {
+          "start": "2026-07-01T00:00:00.000Z",
+          "end": "2026-09-08T00:00:00.000Z",
+          "granularity": "month"
+        }
+      ],
+      "historical_evidence_intervals": [
+        {
+          "start": "2026-04-01T00:00:00.000Z",
+          "end": "2026-06-01T00:00:00.000Z",
+          "granularity": "month"
+        }
+      ],
+      "source_id": "appreviewhistogram|none|population=filtered_reviews|flags=%7B%22count_all_reviews%22%3Afalse%7D|interpretation=steam-review-source-v1",
+      "historical_source_id": "appreviewhistogram|none|population=filtered_reviews|flags=%7B%22count_all_reviews%22%3Afalse%7D|interpretation=steam-review-source-v1"
+    },
+    {
+      "observation_id": 332,
+      "observed_at": "2026-09-09T19:00:00.003Z",
+      "formula_version": "steam-player-v1",
+      "value": 94.7701732537761,
+      "evidence_end": "2026-09-09T00:00:00.000Z",
+      "current_evidence_intervals": [
+        {
+          "start": "2026-07-01T00:00:00.000Z",
+          "end": "2026-09-09T00:00:00.000Z",
+          "granularity": "month"
+        }
+      ],
+      "historical_evidence_intervals": [
+        {
+          "start": "2026-04-01T00:00:00.000Z",
+          "end": "2026-06-01T00:00:00.000Z",
+          "granularity": "month"
+        }
+      ],
+      "source_id": "appreviewhistogram|none|population=filtered_reviews|flags=%7B%22count_all_reviews%22%3Afalse%7D|interpretation=steam-review-source-v1",
+      "historical_source_id": "appreviewhistogram|none|population=filtered_reviews|flags=%7B%22count_all_reviews%22%3Afalse%7D|interpretation=steam-review-source-v1"
+    },
+    {
+      "observation_id": 474,
+      "observed_at": "2026-09-10T19:00:00.003Z",
+      "formula_version": "steam-player-v1",
+      "value": 94.75944868240195,
+      "evidence_end": "2026-09-10T00:00:00.000Z",
+      "current_evidence_intervals": [
+        {
+          "start": "2026-07-01T00:00:00.000Z",
+          "end": "2026-09-10T00:00:00.000Z",
+          "granularity": "month"
+        }
+      ],
+      "historical_evidence_intervals": [
+        {
+          "start": "2026-04-01T00:00:00.000Z",
+          "end": "2026-06-01T00:00:00.000Z",
+          "granularity": "month"
+        }
+      ],
+      "source_id": "appreviewhistogram|none|population=filtered_reviews|flags=%7B%22count_all_reviews%22%3Afalse%7D|interpretation=steam-review-source-v1",
+      "historical_source_id": "appreviewhistogram|none|population=filtered_reviews|flags=%7B%22count_all_reviews%22%3Afalse%7D|interpretation=steam-review-source-v1"
+    },
+    {
+      "observation_id": 623,
+      "observed_at": "2026-09-11T19:00:00.001Z",
+      "formula_version": "steam-player-v1",
+      "value": 94.75911434280792,
+      "evidence_end": "2026-09-11T00:00:00.000Z",
+      "current_evidence_intervals": [
+        {
+          "start": "2026-07-01T00:00:00.000Z",
+          "end": "2026-09-11T00:00:00.000Z",
+          "granularity": "month"
+        }
+      ],
+      "historical_evidence_intervals": [
+        {
+          "start": "2026-04-01T00:00:00.000Z",
+          "end": "2026-06-01T00:00:00.000Z",
+          "granularity": "month"
+        }
+      ],
+      "source_id": "appreviewhistogram|none|population=filtered_reviews|flags=%7B%22count_all_reviews%22%3Afalse%7D|interpretation=steam-review-source-v1",
+      "historical_source_id": "appreviewhistogram|none|population=filtered_reviews|flags=%7B%22count_all_reviews%22%3Afalse%7D|interpretation=steam-review-source-v1"
+    },
+    {
+      "observation_id": 782,
+      "observed_at": "2026-09-12T19:00:00.004Z",
+      "formula_version": "steam-player-v1",
+      "value": 94.74458202878246,
+      "evidence_end": "2026-09-12T00:00:00.000Z",
+      "current_evidence_intervals": [
+        {
+          "start": "2026-07-01T00:00:00.000Z",
+          "end": "2026-09-12T00:00:00.000Z",
+          "granularity": "month"
+        }
+      ],
+      "historical_evidence_intervals": [
+        {
+          "start": "2026-04-01T00:00:00.000Z",
+          "end": "2026-06-01T00:00:00.000Z",
+          "granularity": "month"
+        }
+      ],
+      "source_id": "appreviewhistogram|none|population=filtered_reviews|flags=%7B%22count_all_reviews%22%3Afalse%7D|interpretation=steam-review-source-v1",
+      "historical_source_id": "appreviewhistogram|none|population=filtered_reviews|flags=%7B%22count_all_reviews%22%3Afalse%7D|interpretation=steam-review-source-v1"
+    },
+    {
+      "observation_id": 944,
+      "observed_at": "2026-09-13T19:00:00.001Z",
+      "formula_version": "steam-player-v1",
+      "value": 94.74208261794828,
+      "evidence_end": "2026-09-13T00:00:00.000Z",
+      "current_evidence_intervals": [
+        {
+          "start": "2026-07-01T00:00:00.000Z",
+          "end": "2026-09-13T00:00:00.000Z",
+          "granularity": "month"
+        }
+      ],
+      "historical_evidence_intervals": [
+        {
+          "start": "2026-04-01T00:00:00.000Z",
+          "end": "2026-06-01T00:00:00.000Z",
+          "granularity": "month"
+        }
+      ],
+      "source_id": "appreviewhistogram|none|population=filtered_reviews|flags=%7B%22count_all_reviews%22%3Afalse%7D|interpretation=steam-review-source-v1",
+      "historical_source_id": "appreviewhistogram|none|population=filtered_reviews|flags=%7B%22count_all_reviews%22%3Afalse%7D|interpretation=steam-review-source-v1"
+    },
+    {
+      "observation_id": 1107,
+      "observed_at": "2026-09-14T19:00:00.000Z",
+      "formula_version": "steam-player-v1",
+      "value": 94.73582963296404,
+      "evidence_end": "2026-09-14T00:00:00.000Z",
+      "current_evidence_intervals": [
+        {
+          "start": "2026-07-01T00:00:00.000Z",
+          "end": "2026-09-14T00:00:00.000Z",
+          "granularity": "month"
+        }
+      ],
+      "historical_evidence_intervals": [
+        {
+          "start": "2026-04-01T00:00:00.000Z",
+          "end": "2026-06-01T00:00:00.000Z",
+          "granularity": "month"
+        }
+      ],
+      "source_id": "appreviewhistogram|none|population=filtered_reviews|flags=%7B%22count_all_reviews%22%3Afalse%7D|interpretation=steam-review-source-v1",
+      "historical_source_id": "appreviewhistogram|none|population=filtered_reviews|flags=%7B%22count_all_reviews%22%3Afalse%7D|interpretation=steam-review-source-v1"
+    },
+    {
+      "observation_id": 1269,
+      "observed_at": "2026-09-15T19:00:00.002Z",
+      "formula_version": "steam-player-v1",
+      "value": 94.72760956402792,
+      "evidence_end": "2026-09-15T00:00:00.000Z",
+      "current_evidence_intervals": [
+        {
+          "start": "2026-07-01T00:00:00.000Z",
+          "end": "2026-09-15T00:00:00.000Z",
+          "granularity": "month"
+        }
+      ],
+      "historical_evidence_intervals": [
+        {
+          "start": "2026-04-01T00:00:00.000Z",
+          "end": "2026-06-01T00:00:00.000Z",
+          "granularity": "month"
+        }
+      ],
+      "source_id": "appreviewhistogram|none|population=filtered_reviews|flags=%7B%22count_all_reviews%22%3Afalse%7D|interpretation=steam-review-source-v1",
+      "historical_source_id": "appreviewhistogram|none|population=filtered_reviews|flags=%7B%22count_all_reviews%22%3Afalse%7D|interpretation=steam-review-source-v1"
+    },
+    {
+      "observation_id": 1422,
+      "observed_at": "2026-09-16T19:00:00.001Z",
+      "formula_version": "steam-player-v1",
+      "value": 94.7269897813849,
+      "evidence_end": "2026-09-16T00:00:00.000Z",
+      "current_evidence_intervals": [
+        {
+          "start": "2026-07-01T00:00:00.000Z",
+          "end": "2026-09-16T00:00:00.000Z",
+          "granularity": "month"
+        }
+      ],
+      "historical_evidence_intervals": [
+        {
+          "start": "2026-04-01T00:00:00.000Z",
+          "end": "2026-06-01T00:00:00.000Z",
+          "granularity": "month"
+        }
+      ],
+      "source_id": "appreviewhistogram|none|population=filtered_reviews|flags=%7B%22count_all_reviews%22%3Afalse%7D|interpretation=steam-review-source-v1",
+      "historical_source_id": "appreviewhistogram|none|population=filtered_reviews|flags=%7B%22count_all_reviews%22%3Afalse%7D|interpretation=steam-review-source-v1"
+    },
+    {
+      "observation_id": 7404,
+      "observed_at": "2026-11-04T19:49:06.776Z",
+      "formula_version": "steam-player-v2",
+      "value": 94.7269897813849,
+      "recalculation": {
+        "previous_observation_id": 1422,
+        "previous_formula_version": "steam-player-v1",
+        "calculated_at": "2026-11-04T19:49:06.776Z"
+      },
+      "evidence_end": "2026-09-16T00:00:00.000Z",
+      "current_evidence_intervals": [
+        {
+          "start": "2026-07-01T00:00:00.000Z",
+          "end": "2026-09-16T00:00:00.000Z",
+          "granularity": "month"
+        }
+      ],
+      "historical_evidence_intervals": [
+        {
+          "start": "2026-04-01T00:00:00.000Z",
+          "end": "2026-06-01T00:00:00.000Z",
+          "granularity": "month"
+        }
+      ],
+      "source_id": "appreviewhistogram|none|population=filtered_reviews|flags=%7B%22count_all_reviews%22%3Afalse%7D|interpretation=steam-review-source-v1",
+      "historical_source_id": "appreviewhistogram|none|population=filtered_reviews|flags=%7B%22count_all_reviews%22%3Afalse%7D|interpretation=steam-review-source-v1"
+    }
+  ],
+  "reconstructed": [
+    {
+      "score_at": "2026-08-22T00:00:00.000Z",
+      "observed_at": "2026-09-16T19:00:00.001Z",
+      "formula_version": "steam-player-v2",
+      "value": 94.46896719270968,
+      "evidence_end": "2026-08-22T00:00:00.000Z",
+      "current_evidence_intervals": [
+        {
+          "start": "2026-06-01T00:00:00.000Z",
+          "end": "2026-08-01T00:00:00.000Z",
+          "granularity": "month"
+        },
+        {
+          "start": "2026-08-10T00:00:00.000Z",
+          "end": "2026-08-22T00:00:00.000Z",
+          "granularity": "day"
+        }
+      ],
+      "historical_evidence_intervals": [
+        {
+          "start": "2026-03-01T00:00:00.000Z",
+          "end": "2026-05-01T00:00:00.000Z",
+          "granularity": "month"
+        }
+      ],
+      "source_id": "appreviewhistogram|none|population=filtered_reviews|flags=%7B%22count_all_reviews%22%3Afalse%7D|interpretation=steam-review-source-v1",
+      "historical_source_id": "appreviewhistogram|none|population=filtered_reviews|flags=%7B%22count_all_reviews%22%3Afalse%7D|interpretation=steam-review-source-v1"
+    },
+    {
+      "score_at": "2026-08-23T00:00:00.000Z",
+      "observed_at": "2026-09-16T19:00:00.001Z",
+      "formula_version": "steam-player-v2",
+      "value": 94.46306321349948,
+      "evidence_end": "2026-08-23T00:00:00.000Z",
+      "current_evidence_intervals": [
+        {
+          "start": "2026-06-01T00:00:00.000Z",
+          "end": "2026-08-01T00:00:00.000Z",
+          "granularity": "month"
+        },
+        {
+          "start": "2026-08-10T00:00:00.000Z",
+          "end": "2026-08-23T00:00:00.000Z",
+          "granularity": "day"
+        }
+      ],
+      "historical_evidence_intervals": [
+        {
+          "start": "2026-03-01T00:00:00.000Z",
+          "end": "2026-05-01T00:00:00.000Z",
+          "granularity": "month"
+        }
+      ],
+      "source_id": "appreviewhistogram|none|population=filtered_reviews|flags=%7B%22count_all_reviews%22%3Afalse%7D|interpretation=steam-review-source-v1",
+      "historical_source_id": "appreviewhistogram|none|population=filtered_reviews|flags=%7B%22count_all_reviews%22%3Afalse%7D|interpretation=steam-review-source-v1"
+    },
+    {
+      "score_at": "2026-08-24T00:00:00.000Z",
+      "observed_at": "2026-09-16T19:00:00.001Z",
+      "formula_version": "steam-player-v2",
+      "value": 94.49799849670619,
+      "evidence_end": "2026-08-24T00:00:00.000Z",
+      "current_evidence_intervals": [
+        {
+          "start": "2026-06-01T00:00:00.000Z",
+          "end": "2026-08-01T00:00:00.000Z",
+          "granularity": "month"
+        },
+        {
+          "start": "2026-08-10T00:00:00.000Z",
+          "end": "2026-08-24T00:00:00.000Z",
+          "granularity": "day"
+        }
+      ],
+      "historical_evidence_intervals": [
+        {
+          "start": "2026-03-01T00:00:00.000Z",
+          "end": "2026-05-01T00:00:00.000Z",
+          "granularity": "month"
+        }
+      ],
+      "source_id": "appreviewhistogram|none|population=filtered_reviews|flags=%7B%22count_all_reviews%22%3Afalse%7D|interpretation=steam-review-source-v1",
+      "historical_source_id": "appreviewhistogram|none|population=filtered_reviews|flags=%7B%22count_all_reviews%22%3Afalse%7D|interpretation=steam-review-source-v1"
+    },
+    {
+      "score_at": "2026-08-25T00:00:00.000Z",
+      "observed_at": "2026-09-16T19:00:00.001Z",
+      "formula_version": "steam-player-v2",
+      "value": 94.50151393055829,
+      "evidence_end": "2026-08-25T00:00:00.000Z",
+      "current_evidence_intervals": [
+        {
+          "start": "2026-06-01T00:00:00.000Z",
+          "end": "2026-08-01T00:00:00.000Z",
+          "granularity": "month"
+        },
+        {
+          "start": "2026-08-10T00:00:00.000Z",
+          "end": "2026-08-25T00:00:00.000Z",
+          "granularity": "day"
+        }
+      ],
+      "historical_evidence_intervals": [
+        {
+          "start": "2026-03-01T00:00:00.000Z",
+          "end": "2026-05-01T00:00:00.000Z",
+          "granularity": "month"
+        }
+      ],
+      "source_id": "appreviewhistogram|none|population=filtered_reviews|flags=%7B%22count_all_reviews%22%3Afalse%7D|interpretation=steam-review-source-v1",
+      "historical_source_id": "appreviewhistogram|none|population=filtered_reviews|flags=%7B%22count_all_reviews%22%3Afalse%7D|interpretation=steam-review-source-v1"
+    },
+    {
+      "score_at": "2026-08-26T00:00:00.000Z",
+      "observed_at": "2026-09-16T19:00:00.001Z",
+      "formula_version": "steam-player-v2",
+      "value": 94.51641725575442,
+      "evidence_end": "2026-08-26T00:00:00.000Z",
+      "current_evidence_intervals": [
+        {
+          "start": "2026-06-01T00:00:00.000Z",
+          "end": "2026-08-01T00:00:00.000Z",
+          "granularity": "month"
+        },
+        {
+          "start": "2026-08-10T00:00:00.000Z",
+          "end": "2026-08-26T00:00:00.000Z",
+          "granularity": "day"
+        }
+      ],
+      "historical_evidence_intervals": [
+        {
+          "start": "2026-03-01T00:00:00.000Z",
+          "end": "2026-05-01T00:00:00.000Z",
+          "granularity": "month"
+        }
+      ],
+      "source_id": "appreviewhistogram|none|population=filtered_reviews|flags=%7B%22count_all_reviews%22%3Afalse%7D|interpretation=steam-review-source-v1",
+      "historical_source_id": "appreviewhistogram|none|population=filtered_reviews|flags=%7B%22count_all_reviews%22%3Afalse%7D|interpretation=steam-review-source-v1"
+    },
+    {
+      "score_at": "2026-08-27T00:00:00.000Z",
+      "observed_at": "2026-09-16T19:00:00.001Z",
+      "formula_version": "steam-player-v2",
+      "value": 94.52133400876143,
+      "evidence_end": "2026-08-27T00:00:00.000Z",
+      "current_evidence_intervals": [
+        {
+          "start": "2026-06-01T00:00:00.000Z",
+          "end": "2026-08-01T00:00:00.000Z",
+          "granularity": "month"
+        },
+        {
+          "start": "2026-08-10T00:00:00.000Z",
+          "end": "2026-08-27T00:00:00.000Z",
+          "granularity": "day"
+        }
+      ],
+      "historical_evidence_intervals": [
+        {
+          "start": "2026-03-01T00:00:00.000Z",
+          "end": "2026-05-01T00:00:00.000Z",
+          "granularity": "month"
+        }
+      ],
+      "source_id": "appreviewhistogram|none|population=filtered_reviews|flags=%7B%22count_all_reviews%22%3Afalse%7D|interpretation=steam-review-source-v1",
+      "historical_source_id": "appreviewhistogram|none|population=filtered_reviews|flags=%7B%22count_all_reviews%22%3Afalse%7D|interpretation=steam-review-source-v1"
+    },
+    {
+      "score_at": "2026-08-28T00:00:00.000Z",
+      "observed_at": "2026-09-16T19:00:00.001Z",
+      "formula_version": "steam-player-v2",
+      "value": 94.53122474024137,
+      "evidence_end": "2026-08-28T00:00:00.000Z",
+      "current_evidence_intervals": [
+        {
+          "start": "2026-06-01T00:00:00.000Z",
+          "end": "2026-08-01T00:00:00.000Z",
+          "granularity": "month"
+        },
+        {
+          "start": "2026-08-10T00:00:00.000Z",
+          "end": "2026-08-28T00:00:00.000Z",
+          "granularity": "day"
+        }
+      ],
+      "historical_evidence_intervals": [
+        {
+          "start": "2026-03-01T00:00:00.000Z",
+          "end": "2026-05-01T00:00:00.000Z",
+          "granularity": "month"
+        }
+      ],
+      "source_id": "appreviewhistogram|none|population=filtered_reviews|flags=%7B%22count_all_reviews%22%3Afalse%7D|interpretation=steam-review-source-v1",
+      "historical_source_id": "appreviewhistogram|none|population=filtered_reviews|flags=%7B%22count_all_reviews%22%3Afalse%7D|interpretation=steam-review-source-v1"
+    },
+    {
+      "score_at": "2026-08-29T00:00:00.000Z",
+      "observed_at": "2026-09-16T19:00:00.001Z",
+      "formula_version": "steam-player-v2",
+      "value": 94.51000246262576,
+      "evidence_end": "2026-08-29T00:00:00.000Z",
+      "current_evidence_intervals": [
+        {
+          "start": "2026-06-01T00:00:00.000Z",
+          "end": "2026-08-01T00:00:00.000Z",
+          "granularity": "month"
+        },
+        {
+          "start": "2026-08-10T00:00:00.000Z",
+          "end": "2026-08-29T00:00:00.000Z",
+          "granularity": "day"
+        }
+      ],
+      "historical_evidence_intervals": [
+        {
+          "start": "2026-04-01T00:00:00.000Z",
+          "end": "2026-05-01T00:00:00.000Z",
+          "granularity": "month"
+        }
+      ],
+      "source_id": "appreviewhistogram|none|population=filtered_reviews|flags=%7B%22count_all_reviews%22%3Afalse%7D|interpretation=steam-review-source-v1",
+      "historical_source_id": "appreviewhistogram|none|population=filtered_reviews|flags=%7B%22count_all_reviews%22%3Afalse%7D|interpretation=steam-review-source-v1"
+    },
+    {
+      "score_at": "2026-08-30T00:00:00.000Z",
+      "observed_at": "2026-09-16T19:00:00.001Z",
+      "formula_version": "steam-player-v2",
+      "value": 94.50525366774053,
+      "evidence_end": "2026-08-30T00:00:00.000Z",
+      "current_evidence_intervals": [
+        {
+          "start": "2026-06-01T00:00:00.000Z",
+          "end": "2026-08-01T00:00:00.000Z",
+          "granularity": "month"
+        },
+        {
+          "start": "2026-08-10T00:00:00.000Z",
+          "end": "2026-08-30T00:00:00.000Z",
+          "granularity": "day"
+        }
+      ],
+      "historical_evidence_intervals": [
+        {
+          "start": "2026-04-01T00:00:00.000Z",
+          "end": "2026-06-01T00:00:00.000Z",
+          "granularity": "month"
+        }
+      ],
+      "source_id": "appreviewhistogram|none|population=filtered_reviews|flags=%7B%22count_all_reviews%22%3Afalse%7D|interpretation=steam-review-source-v1",
+      "historical_source_id": "appreviewhistogram|none|population=filtered_reviews|flags=%7B%22count_all_reviews%22%3Afalse%7D|interpretation=steam-review-source-v1"
+    },
+    {
+      "score_at": "2026-08-31T00:00:00.000Z",
+      "observed_at": "2026-09-16T19:00:00.001Z",
+      "formula_version": "steam-player-v2",
+      "value": 94.84748435318494,
+      "evidence_end": "2026-08-31T00:00:00.000Z",
+      "current_evidence_intervals": [
+        {
+          "start": "2026-07-01T00:00:00.000Z",
+          "end": "2026-08-01T00:00:00.000Z",
+          "granularity": "month"
+        },
+        {
+          "start": "2026-08-10T00:00:00.000Z",
+          "end": "2026-08-31T00:00:00.000Z",
+          "granularity": "day"
+        }
+      ],
+      "historical_evidence_intervals": [
+        {
+          "start": "2026-04-01T00:00:00.000Z",
+          "end": "2026-06-01T00:00:00.000Z",
+          "granularity": "month"
+        }
+      ],
+      "source_id": "appreviewhistogram|none|population=filtered_reviews|flags=%7B%22count_all_reviews%22%3Afalse%7D|interpretation=steam-review-source-v1",
+      "historical_source_id": "appreviewhistogram|none|population=filtered_reviews|flags=%7B%22count_all_reviews%22%3Afalse%7D|interpretation=steam-review-source-v1"
+    },
+    {
+      "score_at": "2026-09-01T00:00:00.000Z",
+      "observed_at": "2026-09-16T19:00:00.001Z",
+      "formula_version": "steam-player-v2",
+      "value": 94.79081386473584,
+      "evidence_end": "2026-09-01T00:00:00.000Z",
+      "current_evidence_intervals": [
+        {
+          "start": "2026-07-01T00:00:00.000Z",
+          "end": "2026-09-01T00:00:00.000Z",
+          "granularity": "month"
+        }
+      ],
+      "historical_evidence_intervals": [
+        {
+          "start": "2026-04-01T00:00:00.000Z",
+          "end": "2026-06-01T00:00:00.000Z",
+          "granularity": "month"
+        }
+      ],
+      "source_id": "appreviewhistogram|none|population=filtered_reviews|flags=%7B%22count_all_reviews%22%3Afalse%7D|interpretation=steam-review-source-v1",
+      "historical_source_id": "appreviewhistogram|none|population=filtered_reviews|flags=%7B%22count_all_reviews%22%3Afalse%7D|interpretation=steam-review-source-v1"
+    },
+    {
+      "score_at": "2026-09-02T00:00:00.000Z",
+      "observed_at": "2026-09-16T19:00:00.001Z",
+      "formula_version": "steam-player-v2",
+      "value": 94.7678849555909,
+      "evidence_end": "2026-09-02T00:00:00.000Z",
+      "current_evidence_intervals": [
+        {
+          "start": "2026-07-01T00:00:00.000Z",
+          "end": "2026-09-02T00:00:00.000Z",
+          "granularity": "month"
+        }
+      ],
+      "historical_evidence_intervals": [
+        {
+          "start": "2026-04-01T00:00:00.000Z",
+          "end": "2026-06-01T00:00:00.000Z",
+          "granularity": "month"
+        }
+      ],
+      "source_id": "appreviewhistogram|none|population=filtered_reviews|flags=%7B%22count_all_reviews%22%3Afalse%7D|interpretation=steam-review-source-v1",
+      "historical_source_id": "appreviewhistogram|none|population=filtered_reviews|flags=%7B%22count_all_reviews%22%3Afalse%7D|interpretation=steam-review-source-v1"
+    },
+    {
+      "score_at": "2026-09-03T00:00:00.000Z",
+      "observed_at": "2026-09-16T19:00:00.001Z",
+      "formula_version": "steam-player-v2",
+      "value": 94.76894425489309,
+      "evidence_end": "2026-09-03T00:00:00.000Z",
+      "current_evidence_intervals": [
+        {
+          "start": "2026-07-01T00:00:00.000Z",
+          "end": "2026-09-03T00:00:00.000Z",
+          "granularity": "month"
+        }
+      ],
+      "historical_evidence_intervals": [
+        {
+          "start": "2026-04-01T00:00:00.000Z",
+          "end": "2026-06-01T00:00:00.000Z",
+          "granularity": "month"
+        }
+      ],
+      "source_id": "appreviewhistogram|none|population=filtered_reviews|flags=%7B%22count_all_reviews%22%3Afalse%7D|interpretation=steam-review-source-v1",
+      "historical_source_id": "appreviewhistogram|none|population=filtered_reviews|flags=%7B%22count_all_reviews%22%3Afalse%7D|interpretation=steam-review-source-v1"
+    },
+    {
+      "score_at": "2026-09-04T00:00:00.000Z",
+      "observed_at": "2026-09-16T19:00:00.001Z",
+      "formula_version": "steam-player-v2",
+      "value": 94.77576979750295,
+      "evidence_end": "2026-09-04T00:00:00.000Z",
+      "current_evidence_intervals": [
+        {
+          "start": "2026-07-01T00:00:00.000Z",
+          "end": "2026-09-04T00:00:00.000Z",
+          "granularity": "month"
+        }
+      ],
+      "historical_evidence_intervals": [
+        {
+          "start": "2026-04-01T00:00:00.000Z",
+          "end": "2026-06-01T00:00:00.000Z",
+          "granularity": "month"
+        }
+      ],
+      "source_id": "appreviewhistogram|none|population=filtered_reviews|flags=%7B%22count_all_reviews%22%3Afalse%7D|interpretation=steam-review-source-v1",
+      "historical_source_id": "appreviewhistogram|none|population=filtered_reviews|flags=%7B%22count_all_reviews%22%3Afalse%7D|interpretation=steam-review-source-v1"
+    },
+    {
+      "score_at": "2026-09-05T00:00:00.000Z",
+      "observed_at": "2026-09-16T19:00:00.001Z",
+      "formula_version": "steam-player-v2",
+      "value": 94.75614191998214,
+      "evidence_end": "2026-09-05T00:00:00.000Z",
+      "current_evidence_intervals": [
+        {
+          "start": "2026-07-01T00:00:00.000Z",
+          "end": "2026-09-05T00:00:00.000Z",
+          "granularity": "month"
+        }
+      ],
+      "historical_evidence_intervals": [
+        {
+          "start": "2026-04-01T00:00:00.000Z",
+          "end": "2026-06-01T00:00:00.000Z",
+          "granularity": "month"
+        }
+      ],
+      "source_id": "appreviewhistogram|none|population=filtered_reviews|flags=%7B%22count_all_reviews%22%3Afalse%7D|interpretation=steam-review-source-v1",
+      "historical_source_id": "appreviewhistogram|none|population=filtered_reviews|flags=%7B%22count_all_reviews%22%3Afalse%7D|interpretation=steam-review-source-v1"
+    },
+    {
+      "score_at": "2026-09-06T00:00:00.000Z",
+      "observed_at": "2026-09-16T19:00:00.001Z",
+      "formula_version": "steam-player-v2",
+      "value": 94.75009291803606,
+      "evidence_end": "2026-09-06T00:00:00.000Z",
+      "current_evidence_intervals": [
+        {
+          "start": "2026-07-01T00:00:00.000Z",
+          "end": "2026-09-06T00:00:00.000Z",
+          "granularity": "month"
+        }
+      ],
+      "historical_evidence_intervals": [
+        {
+          "start": "2026-04-01T00:00:00.000Z",
+          "end": "2026-06-01T00:00:00.000Z",
+          "granularity": "month"
+        }
+      ],
+      "source_id": "appreviewhistogram|none|population=filtered_reviews|flags=%7B%22count_all_reviews%22%3Afalse%7D|interpretation=steam-review-source-v1",
+      "historical_source_id": "appreviewhistogram|none|population=filtered_reviews|flags=%7B%22count_all_reviews%22%3Afalse%7D|interpretation=steam-review-source-v1"
+    },
+    {
+      "score_at": "2026-09-07T00:00:00.000Z",
+      "observed_at": "2026-09-16T19:00:00.001Z",
+      "formula_version": "steam-player-v2",
+      "value": 94.74905503289779,
+      "evidence_end": "2026-09-07T00:00:00.000Z",
+      "current_evidence_intervals": [
+        {
+          "start": "2026-07-01T00:00:00.000Z",
+          "end": "2026-09-07T00:00:00.000Z",
+          "granularity": "month"
+        }
+      ],
+      "historical_evidence_intervals": [
+        {
+          "start": "2026-04-01T00:00:00.000Z",
+          "end": "2026-06-01T00:00:00.000Z",
+          "granularity": "month"
+        }
+      ],
+      "source_id": "appreviewhistogram|none|population=filtered_reviews|flags=%7B%22count_all_reviews%22%3Afalse%7D|interpretation=steam-review-source-v1",
+      "historical_source_id": "appreviewhistogram|none|population=filtered_reviews|flags=%7B%22count_all_reviews%22%3Afalse%7D|interpretation=steam-review-source-v1"
+    },
+    {
+      "score_at": "2026-09-08T00:00:00.000Z",
+      "observed_at": "2026-09-16T19:00:00.001Z",
+      "formula_version": "steam-player-v2",
+      "value": 94.76519135135517,
+      "evidence_end": "2026-09-08T00:00:00.000Z",
+      "current_evidence_intervals": [
+        {
+          "start": "2026-07-01T00:00:00.000Z",
+          "end": "2026-09-08T00:00:00.000Z",
+          "granularity": "month"
+        }
+      ],
+      "historical_evidence_intervals": [
+        {
+          "start": "2026-04-01T00:00:00.000Z",
+          "end": "2026-06-01T00:00:00.000Z",
+          "granularity": "month"
+        }
+      ],
+      "source_id": "appreviewhistogram|none|population=filtered_reviews|flags=%7B%22count_all_reviews%22%3Afalse%7D|interpretation=steam-review-source-v1",
+      "historical_source_id": "appreviewhistogram|none|population=filtered_reviews|flags=%7B%22count_all_reviews%22%3Afalse%7D|interpretation=steam-review-source-v1"
+    },
+    {
+      "score_at": "2026-09-09T00:00:00.000Z",
+      "observed_at": "2026-09-16T19:00:00.001Z",
+      "formula_version": "steam-player-v2",
+      "value": 94.7701732537761,
+      "evidence_end": "2026-09-09T00:00:00.000Z",
+      "current_evidence_intervals": [
+        {
+          "start": "2026-07-01T00:00:00.000Z",
+          "end": "2026-09-09T00:00:00.000Z",
+          "granularity": "month"
+        }
+      ],
+      "historical_evidence_intervals": [
+        {
+          "start": "2026-04-01T00:00:00.000Z",
+          "end": "2026-06-01T00:00:00.000Z",
+          "granularity": "month"
+        }
+      ],
+      "source_id": "appreviewhistogram|none|population=filtered_reviews|flags=%7B%22count_all_reviews%22%3Afalse%7D|interpretation=steam-review-source-v1",
+      "historical_source_id": "appreviewhistogram|none|population=filtered_reviews|flags=%7B%22count_all_reviews%22%3Afalse%7D|interpretation=steam-review-source-v1"
+    },
+    {
+      "score_at": "2026-09-10T00:00:00.000Z",
+      "observed_at": "2026-09-16T19:00:00.001Z",
+      "formula_version": "steam-player-v2",
+      "value": 94.75944868240195,
+      "evidence_end": "2026-09-10T00:00:00.000Z",
+      "current_evidence_intervals": [
+        {
+          "start": "2026-07-01T00:00:00.000Z",
+          "end": "2026-09-10T00:00:00.000Z",
+          "granularity": "month"
+        }
+      ],
+      "historical_evidence_intervals": [
+        {
+          "start": "2026-04-01T00:00:00.000Z",
+          "end": "2026-06-01T00:00:00.000Z",
+          "granularity": "month"
+        }
+      ],
+      "source_id": "appreviewhistogram|none|population=filtered_reviews|flags=%7B%22count_all_reviews%22%3Afalse%7D|interpretation=steam-review-source-v1",
+      "historical_source_id": "appreviewhistogram|none|population=filtered_reviews|flags=%7B%22count_all_reviews%22%3Afalse%7D|interpretation=steam-review-source-v1"
+    },
+    {
+      "score_at": "2026-09-11T00:00:00.000Z",
+      "observed_at": "2026-09-16T19:00:00.001Z",
+      "formula_version": "steam-player-v2",
+      "value": 94.75911434280792,
+      "evidence_end": "2026-09-11T00:00:00.000Z",
+      "current_evidence_intervals": [
+        {
+          "start": "2026-07-01T00:00:00.000Z",
+          "end": "2026-09-11T00:00:00.000Z",
+          "granularity": "month"
+        }
+      ],
+      "historical_evidence_intervals": [
+        {
+          "start": "2026-04-01T00:00:00.000Z",
+          "end": "2026-06-01T00:00:00.000Z",
+          "granularity": "month"
+        }
+      ],
+      "source_id": "appreviewhistogram|none|population=filtered_reviews|flags=%7B%22count_all_reviews%22%3Afalse%7D|interpretation=steam-review-source-v1",
+      "historical_source_id": "appreviewhistogram|none|population=filtered_reviews|flags=%7B%22count_all_reviews%22%3Afalse%7D|interpretation=steam-review-source-v1"
+    },
+    {
+      "score_at": "2026-09-12T00:00:00.000Z",
+      "observed_at": "2026-09-16T19:00:00.001Z",
+      "formula_version": "steam-player-v2",
+      "value": 94.74458202878246,
+      "evidence_end": "2026-09-12T00:00:00.000Z",
+      "current_evidence_intervals": [
+        {
+          "start": "2026-07-01T00:00:00.000Z",
+          "end": "2026-09-12T00:00:00.000Z",
+          "granularity": "month"
+        }
+      ],
+      "historical_evidence_intervals": [
+        {
+          "start": "2026-04-01T00:00:00.000Z",
+          "end": "2026-06-01T00:00:00.000Z",
+          "granularity": "month"
+        }
+      ],
+      "source_id": "appreviewhistogram|none|population=filtered_reviews|flags=%7B%22count_all_reviews%22%3Afalse%7D|interpretation=steam-review-source-v1",
+      "historical_source_id": "appreviewhistogram|none|population=filtered_reviews|flags=%7B%22count_all_reviews%22%3Afalse%7D|interpretation=steam-review-source-v1"
+    },
+    {
+      "score_at": "2026-09-13T00:00:00.000Z",
+      "observed_at": "2026-09-16T19:00:00.001Z",
+      "formula_version": "steam-player-v2",
+      "value": 94.74208261794828,
+      "evidence_end": "2026-09-13T00:00:00.000Z",
+      "current_evidence_intervals": [
+        {
+          "start": "2026-07-01T00:00:00.000Z",
+          "end": "2026-09-13T00:00:00.000Z",
+          "granularity": "month"
+        }
+      ],
+      "historical_evidence_intervals": [
+        {
+          "start": "2026-04-01T00:00:00.000Z",
+          "end": "2026-06-01T00:00:00.000Z",
+          "granularity": "month"
+        }
+      ],
+      "source_id": "appreviewhistogram|none|population=filtered_reviews|flags=%7B%22count_all_reviews%22%3Afalse%7D|interpretation=steam-review-source-v1",
+      "historical_source_id": "appreviewhistogram|none|population=filtered_reviews|flags=%7B%22count_all_reviews%22%3Afalse%7D|interpretation=steam-review-source-v1"
+    },
+    {
+      "score_at": "2026-09-14T00:00:00.000Z",
+      "observed_at": "2026-09-16T19:00:00.001Z",
+      "formula_version": "steam-player-v2",
+      "value": 94.73582963296404,
+      "evidence_end": "2026-09-14T00:00:00.000Z",
+      "current_evidence_intervals": [
+        {
+          "start": "2026-07-01T00:00:00.000Z",
+          "end": "2026-09-14T00:00:00.000Z",
+          "granularity": "month"
+        }
+      ],
+      "historical_evidence_intervals": [
+        {
+          "start": "2026-04-01T00:00:00.000Z",
+          "end": "2026-06-01T00:00:00.000Z",
+          "granularity": "month"
+        }
+      ],
+      "source_id": "appreviewhistogram|none|population=filtered_reviews|flags=%7B%22count_all_reviews%22%3Afalse%7D|interpretation=steam-review-source-v1",
+      "historical_source_id": "appreviewhistogram|none|population=filtered_reviews|flags=%7B%22count_all_reviews%22%3Afalse%7D|interpretation=steam-review-source-v1"
+    },
+    {
+      "score_at": "2026-09-15T00:00:00.000Z",
+      "observed_at": "2026-09-16T19:00:00.001Z",
+      "formula_version": "steam-player-v2",
+      "value": 94.72760956402792,
+      "evidence_end": "2026-09-15T00:00:00.000Z",
+      "current_evidence_intervals": [
+        {
+          "start": "2026-07-01T00:00:00.000Z",
+          "end": "2026-09-15T00:00:00.000Z",
+          "granularity": "month"
+        }
+      ],
+      "historical_evidence_intervals": [
+        {
+          "start": "2026-04-01T00:00:00.000Z",
+          "end": "2026-06-01T00:00:00.000Z",
+          "granularity": "month"
+        }
+      ],
+      "source_id": "appreviewhistogram|none|population=filtered_reviews|flags=%7B%22count_all_reviews%22%3Afalse%7D|interpretation=steam-review-source-v1",
+      "historical_source_id": "appreviewhistogram|none|population=filtered_reviews|flags=%7B%22count_all_reviews%22%3Afalse%7D|interpretation=steam-review-source-v1"
+    },
+    {
+      "score_at": "2026-09-16T00:00:00.000Z",
+      "observed_at": "2026-09-16T19:00:00.001Z",
+      "formula_version": "steam-player-v2",
+      "value": 94.7269897813849,
+      "evidence_end": "2026-09-16T00:00:00.000Z",
+      "current_evidence_intervals": [
+        {
+          "start": "2026-07-01T00:00:00.000Z",
+          "end": "2026-09-16T00:00:00.000Z",
+          "granularity": "month"
+        }
+      ],
+      "historical_evidence_intervals": [
+        {
+          "start": "2026-04-01T00:00:00.000Z",
+          "end": "2026-06-01T00:00:00.000Z",
+          "granularity": "month"
+        }
+      ],
+      "source_id": "appreviewhistogram|none|population=filtered_reviews|flags=%7B%22count_all_reviews%22%3Afalse%7D|interpretation=steam-review-source-v1",
+      "historical_source_id": "appreviewhistogram|none|population=filtered_reviews|flags=%7B%22count_all_reviews%22%3Afalse%7D|interpretation=steam-review-source-v1"
+    }
+  ]
+}

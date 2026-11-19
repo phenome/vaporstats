@@ -15,10 +15,11 @@ import type {
 import type { HistoryRange } from "../lib/player-history";
 import { formatLocalDateTime, formatNumber } from "../lib/format";
 import { wilson95 } from "../lib/recent-reception";
+import { mergeIntervals } from "../lib/review-evidence";
 import { PLAYER_SCORE_FORMULA_VERSION } from "../lib/player-score";
 import { gameScoreHistoryQueryOptions, gameScoreSummaryQueryOptions } from "../lib/score-query";
 import { SCORE_MILESTONE_LABEL_GAP, SCORE_MILESTONE_LABEL_WIDTH, selectScoreMilestones } from "../lib/score-milestone-density";
-import { ChartContainer, ChartTooltip, ChartTooltipContent, type ChartConfig } from "./ui/chart";
+import { ChartContainer, ChartTooltip, type ChartConfig } from "./ui/chart";
 import { ScoreEventReader } from "./score-event-reader";
 import { isEventWithinHistoryRange } from "../lib/game-params";
 import "./game-reception.css";
@@ -98,62 +99,120 @@ function ScoreMetrics({ history }: { history: GameScoreHistory | null | undefine
 }
 
 type ChartPoint = {
+  id: string;
   timestamp: number;
   score: number;
-  reviews: number;
-  isolated?: boolean;
+  run: number;
 } & (
   | { provenance: "recorded"; details: RecordedScore }
   | { provenance: "reconstructed"; details: ReconstructedScore }
 );
 
-type ChartDatum = ChartPoint | { timestamp: number; score: null };
+const DAY_MS = 24 * 60 * 60 * 1000;
 
-/** Recorded observations win timestamp collisions; different formula runs never share a line. */
-export function buildScoreHistoryChartData(history: GameScoreHistory | null | undefined): ChartDatum[] {
-  if (!history) return [];
-  const rangeStart = history.range_start ? Date.parse(history.range_start) : NaN;
-  const rangeEnd = history.range_end ? Date.parse(history.range_end) : NaN;
-  const byTimestamp = new Map<number, ChartPoint>();
-  for (const entry of history.reconstructed_scores) {
-    const timestamp = Date.parse(entry.score_at);
-    if (!Number.isFinite(timestamp) || !Number.isFinite(entry.value)
-      || (Number.isFinite(rangeStart) && timestamp < rangeStart)
-      || (Number.isFinite(rangeEnd) && timestamp > rangeEnd)
-      || byTimestamp.has(timestamp)) continue;
-    byTimestamp.set(timestamp, { timestamp, score: entry.value, reviews: entry.current_reviews, provenance: "reconstructed", details: entry });
-  }
-  for (const entry of history.recorded_scores) {
-    const timestamp = Date.parse(entry.observed_at);
-    if (!Number.isFinite(timestamp)) continue;
-    byTimestamp.set(timestamp, { timestamp, score: entry.value, reviews: entry.current_reviews, provenance: "recorded", details: entry });
-  }
-  const data: ChartDatum[] = [];
-  const points = [...byTimestamp.values()].sort((a, b) => a.timestamp - b.timestamp);
-  for (let index = 0; index < points.length; index += 1) {
-    const point = points[index]!;
-    const previous = points[index - 1];
-    const next = points[index + 1];
-    const startsVersion = !previous || previous.details.formula_version !== point.details.formula_version;
-    const endsVersion = !next || next.details.formula_version !== point.details.formula_version;
-    if (previous && startsVersion) data.push({ timestamp: previous.timestamp + (point.timestamp - previous.timestamp) / 2, score: null });
-    point.isolated = startsVersion && endsVersion;
-    data.push(point);
-  }
-  return data;
+type ScorePointDetails = ChartPoint["details"];
+
+function sourceIdentity(source: ScorePopulationReference | null): string | null {
+  return source?.source_id ?? null;
 }
 
-function chartPayloadValue(value: unknown): number | null {
-  if (value === null || value === undefined) return null;
-  const numeric = Number(value);
-  return Number.isFinite(numeric) ? numeric : null;
+function evidenceScope(details: ScorePointDetails): string | null {
+  if (!details.current_evidence_intervals.length) return null;
+  const coverage = (intervals: ScorePointDetails["current_evidence_intervals"]) =>
+    mergeIntervals(intervals).map(({ start, end }) => [start, end]);
+  return JSON.stringify([
+    sourceIdentity(details.population_ref),
+    coverage(details.current_evidence_intervals),
+    sourceIdentity(details.historical_population_ref),
+    coverage(details.historical_evidence_intervals),
+  ]);
+}
+
+function canConnectScorePoints(previous: ChartPoint, next: ChartPoint): boolean {
+  const before = previous.details;
+  const after = next.details;
+  if (previous.timestamp === next.timestamp
+    || before.formula_version !== after.formula_version
+    || sourceIdentity(before.population_ref) !== sourceIdentity(after.population_ref)
+    || (before.historical_population_ref && after.historical_population_ref
+      && sourceIdentity(before.historical_population_ref) !== sourceIdentity(after.historical_population_ref))) return false;
+
+  const previousEnd = before.evidence_end ? Date.parse(before.evidence_end) : previous.timestamp;
+  const nextEnd = after.evidence_end ? Date.parse(after.evidence_end) : NaN;
+  if (Number.isFinite(nextEnd)) {
+    return nextEnd > previousEnd && mergeIntervals(after.current_evidence_intervals).some((interval) =>
+      Date.parse(interval.end) === nextEnd && Date.parse(interval.start) <= previousEnd);
+  }
+
+  // Older observations can lack interval metadata. Use collection cadence for those rows.
+  return next.provenance === "recorded"
+    && Math.floor(next.timestamp / DAY_MS) - Math.floor(previous.timestamp / DAY_MS) <= 1;
+}
+
+export function buildScoreHistoryChartData(history: GameScoreHistory | null | undefined): ChartPoint[] {
+  if (!history) return [];
+  const rangeStart = history.range_start ? Date.parse(history.range_start) : -Infinity;
+  const rangeEnd = history.range_end ? Date.parse(history.range_end) : Infinity;
+  const visible = (timestamp: number, score: number) =>
+    Number.isFinite(timestamp) && Number.isFinite(score) && !(timestamp < rangeStart || timestamp > rangeEnd);
+
+  const recordedScopes = new Set<string>();
+  const recorded = new Map<string, Extract<ChartPoint, { provenance: "recorded" }>>();
+  for (const entry of history.recorded_scores) {
+    const timestamp = Date.parse(entry.observed_at);
+    if (!visible(timestamp, entry.value)) continue;
+    const scope = evidenceScope(entry);
+    // Recalculations keep their later calculation timestamp and cannot stand in for collection.
+    if (scope && !entry.recalculation) recordedScopes.add(scope);
+    const key = JSON.stringify([timestamp, scope, sourceIdentity(entry.population_ref),
+      entry.recalculation?.previous_observation_id ?? null, scope ? null : entry.observation_id]);
+    const existing = recorded.get(key)?.details;
+    if (existing && existing.observation_id > entry.observation_id) continue;
+    recorded.set(key, { id: `recorded-${entry.observation_id}-${timestamp}`, timestamp, score: entry.value, run: 0, provenance: "recorded", details: entry });
+  }
+
+  const points: ChartPoint[] = [...recorded.values()];
+  const reconstructedScopes = new Set<string>();
+  const estimatesPerTimestamp = new Map<number, number>();
+  for (const entry of history.reconstructed_scores) {
+    const timestamp = Date.parse(entry.score_at);
+    if (!visible(timestamp, entry.value)) continue;
+    const scope = evidenceScope(entry);
+    const key = JSON.stringify([timestamp, scope]);
+    if (scope && (recordedScopes.has(scope) || reconstructedScopes.has(key))) continue;
+    if (scope) reconstructedScopes.add(key);
+    const index = estimatesPerTimestamp.get(timestamp) ?? 0;
+    estimatesPerTimestamp.set(timestamp, index + 1);
+    points.push({ id: `reconstructed-${timestamp}-${index}`, timestamp, score: entry.value, run: 0, provenance: "reconstructed", details: entry });
+  }
+  points.sort((a, b) => a.timestamp - b.timestamp);
+
+  let run = 0;
+  for (const [index, point] of points.entries()) {
+    const previous = points[index - 1];
+    if (previous && !canConnectScorePoints(previous, point)) run++;
+    point.run = run;
+  }
+  return points;
+}
+
+export function ScoreHistoryTooltip({ point }: { point: Pick<ChartPoint, "timestamp" | "score"> }) {
+  return (
+    <div className="rounded-lg border border-zinc-700 bg-zinc-950 px-2.5 py-1.5 text-xs text-zinc-100 shadow-2xl">
+      <time dateTime={new Date(point.timestamp).toISOString()}>{formatLocalDateTime(new Date(point.timestamp))}</time>
+      <p className="mt-1 flex justify-between gap-3 font-mono font-medium text-violet-200">
+        <span>Player score</span>
+        <span>{formatNumber(point.score, { maximumFractionDigits: 1 })}</span>
+      </p>
+    </div>
+  );
 }
 
 function historyMilestones(history: GameScoreHistory | null | undefined): ScoreMilestone[] {
   return history?.milestones.filter((milestone) => Number.isFinite(Date.parse(milestone.event_time))) ?? [];
 }
 
-function historyDomain(history: GameScoreHistory | null | undefined, points: readonly ChartDatum[]): [number, number] {
+function historyDomain(history: GameScoreHistory | null | undefined, points: readonly ChartPoint[]): [number, number] {
   const start = history?.range_start ? Date.parse(history.range_start) : NaN;
   const end = history?.range_end ? Date.parse(history.range_end) : NaN;
   const first = points[0]?.timestamp ?? 0;
@@ -244,19 +303,36 @@ function MilestoneLabel({
 
 
 function ScoreChart({
+  chartData,
   history,
   appid,
   isUpdating,
   activeEventId,
   onSelectEvent,
+  onSelectPoint,
 }: {
+  chartData: ChartPoint[];
   history: GameScoreHistory | null | undefined;
   appid: number;
   isUpdating: boolean;
   activeEventId?: string | null;
   onSelectEvent?: (eventId: string | null) => void;
+  onSelectPoint: (id: string) => void;
 }) {
-  const chartData = useMemo(() => buildScoreHistoryChartData(history), [history]);
+  const pointsByTimestamp = useMemo(() => {
+    const grouped = new Map<number, ChartPoint[]>();
+    for (const point of chartData) {
+      const points = grouped.get(point.timestamp);
+      if (points) points.push(point);
+      else grouped.set(point.timestamp, [point]);
+    }
+    return grouped;
+  }, [chartData]);
+  const runSizes = useMemo(() => {
+    const sizes = new Map<number, number>();
+    for (const point of chartData) sizes.set(point.run, (sizes.get(point.run) ?? 0) + 1);
+    return sizes;
+  }, [chartData]);
   const milestones = useMemo(() => historyMilestones(history), [history]);
   const domain = useMemo(() => historyDomain(history, chartData), [history, chartData]);
   const domainMidpoint = (domain[0] + domain[1]) / 2;
@@ -286,9 +362,13 @@ function ScoreChart({
     () => selectScoreMilestones(visibleMilestones, domain, Math.max(0, chartWidth - SCORE_CHART_Y_AXIS_WIDTH - SCORE_CHART_MARGIN_RIGHT)),
     [chartWidth, domain, visibleMilestones],
   );
-  const hasScoreObservations = chartData.some((point) => Number.isFinite(point.score));
-  const [hoveredValue, setHoveredValue] = useState<number | null>(null);
-  const [activeTimestamp, setActiveTimestamp] = useState<number | null>(null);
+  const [hoveredPoint, setHoveredPoint] = useState<ChartPoint>();
+  const pointAtPointer = (label: string | number | undefined, target: EventTarget) => {
+    const points = pointsByTimestamp.get(Number(label));
+    if (!points || points.length === 1 || !(target instanceof Element)) return points?.[0];
+    const pointId = target.closest("[data-score-point]")?.getAttribute("data-score-point");
+    return points.find((point) => point.id === pointId) ?? points[0];
+  };
   const [milestoneTooltip, setMilestoneTooltip] = useState<{
     id: string;
     modality: "pointer" | "touch" | "focus";
@@ -316,8 +396,7 @@ function ScoreChart({
   const activateMilestonePointer = (eventMilestoneId: string, event: MilestonePointerEvent | undefined) => {
     const touch = event?.nativeEvent instanceof PointerEvent && event.nativeEvent.pointerType === "touch";
     if (touch) focusedTooltipRef.current = null;
-    setHoveredValue(null);
-    setActiveTimestamp(null);
+    setHoveredPoint(undefined);
     const modality = touch ? "touch" : "pointer";
     const anchor = tooltipPositionFor(event);
     if (!anchor) return;
@@ -404,16 +483,17 @@ function ScoreChart({
           data={chartData}
           accessibilityLayer
           margin={{ top: 12, right: SCORE_CHART_MARGIN_RIGHT, left: 0, bottom: 0 }}
-          onMouseMove={(state) => {
-            if (milestoneTooltip !== null) return;
-            const activeLabel = Number(state.activeLabel);
-            const activeRow = Number.isFinite(activeLabel) ? chartData.find((row) => row.timestamp === activeLabel) : undefined;
-            setActiveTimestamp(Number.isFinite(activeLabel) ? activeLabel : null);
-            setHoveredValue(chartPayloadValue(activeRow?.score));
+          onMouseMove={(state, event) => {
+            if (active) return;
+            setHoveredPoint(pointAtPointer(state.activeLabel, event.target));
+          }}
+          onClick={(state, event) => {
+            if (active) return;
+            const point = pointAtPointer(state.activeLabel, event.target);
+            if (point) onSelectPoint(point.id);
           }}
           onMouseLeave={() => {
-            setHoveredValue(null);
-            setActiveTimestamp(null);
+            setHoveredPoint(undefined);
             setMilestoneTooltip((current) => {
               if (current?.modality !== "pointer") return current;
               const focused = focusedTooltipRef.current;
@@ -430,13 +510,24 @@ function ScoreChart({
           <CartesianGrid strokeDasharray="3 3" stroke="#27272a" vertical={false} />
           <XAxis dataKey="timestamp" type="number" domain={domain} allowDataOverflow tickLine={false} axisLine={false} stroke="#71717a" fontSize={10} minTickGap={40} tickFormatter={(value) => formatDateOnly(new Date(Number(value)).toISOString())} />
           <YAxis domain={[0, 100]} ticks={[0, 50, 100]} width={SCORE_CHART_Y_AXIS_WIDTH} tickLine={false} axisLine={false} stroke="#71717a" fontSize={10} />
-          <Area dataKey="score" name="Player score" type="monotone" stroke="var(--color-score)" strokeWidth={1.8} fill={"url(#score-area-" + appid + ")"}
+          {[...runSizes].map(([run, size]) => size > 1 && (
+            <Area key={run} dataKey={(point: ChartPoint) => point.run === run ? point.score : undefined}
+              type="monotone" stroke="var(--color-score)" strokeWidth={1.8}
+              fill={"url(#score-area-" + appid + ")"} dot={false} activeDot={false}
+              isAnimationActive={false} connectNulls
+            />
+          ))}
+          {/* Keep one shared tooltip timeline and show a marker only for a one-point run. */}
+          <Area dataKey="score" name="Player score" stroke="none" fill="none"
             dot={(props) => {
-              const point: ChartDatum | undefined = props.payload;
-              if (point?.score === null || !point?.isolated) return <g />;
-              return <circle key={point.timestamp} cx={props.cx} cy={props.cy} r={3} fill="var(--color-score)" />;
+              const point: ChartPoint = props.payload;
+              if (runSizes.get(point.run) !== 1) {
+                if ((pointsByTimestamp.get(point.timestamp)?.length ?? 0) < 2) return <g />;
+                return <circle key={point.id} data-score-point={point.id} cx={props.cx} cy={props.cy} r={5} fill="transparent" />;
+              }
+              return <circle key={point.id} data-score-point={point.id} cx={props.cx} cy={props.cy} r={3} fill="var(--color-score)" />;
             }}
-            activeDot={false} isAnimationActive={false} connectNulls={false}
+            activeDot={false} isAnimationActive={false}
           />
           {selectedMilestones.map((milestone) => {
             const timestamp = Date.parse(milestone.event_time);
@@ -451,6 +542,7 @@ function ScoreChart({
                 onMouseEnter={(event) => activateMilestonePointer(milestone.event_id, event)}
                 onMouseMove={(event) => activateMilestonePointer(milestone.event_id, event)}
                 onClick={(event) => {
+                  event.stopPropagation();
                   activateMilestonePointer(milestone.event_id, event);
                   onSelectEvent?.(milestone.event_id);
                 }}
@@ -470,33 +562,14 @@ function ScoreChart({
               />
             );
           })}
-          {hoveredValue !== null && activeTimestamp !== null && active === null && <ReferenceDot x={activeTimestamp} y={hoveredValue} r={3} fill={SCORE_COLOR} stroke="#09090b" strokeWidth={1} />}
-          {hoveredValue !== null && active === null && <ReferenceLine y={hoveredValue} stroke={SCORE_COLOR} strokeDasharray="3 3" />}
+          {hoveredPoint && !active && <ReferenceDot x={hoveredPoint.timestamp} y={hoveredPoint.score} r={3} fill={SCORE_COLOR} stroke="#09090b" strokeWidth={1} pointerEvents="none" />}
+          {hoveredPoint && !active && <ReferenceLine y={hoveredPoint.score} stroke={SCORE_COLOR} strokeDasharray="3 3" pointerEvents="none" />}
           <ChartTooltip active={active ? false : undefined}
-            content={
-              <ChartTooltipContent
-                className="!bg-zinc-950 !opacity-100 border-zinc-700 shadow-2xl text-zinc-100 max-w-[min(28rem,calc(100vw-2rem))]"
-                labelFormatter={(_, payload) => {
-                  const row = payload?.[0]?.payload as ChartPoint | undefined;
-                  return row ? formatLocalDateTime(new Date(row.timestamp)) : "";
-                }}
-                formatter={(value, _name, item) => {
-                  const row = item?.payload as ChartPoint | undefined;
-                  return (
-                    <div className="grid w-full gap-1 text-[11px] wrap-anywhere">
-                      <div className="flex items-center justify-between gap-3">
-                        <span className="font-mono font-medium text-violet-200">Player score</span>
-                        <span className="font-mono font-medium text-violet-200">{formatNumber(Number(value), { maximumFractionDigits: 1 })}</span>
-                      </div>
-                      <p className="text-zinc-400">{row ? "Current scoring-window evidence: " + formatNumber(row.reviews) + " reviews" : "Current scoring-window evidence unavailable"}</p>
-                      {row && <p className="text-zinc-400">{row.provenance === "recorded" ? row.details.recalculation ? "Formula recalculation (not new reviews)" : "Recorded observation" : "Reconstructed estimate"} · {row.details.formula_version}</p>}
-                      {row && <p className="text-zinc-400">Review evidence observed at: {formatBoundary(row.details.current_evidence_observed_at)}</p>}
-                      {row?.provenance === "recorded" && row.details.recalculation && <p className="text-zinc-400">{row.details.recalculation.previous_formula_version} → {row.details.formula_version} · calculated {formatBoundary(row.details.recalculation.calculated_at)}</p>}
-                    </div>
-                  );
-                }}
-              />
-            }
+            content={({ active: tooltipActive, label }) => {
+              const timestamp = Number(label);
+              const point = hoveredPoint?.timestamp === timestamp ? hoveredPoint : pointsByTimestamp.get(timestamp)?.[0];
+              return tooltipActive && point ? <ScoreHistoryTooltip point={point} /> : null;
+            }}
           />
         </ComposedChart>
       </ChartContainer>
@@ -515,7 +588,7 @@ function ScoreChart({
           <p className="mt-1 text-zinc-400">{milestoneKindLabel(active.kind)} · {formatDateOnly(active.event_time)}</p>
         </div>
       )}
-      {!hasScoreObservations && <p className="pointer-events-none absolute inset-0 flex items-center justify-center font-mono text-xs text-zinc-500">No score observations in this range.</p>}
+      {chartData.length === 0 && <p className="pointer-events-none absolute inset-0 flex items-center justify-center font-mono text-xs text-zinc-500">No score observations in this range.</p>}
     </div>
   );
 }
@@ -538,14 +611,46 @@ function populationDetails(label: string, population: ScorePopulationReference |
   );
 }
 
-function ScoreDetails({ summary, history }: { summary: GameScoreSummary | null | undefined; history: GameScoreHistory | null | undefined }) {
+function ScoreDetails({ summary, history, points, selectedPointId, onSelectPoint, detailsRef }: {
+  summary: GameScoreSummary | null | undefined;
+  history: GameScoreHistory | null | undefined;
+  points: readonly ChartPoint[];
+  selectedPointId: string | null;
+  onSelectPoint: (id: string) => void;
+  detailsRef: React.Ref<HTMLDetailsElement>;
+}) {
+  const point = points.find((item) => item.id === selectedPointId) ?? points.at(-1);
+  const recalculation = point?.provenance === "recorded" ? point.details.recalculation : undefined;
   const score = summary?.score;
   const uncertainty = score ? wilson95(score.current_positive_reviews, score.current_total_reviews) : null;
   return (
-    <details className="mt-3 border-t border-zinc-900 pt-3 text-xs text-zinc-400">
+    <details ref={detailsRef} className="mt-3 border-t border-zinc-900 pt-3 text-xs text-zinc-400">
       <summary className="cursor-pointer font-mono text-violet-300 underline decoration-violet-500/50 underline-offset-4 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400">Score details</summary>
       <div className="mt-3 space-y-2 leading-relaxed">
-        <p>Current Player Score is a player-evidence estimate. The chart combines recorded and reconstructed history for display; recorded observations keep their original formula version and take precedence at matching timestamps. Reconstructions use {PLAYER_SCORE_FORMULA_VERSION} and retain the source observation dates. Lines do not connect different formula versions: a calculation change alone is not improving or worsening reception. History is separate from raw approval buckets and does not imply that a milestone caused a change.</p>
+        <p>Current Player Score is a player-evidence estimate. The timeline uses recorded scores where available for the same review evidence and supported estimates elsewhere. Reconstructions use {PLAYER_SCORE_FORMULA_VERSION}. The line breaks at gaps and changes in formula or review population.</p>
+        {point && <>
+          <label className="block">
+            <span className="block text-zinc-300">Historical score point</span>
+            <select
+              className="max-w-full border border-zinc-700 bg-zinc-950 p-2 text-zinc-200"
+              value={point.id}
+              onChange={(event) => onSelectPoint(event.currentTarget.value)}
+            >
+              {points.map((item) => (
+                <option key={item.id} value={item.id}>
+                  {formatLocalDateTime(new Date(item.timestamp))} · {formatNumber(item.score, { maximumFractionDigits: 1 })}
+                </option>
+              ))}
+            </select>
+          </label>
+          <div className="space-y-1 border-l border-zinc-800 pl-2" aria-live="polite">
+            <p>{point.provenance === "reconstructed" ? "Reconstructed estimate" : recalculation ? "Formula recalculation (not new reviews)" : "Recorded observation"} · {point.details.formula_version}</p>
+            <p>Current scoring-window evidence: {formatNumber(point.details.current_reviews)} reviews</p>
+            <p>Review evidence observed at: {formatBoundary(point.details.current_evidence_observed_at)}</p>
+            {point.details.population_ref && populationDetails("Review population", point.details.population_ref)}
+            {recalculation && <p>{recalculation.previous_formula_version} → {point.details.formula_version} · calculated {formatBoundary(recalculation.calculated_at)}</p>}
+          </div>
+        </>}
         {score && <>
           <p>Score recorded at: <span className="text-zinc-300">{formatLocalDateTime(score.observed_at)}</span>; formula version: <span className="text-zinc-300">{score.formula_version}</span></p>
           {score.recalculation && <p>Formula recalculation (not new reviews): {score.recalculation.previous_formula_version} → {score.formula_version}, calculated {formatLocalDateTime(score.recalculation.calculated_at)} from observation {formatNumber(score.recalculation.previous_observation_id)}. Review evidence is unchanged.</p>}
@@ -585,6 +690,13 @@ function ScoreHistoryCard({
   activeEventId?: string | null;
   onSelectEvent?: (eventId: string | null) => void;
 }) {
+  const chartData = useMemo(() => buildScoreHistoryChartData(history), [history]);
+  const [pointSelection, setPointSelection] = useState<{ range: HistoryRange; id: string } | null>(null);
+  const detailsRef = useRef<HTMLDetailsElement>(null);
+  const selectPoint = (id: string) => {
+    if (!history) return;
+    setPointSelection({ range: history.range, id });
+  };
   const milestones = historyMilestones(history);
   return (
     <section id="score-history" className="min-w-0 border border-zinc-800 bg-zinc-950 p-4 sm:p-5" aria-labelledby="score-history-title">
@@ -601,6 +713,12 @@ function ScoreHistoryCard({
       <ScoreMetrics history={history} />
       <div className="mt-4 overflow-hidden" data-testid="score-history-chart">
         <ScoreChart
+          key={history?.range}
+          chartData={chartData}
+          onSelectPoint={(id) => {
+            selectPoint(id);
+            if (detailsRef.current) detailsRef.current.open = true;
+          }}
           appid={appid}
           history={history}
           isUpdating={isUpdating}
@@ -641,7 +759,14 @@ function ScoreHistoryCard({
           )}
         </ol>
       </details>
-      <ScoreDetails summary={summary} history={history} />
+      <ScoreDetails
+        summary={summary}
+        history={history}
+        points={chartData}
+        selectedPointId={pointSelection && pointSelection.range === history?.range ? pointSelection.id : null}
+        onSelectPoint={selectPoint}
+        detailsRef={detailsRef}
+      />
     </section>
   );
 }

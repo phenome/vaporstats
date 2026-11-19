@@ -188,7 +188,7 @@ function intervalOf(bucket: NormalizedBucket): ReviewInterval {
   return { start: bucket.start, end: bucket.end, granularity: bucket.granularity };
 }
 
-function mergeIntervals(intervals: readonly ReviewInterval[]): ReviewInterval[] {
+export function mergeIntervals(intervals: readonly ReviewInterval[]): ReviewInterval[] {
   const sorted = intervals
     .map((interval) => ({ startMs: parseUtc(interval.start)!, endMs: parseUtc(interval.end)!, granularity: interval.granularity }))
     .sort((a, b) => a.startMs - b.startMs || a.endMs - b.endMs);
