@@ -18,22 +18,25 @@ function boundaryViolations(file: string, source: string): string[] {
     violations.push(`${file}: use fetchOutletArticle to contact an Outlet and classify its response`);
   }
 
-  // OpenRouter and paid-provider classifiers have their own HTTP contracts.
+  if (file !== "lib/media-gemini.ts" && /generativelanguage\.googleapis\.com|:asyncBatchEmbedContent/.test(source)) {
+    violations.push(`${file}: use createGeminiBatchTransport for Gemini Batch requests`);
+  }
+  if (file !== "lib/media-embedding-vector.ts" && /\b(?:new Float32Array\(|Float32Array\.from\()/.test(source)) {
+    violations.push(`${file}: use encodeVector and decodeVector for stored embedding vectors`);
+  }
+
+  // The paid adapters and classifiers own their provider HTTP contracts.
   const paidAdapter = ["lib/media-openrouter.ts", "lib/media-paid-providers.ts", "lib/media-gemini.ts"].includes(file);
   if (paidAdapter) return violations;
-  // Until the Gemini adapter moves, permit its existing provider transport.
-  const callers = file === "lib/media-processing.ts"
-    ? source.replace(/^function providerError\([\s\S]*?(?=^function normalizeUsage\()/m, "")
-    : source;
   const rawFetch = /\b(?:fetch|fetchFn|mediaFetch|searchFetch|tavilyFetch)\s*\(/i;
   const inlineStatus = /(?:\??\.\s*ok\b|\[\s*["']ok["']\s*\])|\bstatus(?:Code|_code)?\s*[=!<>]=?=?\s*[1-5]\d\d\b|\b[1-5]\d\d\s*[=!<>]=?=?\s*(?:\w+\.)?status\b|\bcase\s+[1-5]\d\d\s*:/;
-  if (rawFetch.test(callers) || inlineStatus.test(callers)) {
-    violations.push(`${file}: use fetchOutletArticle for Outlet HTTP handling or createTavilyTransport / classifyTavilySearchOutcome for Tavily HTTP handling`);
+  if (rawFetch.test(source) || inlineStatus.test(source)) {
+    violations.push(`${file}: use fetchOutletArticle for Outlet HTTP handling or createTavilyTransport / classifyTavilySearchOutcome for Tavily HTTP handling or a paid-provider transport`);
   }
   return violations;
 }
 
-test("production media callers use the Outlet and Tavily interfaces", async () => {
+test("production media callers use the Outlet, provider and embedding vector interfaces", async () => {
   expect(mediaFiles).toContain("lib/media-discovery.ts");
   expect(mediaFiles).toContain("lib/media-processing.ts");
   const violations = await Promise.all(mediaFiles.map(async (file) =>
@@ -47,6 +50,8 @@ test.each([
   ["lib/media-discovery.ts", "if (answered.status === 403) return null", "fetchOutletArticle"],
   ["lib/media-discovery.ts", 'await request("https://api.tavily.com/search")', "createTavilyTransport"],
   ["lib/media-discovery.ts", "if (searchResponse.status === 432) return", "classifyTavilySearchOutcome"],
+  ["lib/media-processing.ts", 'await request("https://generativelanguage.googleapis.com/v1beta")', "createGeminiBatchTransport"],
+  ["lib/media-similarity.ts", "const vector = new Float32Array(buffer)", "decodeVector"],
 ])("reports the supported interface for %s containing %s", (file, source, supported) => {
   expect(boundaryViolations(file, source).join("\n")).toContain(supported);
 });

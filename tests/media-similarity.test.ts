@@ -9,6 +9,7 @@ import {
 } from "../src/lib/media-similarity";
 import { getCanonicalChildPath } from "../src/lib/related";
 import { getCanonicalGamePath } from "../src/lib/slug";
+import { decodeVector, encodeVector } from "../src/lib/media-embedding-vector";
 import { openMemoryDatabase } from "./support/db";
 
 function countRows(native: Database, table: "media_processing_jobs" | "media_game_embeddings" | "media_game_overviews"): number {
@@ -317,5 +318,44 @@ describe("live media similarity", () => {
       overviews: countRows(value.native, "media_game_overviews"),
     };
     expect(after).toEqual(before);
+  });
+});
+
+describe("embedding vector codec", () => {
+  test("round-trips 3,072 dimensions from blobs and aligned byte views", () => {
+    const input = Array.from({ length: 3_072 }, (_, index) => (index - 1_536) * 0.1);
+    const expected = Float32Array.from(input);
+    const encoded = encodeVector(input)!;
+    expect(encoded.byteLength).toBe(12_288);
+    expect(decodeVector(encoded)).toEqual(expected);
+    expect(decodeVector(Uint8Array.from(encoded).buffer)).toEqual(expected);
+
+    const backing = new Uint8Array(12_296);
+    backing.set(encoded, 4);
+    expect(decodeVector(backing.subarray(4, 12_292))).toEqual(expected);
+  });
+
+  test("rejects malformed, misaligned, wrong-length and non-finite buffers", () => {
+    for (const value of [
+      null, "vector", new Float32Array(3_072), new DataView(new ArrayBuffer(12_288)),
+      new ArrayBuffer(12_284), new Uint8Array(12_287), new Uint8Array(12_292),
+      new Uint8Array(12_289).subarray(1),
+    ]) {
+      expect(decodeVector(value)).toBeNull();
+    }
+    for (const invalid of [NaN, Infinity, -Infinity]) {
+      const buffer = new ArrayBuffer(12_288);
+      new Float32Array(buffer)[3_071] = invalid;
+      expect(decodeVector(buffer)).toBeNull();
+    }
+  });
+
+  test("rejects input that cannot be encoded as a finite Float32 vector", () => {
+    const valid = Array<number>(3_072).fill(0);
+    for (const invalid of [NaN, Infinity, Number.MAX_VALUE, "1", undefined]) {
+      expect(encodeVector([...valid.slice(1), invalid])).toBeNull();
+    }
+    expect(encodeVector(valid.slice(1))).toBeNull();
+    expect(encodeVector(Array<number>(3_072))).toBeNull();
   });
 });

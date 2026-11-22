@@ -1,8 +1,9 @@
 import { describe, expect, test } from "bun:test";
+import { createGeminiBatchTransport } from "../src/lib/media-gemini";
 import { createOpenRouterTransport } from "../src/lib/media-openrouter";
 import { createTavilyTransport } from "../src/lib/media-tavily";
 import { classifyGeminiOutcome, classifyOpenRouterOutcome, GeminiBatchFailure, type ProviderOutcome } from "../src/lib/media-paid-providers";
-import { createGeminiBatchTransport, OPENROUTER_TEXT_MODEL } from "../src/lib/media-processing";
+import { createGeminiBatchTransport as processingGeminiTransport, OPENROUTER_TEXT_MODEL } from "../src/lib/media-processing";
 import { GEMINI_EMBEDDING_MODEL } from "../src/lib/media-similarity";
 import {
   controlledGeminiApi,
@@ -81,6 +82,10 @@ const PROVIDERS = [
 ] as const;
 
 describe("paid-provider classifier contract", () => {
+  test("media processing re-exports the Gemini Batch transport", () => {
+    expect(processingGeminiTransport).toBe(createGeminiBatchTransport);
+  });
+
   test("every provider has fixtures for every response scope", () => {
     for (const { name, fixtures } of PROVIDERS) {
       for (const scope of PROVIDER_RESPONSE_SCOPES) {

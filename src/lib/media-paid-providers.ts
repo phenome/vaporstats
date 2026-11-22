@@ -40,11 +40,45 @@ export type ProviderOutcome =
   | { class: "uncertain"; reason: string }
   | { class: "missing_configuration"; reason: ConfigurationPauseReason };
 
-export type CreditPauseReason =
-  | "prepay_depleted" | "spend_cap"
-  | "key_limit" | "credits" | "guardrail_budget" | "workspace_budget";
-export type ConfigurationPauseReason = "missing_key" | "rejected_key" | "invalid_key" | "permission_denied" | "forbidden" | "failed_precondition" | "model_unavailable" | "unrecognized_client_error" | "output_truncated";
-export type ProviderPauseReason = CreditPauseReason | ConfigurationPauseReason;
+export const CREDIT_PAUSE_REASONS = [
+  "prepay_depleted", "spend_cap", "key_limit", "credits", "guardrail_budget", "workspace_budget",
+] as const;
+export type CreditPauseReason = (typeof CREDIT_PAUSE_REASONS)[number];
+
+export const CONFIGURATION_PAUSE_REASONS = [
+  "missing_key", "rejected_key", "invalid_key", "permission_denied", "forbidden", "failed_precondition",
+  "model_unavailable", "unrecognized_client_error", "output_truncated",
+] as const;
+export type ConfigurationPauseReason = (typeof CONFIGURATION_PAUSE_REASONS)[number];
+
+export const PROVIDER_PAUSE_REASONS = [...CREDIT_PAUSE_REASONS, ...CONFIGURATION_PAUSE_REASONS] as const;
+export type ProviderPauseReason = (typeof PROVIDER_PAUSE_REASONS)[number];
+
+/** Fixed processing summary reasons that can cross the internal server boundary. */
+export const PROCESSING_STOP_REASONS = {
+  INPUT_TOKEN_CAP: "input_token_cap",
+  PROVIDER_REFUSAL: "provider_refusal",
+  TERMINAL_FAILURE: "terminal_failure",
+  TRANSIENT_PROVIDER_FAILURE: "transient_provider_failure",
+  UNCERTAIN_SUBMISSION: "uncertain_submission",
+  MISSING_GEMINI_EMBEDDING_BATCH: "missing_gemini_embedding_batch",
+  ITEM_ERROR: "item_error",
+} as const;
+
+const MAX_ERROR_LENGTH = 256;
+
+/** `error`'s message on one bounded line, with every configured secret and bearer token redacted. */
+export function boundedPaidWorkError(error: unknown, secrets: readonly (string | undefined)[] = []): string {
+  let message = error instanceof Error ? error.message : String(error);
+  for (const secret of secrets) {
+    if (secret) message = message.split(secret).join("[redacted]");
+  }
+  return message
+    .replace(/[\r\n]+/g, " ")
+    .replace(/Bearer\s+\S+/gi, "Bearer [redacted]")
+    .replace(/(?:api[_-]?key|token|secret)\s*[:=]\s*\S+/gi, "[redacted]")
+    .slice(0, MAX_ERROR_LENGTH);
+}
 
 /** A non-OK Gemini HTTP response, as the batch transport receives it. */
 export class GeminiHttpError extends Error {

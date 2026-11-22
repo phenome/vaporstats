@@ -3,6 +3,15 @@ import { Readability } from "@mozilla/readability";
 import { MIN_USABLE_ARTICLE_CHARS, parseArticleDocument } from "./article-document";
 import type { AppDatabase } from "./db";
 import { writeTransaction } from "./db-transaction";
+import { decodeVector, encodeVector, GEMINI_EMBEDDING_DIMENSIONS } from "./media-embedding-vector";
+import {
+  createGeminiBatchTransport,
+  type GeminiBatchPoll,
+  type GeminiBatchTransport,
+  type GeminiBatchUsage,
+  type GeminiFetch,
+  type GeminiRequest,
+} from "./media-gemini";
 import {
   createMediaEvidenceSource,
   MEDIA_CATEGORY_NAMES,
@@ -26,12 +35,11 @@ import {
   type OpenRouterTransport,
 } from "./media-openrouter";
 import {
+  boundedPaidWorkError,
   classifyGeminiOutcome,
   classifyOpenRouterKeyCheck,
   classifyOpenRouterOutcome,
   GeminiBatchFailure,
-  GeminiHttpError,
-  GeminiMissingKeyError,
   OpenRouterHttpError,
   liftProviderPause,
   MAX_CLIENT_ERROR_PAUSES,
@@ -41,6 +49,7 @@ import {
   paidWorkCost,
   pauseProvider,
   PAID_PROVIDERS,
+  PROCESSING_STOP_REASONS,
   providerState,
   readEntityTurns,
   writeEntityTurns,
@@ -58,7 +67,6 @@ import {
 import {
   ELIGIBLE_MEDIA_ENTITY_SQL,
   GEMINI_EMBEDDING_CONFIG_VERSION,
-  GEMINI_EMBEDDING_DIMENSIONS,
   GEMINI_EMBEDDING_MODEL,
 } from "./media-similarity";
 
@@ -107,7 +115,6 @@ const OPENROUTER_MAX_INPUT_TOKENS = 60_000;
  */
 const ESTIMATE_BYTES_PER_TOKEN = 3;
 const MAX_EMBEDDING_INPUT_TOKENS = 8_192;
-const MAX_ERROR_LENGTH = 256;
 const SIMILARITY_DIMENSIONS = ["gameplay", "story_world"] as const;
 type SimilarityDimension = (typeof SIMILARITY_DIMENSIONS)[number];
 
@@ -174,38 +181,9 @@ export interface MediaProcessingSummary {
   cost: PaidWorkCost;
 }
 
-type GeminiRequest = Record<string, unknown>;
-type GeminiInlineRequest = { key: string; request: GeminiRequest };
+export { createGeminiBatchTransport, type GeminiBatchPoll, type GeminiBatchTransport, type GeminiBatchUsage } from "./media-gemini";
 
-export interface GeminiBatchUsage {
-  inputTokens?: number;
-  outputTokens?: number;
-  thinkingTokens?: number;
-  promptTokenCount?: number;
-  candidatesTokenCount?: number;
-  thoughtsTokenCount?: number;
-}
-
-export interface GeminiBatchPoll {
-  state: "pending" | "succeeded" | "failed";
-  output?: unknown;
-  usage?: GeminiBatchUsage | null;
-  error?: string | null;
-  /** The provider's state of a batch that ended without output, such as `BATCH_STATE_EXPIRED`. */
-  batchState?: string | null;
-}
-
-/**
- * Gemini Batch: embeddings, and polls of batches already submitted. Text
- * generation is no longer submitted to Gemini.
- */
-export interface GeminiBatchTransport {
-  countTokens(model: string, request: GeminiRequest): Promise<number>;
-  submitEmbeddingBatch?(model: string, requests: readonly GeminiInlineRequest[]): Promise<{ name: string }>;
-  pollBatch(name: string): Promise<GeminiBatchPoll>;
-}
-
-export type MediaFetch = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
+export type MediaFetch = GeminiFetch;
 export type ArticleFetch = (input: string, init?: RequestInit) => Promise<Response | string>;
 
 export interface MediaProcessingOptions {
@@ -239,19 +217,6 @@ export interface MediaProcessingOptions {
    * disabled: no credit check, no new queue item and no paid submission.
    */
   pollOnly?: boolean;
-}
-
-/** `error`'s message on one bounded line, with every configured secret and bearer token redacted. */
-function boundedError(error: unknown, secrets: readonly (string | undefined)[] = []): string {
-  let message = error instanceof Error ? error.message : String(error);
-  for (const secret of secrets) {
-    if (secret) message = message.split(secret).join("[redacted]");
-  }
-  return message
-    .replace(/[\r\n]+/g, " ")
-    .replace(/Bearer\s+\S+/gi, "Bearer [redacted]")
-    .replace(/(?:api[_-]?key|token|secret)\s*[:=]\s*\S+/gi, "[redacted]")
-    .slice(0, MAX_ERROR_LENGTH);
 }
 
 function jsonObject(value: unknown): Record<string, unknown> {
@@ -296,165 +261,6 @@ function transaction(db: AppDatabase, work: () => Promise<void>): Promise<void> 
 }
 
 /** How long a Gemini error asks to wait: its `Retry-After` header, else a `RetryInfo` detail. */
-function retryAfterMs(response: Response, details: unknown): number | null {
-  const header = response.headers.get("retry-after");
-  if (header) {
-    const seconds = Number(header);
-    if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1_000;
-    const date = Date.parse(header);
-    if (Number.isFinite(date)) return Math.max(0, date - Date.now());
-  }
-  for (const detail of Array.isArray(details) ? details : []) {
-    const delay = jsonObject(detail).retryDelay;
-    const match = typeof delay === "string" ? /^(\d+(?:\.\d+)?)s$/.exec(delay) : null;
-    if (match) return Number(match[1]) * 1_000;
-  }
-  return null;
-}
-
-function providerError(response: Response, body: unknown): GeminiHttpError {
-  const root = jsonObject(body);
-  const nested = jsonObject(root.error);
-  const message = nested.message ?? root.error;
-  return new GeminiHttpError(
-    response.status,
-    typeof message === "string" ? message : `Gemini HTTP ${response.status}`,
-    typeof nested.status === "string" ? nested.status : null,
-    retryAfterMs(response, nested.details),
-    (Array.isArray(nested.details) ? nested.details : []).map((detail) => jsonObject(detail).reason).filter((reason): reason is string => typeof reason === "string"),
-  );
-}
-
-async function responseJson(response: Response): Promise<unknown> {
-  return response.json().catch(() => ({}));
-}
-
-export function createGeminiBatchTransport(apiKey: string, fetchFn: MediaFetch = fetch): GeminiBatchTransport {
-  if (!apiKey || typeof apiKey !== "string") throw new GeminiMissingKeyError();
-  const base = "https://generativelanguage.googleapis.com/v1beta";
-  const request = async (url: string, init: RequestInit): Promise<unknown> => {
-    const response = await fetchFn(url, {
-      ...init,
-      headers: { Accept: "application/json", "Content-Type": "application/json", "x-goog-api-key": apiKey, ...(init.headers ?? {}) },
-    });
-    const body = await responseJson(response);
-    if (!response.ok) throw providerError(response, body);
-    return body;
-  };
-  return {
-    async countTokens(model, input) {
-      const { generationConfig: _generationConfig, embedContentConfig: _embedContentConfig, content, ...countInput } = input;
-      const payload = content ? { ...countInput, contents: [content] } : countInput;
-      const body = await request(`${base}/models/${encodeURIComponent(model)}:countTokens`, { method: "POST", body: JSON.stringify(payload) });
-      const root = jsonObject(body);
-      const count = root.totalTokens ?? root.total_tokens;
-      if (typeof count !== "number" || !Number.isInteger(count) || count < 0) throw new Error("Gemini countTokens returned no bounded token count");
-      return count;
-    },
-    async submitEmbeddingBatch(model, requests) {
-      const body = await request(`${base}/models/${encodeURIComponent(model)}:asyncBatchEmbedContent`, {
-        method: "POST",
-        body: JSON.stringify({
-          batch: {
-            displayName: requests[0]?.key ?? "vaporstats-media-embedding",
-            inputConfig: {
-              requests: {
-                requests: requests.map(({ key, request: item }) => ({
-                  request: item,
-                  metadata: { key },
-                })),
-              },
-            },
-          },
-        }),
-      });
-      const root = jsonObject(body);
-      const name = root.name ?? jsonObject(root.batch).name ?? jsonObject(root.operation).name;
-      if (typeof name !== "string" || !name) throw new Error("Gemini embedding batch submission returned no batch name");
-      return { name };
-    },
-    async pollBatch(name) {
-      const response = await fetchFn(`${base}/${name.replace(/^\/+/, "")}`, { headers: { Accept: "application/json", "x-goog-api-key": apiKey } });
-      const body = await responseJson(response);
-      if (!response.ok) throw providerError(response, body);
-      const root = jsonObject(body);
-      const metadata = jsonObject(root.metadata);
-      const rawState = metadata.state ?? root.state ?? root.status;
-      const stateValue = String(
-        typeof rawState === "object" ? jsonObject(rawState).name ?? jsonObject(rawState).state ?? jsonObject(rawState).status ?? "" : rawState ?? "",
-      ).toUpperCase();
-      const responseBody = root.response ?? root.result ?? root.output ?? root.responses ?? root.inlinedResponses;
-      const responseRoot = jsonObject(responseBody);
-      const inlineResponses = batchInlineResponses(responseBody);
-      const inline = jsonObject(inlineResponses[0]);
-      const inlineResponse = jsonObject(inline.response ?? inline.output);
-      const usage = normalizeUsage(
-        root.usageMetadata
-          ?? root.usage
-          ?? responseRoot.usageMetadata
-          ?? responseRoot.usage
-          ?? inline.usageMetadata
-          ?? inline.usage
-          ?? inlineResponse.usageMetadata
-          ?? inlineResponse.usage,
-      );
-      if (!stateValue || /PENDING|RUNNING|QUEUED|PROCESSING|ACTIVE/.test(stateValue)) return { state: "pending" };
-      if (/FAIL|CANCEL|EXPIRE|ERROR/.test(stateValue)) return { state: "failed", error: boundedError(jsonObject(root.error).message ?? root.error ?? stateValue), usage, batchState: stateValue };
-      if (!/SUCCEED|COMPLETE|DONE/.test(stateValue)) return { state: "pending" };
-      const inlineError = inline.error ?? inlineResponse.error;
-      if (inlineError) {
-        return { state: "failed", error: boundedError(jsonObject(inlineError).message ?? inlineError), usage };
-      }
-      const output = normalizeBatchOutput(responseBody);
-      return { state: "succeeded", output, usage };
-    },
-  };
-}
-
-function normalizeUsage(value: unknown): GeminiBatchUsage | null {
-  const root = jsonObject(value);
-  if (Object.keys(root).length === 0) return null;
-  const number = (...keys: string[]): number | undefined => {
-    for (const key of keys) {
-      const candidate = root[key];
-      if (typeof candidate === "number" && Number.isFinite(candidate) && candidate >= 0) return Math.floor(candidate);
-    }
-    return undefined;
-  };
-  return {
-    inputTokens: number("inputTokens", "input_token_count", "promptTokenCount"),
-    outputTokens: number("outputTokens", "output_token_count", "candidatesTokenCount"),
-    thinkingTokens: number("thinkingTokens", "thinking_token_count", "thoughtsTokenCount"),
-    promptTokenCount: number("promptTokenCount"),
-    candidatesTokenCount: number("candidatesTokenCount"),
-    thoughtsTokenCount: number("thoughtsTokenCount"),
-  };
-}
-
-function batchInlineResponses(value: unknown): unknown[] {
-  if (Array.isArray(value)) return value;
-  const root = jsonObject(value);
-  if (root.inlinedResponses !== undefined) return batchInlineResponses(root.inlinedResponses);
-  if (root.responses !== undefined) return batchInlineResponses(root.responses);
-  return [];
-}
-
-function normalizeBatchOutput(value: unknown): unknown {
-  const inlineResponses = batchInlineResponses(value);
-  if (inlineResponses.length > 0) {
-    const first = inlineResponses[0];
-    if (jsonObject(first).response !== undefined) return normalizeBatchOutput(jsonObject(first).response);
-    if (jsonObject(first).output !== undefined) return normalizeBatchOutput(jsonObject(first).output);
-    return normalizeBatchOutput(first);
-  }
-  const root = jsonObject(value);
-  if (root.candidates && Array.isArray(root.candidates)) {
-    const text = jsonObject(jsonObject(root.candidates[0]).content).parts;
-    if (Array.isArray(text)) return text.map((part) => jsonObject(part).text).filter((part): part is string => typeof part === "string").join("");
-  }
-  return value;
-}
-
 function cleanLine(value: string): string {
   return value.replace(/[\t ]+/g, " ").replace(/\s+([,.;!?])/g, "$1").trim();
 }
@@ -1037,7 +843,7 @@ async function returnUncertainItem(advance: QueueAdvance, job: JobRow, reason: s
     await db.prepare("UPDATE media_processing_jobs SET status = 'queued', provider = ?, model = ?, config_version = ?, max_output_tokens = ?, input_identity = ?, provider_batch_id = NULL, submitted_at = NULL, attempt_count = ?, next_attempt_at = ?, error = ? WHERE id = ?")
       .bind(queued.provider, queued.model, queued.config_version, queued.max_output_tokens, queued.input_identity, failures, transientRetryAt(failures, now, null).toISOString(), `uncertain:${reason}`, job.id).run();
   });
-  noteReason(advance, job.run_id, "uncertain_submission");
+  noteReason(advance, job.run_id, PROCESSING_STOP_REASONS.UNCERTAIN_SUBMISSION);
 }
 
 /**
@@ -1084,7 +890,9 @@ async function holdItem(advance: QueueAdvance, job: JobRow, outcome: Exclude<Pro
   if (outcome.class === "uncertain") return returnUncertainItem(advance, job, outcome.reason);
   if (outcome.class === "refusal") {
     await refuseItem(db, job, outcome.reason, now);
-    noteReason(advance, job.run_id, outcome.reason === "input_token_cap" ? "input_token_cap" : "provider_refusal");
+    noteReason(advance, job.run_id, outcome.reason === PROCESSING_STOP_REASONS.INPUT_TOKEN_CAP
+      ? PROCESSING_STOP_REASONS.INPUT_TOKEN_CAP
+      : PROCESSING_STOP_REASONS.PROVIDER_REFUSAL);
     return;
   }
   if (outcome.class === "missing_configuration" && countsAsClientErrorPause(outcome)) return holdClientError(advance, job, outcome);
@@ -1104,7 +912,7 @@ async function holdItem(advance: QueueAdvance, job: JobRow, outcome: Exclude<Pro
     await db.prepare(`UPDATE media_processing_jobs SET status = 'queued', attempt_count = ?, next_attempt_at = ?, error = ?, submitted_at = NULL WHERE id = ? AND (${WAITING} OR (status = 'uncertain' AND error = '${IN_FLIGHT}'))`).bind(failures, retryAt.toISOString(), `transient:${outcome.reason}`, job.id).run();
     await closeAttempt(db, job.id, attemptOutcome(outcome), `transient:${outcome.reason}`);
   });
-  noteReason(advance, job.run_id, "transient_provider_failure");
+  noteReason(advance, job.run_id, PROCESSING_STOP_REASONS.TRANSIENT_PROVIDER_FAILURE);
 }
 
 /**
@@ -1141,9 +949,6 @@ async function holdClientError(advance: QueueAdvance, job: JobRow, outcome: Extr
   advance.paused.add(job.provider);
 }
 
-/** Why an item was held after an unexpected exception while it was handled. */
-const ITEM_ERROR = "item_error";
-
 /**
  * Acts on an unexpected exception while `job` was handled: one no
  * classifier anticipated, such as a defect in handling its article. It is
@@ -1164,11 +969,11 @@ const ITEM_ERROR = "item_error";
  */
 async function holdThrowingItem(advance: QueueAdvance, job: JobRow, error: unknown): Promise<void> {
   const { db, now } = advance;
-  const reason = boundedError(error, advance.secrets);
-  noteReason(advance, job.run_id, ITEM_ERROR);
+  const reason = boundedPaidWorkError(error, advance.secrets);
+  noteReason(advance, job.run_id, PROCESSING_STOP_REASONS.ITEM_ERROR);
   const state = await first<{ status: JobStatus; error: string | null }>(db, "SELECT status, error FROM media_processing_jobs WHERE id = ?", job.id);
   if (state && ((state.status === "uncertain" && state.error === IN_FLIGHT) || state.status === "submitted")) {
-    await returnUncertainItem(advance, job, `${ITEM_ERROR}:${reason}`);
+    await returnUncertainItem(advance, job, `${PROCESSING_STOP_REASONS.ITEM_ERROR}:${reason}`);
     return;
   }
   await transaction(db, async () => {
@@ -1181,13 +986,13 @@ async function holdThrowingItem(advance: QueueAdvance, job: JobRow, error: unkno
     const occurrences = (current.client_error_identity === current.input_identity ? current.client_error_pauses : 0) + 1;
     if (occurrences >= MAX_CLIENT_ERROR_PAUSES) {
       await db.prepare("UPDATE media_processing_jobs SET status = 'client_error_exhausted', error = ?, next_attempt_at = NULL, completed_at = ?, client_error_pauses = ?, client_error_identity = ? WHERE id = ?")
-        .bind(`client_error_exhausted:${ITEM_ERROR}`, now.toISOString(), occurrences, current.input_identity, job.id).run();
+        .bind(`client_error_exhausted:${PROCESSING_STOP_REASONS.ITEM_ERROR}`, now.toISOString(), occurrences, current.input_identity, job.id).run();
       await countOutputs(db, job.run_id, "skipped");
       return;
     }
     const failures = current.attempt_count + 1;
     await db.prepare("UPDATE media_processing_jobs SET attempt_count = ?, next_attempt_at = ?, error = ?, client_error_pauses = ?, client_error_identity = ? WHERE id = ?")
-      .bind(failures, transientRetryAt(failures, now, null).toISOString(), `${ITEM_ERROR}:${reason}`, occurrences, current.input_identity, job.id).run();
+      .bind(failures, transientRetryAt(failures, now, null).toISOString(), `${PROCESSING_STOP_REASONS.ITEM_ERROR}:${reason}`, occurrences, current.input_identity, job.id).run();
   });
 }
 
@@ -1471,40 +1276,15 @@ async function persistOverview(db: AppDatabase, job: JobRow, output: unknown, no
   return "succeeded";
 }
 
-function decodeVector(value: unknown): Float32Array | null {
-  const bytes = value instanceof Uint8Array
-    ? value
-    : value instanceof ArrayBuffer
-      ? new Uint8Array(value)
-      : null;
-  if (!bytes || bytes.byteLength !== GEMINI_EMBEDDING_DIMENSIONS * Float32Array.BYTES_PER_ELEMENT) return null;
-  const copy = bytes.slice();
-  const vector = new Float32Array(copy.buffer);
-  return vector.every(Number.isFinite) ? vector : null;
-}
-
-function encodeVector(values: readonly number[]): Uint8Array {
-  const buffer = new ArrayBuffer(values.length * Float32Array.BYTES_PER_ELEMENT);
-  new Float32Array(buffer).set(values);
-  return new Uint8Array(buffer);
-}
-
-function embeddingValues(value: unknown): number[] | null {
+function embeddingValues(value: unknown): unknown {
   const root = jsonObject(parseJson(value));
   const embedding = jsonObject(root.embedding);
-  const raw = Array.isArray(embedding.values)
-    ? embedding.values
-    : Array.isArray(root.values)
-      ? root.values
-      : Array.isArray(root.embeddings) && root.embeddings.length > 0
-        ? jsonObject(root.embeddings[0]).values
-        : null;
-  if (
-    !Array.isArray(raw)
-    || raw.length !== GEMINI_EMBEDDING_DIMENSIONS
-    || !raw.every((item) => typeof item === "number" && Number.isFinite(item) && Number.isFinite(Math.fround(item)))
-  ) return null;
-  return raw;
+  if (Array.isArray(embedding.values)) return embedding.values;
+  if (Array.isArray(root.values)) return root.values;
+  if (Array.isArray(root.embeddings) && root.embeddings.length > 0) {
+    return jsonObject(root.embeddings[0]).values;
+  }
+  return null;
 }
 
 function embeddingOverviewIdentity(job: JobRow): string | null {
@@ -1532,12 +1312,11 @@ async function persistEmbedding(db: AppDatabase, job: JobRow, output: unknown, n
   const overview = await first<{ input_identity: string; output_json: string }>(db, "SELECT input_identity, output_json FROM media_game_overviews WHERE appid = ? AND active = 1 ORDER BY id DESC LIMIT 1", job.appid);
   const input = overviewSimilarityInput(overview?.output_json, job.dimension);
   if (!overview || overview.input_identity !== overviewInputIdentity || input.length === 0 || similarityInputIdentity(job.dimension, input) !== job.input_identity) return markStale();
-  const values = embeddingValues(output);
-  if (!values) {
+  const vector = encodeVector(embeddingValues(output));
+  if (!vector) {
     await db.prepare("UPDATE media_processing_jobs SET status = 'refused', error = ?, completed_at = ? WHERE id = ?").bind("invalid_output: incompatible vector", now.toISOString(), job.id).run();
     return "refused";
   }
-  const vector = encodeVector(values);
   const existing = await first<{ id: number }>(db, "SELECT id FROM media_game_embeddings WHERE appid = ? AND dimension = ? AND input_identity = ? AND model = ? AND dimensions = ? AND config_version = ? ORDER BY id DESC LIMIT 1", job.appid, job.dimension, job.input_identity, GEMINI_EMBEDDING_MODEL, GEMINI_EMBEDDING_DIMENSIONS, GEMINI_EMBEDDING_CONFIG_VERSION);
   const earlier = await first<{ id: number }>(db, "SELECT id FROM media_game_embeddings WHERE appid = ? AND dimension = ? LIMIT 1", job.appid, job.dimension);
   await countOutputs(db, job.run_id, earlier ? "replaced" : "new");
@@ -1581,7 +1360,7 @@ async function settleJob(db: AppDatabase, job: JobRow, result: GeminiBatchPoll &
   await recordBatchCharge(db, job, result, now);
   await db.prepare("UPDATE media_processing_jobs SET completed_at = ? WHERE id = ?").bind(now.toISOString(), job.id).run();
   if (result.state === "failed") {
-    await db.prepare("UPDATE media_processing_jobs SET status = 'refused', error = ? WHERE id = ?").bind(boundedError(result.error, secrets), job.id).run();
+    await db.prepare("UPDATE media_processing_jobs SET status = 'refused', error = ? WHERE id = ?").bind(boundedPaidWorkError(result.error, secrets), job.id).run();
     return "refused";
   }
   if (job.stage === "extraction") return persistExtraction(db, job, result.output, now);
@@ -1683,9 +1462,9 @@ async function pollSubmittedJob(advance: QueueAdvance, job: JobRow, summary: Sub
     }
     if (outcome.class === "uncertain" || outcome.class === "refusal") {
       // An error about the batch itself: whether it ran is unknown.
-      await returnUncertainItem(advance, job, outcome.reason, boundedError(error, secrets));
+      await returnUncertainItem(advance, job, outcome.reason, boundedPaidWorkError(error, secrets));
     } else {
-      await db.prepare("UPDATE media_processing_jobs SET error = ? WHERE id = ? AND status = 'submitted'").bind(boundedError(error, secrets), job.id).run();
+      await db.prepare("UPDATE media_processing_jobs SET error = ? WHERE id = ? AND status = 'submitted'").bind(boundedPaidWorkError(error, secrets), job.id).run();
     }
     summary.uncertain += 1;
     return;
@@ -1695,7 +1474,7 @@ async function pollSubmittedJob(advance: QueueAdvance, job: JobRow, summary: Sub
     return;
   }
   if (result.state === "failed") {
-    const outcome = classifyGeminiOutcome("poll", new GeminiBatchFailure(boundedError(result.error ?? "batch failed", secrets), result.batchState ?? null));
+    const outcome = classifyGeminiOutcome("poll", new GeminiBatchFailure(boundedPaidWorkError(result.error ?? "batch failed", secrets), result.batchState ?? null));
     if (outcome.class === "credit_pause" || outcome.class === "missing_configuration") {
       // The provider declined the batch for credit or configuration:
       // nothing was produced, so the item waits again, with no attempt
@@ -1717,7 +1496,7 @@ async function pollSubmittedJob(advance: QueueAdvance, job: JobRow, summary: Sub
         await closeAttempt(db, job.id, "transient", `transient:${outcome.reason}`);
         await returnUnrunBatch(db, job, { attemptCount: failures, nextAttemptAt: transientRetryAt(failures, now, null).toISOString(), error: `transient:${outcome.reason}` }, now);
       });
-      noteReason(advance, job.run_id, "transient_provider_failure");
+      noteReason(advance, job.run_id, PROCESSING_STOP_REASONS.TRANSIENT_PROVIDER_FAILURE);
       summary.uncertain += 1;
       return;
     }
@@ -1725,7 +1504,7 @@ async function pollSubmittedJob(advance: QueueAdvance, job: JobRow, summary: Sub
       // The batch was accepted and then failed: it may have run and been
       // charged. Its reported usage is recorded, and the item is resent.
       await transaction(db, () => recordBatchCharge(db, job, result, now));
-      await returnUncertainItem(advance, job, outcome.reason, boundedError(result.error ?? "batch failed", secrets));
+      await returnUncertainItem(advance, job, outcome.reason, boundedPaidWorkError(result.error ?? "batch failed", secrets));
       summary.uncertain += 1;
       return;
     }
@@ -2148,7 +1927,7 @@ async function takeSynthesisTurn(advance: QueueAdvance, job: JobRow): Promise<bo
 async function takeEmbeddingTurn(advance: QueueAdvance, job: JobRow): Promise<boolean> {
   const { db } = advance;
   if (!advance.transport?.submitEmbeddingBatch) {
-    noteReason(advance, job.run_id, "missing_gemini_embedding_batch");
+    noteReason(advance, job.run_id, PROCESSING_STOP_REASONS.MISSING_GEMINI_EMBEDDING_BATCH);
     return false;
   }
   const overviewInputIdentity = embeddingOverviewIdentity(job);
@@ -2293,9 +2072,10 @@ async function finishRun(advance: QueueAdvance, run: OpenAuthorization): Promise
       if (state.paused) reasons.push(`provider_paused:${provider}:${state.reason}`);
     }
   }
-  const workStop = reasons.some((reason) => reason === "input_token_cap" || reason === "provider_refusal");
+  const workStop = reasons.some((reason) =>
+    reason === PROCESSING_STOP_REASONS.INPUT_TOKEN_CAP || reason === PROCESSING_STOP_REASONS.PROVIDER_REFUSAL);
   const terminalFailure = pending === 0 && Number(runAggregate?.hard ?? 0) > 0;
-  if (!workStop && terminalFailure) reasons.unshift("terminal_failure");
+  if (!workStop && terminalFailure) reasons.unshift(PROCESSING_STOP_REASONS.TERMINAL_FAILURE);
   // Sources an outlet stop deferred stay queued; once nothing waits, the run
   // has done all the work it was authorized for.
   const remainingInScope = sources.some((source) => inScope(source, auth.run_id, affected));
