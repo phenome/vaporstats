@@ -2,58 +2,80 @@ import { expect, test } from "bun:test";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { MIN_USABLE_ARTICLE_CHARS } from "../src/lib/article-document";
+import * as outletAccess from "../src/lib/media-outlet-access";
+import * as ledger from "../src/lib/media-paid-ledger";
 
 const root = join(import.meta.dir, "..");
-const mediaFiles = [...new Bun.Glob("**/media-*.{ts,tsx}").scanSync(join(root, "src"))].sort();
-const adapters = ["lib/media-outlet-access.ts", "lib/media-tavily.ts"];
+const sourceFiles = [...new Set(
+  ["lib/**/*.ts", "**/media-*.{ts,tsx}"].flatMap((pattern) => [...new Bun.Glob(pattern).scanSync(join(root, "src"))]),
+)].sort();
 
 function boundaryViolations(file: string, source: string): string[] {
-  if (adapters.includes(file)) return [];
   const violations: string[] = [];
-  const sourceWithoutTavilyImport = source.replaceAll(/from ["'][^"']*\/media-tavily["']/g, "");
-  if (/api\.tavily\.com|tavily_search_http_\$\{|\b(?:tavily|search)\w*(?:response|reply)\s*(?:\??\.\s*(?:ok|status)|\[\s*["'](?:ok|status)["']\s*\])/i.test(sourceWithoutTavilyImport)) {
+  const responseProperty = String.raw`(?:\??\.\s*(?:ok|status)\b|\[\s*["'](?:ok|status)["']\s*\])`;
+  const tavilyResponse = new RegExp(String.raw`\b(?:tavily|search)\w*(?:response|reply)\s*${responseProperty}`, "i");
+  if (file !== "lib/media-tavily.ts" && (
+    /api\.tavily\.com|tavily_search_http_\$\{|\b(?:tavilyFetch|searchFetch)\s*\(/i.test(source) || tavilyResponse.test(source)
+  )) {
     violations.push(`${file}: use createTavilyTransport for Tavily requests and classifyTavilySearchOutcome for its response`);
   }
-  if (/\bredirect\s*:\s*["']manual["']|text\/html,application\/xhtml\+xml|\bfinishAnsweredAttempt\s*\(|\b(?:articleFetch|outletFetch)\s*\(/.test(source)) {
+  const outletResponse = new RegExp(String.raw`\b(?:(?:article|outlet)\w*(?:response|reply)|answered)\s*${responseProperty}`, "i");
+  const mediaArticleCaller = /^lib\/(?:article-document|media-[^/]+)\.ts$/.test(file);
+  const manualRedirect = /\bredirect\s*:\s*["']manual["']/;
+  if (file !== "lib/media-outlet-access.ts" && (
+    /["\x27]text\/html,application\/xhtml\+xml["\x27]|fetch_http_\$\{|\b(?:finishAnsweredAttempt|articleFetch|outletFetch)\s*\(/.test(source) || outletResponse.test(source)
+    || (mediaArticleCaller && file !== "lib/media-tavily.ts" && manualRedirect.test(source))
+  )) {
     violations.push(`${file}: use fetchOutletArticle to contact an Outlet and classify its response`);
   }
 
   if (file !== "lib/media-gemini.ts" && /generativelanguage\.googleapis\.com|:asyncBatchEmbedContent/.test(source)) {
     violations.push(`${file}: use createGeminiBatchTransport for Gemini Batch requests`);
   }
-  if (file !== "lib/media-embedding-vector.ts" && /\b(?:new Float32Array\(|Float32Array\.from\()/.test(source)) {
+  if (file !== "lib/media-embedding-vector.ts" && /\b(?:function\s+(?:decodeVector|encodeVector)\s*\(|(?:const|let)\s+(?:decodeVector|encodeVector)\s*(?:=|:)|GEMINI_EMBEDDING_DIMENSIONS\s*\*\s*Float32Array\.BYTES_PER_ELEMENT)/.test(source)) {
     violations.push(`${file}: use encodeVector and decodeVector for stored embedding vectors`);
   }
 
-  // The paid adapters and classifiers own their provider HTTP contracts.
-  const paidAdapter = ["lib/media-openrouter.ts", "lib/media-paid-providers.ts", "lib/media-gemini.ts"].includes(file);
-  if (paidAdapter) return violations;
-  const rawFetch = /\b(?:fetch|fetchFn|mediaFetch|searchFetch|tavilyFetch)\s*\(/i;
-  const inlineStatus = /(?:\??\.\s*ok\b|\[\s*["']ok["']\s*\])|\bstatus(?:Code|_code)?\s*[=!<>]=?=?\s*[1-5]\d\d\b|\b[1-5]\d\d\s*[=!<>]=?=?\s*(?:\w+\.)?status\b|\bcase\s+[1-5]\d\d\s*:/;
-  if (rawFetch.test(source) || inlineStatus.test(source)) {
-    violations.push(`${file}: use fetchOutletArticle for Outlet HTTP handling or createTavilyTransport / classifyTavilySearchOutcome for Tavily HTTP handling or a paid-provider transport`);
-  }
   return violations;
 }
 
 test("production media callers use the Outlet, provider and embedding vector interfaces", async () => {
-  expect(mediaFiles).toContain("lib/media-discovery.ts");
-  expect(mediaFiles).toContain("lib/media-processing.ts");
-  const violations = await Promise.all(mediaFiles.map(async (file) =>
+  expect(sourceFiles).toContain("lib/article-document.ts");
+  expect(sourceFiles).toContain("lib/media-discovery.ts");
+  expect(sourceFiles).toContain("lib/media-processing.ts");
+  const violations = await Promise.all(sourceFiles.map(async (file) =>
     boundaryViolations(file, await Bun.file(join(root, "src", file)).text())));
   expect(violations.flat()).toEqual([]);
 });
 
 test.each([
-  ["lib/media-extra.ts", "await fetch(url)", "fetchOutletArticle"],
+  ["lib/article-document.ts", "await outletFetch(url)", "fetchOutletArticle"],
   ["lib/media-processing.ts", "await advance.articleFetch(url)", "fetchOutletArticle"],
   ["lib/media-discovery.ts", "if (answered.status === 403) return null", "fetchOutletArticle"],
   ["lib/media-discovery.ts", 'await request("https://api.tavily.com/search")', "createTavilyTransport"],
   ["lib/media-discovery.ts", "if (searchResponse.status === 432) return", "classifyTavilySearchOutcome"],
   ["lib/media-processing.ts", 'await request("https://generativelanguage.googleapis.com/v1beta")', "createGeminiBatchTransport"],
-  ["lib/media-similarity.ts", "const vector = new Float32Array(buffer)", "decodeVector"],
+  ["lib/media-similarity.ts", "function decodeVector(bytes: Uint8Array) {}", "decodeVector"],
+  ["lib/article-document.ts", "const bytes = GEMINI_EMBEDDING_DIMENSIONS * Float32Array.BYTES_PER_ELEMENT", "decodeVector"],
 ])("reports the supported interface for %s containing %s", (file, source, supported) => {
   expect(boundaryViolations(file, source).join("\n")).toContain(supported);
+});
+
+test.each([
+  "if (!response.ok) return null",
+  "const samples = new Float32Array(buffer)",
+])("allows unrelated HTTP handling or typed arrays in article-document.ts: %s", (source) => {
+  expect(boundaryViolations("lib/article-document.ts", source)).toEqual([]);
+});
+
+test("Outlet callers cannot finalize raw article responses", () => {
+  expect(outletAccess.fetchOutletArticle).toBeFunction();
+  expect(outletAccess).not.toHaveProperty("finishAnsweredAttempt");
+});
+
+test("callers record provider charges through ledger transitions", () => {
+  expect(ledger).not.toHaveProperty("recordOpenRouterAnswer");
+  expect(ledger).not.toHaveProperty("recordGeminiBatchCharge");
 });
 
 test("discovery and processing share the 120-character article minimum", async () => {
@@ -97,6 +119,7 @@ test("production writes Paid-work jobs and attempts through src/lib/media-paid-l
     // The migration check seeds historical schemas in temporary databases.
     .filter((file) => file !== "scripts/check-migrations.ts")
     .sort();
+  expect(productionFiles).toContain("src/lib/article-document.ts");
   const violations = await Promise.all(productionFiles.map(async (file) =>
     paidWorkWriteViolations(file, await Bun.file(join(root, file)).text())));
   expect(violations.flat()).toEqual([]);
@@ -111,6 +134,6 @@ test.each([
   ["db.exec(`UPDATE 'media_processing_jobs' SET error = NULL`)"],
   [String.raw`db.exec("DELETE -- remove abandoned work\nFROM media_processing_jobs")`],
 ])("reports the Paid-work ledger for a forbidden write in %s", (source) => {
-  expect(paidWorkWriteViolations("src/lib/queue.ts", source).join("\n")).toContain(paidWorkLedger);
+  expect(paidWorkWriteViolations("src/lib/article-document.ts", source).join("\n")).toContain(paidWorkLedger);
   expect(paidWorkWriteViolations(paidWorkLedger, source)).toEqual([]);
 });

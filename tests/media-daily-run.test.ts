@@ -157,6 +157,40 @@ describe("automatic Paid-work summaries", () => {
     });
   });
 
+  test.each([
+    { outcome: "a refusal", reply: { status: 400, body: { error: { message: "Invalid request" } } }, failed: 1, uncertain: 0 },
+    { outcome: "an uncertain send", reply: { network: "Socket closed" }, failed: 0, uncertain: 1 },
+  ])("an automatic tick counts $outcome from OpenRouter", async ({ reply, failed, uncertain }) => {
+    const database = experimentCatalog();
+    insertSources(database.native, CYBERPUNK, "initial", 1);
+    const openRouter = controlledOpenRouterApi();
+    openRouter.reply("chat", reply);
+
+    const result = await tick(database, { openRouter }, "2026-11-20T06:00:00.000Z", { geminiApiKey: "" });
+
+    expect(result.mediaProcessing).toMatchObject({ submitted: 1, completed: 0, failed, uncertain });
+  });
+
+  test("automatic work identifies its own run while polling an older pending batch", async () => {
+    const database = experimentCatalog();
+    insertSources(database.native, CYBERPUNK, "initial", 1);
+    const oldRun = insertCompletedRun(database.native, "initial:pre-cutover", [CYBERPUNK]);
+    const sourceId = database.native.query<{ id: number }, []>("SELECT id FROM media_sources").get()!.id;
+    insertSubmittedGeminiExtraction(database.native, { runId: oldRun, sourceId, batch: "batches/older" });
+    insertSources(database.native, BALDURS_GATE, "initial", 1);
+    const providers = { openRouter: controlledOpenRouterApi(), gemini: controlledGeminiApi() };
+    providers.gemini.batch("batches/older", "extraction");
+    providers.gemini.reply("poll", { status: 200, body: { metadata: { state: "BATCH_STATE_PENDING" } } });
+
+    const result = await tick(database, providers, "2026-11-20T06:00:00.000Z");
+
+    expect(result.mediaDailyRun?.discoveryRunId).toBeGreaterThan(oldRun);
+    expect(result.mediaProcessing).toMatchObject({
+      runId: result.mediaDailyRun?.discoveryRunId,
+      submitted: 3, completed: 3, failed: 0, uncertain: 1, status: "waiting", overviewAppids: [BALDURS_GATE],
+    });
+  });
+
   test("paused Gemini work keeps the automatic summary waiting after OpenRouter completes", async () => {
     const database = experimentCatalog();
     insertSources(database.native, CYBERPUNK, "initial", 1);
@@ -390,7 +424,8 @@ describe("the automatic media ingestion switch", () => {
     // A text batch Gemini accepted before the move to OpenRouter is still out.
     insertSources(database.native, CYBERPUNK, "initial", 1);
     const sourceId = database.native.query<{ id: number }, []>("SELECT MAX(id) AS id FROM media_sources").get()!.id;
-    const jobId = insertSubmittedGeminiExtraction(database.native, { runId: insertCompletedRun(database.native, "initial:pre-cutover", [CYBERPUNK]), sourceId, batch: "batches/pre-cutover" });
+    const retainedRunId = insertCompletedRun(database.native, "initial:pre-cutover", [CYBERPUNK]);
+    const jobId = insertSubmittedGeminiExtraction(database.native, { runId: retainedRunId, sourceId, batch: "batches/pre-cutover" });
     providers.gemini.batch("batches/pre-cutover", "extraction");
     const before = { searches: providers.tavily.searches.length, usage: providers.tavily.usageCalls, openRouter: providers.openRouter.calls.length, gemini: providers.gemini.submitted.length };
 
@@ -401,6 +436,7 @@ describe("the automatic media ingestion switch", () => {
 
     expect(disabled.map((result) => result.mediaDailyRun)).toEqual([undefined, undefined, undefined]);
     expect(disabled.map((result) => result.mediaDiscovery)).toEqual([undefined, undefined, undefined]);
+    expect(disabled.map((result) => result.mediaProcessing?.runId)).toEqual([retainedRunId, undefined, undefined]);
     expect({ searches: providers.tavily.searches.length, usage: providers.tavily.usageCalls, openRouter: providers.openRouter.calls.length, gemini: providers.gemini.submitted.length }).toEqual(before);
     expect(providers.gemini.calls.filter((call) => call.kind === "poll").map((call) => call.key)).toEqual(["extraction:batches/pre-cutover"]);
     expect(database.native.query("SELECT status FROM media_processing_jobs WHERE id = ?").get(jobId)).toEqual({ status: "succeeded" });

@@ -348,9 +348,16 @@ describe("media processing summary stop reasons", () => {
     expect(sanitizedStopReasons(reasons)).toEqual(reasons);
   });
 
+  it("preserves bounded stop reasons for each supported Outlet", () => {
+    const reasons = ["IGN", "Eurogamer", "GameSpot", "PC Gamer", "Kotaku", "GamesRadar+"].flatMap((outlet) =>
+      ["fetch_http_401", "fetch_http_403", "fetch_http_429", "daily_attempt_cap", "article_unreachable", "article_unusable"]
+        .map((reason) => `${outlet}:${reason}`));
+    expect(sanitizedStopReasons(reasons)).toEqual(reasons);
+  });
+
   it("reports unknown and unbounded stop reasons as provider_failure", () => {
     for (const reason of [
-      "unknown_reason", "__proto__", "provider_paused:unknown:missing_key",
+      "unknown_reason", "__proto__", "Unknown:article_unusable", "IGN:fetch_http_500", "provider_paused:unknown:missing_key",
       "provider_paused:gemini:arbitrary error detail", "item_error:exception detail", `count_tokens:${"x".repeat(4_096)}`,
     ]) {
       expect(sanitizedStopReasons([reason])).toEqual(["provider_failure"]);

@@ -11,6 +11,7 @@ import {
   pauseProvider,
   type PaidWorkCost,
   PROCESSING_STOP_REASONS,
+  type ProcessingStopReason,
   transientRetryAt,
   type PaidProvider,
   type ProviderOutcome,
@@ -32,7 +33,7 @@ export type SimilarityDimension = "gameplay" | "story_world";
 type QueuedIdentity = Pick<JobRow, "provider" | "model" | "config_version" | "max_output_tokens" | "input_identity">;
 type RetryIdentity = (db: AppDatabase, job: JobRow) => Promise<QueuedIdentity>;
 type UnsuccessfulOutcome = Exclude<ProviderOutcome, { class: "success" }>;
-type TransitionReport = { reason?: string; paused?: boolean };
+type TransitionReport = { reason?: ProcessingStopReason; paused?: boolean };
 type ProviderAnswer =
   | { provider: "openrouter"; answer: OpenRouterCompletion }
   | { provider: "gemini"; usage: GeminiBatchUsage | null };
@@ -123,24 +124,26 @@ export async function automaticRequestKey(db: AppDatabase, baseKey: string, runI
  * of one run do not add to it.
  */
 export async function recordReusedOutputs(db: AppDatabase, runId: number, sourceIds: readonly number[], entities: readonly number[]): Promise<void> {
-  const reused = await first<{ count: number }>(
-    db,
-    `SELECT
-       (SELECT COUNT(*) FROM media_article_extractions AS e
-         WHERE e.active = 1 AND e.source_id IN (SELECT value FROM json_each(?1))
-           AND NOT EXISTS (SELECT 1 FROM media_processing_jobs AS j WHERE j.run_id = ?3 AND j.stage = 'extraction' AND j.status = 'succeeded' AND j.source_id = e.source_id AND j.input_identity = e.input_identity))
-     + (SELECT COUNT(*) FROM media_game_overviews AS o
-         WHERE o.active = 1 AND o.appid IN (SELECT value FROM json_each(?2))
-           AND NOT EXISTS (SELECT 1 FROM media_processing_jobs AS j WHERE j.run_id = ?3 AND j.stage = 'synthesis' AND j.status = 'succeeded' AND j.appid = o.appid AND j.input_identity = o.input_identity))
-     + (SELECT COUNT(*) FROM media_game_embeddings AS m
-         WHERE m.active = 1 AND m.appid IN (SELECT value FROM json_each(?2))
-           AND NOT EXISTS (SELECT 1 FROM media_processing_jobs AS j WHERE j.run_id = ?3 AND j.stage = 'embedding' AND j.status = 'succeeded' AND j.appid = m.appid AND j.dimension = m.dimension AND j.input_identity = m.input_identity))
-     AS count`,
-    JSON.stringify(sourceIds),
-    JSON.stringify(entities),
-    runId,
-  );
-  await db.prepare("UPDATE media_processing_authorizations SET reused_outputs = ? WHERE run_id = ?").bind(Number(reused?.count ?? 0), runId).run();
+  return transaction(db, async () => {
+    const reused = await first<{ count: number }>(
+      db,
+      `SELECT
+         (SELECT COUNT(*) FROM media_article_extractions AS e
+           WHERE e.active = 1 AND e.source_id IN (SELECT value FROM json_each(?1))
+             AND NOT EXISTS (SELECT 1 FROM media_processing_jobs AS j WHERE j.run_id = ?3 AND j.stage = 'extraction' AND j.status = 'succeeded' AND j.source_id = e.source_id AND j.input_identity = e.input_identity))
+       + (SELECT COUNT(*) FROM media_game_overviews AS o
+           WHERE o.active = 1 AND o.appid IN (SELECT value FROM json_each(?2))
+             AND NOT EXISTS (SELECT 1 FROM media_processing_jobs AS j WHERE j.run_id = ?3 AND j.stage = 'synthesis' AND j.status = 'succeeded' AND j.appid = o.appid AND j.input_identity = o.input_identity))
+       + (SELECT COUNT(*) FROM media_game_embeddings AS m
+           WHERE m.active = 1 AND m.appid IN (SELECT value FROM json_each(?2))
+             AND NOT EXISTS (SELECT 1 FROM media_processing_jobs AS j WHERE j.run_id = ?3 AND j.stage = 'embedding' AND j.status = 'succeeded' AND j.appid = m.appid AND j.dimension = m.dimension AND j.input_identity = m.input_identity))
+       AS count`,
+      JSON.stringify(sourceIds),
+      JSON.stringify(entities),
+      runId,
+    );
+    await db.prepare("UPDATE media_processing_authorizations SET reused_outputs = ? WHERE run_id = ?").bind(Number(reused?.count ?? 0), runId).run();
+  });
 }
 
 export async function outputCounts(db: AppDatabase, runId: number): Promise<MediaProcessingOutputCounts> {
@@ -266,6 +269,10 @@ function legacyAttemptOutcome(status: JobStatus, error: string | null): AttemptO
  * or one with attempts, is left as it is.
  */
 export async function recordLegacyAttempt(db: AppDatabase, jobId: number): Promise<void> {
+  await transaction(db, () => backfillLegacyAttempt(db, jobId));
+}
+
+async function backfillLegacyAttempt(db: AppDatabase, jobId: number): Promise<void> {
   if (await first<{ id: number }>(db, "SELECT id FROM media_processing_attempts WHERE job_id = ? LIMIT 1", jobId)) return;
   const job = await first<{ provider: PaidProvider; input_identity: string; status: JobStatus; error: string | null; submitted_at: string | null; completed_at: string | null; enqueued_at: string; provider_batch_id: string | null; generation_id: string | null; routed_provider: string | null; routed_model: string | null; usage_json: string; charged_microusd: number | null; cost_source: string | null }>(
     db,
@@ -287,7 +294,7 @@ export async function markInFlight(db: AppDatabase, job: JobRow, maxInputTokens:
   let marked = false;
   await transaction(db, async () => {
     // History of a send recorded before per-attempt records existed comes first.
-    await recordLegacyAttempt(db, job.id);
+    await backfillLegacyAttempt(db, job.id);
     const update = await db.prepare(`UPDATE media_processing_jobs SET status = 'uncertain', error = '${IN_FLIGHT}', max_input_tokens = ?, max_output_tokens = ?, submitted_at = ? WHERE id = ? AND ${WAITING}`).bind(maxInputTokens, maxOutputTokens, now.toISOString(), job.id).run();
     if (update.meta.changes !== 1) return;
     marked = true;
@@ -364,7 +371,7 @@ async function retryUncertainItem(db: AppDatabase, job: JobRow, reason: string, 
     await db.prepare("UPDATE media_processing_jobs SET status = 'uncertain', error = ? WHERE id = ?").bind(detail ?? `uncertain:${reason}`, job.id).run();
     return;
   }
-  await recordLegacyAttempt(db, job.id);
+  await backfillLegacyAttempt(db, job.id);
   await closeAttempt(db, job.id, "uncertain", `uncertain:${reason}`);
   if (uncertainLimitReached(await uncertainOutcomes(db, job.id))) {
     await db.prepare("UPDATE media_processing_jobs SET status = 'uncertain_exhausted', error = ?, provider_batch_id = NULL, next_attempt_at = NULL, completed_at = ? WHERE id = ?").bind(`uncertain_exhausted:${reason}`, now.toISOString(), job.id).run();
@@ -384,12 +391,14 @@ async function retryUncertainItem(db: AppDatabase, job: JobRow, reason: string, 
  * items were resent automatically. Each is acted on as an uncertain outcome.
  */
 export async function recoverInFlight(db: AppDatabase, now: Date, retryIdentity: RetryIdentity): Promise<number[]> {
-  const found = await rows<JobRow>(db, `SELECT ${JOB_COLUMNS} FROM media_processing_jobs WHERE status = 'uncertain' AND retained = 0 ORDER BY id`);
-  for (const job of found) {
-    const reason = job.error === IN_FLIGHT ? IN_FLIGHT_AT_STARTUP : (job.error ?? "no_response").replace(/^uncertain:/, "");
-    await transaction(db, () => retryUncertainItem(db, job, reason, now, retryIdentity));
-  }
-  return found.map(({ run_id }) => run_id);
+  return transaction(db, async () => {
+    const found = await rows<JobRow>(db, `SELECT ${JOB_COLUMNS} FROM media_processing_jobs WHERE status = 'uncertain' AND retained = 0 ORDER BY id`);
+    for (const job of found) {
+      const reason = job.error === IN_FLIGHT ? IN_FLIGHT_AT_STARTUP : (job.error ?? "no_response").replace(/^uncertain:/, "");
+      await retryUncertainItem(db, job, reason, now, retryIdentity);
+    }
+    return found.map(({ run_id }) => run_id);
+  });
 }
 
 /** Refuses `job` for its input identity with `reason`, counting it skipped once. */
@@ -407,11 +416,20 @@ async function recordRefusal(db: AppDatabase, job: JobRow, reason: string, now: 
 /**
  * Resolves a waiting item whose work turned out to need no provider. An item
  * never sent never cost anything and is removed; one with recorded attempts
- * ends `stale`, so its attempts and their cost stay reported.
+ * ends `stale`, so its attempts and their cost stay reported. If supplied,
+ * `prepare` updates related output or source state in the same transaction
+ * and returns whether the item needs no provider.
  */
-export async function resolveWithoutProvider(db: AppDatabase, job: JobRow): Promise<void> {
-  await db.prepare(`UPDATE media_processing_jobs SET status = 'stale', next_attempt_at = NULL, completed_at = CURRENT_TIMESTAMP WHERE id = ? AND ${WAITING} AND EXISTS (SELECT 1 FROM media_processing_attempts WHERE job_id = ?1)`).bind(job.id).run();
-  await db.prepare(`DELETE FROM media_processing_jobs WHERE id = ? AND ${WAITING}`).bind(job.id).run();
+export async function resolveWithoutProvider(
+  db: AppDatabase,
+  job: JobRow,
+  prepare?: () => Promise<boolean>,
+): Promise<void> {
+  await transaction(db, async () => {
+    if (prepare && !await prepare()) return;
+    await db.prepare(`UPDATE media_processing_jobs SET status = 'stale', next_attempt_at = NULL, completed_at = CURRENT_TIMESTAMP WHERE id = ? AND ${WAITING} AND EXISTS (SELECT 1 FROM media_processing_attempts WHERE job_id = ?1)`).bind(job.id).run();
+    await db.prepare(`DELETE FROM media_processing_jobs WHERE id = ? AND ${WAITING}`).bind(job.id).run();
+  });
 }
 
 /**
@@ -532,7 +550,7 @@ function reportedCharge(completion: OpenRouterCompletion): { microusd: number; s
  * cost. The job keeps the latest answer's identifiers and usage, and the cost
  * of all its attempts, so a resent item keeps every charge.
  */
-export async function recordOpenRouterAnswer(db: AppDatabase, job: JobRow, answer: OpenRouterCompletion, now: Date): Promise<void> {
+async function recordOpenRouterAnswer(db: AppDatabase, job: JobRow, answer: OpenRouterCompletion, now: Date): Promise<void> {
   const charge = reportedCharge(answer);
   const { promptTokens, completionTokens, reasoningTokens } = answer.usage;
   const usageJson = JSON.stringify({ promptTokens, completionTokens, ...(reasoningTokens === null ? {} : { reasoningTokens }) });
@@ -542,10 +560,10 @@ export async function recordOpenRouterAnswer(db: AppDatabase, job: JobRow, answe
 }
 
 /** Records the usage and estimated cost a polled batch reported, on `job` and its attempt. */
-export async function recordGeminiBatchCharge(db: AppDatabase, job: JobRow, usage: GeminiBatchUsage | null, now: Date): Promise<void> {
+async function recordGeminiBatchCharge(db: AppDatabase, job: JobRow, usage: GeminiBatchUsage | null, now: Date): Promise<void> {
   const usageJson = usage ? JSON.stringify(usage) : "{}";
   const charge = settledCharge(job, usage);
-  await recordLegacyAttempt(db, job.id);
+  await backfillLegacyAttempt(db, job.id);
   await db.prepare("UPDATE media_processing_jobs SET usage_json = ?, charged_microusd = ?, cost_source = ? WHERE id = ?").bind(usageJson, charge.microusd, charge.source, job.id).run();
   await recordAttemptCharge(db, job.id, { usageJson, microusd: charge.microusd, source: charge.source }, now);
 }

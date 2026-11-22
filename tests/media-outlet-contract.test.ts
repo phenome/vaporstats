@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { fetchOutletArticle } from "../src/lib/media-outlet-access";
+import { fetchOutletArticle, finishOutletAttempt, reserveOutletAttempt } from "../src/lib/media-outlet-access";
 import { openTestDatabase, type TestDatabase } from "./support/db";
 import { CYBERPUNK, insertCompletedRun, seedApps, throwingResponse } from "./support/media";
 
@@ -10,7 +10,7 @@ let database: TestDatabase | undefined;
 
 afterEach(() => database?.cleanup());
 
-function fixture(respond: (url: string) => Response | string) {
+function fixture(respond: (url: string) => Response | string, secrets?: readonly string[]) {
   const db = openTestDatabase("outlet-contract-");
   database = db;
   seedApps(db.native, [CYBERPUNK]);
@@ -19,7 +19,7 @@ function fixture(respond: (url: string) => Response | string) {
   return {
     calls,
     fetch: (url = START, day = DAY) => fetchOutletArticle(db.db, {
-      url, runId, outlet: "IGN", appid: CYBERPUNK, pass: "initial", clock: () => day,
+      url, runId, outlet: "IGN", appid: CYBERPUNK, pass: "initial", clock: () => day, secrets,
       fetch: async (address, init) => {
         expect(init?.redirect).toBe("manual");
         calls.push(address);
@@ -31,17 +31,39 @@ function fixture(respond: (url: string) => Response | string) {
   };
 }
 
+test("recorded search failures free an Outlet attempt while interrupted reservations keep it", async () => {
+  const db = openTestDatabase("outlet-search-reservation-");
+  database = db;
+  seedApps(db.native, [CYBERPUNK]);
+  const runId = insertCompletedRun(db.native, "outlet-search-reservation", [CYBERPUNK]);
+  const search = { runId, appid: CYBERPUNK, pass: "initial", outlet: "IGN", date: DAY, kind: "search", url: null } as const;
+  const previous = process.env.MEDIA_OUTLET_DAILY_ATTEMPTS;
+  process.env.MEDIA_OUTLET_DAILY_ATTEMPTS = "1";
+  try {
+    const reserved = await reserveOutletAttempt(db.db, search);
+    if (!("attemptId" in reserved)) throw new Error(reserved.stop);
+    expect(await reserveOutletAttempt(db.db, search)).toEqual({ stop: "daily_attempt_cap" });
+    // Use a recorded outcome whose failure cannot be inferred from HTTP status.
+    await finishOutletAttempt(db.db, reserved.attemptId, { kind: "search", statusCode: 200, succeeded: false, error: "body read failed" });
+    expect(await reserveOutletAttempt(db.db, search)).toHaveProperty("attemptId");
+    expect(await reserveOutletAttempt(db.db, search)).toEqual({ stop: "daily_attempt_cap" });
+  } finally {
+    if (previous === undefined) delete process.env.MEDIA_OUTLET_DAILY_ATTEMPTS;
+    else process.env.MEDIA_OUTLET_DAILY_ATTEMPTS = previous;
+  }
+});
+
 describe("Outlet article response scopes", () => {
   const stops = [
     { scope: "Outlet denial", status: 401, reopens: false },
     { scope: "Outlet denial", status: 403, reopens: false },
     { scope: "Outlet day stop", status: 429, reopens: true },
-  ];
+  ] as const;
 
   for (const { scope, status, reopens } of stops) {
     test(`${status} is an ${scope}`, async () => {
       const outlet = fixture(() => new Response("", { status }));
-      const stop = `fetch_http_${status}`;
+      const stop = `fetch_http_${status}` as const;
       expect(await outlet.fetch()).toEqual({ stop, contacted: true });
       expect(await outlet.fetch()).toEqual({ stop, contacted: false });
       expect(await outlet.fetch(START, TOMORROW)).toEqual({ stop, contacted: reopens });
@@ -73,6 +95,16 @@ describe("Outlet article response scopes", () => {
     expect(await outlet.fetch()).toBeNull();
     expect(outlet.calls).toHaveLength(6);
     expect(outlet.attempts()).toHaveLength(6);
+  });
+
+  test("records one bounded line with configured secrets and bearer tokens redacted", async () => {
+    const outlet = fixture(() => {
+      throw new Error(`configured-value\nBearer bearer-value token=token-value ${"x".repeat(300)}`);
+    }, ["configured-value"]);
+
+    expect(await outlet.fetch()).toBeNull();
+    const expected = "[redacted] Bearer [redacted] [redacted] ".padEnd(256, "x");
+    expect(outlet.attempts()).toEqual([{ kind: "failure", status_code: null, succeeded: 0, error: expected }]);
   });
 
   for (const [part, kind, status, response] of [

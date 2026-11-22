@@ -2,8 +2,9 @@ import { Readability } from "@mozilla/readability";
 import { MIN_USABLE_ARTICLE_CHARS, parseArticleDocument } from "./article-document";
 import type { AppDatabase } from "./db";
 import { writeTransaction } from "./db-transaction";
+import { boundedMediaError } from "./media-error";
 import { mainReleasedDate, type MainReleasedFields } from "./lifecycle-history";
-import { fetchOutletArticle, finishOutletAttempt, hostInOutlet, MEDIA_OUTLETS, reserveOutletAttempt, type MediaOutlet } from "./media-outlet-access";
+import { fetchOutletArticle, finishOutletAttempt, hostInOutlet, MEDIA_OUTLETS, OUTLET_HTTP_STOPS, OUTLET_STOP_REASONS, reserveOutletAttempt, type MediaOutlet } from "./media-outlet-access";
 import { parsePreciseReleaseDate } from "./releases";
 import { ELIGIBLE_MEDIA_ENTITY_SQL } from "./media-similarity";
 import { createTavilyTransport } from "./media-tavily";
@@ -260,16 +261,6 @@ function dayKey(date: Date): string {
   return date.toISOString().slice(0, 10);
 }
 
-function boundedError(error: unknown, secret?: string): string {
-  let message = error instanceof Error ? error.message : String(error);
-  if (secret) message = message.split(secret).join("[redacted]");
-  return message
-    .replace(/[\r\n]+/g, " ")
-    .replace(/Bearer\s+\S+/gi, "Bearer [redacted]")
-    .replace(/(?:api[_-]?key|token|secret)\s*[:=]\s*\S+/gi, "[redacted]")
-    .slice(0, 256);
-}
-
 function json<T>(value: string | null | undefined, fallback: T): T {
   try {
     return JSON.parse(value ?? "") as T;
@@ -324,7 +315,7 @@ async function prepareProgressForAuthorization(
  * stop (the daily attempt cap or an outlet rate limit) or the search
  * provider's rate limit. Any other stop, an Outlet denial, never reopens.
  */
-const DAY_SCOPED_STOPS = ["daily_attempt_cap", "search_http_429", "fetch_http_429", "tavily_search_http_429"] as const;
+const DAY_SCOPED_STOPS = [OUTLET_STOP_REASONS.DAILY_ATTEMPT_CAP, "search_http_429", OUTLET_HTTP_STOPS[429], "tavily_search_http_429"] as const;
 const DAY_SCOPED_STOPS_SQL = DAY_SCOPED_STOPS.map((reason) => `'${reason}'`).join(", ");
 
 /**
@@ -982,7 +973,7 @@ export async function runAuthorizedMediaDiscovery(db: AppDatabase, options: Medi
             fetched = await fetchOutletArticle(db, {
               fetch: fetchFn, url: candidates[index]!.url, outlet: outlet.name, runId: run.id, pass, appid, clock,
               onAttempt: () => { issued.attempts += 1; },
-              formatError: (error) => boundedError(error, apiKey),
+              secrets: [apiKey],
             });
             if (fetched && "stop" in fetched) {
               // A candidate the outlet answered is done; one refused before any
@@ -1000,7 +991,7 @@ export async function runAuthorizedMediaDiscovery(db: AppDatabase, options: Medi
             source.discoveryUrl = candidates[index]!.url;
             if (pass === "later" && !await qualifiesForLaterPass(db, source)) continue;
           } catch (error) {
-            await skipThrowingCandidate(db, { progressId, index, pass, appid, outlet: outlet.name, url: candidates[index]!.url }, boundedError(error, apiKey));
+            await skipThrowingCandidate(db, { progressId, index, pass, appid, outlet: outlet.name, url: candidates[index]!.url }, boundedMediaError(error, [apiKey]));
             stopReasons.add(`${outlet.name}:${CANDIDATE_ERROR}`);
             continue;
           }
@@ -1063,7 +1054,7 @@ export async function runAuthorizedMediaDiscovery(db: AppDatabase, options: Medi
   } catch (error) {
     const counts = await mediaRunCounts(db, passes, targetAppids);
     const stopReason = "execution_error";
-    const failureMessage = boundedError(error, apiKey);
+    const failureMessage = boundedMediaError(error, [apiKey]);
     const summary: MediaRunSummary["summary"] = {
       discovered: counts.discovered,
       accepted: counts.accepted,

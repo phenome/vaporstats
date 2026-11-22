@@ -5,6 +5,7 @@ import { isAbsolute, relative, resolve, sep } from "node:path";
 import serverEntry from "@tanstack/react-start/server-entry";
 import { startIngestionScheduler } from "../workers/ingestion";
 import { MEDIA_GAME_CHOICES } from "./lib/media-discovery";
+import { MEDIA_OUTLETS, OUTLET_HTTP_STOPS, OUTLET_STOP_REASONS } from "./lib/media-outlet-access";
 import type { MediaProcessingSummary } from "./lib/media-processing";
 import { CACHE_POLICIES } from "./lib/cache";
 import { PAID_PROVIDERS, PROCESSING_STOP_REASONS, PROVIDER_PAUSE_REASONS } from "./lib/media-paid-providers";
@@ -246,6 +247,8 @@ function internalMediaResponse(status: number, body: Record<string, unknown>): R
  */
 const SAFE_MEDIA_PROCESSING_STOP_REASONS: ReadonlySet<string> = new Set([
   ...Object.values(PROCESSING_STOP_REASONS),
+  ...MEDIA_OUTLETS.flatMap(({ name }) =>
+    [...Object.values(OUTLET_HTTP_STOPS), ...Object.values(OUTLET_STOP_REASONS)].map((reason) => `${name}:${reason}`)),
   ...PAID_PROVIDERS.flatMap((provider) =>
     PROVIDER_PAUSE_REASONS.map((reason) => `provider_paused:${provider}:${reason}`)),
 ]);

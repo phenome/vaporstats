@@ -1,15 +1,6 @@
+import { boundedMediaError } from "./media-error";
 function jsonObject(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" ? value as Record<string, unknown> : {};
-}
-
-function boundedError(error: unknown, secret?: string): string {
-  let message = error instanceof Error ? error.message : String(error);
-  if (secret) message = message.split(secret).join("[redacted]");
-  return message
-    .replace(/[\r\n]+/g, " ")
-    .replace(/Bearer\s+\S+/gi, "Bearer [redacted]")
-    .replace(/(?:api[_-]?key|token|secret)\s*[:=]\s*\S+/gi, "[redacted]")
-    .slice(0, 256);
 }
 
 function usageDetails(value: unknown): { plan: "free" | "rejected" | "unknown"; remainingCredits: number | null; planUsage: number | null; planLimit: number | null; paygoUsage: number | null; paygoLimit: number | null; valid: boolean } {
@@ -94,7 +85,7 @@ export async function classifyTavilySearchOutcome(reply: TavilyReply, apiKey?: s
 function searchNetworkStop(error: unknown, apiKey?: string): SearchOutcome {
   return {
     class: "provider_stop", reason: "tavily_search_error", progress: "queued", action: "stop_searches",
-    attempt: { kind: "search", statusCode: null, succeeded: false, error: boundedError(error, apiKey) },
+    attempt: { kind: "search", statusCode: null, succeeded: false, error: boundedMediaError(error, [apiKey]) },
   };
 }
 

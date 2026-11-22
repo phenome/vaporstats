@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { enqueuePaidWork, readyPaidWork, recordLegacyAttempt, resolveWithoutProvider } from "../src/lib/media-paid-ledger";
 import { authorizeMediaProcessing } from "../src/lib/media-processing";
 import { getMediaOverview } from "../src/lib/media-overview";
 import { MEDIA_OUTLETS } from "../src/lib/media-discovery";
@@ -17,6 +18,7 @@ import {
   GEMINI_SPEND_CAP,
   insertCompletedRun,
   insertSources,
+  insertSubmittedGeminiExtraction,
   OPENROUTER_TRUNCATED,
   openRouterKeyLimit,
   overviewOutputForUrls,
@@ -86,6 +88,33 @@ function geminiAttempts(database: TestDatabase) {
 function geminiStages(apis: Providers): string[] {
   return apis.gemini.submitted.map((key) => key.split(":")[0]!);
 }
+
+test("concurrent legacy attempt backfills record one attempt", async () => {
+  const { database, runId } = await authorizedGames();
+  const sourceId = database.native.query<{ id: number }, []>("SELECT id FROM media_sources").get()!.id;
+  const jobId = insertSubmittedGeminiExtraction(database.native, { runId, sourceId });
+
+  await Promise.all([recordLegacyAttempt(database.db, jobId), recordLegacyAttempt(database.db, jobId)]);
+
+  expect(database.native.query("SELECT attempt FROM media_processing_attempts WHERE job_id = ?").all(jobId)).toEqual([{ attempt: 1 }]);
+});
+
+test("a failed no-provider resolution rolls back its related writes and keeps the item ready", async () => {
+  const { database, runId } = await authorizedGames();
+  const now = new Date("2026-11-10T03:00:00.000Z");
+  await enqueuePaidWork(database.db, {
+    run_id: runId, appid: CYBERPUNK, provider: "openrouter", stage: "synthesis", source_id: null,
+    request_key: "resolution", input_identity: "overview", model: "test", config_version: "test", max_output_tokens: 100,
+  }, now);
+  const [job] = await readyPaidWork(database.db, "openrouter", now);
+
+  await expect(resolveWithoutProvider(database.db, job!, async () => {
+    await database.db.prepare("UPDATE media_discovery_runs SET attempt_count = 10 WHERE id = ?").bind(runId).run();
+    throw new Error("failed to prepare resolution");
+  })).rejects.toThrow("failed to prepare resolution");
+  expect(database.native.query("SELECT attempt_count FROM media_discovery_runs WHERE id = ?").get(runId)).toEqual({ attempt_count: 0 });
+  expect(await readyPaidWork(database.db, "openrouter", now)).toEqual([job]);
+});
 
 describe("retired lifetime allowance", () => {
   test("a database whose charges and reservations already exceed US$5 still submits new paid work, and keeps its old rows unchanged", async () => {

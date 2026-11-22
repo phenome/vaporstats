@@ -322,7 +322,7 @@ describe("live media similarity", () => {
 });
 
 describe("embedding vector codec", () => {
-  test("round-trips 3,072 dimensions from blobs and aligned byte views", () => {
+  test("round-trips 3,072 dimensions from blobs and aligned or unaligned byte views", () => {
     const input = Array.from({ length: 3_072 }, (_, index) => (index - 1_536) * 0.1);
     const expected = Float32Array.from(input);
     const encoded = encodeVector(input)!;
@@ -333,13 +333,14 @@ describe("embedding vector codec", () => {
     const backing = new Uint8Array(12_296);
     backing.set(encoded, 4);
     expect(decodeVector(backing.subarray(4, 12_292))).toEqual(expected);
+    backing.set(encoded, 1);
+    expect(decodeVector(backing.subarray(1, 12_289))).toEqual(expected);
   });
 
-  test("rejects malformed, misaligned, wrong-length and non-finite buffers", () => {
+  test("rejects malformed, wrong-length and non-finite buffers", () => {
     for (const value of [
       null, "vector", new Float32Array(3_072), new DataView(new ArrayBuffer(12_288)),
       new ArrayBuffer(12_284), new Uint8Array(12_287), new Uint8Array(12_292),
-      new Uint8Array(12_289).subarray(1),
     ]) {
       expect(decodeVector(value)).toBeNull();
     }

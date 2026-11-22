@@ -3,6 +3,7 @@ import { Readability } from "@mozilla/readability";
 import { MIN_USABLE_ARTICLE_CHARS, parseArticleDocument } from "./article-document";
 import type { AppDatabase } from "./db";
 import { writeTransaction } from "./db-transaction";
+import { boundedMediaError } from "./media-error";
 import { decodeVector, encodeVector, GEMINI_EMBEDDING_DIMENSIONS } from "./media-embedding-vector";
 import {
   createGeminiBatchTransport,
@@ -24,7 +25,7 @@ import {
   type MediaOutlet,
   type MediaPass,
 } from "./media-discovery";
-import { fetchOutletArticle, isOutletDenialStop } from "./media-outlet-access";
+import { fetchOutletArticle, isOutletDenialStop, OUTLET_STOP_REASONS, type OutletAccessStop, type OutletStopReason } from "./media-outlet-access";
 import {
   createOpenRouterTransport,
   type OpenRouterChatRequest,
@@ -34,7 +35,6 @@ import {
   type OpenRouterTransport,
 } from "./media-openrouter";
 import {
-  boundedPaidWorkError,
   classifyGeminiOutcome,
   classifyOpenRouterKeyCheck,
   classifyOpenRouterOutcome,
@@ -44,6 +44,7 @@ import {
   pauseProvider,
   PAID_PROVIDERS,
   PROCESSING_STOP_REASONS,
+  type ProcessingStopReason,
   providerState,
   readEntityTurns,
   writeEntityTurns,
@@ -524,15 +525,16 @@ type QueueAdvance = {
   articleFetch: ArticleFetch;
   remaining: Record<PaidProvider, number>;
   paused: Set<PaidProvider>;
-  outletStops: Map<MediaOutlet, string>;
+  outletStops: Map<MediaOutlet, OutletAccessStop>;
   reasons: Map<number, Set<string>>;
   submitted: Map<number, number>;
   requestsSent: number;
   textSucceeded: number;
   textFailed: number;
+  textUncertain: number;
 };
 
-function noteReason(advance: QueueAdvance, runId: number, reason: string): void {
+function noteReason(advance: QueueAdvance, runId: number, reason: ProcessingStopReason | `${MediaOutlet}:${OutletStopReason}`): void {
   const reasons = advance.reasons.get(runId) ?? new Set<string>();
   reasons.add(reason);
   advance.reasons.set(runId, reasons);
@@ -542,13 +544,20 @@ async function holdItem(advance: QueueAdvance, job: JobRow, outcome: Exclude<Pro
   const report = await applyProviderOutcome(advance.db, job, outcome, advance.now, queuedIdentity, observation);
   if (report.paused) advance.paused.add(job.provider);
   if (report.reason) noteReason(advance, job.run_id, report.reason);
+  if (job.provider === "openrouter") {
+    if (outcome.class === "refusal") advance.textFailed += 1;
+    if (outcome.class === "uncertain") advance.textUncertain += 1;
+  }
 }
 
 async function holdThrowingItem(advance: QueueAdvance, job: JobRow, error: unknown): Promise<void> {
-  const reason = boundedPaidWorkError(error, advance.secrets);
+  const reason = boundedMediaError(error, advance.secrets);
   noteReason(advance, job.run_id, PROCESSING_STOP_REASONS.ITEM_ERROR);
   const report = await recordItemError(advance.db, job, reason, advance.now, queuedIdentity);
   if (report.reason) noteReason(advance, job.run_id, report.reason);
+  if (job.provider === "openrouter" && report.reason === PROCESSING_STOP_REASONS.UNCERTAIN_SUBMISSION) {
+    advance.textUncertain += 1;
+  }
 }
 
 function countSubmission(advance: QueueAdvance, outcome: ProviderOutcome): void {
@@ -906,7 +915,7 @@ async function pollSubmittedJob(advance: QueueAdvance, job: JobRow, summary: Sub
     result = await transport.pollBatch(job.provider_batch_id);
   } catch (error) {
     const outcome = classifyGeminiOutcome("poll", error);
-    const detail = boundedPaidWorkError(error, secrets);
+    const detail = boundedMediaError(error, secrets);
     if (outcome.class === "uncertain" || outcome.class === "refusal") {
       // An error about the batch itself: whether it ran is unknown.
       await holdItem(advance, job, { class: "uncertain", reason: outcome.reason }, { detail });
@@ -922,7 +931,7 @@ async function pollSubmittedJob(advance: QueueAdvance, job: JobRow, summary: Sub
     return;
   }
   if (result.state === "failed") {
-    const outcome = classifyGeminiOutcome("poll", new GeminiBatchFailure(boundedPaidWorkError(result.error ?? "batch failed", secrets), result.batchState ?? null));
+    const outcome = classifyGeminiOutcome("poll", new GeminiBatchFailure(boundedMediaError(result.error ?? "batch failed", secrets), result.batchState ?? null));
     if (outcome.class === "credit_pause" || outcome.class === "missing_configuration" || outcome.class === "transient") {
       const report = await returnUnrunBatch(db, job, outcome, now, queuedIdentity);
       if (report.paused) advance.paused.add(job.provider);
@@ -934,7 +943,7 @@ async function pollSubmittedJob(advance: QueueAdvance, job: JobRow, summary: Sub
       // The batch was accepted and then failed: it may have run and been
       // charged. Its reported usage is recorded, and the item is resent.
       await holdItem(advance, job, outcome, {
-        detail: boundedPaidWorkError(result.error ?? "batch failed", secrets),
+        detail: boundedMediaError(result.error ?? "batch failed", secrets),
         answer: { provider: "gemini", usage: result.usage ?? null },
       });
       summary.uncertain += 1;
@@ -942,7 +951,7 @@ async function pollSubmittedJob(advance: QueueAdvance, job: JobRow, summary: Sub
     }
   }
   const status = await settleOutput(db, job, now, { provider: "gemini", usage: result.usage ?? null }, async () => {
-    if (result.state === "failed") return { status: "refused", error: boundedPaidWorkError(result.error, secrets) };
+    if (result.state === "failed") return { status: "refused", error: boundedMediaError(result.error, secrets) };
     if (job.stage === "extraction") return persistExtraction(db, job, result.output, now);
     if (job.stage === "embedding") return persistEmbedding(db, job, result.output, now);
     if (job.stage === "explanation") return { status: "stale" };
@@ -1265,7 +1274,7 @@ async function takeExtractionTurn(advance: QueueAdvance, job: JobRow): Promise<b
   }
   const fetched = await fetchOutletArticle(db, {
     url: source.original_url, outlet: source.outlet, appid: source.appid, pass: source.pass,
-    runId: job.run_id, fetch: advance.articleFetch, clock: advance.clock,
+    runId: job.run_id, fetch: advance.articleFetch, clock: advance.clock, secrets: advance.secrets,
   });
   if (fetched && "stop" in fetched) {
     advance.outletStops.set(source.outlet, fetched.stop);
@@ -1275,7 +1284,7 @@ async function takeExtractionTurn(advance: QueueAdvance, job: JobRow): Promise<b
   }
   const cleaned = fetched ? cleanArticle(fetched.html) : null;
   if (!cleaned) {
-    const reason = fetched === null ? "article_unreachable" : "article_unusable";
+    const reason = fetched === null ? OUTLET_STOP_REASONS.ARTICLE_UNREACHABLE : OUTLET_STOP_REASONS.ARTICLE_UNUSABLE;
     await refuseItem(db, job, reason, now);
     noteReason(advance, job.run_id, `${source.outlet}:${reason}`);
     return true;
@@ -1283,9 +1292,9 @@ async function takeExtractionTurn(advance: QueueAdvance, job: JobRow): Promise<b
   let identity: string | null = null;
   let kept = false;
   let current: SourceRow | null = null;
-  await transaction(db, async () => {
+  await resolveWithoutProvider(db, job, async () => {
     current = await currentSource(db, source.id);
-    if (!current) return;
+    if (!current) return false;
     identity = extractionIdentity(current, cleaned.hash);
     const prior = await first<ExtractionRow>(db, "SELECT id, source_id, input_identity, content_hash, cleanup_version, model, config_version, output_json, active FROM media_article_extractions WHERE source_id = ? AND active = 1 LIMIT 1", source.id);
     // Only changed cleaned content re-extracts. A metadata, model,
@@ -1299,16 +1308,16 @@ async function takeExtractionTurn(advance: QueueAdvance, job: JobRow): Promise<b
       await markContributionChanged(db, source.id, job.run_id);
     }
     await db.prepare("UPDATE media_sources SET normalized_content_hash = ?, cleanup_version = ?, processing_content = NULL, processing_input_identity = ?, processing_run_id = ? WHERE id = ?").bind(cleaned.hash, CLEANUP_VERSION, identity, job.run_id, source.id).run();
-    if (kept) await resolveWithoutProvider(db, job);
+    return kept;
   });
   if (kept || !identity || !current) return true;
   const knownExtraction = await first<ExtractionRow>(db, "SELECT id, source_id, input_identity, content_hash, cleanup_version, model, config_version, output_json, active FROM media_article_extractions WHERE source_id = ? AND input_identity = ? LIMIT 1", source.id, identity);
   if (knownExtraction) {
-    await transaction(db, async () => {
+    await resolveWithoutProvider(db, job, async () => {
       await db.prepare("UPDATE media_article_extractions SET active = 0 WHERE source_id = ? AND active = 1").bind(source.id).run();
       await db.prepare("UPDATE media_article_extractions SET active = 1 WHERE id = ?").bind(knownExtraction.id).run();
       await markContributionChanged(db, source.id, job.run_id);
-      await resolveWithoutProvider(db, job);
+      return true;
     });
     return true;
   }
@@ -1586,6 +1595,7 @@ async function advanceMediaProcessingNow(db: AppDatabase, options: MediaProcessi
     requestsSent: 0,
     textSucceeded: 0,
     textFailed: 0,
+    textUncertain: 0,
   };
   for (const runId of await recoverInFlight(db, now, queuedIdentity)) {
     noteReason(advance, runId, PROCESSING_STOP_REASONS.UNCERTAIN_SUBMISSION);
@@ -1640,7 +1650,7 @@ async function advanceMediaProcessingNow(db: AppDatabase, options: MediaProcessi
   const target = authorization ? outcomes.get(authorization.auth.run_id) : undefined;
   if (target) return { ...target, ...report };
 
-  const reconciliationRunId = globallySubmitted.at(-1)?.run_id ?? options.runId ?? options.automaticRunId ?? await latestPaidWorkRun(db);
+  const reconciliationRunId = automatic?.runId ?? globallySubmitted.at(-1)?.run_id ?? options.runId ?? options.automaticRunId ?? await latestPaidWorkRun(db);
   if (reconciliationRunId === undefined) throw new Error("Media processing authorization not found");
   const recorded = await first<{ stop_reason: string | null }>(db, "SELECT stop_reason FROM media_processing_authorizations WHERE run_id = ?", reconciliationRunId);
   const entities = automatic?.entities ?? (pollOnly ? globallySubmitted.map(({ appid }) => appid) : await enrolledEntities(db));
@@ -1652,7 +1662,7 @@ async function advanceMediaProcessingNow(db: AppDatabase, options: MediaProcessi
     outputs: await outputCounts(db, reconciliationRunId),
     stopReasons: (recorded?.stop_reason ?? "").split("; ").filter(Boolean),
     failed: advance.textFailed + prePoll.failed + currentPoll.failed,
-    uncertain: prePoll.uncertain + currentPoll.uncertain,
+    uncertain: advance.textUncertain + prePoll.uncertain + currentPoll.uncertain,
     overviewAppids: await activeOverviewAppids(db, entities),
     ...report,
   };

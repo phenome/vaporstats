@@ -1,5 +1,6 @@
 import type { AppDatabase } from "./db";
 import { writeTransaction } from "./db-transaction";
+import { boundedMediaError } from "./media-error";
 import type { MediaPass } from "./media-discovery";
 
 /**
@@ -36,10 +37,23 @@ const OUTLET_DENIAL_STATUSES: readonly number[] = [401, 403];
 const OUTLET_DAY_STOP_STATUS = 429;
 const MAX_REDIRECTS = 5;
 
-function outletHttpStop(status: number): string | null {
-  return OUTLET_DENIAL_STATUSES.includes(status) || status === OUTLET_DAY_STOP_STATUS
-    ? `fetch_http_${status}`
-    : null;
+export const OUTLET_HTTP_STOPS = {
+  401: "fetch_http_401",
+  403: "fetch_http_403",
+  [OUTLET_DAY_STOP_STATUS]: "fetch_http_429",
+} as const;
+export const OUTLET_STOP_REASONS = {
+  DAILY_ATTEMPT_CAP: "daily_attempt_cap",
+  ARTICLE_UNREACHABLE: "article_unreachable",
+  ARTICLE_UNUSABLE: "article_unusable",
+} as const;
+
+type OutletHttpStop = (typeof OUTLET_HTTP_STOPS)[keyof typeof OUTLET_HTTP_STOPS];
+export type OutletAccessStop = OutletHttpStop | typeof OUTLET_STOP_REASONS.DAILY_ATTEMPT_CAP;
+export type OutletStopReason = OutletHttpStop | (typeof OUTLET_STOP_REASONS)[keyof typeof OUTLET_STOP_REASONS];
+
+function outletHttpStop(status: number): OutletHttpStop | null {
+  return OUTLET_HTTP_STOPS[status as keyof typeof OUTLET_HTTP_STOPS] ?? null;
 }
 
 /**
@@ -70,10 +84,8 @@ async function first<T>(db: AppDatabase, query: string, ...values: unknown[]): P
  * It uses none of the outlet's attempts, but stays in the log. A reserved
  * search with no recorded outcome may have been served and still counts.
  */
-const SERVED_ATTEMPT_SQL = `NOT (kind = 'search' AND (
-  (status_code IS NOT NULL AND status_code NOT BETWEEN 200 AND 299)
-  OR (status_code IS NULL AND error IS NOT NULL)
-))`;
+const SERVED_ATTEMPT_SQL = `NOT (kind = 'search' AND succeeded = 0
+  AND (status_code IS NOT NULL OR error IS NOT NULL))`;
 
 /** Search, fetch, redirect and failed attempts on `outlet` during `date`'s UTC day, from every pass and stage. */
 async function attemptsToday(db: AppDatabase, outlet: MediaOutlet, date: Date): Promise<number> {
@@ -87,7 +99,7 @@ async function attemptsToday(db: AppDatabase, outlet: MediaOutlet, date: Date): 
  * Search attempts go to the search provider, so a 401 or 403 there is a
  * provider stop, not an outlet denial.
  */
-async function outletDenial(db: AppDatabase, outlet: MediaOutlet): Promise<string | null> {
+async function outletDenial(db: AppDatabase, outlet: MediaOutlet): Promise<OutletHttpStop | null> {
   const denied = await first<{ status_code: number }>(
     db,
     `SELECT status_code FROM media_discovery_attempts WHERE outlet = ? AND kind = 'fetch' AND status_code IN (${OUTLET_DENIAL_STATUSES.join(", ")}) ORDER BY id LIMIT 1`,
@@ -101,8 +113,8 @@ async function outletDenial(db: AppDatabase, outlet: MediaOutlet): Promise<strin
  * or stage recorded it: the daily attempt cap, or a rate limit the outlet
  * returned to an article fetch that day. Both reopen on the next UTC day.
  */
-async function outletDayStop(db: AppDatabase, outlet: MediaOutlet, date: Date): Promise<string | null> {
-  if ((await attemptsToday(db, outlet, date)) >= outletDailyAttemptCap()) return "daily_attempt_cap";
+async function outletDayStop(db: AppDatabase, outlet: MediaOutlet, date: Date): Promise<OutletAccessStop | null> {
+  if ((await attemptsToday(db, outlet, date)) >= outletDailyAttemptCap()) return OUTLET_STOP_REASONS.DAILY_ATTEMPT_CAP;
   const limited = await first<{ id: number }>(
     db,
     "SELECT id FROM media_discovery_attempts WHERE outlet = ? AND day = ? AND kind = 'fetch' AND status_code = ? LIMIT 1",
@@ -123,7 +135,7 @@ export function isOutletDenialStop(stop: string): boolean {
 }
 
 /** Why `outlet` must not be contacted at `date`: a lasting access denial first, then a same-day stop. */
-async function mediaOutletStop(db: AppDatabase, outlet: MediaOutlet, date: Date): Promise<string | null> {
+async function mediaOutletStop(db: AppDatabase, outlet: MediaOutlet, date: Date): Promise<OutletAccessStop | null> {
   return (await outletDenial(db, outlet)) ?? outletDayStop(db, outlet, date);
 }
 
@@ -140,7 +152,7 @@ type OutletAttemptKind = "search" | "fetch" | "redirect" | "failure";
 export async function reserveOutletAttempt(
   db: AppDatabase,
   attempt: { runId: number; pass: MediaPass; appid: number; outlet: MediaOutlet; kind: "search" | "fetch"; url: string | null; date: Date },
-): Promise<{ attemptId: number } | { stop: string }> {
+): Promise<{ attemptId: number } | { stop: OutletAccessStop }> {
   return writeTransaction(db, async () => {
     const stop = await mediaOutletStop(db, attempt.outlet, attempt.date);
     if (stop) return { stop };
@@ -165,21 +177,16 @@ export async function finishOutletAttempt(
     .bind(outcome.kind, outcome.statusCode, outcome.succeeded ? 1 : 0, outcome.error, attemptId).run();
 }
 
-type ArticleFetchResult = { html: string; finalUrl: string } | { stop: string; contacted: boolean } | null;
+type ArticleFetchResult = { html: string; finalUrl: string } | { stop: OutletAccessStop; contacted: boolean } | null;
 
 type AnsweredAttempt = { status: number; ok: boolean; redirect: boolean };
 
 async function finishFailedAttempt(
-  db: AppDatabase, attemptId: number, error: unknown, answered?: AnsweredAttempt, formatError?: (error: unknown) => string,
+  db: AppDatabase, attemptId: number, error: unknown, answered?: AnsweredAttempt, secrets?: readonly (string | undefined)[],
 ): Promise<void> {
-  const message = (formatError ? formatError(error) : error instanceof Error ? error.message : String(error))
-    .replace(/[\r\n]+/g, " ")
-    .replace(/Bearer\s+\S+/gi, "Bearer [redacted]")
-    .replace(/(?:api[_-]?key|token|secret)\s*[:=]\s*\S+/gi, "[redacted]")
-    .slice(0, 256);
   await finishOutletAttempt(db, attemptId, {
     kind: answered ? (answered.redirect ? "redirect" : "fetch") : "failure",
-    statusCode: answered?.status ?? null, succeeded: false, error: message,
+    statusCode: answered?.status ?? null, succeeded: false, error: boundedMediaError(error, secrets),
   });
 }
 
@@ -188,7 +195,7 @@ async function recordAnsweredAttempt<T>(
   attemptId: number,
   response: Response,
   read: (answered: AnsweredAttempt) => T | Promise<T>,
-  formatError?: (error: unknown) => string,
+  secrets?: readonly (string | undefined)[],
 ): Promise<T> {
   let answered: AnsweredAttempt | undefined;
   let result: T;
@@ -197,7 +204,7 @@ async function recordAnsweredAttempt<T>(
     answered = { status, ok: response.ok, redirect: status >= 300 && status < 400 };
     result = await read(answered);
   } catch (error) {
-    await finishFailedAttempt(db, attemptId, error, answered, formatError);
+    await finishFailedAttempt(db, attemptId, error, answered, secrets);
     throw error;
   }
   await finishOutletAttempt(db, attemptId, {
@@ -207,11 +214,6 @@ async function recordAnsweredAttempt<T>(
     error: answered.ok ? null : `HTTP ${answered.status}`,
   });
   return result;
-}
-
-/** Completes an attempt when only the response metadata is needed. */
-export function finishAnsweredAttempt(db: AppDatabase, attemptId: number, response: Response): Promise<AnsweredAttempt> {
-  return recordAnsweredAttempt(db, attemptId, response, (answered) => answered);
 }
 
 /**
@@ -230,7 +232,7 @@ export async function fetchOutletArticle(
     clock: () => Date;
     fetch: (url: string, init?: RequestInit) => Promise<Response | string>;
     onAttempt?: () => void;
-    formatError?: (error: unknown) => string;
+    secrets?: readonly (string | undefined)[];
   },
 ): Promise<ArticleFetchResult> {
   const { runId, pass, appid, outlet, clock } = options;
@@ -249,7 +251,7 @@ export async function fetchOutletArticle(
       options.onAttempt?.();
       response = await options.fetch(url, { redirect: "manual", headers: { Accept: "text/html,application/xhtml+xml" } });
     } catch (error) {
-      await finishFailedAttempt(db, attemptId, error, undefined, options.formatError);
+      await finishFailedAttempt(db, attemptId, error, undefined, options.secrets);
       return null;
     }
     if (typeof response === "string") {
@@ -266,7 +268,7 @@ export async function fetchOutletArticle(
         return next ? { next: next.href } : null;
       }
       return answered.ok ? { html: await reply.text(), finalUrl: url } : null;
-    }, options.formatError);
+    }, options.secrets);
     if (!result || !("next" in result)) return result;
     url = result.next;
   }

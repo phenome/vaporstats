@@ -16,7 +16,9 @@ export function decodeVector(value: unknown): Float32Array | null {
     : value instanceof ArrayBuffer
       ? new Uint8Array(value)
       : null;
-  if (!bytes || bytes.byteLength !== VECTOR_BYTE_LENGTH || bytes.byteOffset % Float32Array.BYTES_PER_ELEMENT !== 0) return null;
-  const vector = new Float32Array(bytes.buffer, bytes.byteOffset, GEMINI_EMBEDDING_DIMENSIONS);
+  if (!bytes || bytes.byteLength !== VECTOR_BYTE_LENGTH) return null;
+  const vector = bytes.byteOffset % Float32Array.BYTES_PER_ELEMENT === 0
+    ? new Float32Array(bytes.buffer, bytes.byteOffset, GEMINI_EMBEDDING_DIMENSIONS)
+    : new Float32Array(Uint8Array.from(bytes).buffer);
   return vector.every(Number.isFinite) ? vector : null;
 }
