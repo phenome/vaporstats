@@ -14,6 +14,7 @@ import {
   insertCompletedRun,
   insertSources,
   insertSubmittedGeminiExtraction,
+  manualProcessingOutcome,
   OPENROUTER_CREDITS,
   OPENROUTER_GUARDRAIL_BUDGET,
   OPENROUTER_IN_FLIGHT_BUDGET,
@@ -182,12 +183,12 @@ describe("applying answers", () => {
       if (request.stage === "extraction") database.native.prepare("UPDATE media_sources SET processing_input_identity = 'changed-while-in-flight'").run();
     };
 
-    const result = await tick(database, providers, "2026-11-18T07:00:00.000Z");
+    await tick(database, providers, "2026-11-18T07:00:00.000Z");
 
     expect(textJobs(database).map(({ stage, status }) => ({ stage, status }))).toEqual([{ stage: "extraction", status: "stale" }]);
     expect(database.native.query("SELECT COUNT(*) AS count FROM media_article_extractions").get()).toEqual({ count: 0 });
     expect(database.native.query("SELECT charged_microusd, cost_source, generation_id FROM media_processing_jobs").get()).toEqual({ charged_microusd: 150, cost_source: "provider_reported", generation_id: "gen-1" });
-    expect(result.mediaProcessing?.outputs.skipped).toBe(1);
+    expect(manualProcessingOutcome(database).skipped).toBe(1);
   });
 });
 
@@ -214,9 +215,9 @@ describe("OpenRouter classifier", () => {
       expect(providers.openRouter.requests).toHaveLength(1);
       expect(fetched).toHaveLength(1);
       expect(textJobs(database).map(({ status, attempt_count, error }) => ({ status, attempt_count, error }))).toEqual(Array(3).fill({ status: "queued", attempt_count: 0, error: null }));
-      expect(paused.mediaProcessing?.outputs.skipped).toBe(0);
-      expect(paused.mediaProcessing?.status).toBe("waiting");
-      expect(paused.mediaProcessing?.stopReasons).toContain(`provider_paused:openrouter:${reason}`);
+      expect(manualProcessingOutcome(database).skipped).toBe(0);
+      expect(manualProcessingOutcome(database).status).toBe("waiting");
+      expect(manualProcessingOutcome(database).stopReasons).toContain(`provider_paused:openrouter:${reason}`);
       expect(database.native.query("SELECT processing_content FROM media_sources WHERE processing_content IS NOT NULL").all()).toEqual([]);
 
       // The pause lasts until the next daily credit check.
@@ -254,7 +255,7 @@ describe("OpenRouter classifier", () => {
       const waiting = await tick(database, providers, "2026-11-18T07:00:00.000Z");
 
       expect(waiting.mediaProcessing?.providers.openrouter.paused).toBe(false);
-      expect(waiting.mediaProcessing?.outputs.skipped).toBe(0);
+      expect(manualProcessingOutcome(database).skipped).toBe(0);
       expect(textJobs(database).map(({ status: state, attempt_count, next_attempt_at }) => ({ state, attempt_count, next_attempt_at }))).toEqual([
         { state: "queued", attempt_count: 1, next_attempt_at: "2026-11-18T07:15:00.000Z" },
       ]);
@@ -362,10 +363,10 @@ describe("OpenRouter classifier", () => {
       const providers = apis();
       providers.openRouter.reply("chat", reply);
 
-      const uncertain = await tick(database, providers, "2026-11-18T07:00:00.000Z");
+      await tick(database, providers, "2026-11-18T07:00:00.000Z");
 
       expect(answerRecord(database)).toMatchObject({ status: "queued", error: "uncertain:accepted_without_answer" });
-      expect(uncertain.mediaProcessing?.outputs.skipped).toBe(0);
+      expect(manualProcessingOutcome(database).skipped).toBe(0);
       await tick(database, providers, "2026-11-18T07:15:00.000Z");
       expect(providers.openRouter.requests.filter((request) => request.stage === "extraction")).toHaveLength(2);
       expect(answerRecord(database)).toMatchObject({ status: "succeeded" });
@@ -392,7 +393,7 @@ describe("OpenRouter classifier", () => {
         { stage: "extraction", status: "succeeded" },
         { stage: "synthesis", status: "succeeded" },
       ]);
-      expect(refused.mediaProcessing?.outputs.skipped).toBe(1);
+      expect(manualProcessingOutcome(database).skipped).toBe(1);
       expect(refused.mediaProcessing?.providers.openrouter.paused).toBe(false);
       expect(providers.openRouter.requests.map((request) => request.stage)).toEqual(["extraction", "extraction", "synthesis"]);
       // The Overview is built from the article that succeeded.
@@ -414,7 +415,7 @@ describe("OpenRouter classifier", () => {
       const paused = await tick(database, providers, "2026-11-18T07:00:00.000Z");
 
       expect(paused.mediaProcessing?.providers.openrouter).toMatchObject({ paused: true, reason });
-      expect(paused.mediaProcessing?.outputs.skipped).toBe(0);
+      expect(manualProcessingOutcome(database).skipped).toBe(0);
       expect(textJobs(database).map(({ status, attempt_count, error }) => ({ status, attempt_count, error }))).toEqual(Array(2).fill({ status: "queued", attempt_count: 0, error: null }));
       expect(providers.openRouter.requests).toHaveLength(1);
 
@@ -432,7 +433,7 @@ describe("OpenRouter classifier", () => {
     const refused = await tick(database, providers, "2026-11-18T07:00:00.000Z");
 
     expect(textJobs(database).map(({ status, error }) => ({ status, error }))).toEqual([{ status: "refused", error: "invalid_output: no supported contributions" }]);
-    expect(refused.mediaProcessing?.outputs.skipped).toBe(1);
+    expect(manualProcessingOutcome(database).skipped).toBe(1);
     // The answer was charged, so its reported cost is recorded.
     expect(refused.mediaProcessing?.cost.providers.openrouter.allTimeMicrousd).toBe(150);
   });
@@ -446,7 +447,7 @@ describe("OpenRouter classifier", () => {
 
     expect(paused.mediaProcessing?.providers.openrouter).toMatchObject({ paused: true, reason: "invalid_key" });
     expect(textJobs(database).map(({ status, attempt_count, error }) => ({ status, attempt_count, error }))).toEqual([{ status: "queued", attempt_count: 0, error: null }]);
-    expect(paused.mediaProcessing?.stopReasons).toContain("provider_paused:openrouter:invalid_key");
+    expect(manualProcessingOutcome(database).stopReasons).toContain("provider_paused:openrouter:invalid_key");
 
     const resumed = await tick(database, providers, "2026-11-19T06:00:00.000Z");
     expect(resumed.mediaProcessing?.providers.openrouter).toMatchObject({ paused: false, checkOutcome: "credit_remaining" });
@@ -499,8 +500,8 @@ describe("request lifecycle", () => {
       { stage: "extraction", status: "queued", attempt_count: 1, next_attempt_at: "2026-11-18T07:15:00.000Z", error: "uncertain:timeout" },
     ]);
     expect(sent.mediaProcessing?.cost.uncertain).toBe(1);
-    expect(sent.mediaProcessing?.stopReasons).toContain("uncertain_submission");
-    expect(sent.mediaProcessing?.outputs.skipped).toBe(0);
+    expect(manualProcessingOutcome(database).stopReasons).toContain("uncertain_submission");
+    expect(manualProcessingOutcome(database).skipped).toBe(0);
 
     const resent = await tick(database, providers, "2026-11-18T07:15:00.000Z");
 
@@ -586,7 +587,7 @@ describe("request lifecycle", () => {
 
     expect(textJobs(database).map(({ status, next_attempt_at, error }) => ({ status, next_attempt_at, error }))).toEqual([{ status: "uncertain_exhausted", next_attempt_at: null, error: "uncertain_exhausted:timeout" }]);
     expect(exhausted.mediaProcessing?.cost.uncertain).toBe(1);
-    expect(exhausted.mediaProcessing?.outputs.skipped).toBe(1);
+    expect(manualProcessingOutcome(database).skipped).toBe(1);
     for (const at of ["2026-11-18T09:00:00.000Z", "2026-11-19T06:00:00.000Z", "2026-11-20T06:00:00.000Z"]) await tick(database, providers, at);
     expect(providers.openRouter.requests).toHaveLength(3);
     expect(attempts(database).map(({ attempt, outcome }) => ({ attempt, outcome }))).toEqual([1, 2, 3].map((attempt) => ({ attempt, outcome: "uncertain" })));
@@ -787,14 +788,14 @@ describe("input cap", () => {
     const providers = apis();
     const [oversized] = sourceUrls(database);
 
-    const result = await tick(database, providers, "2026-11-18T07:00:00.000Z", { outlet: (url) => (url === oversized ? new Response(oversizedArticleHtml(CYBERPUNK)) : undefined) });
+    await tick(database, providers, "2026-11-18T07:00:00.000Z", { outlet: (url) => (url === oversized ? new Response(oversizedArticleHtml(CYBERPUNK)) : undefined) });
 
     expect(textJobs(database).map(({ stage, status, error }) => ({ stage, status, error }))).toEqual([
       { stage: "extraction", status: "refused", error: "input_token_cap" },
       { stage: "extraction", status: "succeeded", error: null },
       { stage: "synthesis", status: "succeeded", error: null },
     ]);
-    expect(result.mediaProcessing?.stopReasons).toContain("input_token_cap");
+    expect(manualProcessingOutcome(database).stopReasons).toContain("input_token_cap");
     expect(providers.openRouter.requests.map((request) => request.stage)).toEqual(["extraction", "synthesis"]);
     const caps = database.native.query<{ stage: string; max_output_tokens: number }, []>("SELECT stage, max_output_tokens FROM media_processing_jobs WHERE status = 'succeeded' AND stage IN ('extraction', 'synthesis') ORDER BY id").all();
     expect(providers.openRouter.requests.map((request) => request.body.max_tokens)).toEqual(caps.map((cap) => cap.max_output_tokens));
@@ -823,10 +824,10 @@ describe("input cap", () => {
     const { database } = await authorizedGames();
     const providers = apis();
 
-    const result = await tick(database, providers, "2026-11-18T07:00:00.000Z", { outlet: () => new Response(longArticle(200_000, "Closing verdict marker.")) });
+    await tick(database, providers, "2026-11-18T07:00:00.000Z", { outlet: () => new Response(longArticle(200_000, "Closing verdict marker.")) });
 
     expect(textJobs(database).map(({ stage, status, error }) => ({ stage, status, error }))).toEqual([{ stage: "extraction", status: "refused", error: "input_token_cap" }]);
-    expect(result.mediaProcessing?.stopReasons).toContain("input_token_cap");
+    expect(manualProcessingOutcome(database).stopReasons).toContain("input_token_cap");
     expect(providers.openRouter.requests).toHaveLength(0);
   });
 });
@@ -895,6 +896,15 @@ describe("daily OpenRouter credit check", () => {
 
     expect(checked.mediaProcessing?.providers.openrouter).toMatchObject({ paused: true, reason: "key_limit", pausedAt: "2026-11-18T07:00:00.000Z", checkedAt: "2026-11-19T06:00:00.000Z", checkOutcome: "check_failed:http_503" });
     expect(providers.openRouter.requests).toHaveLength(1);
+  });
+
+  test("malformed HTTP 200 key JSON keeps the pause and records an invalid answer", async () => {
+    const { database, providers } = await pausedForKeyLimit();
+    providers.openRouter.reply("key", { status: 200, raw: '{"data":' });
+
+    const checked = await tick(database, providers, "2026-11-19T06:00:00.000Z");
+
+    expect(checked.mediaProcessing?.providers.openrouter).toMatchObject({ paused: true, reason: "key_limit", checkOutcome: "check_failed:invalid_answer" });
   });
 
   test("a check whose key is rejected pauses text generation with reason invalid_key", async () => {

@@ -262,6 +262,7 @@ describe("outlet stops across passes", () => {
 
   test.each([
     ["a server error", "tavily_search_http_503", async (): Promise<Response> => new Response("", { status: 503 })],
+    ["malformed HTTP 200 JSON", "tavily_search_error", async (): Promise<Response> => new Response('{"results":')],
     ["a network error", "tavily_search_error", async (): Promise<Response> => { throw new TypeError("fetch failed"); }],
   ])("%s from the search provider stops searching without using the outlet's attempts, and the next authorized run issues the query once", async (_failure, reason, failingSearch) => {
     const database = fixture();

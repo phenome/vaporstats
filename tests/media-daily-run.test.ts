@@ -171,6 +171,24 @@ describe("automatic Paid-work summaries", () => {
     expect(result.mediaProcessing).toMatchObject({ submitted: 1, completed: 0, failed, uncertain });
   });
 
+  test("an automatic tick reports both runs' work and finishes the open manual authorization", async () => {
+    const database = experimentCatalog();
+    insertSources(database.native, CYBERPUNK, "initial", 1);
+    insertSources(database.native, BALDURS_GATE, "initial", 1);
+    const manualRun = insertCompletedRun(database.native, "initial:manual", [CYBERPUNK]);
+    await authorizeMediaProcessing(database.db, manualRun);
+    const providers = { openRouter: controlledOpenRouterApi(), gemini: controlledGeminiApi() };
+
+    const result = await tick(database, providers, "2026-11-20T06:00:00.000Z");
+
+    expect(result.mediaDailyRun?.discoveryRunId).toBeGreaterThan(manualRun);
+    expect(result.mediaProcessing).toMatchObject({
+      runId: result.mediaDailyRun?.discoveryRunId,
+      submitted: 6, completed: 6, failed: 0, uncertain: 0, status: "completed", overviewAppids: [BALDURS_GATE, CYBERPUNK],
+    });
+    expect(database.native.query("SELECT status FROM media_processing_authorizations WHERE run_id = ?").get(manualRun)).toEqual({ status: "completed" });
+  });
+
   test("automatic work identifies its own run while polling an older pending batch", async () => {
     const database = experimentCatalog();
     insertSources(database.native, CYBERPUNK, "initial", 1);

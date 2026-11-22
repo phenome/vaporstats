@@ -210,6 +210,20 @@ describe("Tavily response scopes", () => {
     });
   });
 
+  test("a valid empty search result is successful", async () => {
+    const body = { results: [] };
+    const transport = createTavilyTransport("test-key", async () => Response.json(body));
+    expect(await transport.search("a review", "ign.com")).toEqual({
+      class: "success", body, attempt: { kind: "search", statusCode: 200, succeeded: true, error: null },
+    });
+  });
+
+  test("malformed usage JSON fails a successful response and preserves HTTP rejection handling", async () => {
+    const usage = (status: number) => createTavilyTransport("test-key", async () => new Response("{", { status })).usage();
+    expect(await usage(200)).toEqual({ stop: "tavily_usage_error", details: null });
+    expect((await usage(432)).stop).toBe("tavily_account_not_free");
+  });
+
   const freeUsage = { account: { current_plan: "free" }, plan_usage: 5, plan_limit: 100, paygo_usage: 0 };
   const usageFixtures = [
     { label: "valid free credit", body: freeUsage, status: 200, stop: null },
@@ -234,4 +248,12 @@ describe("Tavily response scopes", () => {
     expect(await createTavilyTransport(undefined, async () => { throw new Error("unexpected request"); }).usage())
       .toEqual({ stop: "tavily_missing_key", details: null });
   });
+});
+
+test("Gemini rejects malformed successful JSON and preserves malformed HTTP error status", async () => {
+  const transport = (status: number) => createGeminiBatchTransport("test-key", async () => new Response("{", { status }));
+  await expect(transport(200).countTokens(GEMINI_EMBEDDING_MODEL, {})).rejects.toBeInstanceOf(SyntaxError);
+  await expect(transport(200).submitEmbeddingBatch!(GEMINI_EMBEDDING_MODEL, [])).rejects.toBeInstanceOf(SyntaxError);
+  await expect(transport(200).pollBatch("batches/test")).rejects.toBeInstanceOf(SyntaxError);
+  await expect(transport(429).pollBatch("batches/test")).rejects.toMatchObject({ status: 429 });
 });

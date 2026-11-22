@@ -471,7 +471,7 @@ function storedExtractionJson(value: unknown, sourceIdentity: string, sourceUrl:
   });
 }
 
-type AuthorizationRow = { run_id: number; status: string; stop_reason: string | null; billing_confirmation: string | null; affected_source_ids: string };
+type AuthorizationRow = { run_id: number; status: MediaProcessingSummary["status"]; stop_reason: string | null; billing_confirmation: string | null; affected_source_ids: string };
 
 type SourceRow = { id: number; appid: number; pass: MediaPass; original_url: string; title: string; outlet: MediaOutlet; author: string | null; published_at: string | null; updated_at: string | null; retrieved_at: string; type: string; hands_on: number | null; affiliation: string | null; platform: string | null; build_context: string | null; normalized_content_hash: string | null; cleanup_version: string | null; processing_content: string | null; processing_input_identity: string | null; processing_run_id: number | null };
 const SOURCE_COLUMNS = "id, appid, pass, original_url, title, outlet, author, published_at, updated_at, retrieved_at, type, hands_on, affiliation, platform, build_context, normalized_content_hash, cleanup_version, processing_content, processing_input_identity, processing_run_id";
@@ -1012,20 +1012,12 @@ async function enrolledEntities(db: AppDatabase): Promise<number[]> {
 async function loadAuthorization(
   db: AppDatabase,
   runId?: number,
-  submittedRunIds: readonly number[] = [],
 ): Promise<{ auth: AuthorizationRow; selectedGames: number[] } | null> {
   const auth = runId === undefined
     ? await first<AuthorizationRow & { selected_games: string }>(db, "SELECT a.run_id, a.status, a.stop_reason, a.billing_confirmation, a.affected_source_ids, r.selected_games FROM media_processing_authorizations a JOIN media_discovery_runs r ON r.id = a.run_id WHERE a.status IN ('queued', 'waiting') AND r.status NOT IN ('queued', 'running') ORDER BY a.run_id DESC LIMIT 1")
-    : await first<AuthorizationRow & { selected_games: string }>(db, "SELECT a.run_id, a.status, a.stop_reason, a.billing_confirmation, a.affected_source_ids, r.selected_games FROM media_processing_authorizations a JOIN media_discovery_runs r ON r.id = a.run_id WHERE a.run_id = ? AND a.status IN ('queued', 'waiting') AND r.status NOT IN ('queued', 'running')", runId);
+    : await first<AuthorizationRow & { selected_games: string }>(db, "SELECT a.run_id, a.status, a.stop_reason, a.billing_confirmation, a.affected_source_ids, r.selected_games FROM media_processing_authorizations a JOIN media_discovery_runs r ON r.id = a.run_id WHERE a.run_id = ? AND a.status IN ('queued', 'waiting', 'completed', 'stopped') AND r.status NOT IN ('queued', 'running')", runId);
   if (!auth) {
-    if (runId !== undefined) {
-      const terminal = await first<{ run_id: number }>(
-        db,
-        "SELECT a.run_id FROM media_processing_authorizations a JOIN media_discovery_runs r ON r.id = a.run_id WHERE a.run_id = ? AND a.status IN ('completed', 'stopped') AND r.status NOT IN ('queued', 'running')",
-        runId,
-      );
-      if (!terminal) throw new Error("Media processing authorization not found");
-    }
+    if (runId !== undefined) throw new Error("Media processing authorization not found");
     return null;
   }
   return { auth, selectedGames: parseSelectedGames(auth.selected_games) };
@@ -1650,15 +1642,19 @@ async function advanceMediaProcessingNow(db: AppDatabase, options: MediaProcessi
   for (const run of open) outcomes.set(run.auth.run_id, await finishRun(advance, run));
   const report = await queueReport(db, now);
   const target = authorization ? outcomes.get(authorization.auth.run_id) : undefined;
-  if (target) return { ...target, ...report };
+  if (target && (automatic === null || options.runId !== undefined)) return { ...target, ...report };
 
-  const reconciliationRunId = automatic?.runId ?? globallySubmitted.at(-1)?.run_id ?? options.runId ?? options.automaticRunId ?? await latestPaidWorkRun(db);
+  const auth = authorization?.auth;
+  const terminal = auth?.status === "completed" || auth?.status === "stopped"
+    ? { runId: auth.run_id, status: auth.status }
+    : null;
+  const reconciliationRunId = terminal?.runId ?? automatic?.runId ?? globallySubmitted.at(-1)?.run_id ?? options.runId ?? options.automaticRunId ?? await latestPaidWorkRun(db);
   if (reconciliationRunId === undefined) throw new Error("Media processing authorization not found");
   const recorded = await first<{ stop_reason: string | null }>(db, "SELECT stop_reason FROM media_processing_authorizations WHERE run_id = ?", reconciliationRunId);
   const entities = automatic?.entities ?? (pollOnly ? globallySubmitted.map(({ appid }) => appid) : await enrolledEntities(db));
   return {
     runId: reconciliationRunId,
-    status: await hasUnresolvedPaidWork(db) ? "waiting" : "completed",
+    status: terminal?.status ?? (await hasUnresolvedPaidWork(db) ? "waiting" : "completed"),
     submitted: advance.requestsSent,
     completed: advance.textSucceeded + prePoll.succeeded + currentPoll.succeeded,
     outputs: await outputCounts(db, reconciliationRunId),

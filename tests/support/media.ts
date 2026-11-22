@@ -652,6 +652,14 @@ export function mediaTickFetch(apis: MediaTickApis, fetched: string[] = [], outl
   }) as typeof fetch;
 }
 
+/** Reads the latest manual authorization from a test fixture. */
+export function manualProcessingOutcome(database: TestDatabase) {
+  const auth = database.native.query<{ status: string; stop_reason: string | null; skipped_outputs: number }, []>(
+    "SELECT status, stop_reason, skipped_outputs FROM media_processing_authorizations ORDER BY run_id DESC LIMIT 1",
+  ).get()!;
+  return { status: auth.status, stopReasons: (auth.stop_reason ?? "").split("; ").filter(Boolean), skipped: auth.skipped_outputs };
+}
+
 /** Options of `runMediaTick`: tick options plus the outlets' controlled answers. */
 export type MediaTickOptions = Partial<IngestionTickOptions> & { fetched?: string[]; outlet?: (url: string) => Response | undefined };
 

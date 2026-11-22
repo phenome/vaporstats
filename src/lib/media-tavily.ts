@@ -35,11 +35,11 @@ type SearchOutcome =
     attempt: SearchAttempt;
   };
 
-async function readJson(response: Response): Promise<unknown> {
+async function readUsageJson(response: Response): Promise<unknown> {
   try {
     return await response.json();
   } catch (error) {
-    if (error instanceof SyntaxError) return {};
+    if (!response.ok && error instanceof SyntaxError) return {};
     throw error;
   }
 }
@@ -49,7 +49,7 @@ export async function classifyTavilyUsage(reply: TavilyReply | null) {
   try {
     if ("error" in reply) throw reply.error;
     const { response } = reply;
-    const details = usageDetails(await readJson(response));
+    const details = usageDetails(await readUsageJson(response));
     if (response.ok && details.valid) return { stop: null, details };
     const stop = details.remainingCredits === 0 ? "tavily_credits_exhausted"
       : details.plan === "free" ? "tavily_free_credits_unavailable"
@@ -74,7 +74,7 @@ export async function classifyTavilySearchOutcome(reply: TavilyReply, apiKey?: s
   }
   try {
     return {
-      class: "success", body: await readJson(response),
+      class: "success", body: await response.json(),
       attempt: { kind: "search", statusCode: status, succeeded: true, error: null },
     };
   } catch (error) {

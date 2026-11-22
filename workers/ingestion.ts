@@ -333,7 +333,7 @@ async function advanceMedia(
   if (automaticRunId === null && !pendingAuthorization && !queuedWork) return;
   report.mediaProcessing = await advanceMediaProcessing(db, {
     ...providerOptions,
-    ...(pendingAuthorization ? { runId: pendingAuthorization.run_id } : {}),
+    ...(automaticRunId === null && pendingAuthorization ? { runId: pendingAuthorization.run_id } : {}),
     ...(automaticRunId !== null ? { automaticRunId } : {}),
     probe: [...rechecked, ...(mediaDailyRun?.probe ?? [])],
     submissionsPerTick: options.paidSubmissionsPerTick,

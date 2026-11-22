@@ -66,7 +66,8 @@ function providerError(response: Response, body: unknown): GeminiHttpError {
 }
 
 async function responseJson(response: Response): Promise<unknown> {
-  return response.json().catch(() => ({}));
+  if (response.ok) return response.json();
+  throw providerError(response, await response.json().catch(() => ({})));
 }
 
 export function createGeminiBatchTransport(apiKey: string, fetchFn: GeminiFetch = fetch): GeminiBatchTransport {
@@ -77,9 +78,7 @@ export function createGeminiBatchTransport(apiKey: string, fetchFn: GeminiFetch 
       ...init,
       headers: { Accept: "application/json", "Content-Type": "application/json", "x-goog-api-key": apiKey, ...(init.headers ?? {}) },
     });
-    const body = await responseJson(response);
-    if (!response.ok) throw providerError(response, body);
-    return body;
+    return responseJson(response);
   };
   return {
     async countTokens(model, input) {
@@ -116,7 +115,6 @@ export function createGeminiBatchTransport(apiKey: string, fetchFn: GeminiFetch 
     async pollBatch(name) {
       const response = await fetchFn(`${base}/${name.replace(/^\/+/, "")}`, { headers: { Accept: "application/json", "x-goog-api-key": apiKey } });
       const body = await responseJson(response);
-      if (!response.ok) throw providerError(response, body);
       const root = jsonObject(body);
       const metadata = jsonObject(root.metadata);
       const rawState = metadata.state ?? root.state ?? root.status;

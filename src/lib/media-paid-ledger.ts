@@ -181,6 +181,8 @@ const JOB_COLUMNS = "id, retained, run_id, stage, appid, matched_appid, dimensio
  * run queues that work as an item of its own.
  */
 const WAITING = "(status = 'queued' AND retained = 0)";
+/** Retained submissions can still settle. Retained uncertain jobs are history. */
+const UNRESOLVED = `(status = 'submitted' OR (status = 'uncertain' AND retained = 0) OR ${WAITING})`;
 type QueueInput = {
   provider: PaidProvider;
   run_id: number;
@@ -367,12 +369,13 @@ function uncertainLimitReached({ streak, lifetime }: { streak: number; lifetime:
 async function retryUncertainItem(db: AppDatabase, job: JobRow, reason: string, now: Date, retryIdentity: RetryIdentity, detail: string | null = null): Promise<void> {
   const current = await first<{ status: JobStatus; retained: number; attempt_count: number }>(db, "SELECT status, retained, attempt_count FROM media_processing_jobs WHERE id = ?", job.id);
   if (!current || (current.status !== "uncertain" && current.status !== "submitted")) return;
+  await backfillLegacyAttempt(db, job.id);
+  const error = current.retained === 1 && detail !== null ? detail : `uncertain:${reason}`;
+  await closeAttempt(db, job.id, "uncertain", error);
   if (current.retained === 1) {
-    await db.prepare("UPDATE media_processing_jobs SET status = 'uncertain', error = ? WHERE id = ?").bind(detail ?? `uncertain:${reason}`, job.id).run();
+    await db.prepare("UPDATE media_processing_jobs SET status = 'uncertain', error = ? WHERE id = ?").bind(error, job.id).run();
     return;
   }
-  await backfillLegacyAttempt(db, job.id);
-  await closeAttempt(db, job.id, "uncertain", `uncertain:${reason}`);
   if (uncertainLimitReached(await uncertainOutcomes(db, job.id))) {
     await db.prepare("UPDATE media_processing_jobs SET status = 'uncertain_exhausted', error = ?, provider_batch_id = NULL, next_attempt_at = NULL, completed_at = ? WHERE id = ?").bind(`uncertain_exhausted:${reason}`, now.toISOString(), job.id).run();
     await countOutputs(db, job.run_id, "skipped");
@@ -427,6 +430,7 @@ export async function resolveWithoutProvider(
 ): Promise<void> {
   await transaction(db, async () => {
     if (prepare && !await prepare()) return;
+    await backfillLegacyAttempt(db, job.id);
     await db.prepare(`UPDATE media_processing_jobs SET status = 'stale', next_attempt_at = NULL, completed_at = CURRENT_TIMESTAMP WHERE id = ? AND ${WAITING} AND EXISTS (SELECT 1 FROM media_processing_attempts WHERE job_id = ?1)`).bind(job.id).run();
     await db.prepare(`DELETE FROM media_processing_jobs WHERE id = ? AND ${WAITING}`).bind(job.id).run();
   });
@@ -446,8 +450,8 @@ export async function applyProviderOutcome(
   retryIdentity: RetryIdentity,
   { detail, answer }: ProviderObservation = {},
 ): Promise<TransitionReport> {
+  if (answer) await transaction(db, () => recordProviderAnswer(db, job, answer, now));
   return transaction(db, async () => {
-    if (answer) await recordProviderAnswer(db, job, answer, now);
     if (outcome.class === "uncertain") {
       await retryUncertainItem(db, job, outcome.reason, now, retryIdentity, detail);
       return { reason: PROCESSING_STOP_REASONS.UNCERTAIN_SUBMISSION };
@@ -651,7 +655,7 @@ async function recordProviderAnswer(db: AppDatabase, job: JobRow, answer: Provid
   else await recordGeminiBatchCharge(db, job, answer.usage, now);
 }
 
-/** Applies output, cost, attempt outcome and authorization counts in one transaction. */
+/** Commits observed cost before atomically applying output, attempt outcome and authorization counts. */
 export async function settleOutput(
   db: AppDatabase,
   job: JobRow,
@@ -659,8 +663,8 @@ export async function settleOutput(
   answer: ProviderAnswer,
   persist: () => Promise<OutputSettlement>,
 ): Promise<OutputSettlement["status"]> {
+  await transaction(db, () => recordProviderAnswer(db, job, answer, now));
   return transaction(db, async () => {
-    await recordProviderAnswer(db, job, answer, now);
     const result = await persist();
     if (result.status === "succeeded") {
       await db.prepare("UPDATE media_processing_jobs SET status = 'succeeded', output_json = ?, error = NULL, completed_at = ? WHERE id = ?")
@@ -684,7 +688,7 @@ export async function paidWorkRunAggregate(db: AppDatabase, runId: number) {
     `SELECT COALESCE(SUM(status = 'succeeded'), 0) AS succeeded,
        COALESCE(SUM(status IN ('failed', 'refused', 'stale', 'client_error_exhausted')), 0) AS failed,
        COALESCE(SUM(status IN ('uncertain', 'uncertain_exhausted') OR (${WAITING} AND error LIKE 'uncertain:%')), 0) AS uncertain,
-       COALESCE(SUM(status IN ('submitted', 'uncertain') OR ${WAITING}), 0) AS pending,
+       COALESCE(SUM(${UNRESOLVED}), 0) AS pending,
        COUNT(*) AS jobs,
        COALESCE(SUM(status IN ('failed', 'uncertain_exhausted', 'client_error_exhausted') OR (status = 'refused' AND submitted_at IS NOT NULL)), 0) AS hard,
        COALESCE(SUM(${WAITING}), 0) AS waiting
@@ -762,13 +766,11 @@ export async function latestPaidWorkRun(db: AppDatabase): Promise<number | undef
 }
 
 export async function hasUnresolvedPaidWork(db: AppDatabase): Promise<boolean> {
-  // A retained submitted batch can still settle. Retained uncertain items
-  // are history and cannot return to the queue.
-  return (await first(db, `SELECT 1 FROM media_processing_jobs WHERE status = 'submitted' OR (status = 'uncertain' AND retained = 0) OR ${WAITING} LIMIT 1`)) !== null;
+  return (await first(db, `SELECT 1 FROM media_processing_jobs WHERE ${UNRESOLVED} LIMIT 1`)) !== null;
 }
 
 export async function hasOpenExtraction(db: AppDatabase, runId: number, sourceId: number): Promise<boolean> {
-  return (await first(db, `SELECT 1 FROM media_processing_jobs WHERE run_id = ? AND source_id = ? AND stage = 'extraction' AND (status IN ('submitted', 'uncertain') OR ${WAITING}) LIMIT 1`, runId, sourceId)) !== null;
+  return (await first(db, `SELECT 1 FROM media_processing_jobs WHERE run_id = ? AND source_id = ? AND stage = 'extraction' AND ${UNRESOLVED} LIMIT 1`, runId, sourceId)) !== null;
 }
 
 export async function hasRequestKey(db: AppDatabase, requestKey: string): Promise<boolean> {
