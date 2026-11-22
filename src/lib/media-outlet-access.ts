@@ -1,6 +1,7 @@
 import type { AppDatabase } from "./db";
 import { writeTransaction } from "./db-transaction";
-import type { MediaOutlet, MediaPass } from "./media-discovery";
+import { boundedMediaError } from "./media-error";
+import type { MediaPass } from "./media-discovery";
 
 /**
  * Outlet access rules shared by every media pass and stage. Discovery
@@ -9,7 +10,51 @@ import type { MediaOutlet, MediaPass } from "./media-discovery";
  * source for whether an outlet may be contacted.
  */
 
+export const MEDIA_OUTLETS = [
+  { name: "IGN", domain: "ign.com" },
+  { name: "Eurogamer", domain: "eurogamer.net" },
+  { name: "GameSpot", domain: "gamespot.com" },
+  { name: "PC Gamer", domain: "pcgamer.com" },
+  { name: "Kotaku", domain: "kotaku.com" },
+  { name: "GamesRadar+", domain: "gamesradar.com" },
+] as const;
+
+export type MediaOutlet = (typeof MEDIA_OUTLETS)[number]["name"];
+export function hostInOutlet(url: string, outlet: (typeof MEDIA_OUTLETS)[number]): boolean {
+  try {
+    const address = new URL(url);
+    if (address.protocol !== "http:" && address.protocol !== "https:") return false;
+    const host = address.hostname.toLowerCase();
+    const domain = outlet.domain.toLowerCase();
+    return host === domain || host.endsWith(`.${domain}`);
+  } catch {
+    return false;
+  }
+}
+
 const DEFAULT_ATTEMPTS_PER_OUTLET_DAY = 30;
+const OUTLET_DENIAL_STATUSES: readonly number[] = [401, 403];
+const OUTLET_DAY_STOP_STATUS = 429;
+const MAX_REDIRECTS = 5;
+
+export const OUTLET_HTTP_STOPS = {
+  401: "fetch_http_401",
+  403: "fetch_http_403",
+  [OUTLET_DAY_STOP_STATUS]: "fetch_http_429",
+} as const;
+export const OUTLET_STOP_REASONS = {
+  DAILY_ATTEMPT_CAP: "daily_attempt_cap",
+  ARTICLE_UNREACHABLE: "article_unreachable",
+  ARTICLE_UNUSABLE: "article_unusable",
+} as const;
+
+type OutletHttpStop = (typeof OUTLET_HTTP_STOPS)[keyof typeof OUTLET_HTTP_STOPS];
+export type OutletAccessStop = OutletHttpStop | typeof OUTLET_STOP_REASONS.DAILY_ATTEMPT_CAP;
+export type OutletStopReason = OutletHttpStop | (typeof OUTLET_STOP_REASONS)[keyof typeof OUTLET_STOP_REASONS];
+
+function outletHttpStop(status: number): OutletHttpStop | null {
+  return OUTLET_HTTP_STOPS[status as keyof typeof OUTLET_HTTP_STOPS] ?? null;
+}
 
 /**
  * Setting that replaces the daily attempt cap per outlet. The default of 30
@@ -35,18 +80,12 @@ async function first<T>(db: AppDatabase, query: string, ...values: unknown[]): P
 }
 
 /**
- * A search the provider refused (401, 403 or 429), failed to serve (5xx), or
- * never received (a recorded network error) was never served, so it is not
- * anything the outlet did: it uses none of the outlet's attempts and never
- * limits or denies it. The attempt stays in the log as the provider stop's
- * record. A reserved search with no recorded outcome may have been served, so
- * it still counts.
+ * A non-2xx search response or recorded network error belongs to the provider.
+ * It uses none of the outlet's attempts, but stays in the log. A reserved
+ * search with no recorded outcome may have been served and still counts.
  */
-const SERVED_ATTEMPT_SQL = `NOT (kind = 'search' AND (
-  COALESCE(status_code, 0) IN (401, 403, 429)
-  OR COALESCE(status_code, 0) >= 500
-  OR (status_code IS NULL AND error IS NOT NULL)
-))`;
+const SERVED_ATTEMPT_SQL = `NOT (kind = 'search' AND succeeded = 0
+  AND (status_code IS NOT NULL OR error IS NOT NULL))`;
 
 /** Search, fetch, redirect and failed attempts on `outlet` during `date`'s UTC day, from every pass and stage. */
 async function attemptsToday(db: AppDatabase, outlet: MediaOutlet, date: Date): Promise<number> {
@@ -60,13 +99,13 @@ async function attemptsToday(db: AppDatabase, outlet: MediaOutlet, date: Date): 
  * Search attempts go to the search provider, so a 401 or 403 there is a
  * provider stop, not an outlet denial.
  */
-async function outletDenial(db: AppDatabase, outlet: MediaOutlet): Promise<string | null> {
+async function outletDenial(db: AppDatabase, outlet: MediaOutlet): Promise<OutletHttpStop | null> {
   const denied = await first<{ status_code: number }>(
     db,
-    "SELECT status_code FROM media_discovery_attempts WHERE outlet = ? AND kind = 'fetch' AND status_code IN (401, 403) ORDER BY id LIMIT 1",
+    `SELECT status_code FROM media_discovery_attempts WHERE outlet = ? AND kind = 'fetch' AND status_code IN (${OUTLET_DENIAL_STATUSES.join(", ")}) ORDER BY id LIMIT 1`,
     outlet,
   );
-  return denied ? `fetch_http_${denied.status_code}` : null;
+  return denied ? outletHttpStop(denied.status_code) : null;
 }
 
 /**
@@ -74,15 +113,16 @@ async function outletDenial(db: AppDatabase, outlet: MediaOutlet): Promise<strin
  * or stage recorded it: the daily attempt cap, or a rate limit the outlet
  * returned to an article fetch that day. Both reopen on the next UTC day.
  */
-async function outletDayStop(db: AppDatabase, outlet: MediaOutlet, date: Date): Promise<string | null> {
-  if ((await attemptsToday(db, outlet, date)) >= outletDailyAttemptCap()) return "daily_attempt_cap";
+async function outletDayStop(db: AppDatabase, outlet: MediaOutlet, date: Date): Promise<OutletAccessStop | null> {
+  if ((await attemptsToday(db, outlet, date)) >= outletDailyAttemptCap()) return OUTLET_STOP_REASONS.DAILY_ATTEMPT_CAP;
   const limited = await first<{ id: number }>(
     db,
-    "SELECT id FROM media_discovery_attempts WHERE outlet = ? AND day = ? AND kind = 'fetch' AND status_code = 429 LIMIT 1",
+    "SELECT id FROM media_discovery_attempts WHERE outlet = ? AND day = ? AND kind = 'fetch' AND status_code = ? LIMIT 1",
     outlet,
     dayKey(date),
+    OUTLET_DAY_STOP_STATUS,
   );
-  return limited ? "fetch_http_429" : null;
+  return limited ? outletHttpStop(OUTLET_DAY_STOP_STATUS) : null;
 }
 
 /**
@@ -91,11 +131,11 @@ async function outletDayStop(db: AppDatabase, outlet: MediaOutlet, date: Date): 
  * permanent. Every other stop is a day stop that reopens on the next UTC day.
  */
 export function isOutletDenialStop(stop: string): boolean {
-  return /^fetch_http_40[13]$/.test(stop);
+  return OUTLET_DENIAL_STATUSES.some((status) => stop === outletHttpStop(status));
 }
 
 /** Why `outlet` must not be contacted at `date`: a lasting access denial first, then a same-day stop. */
-async function mediaOutletStop(db: AppDatabase, outlet: MediaOutlet, date: Date): Promise<string | null> {
+async function mediaOutletStop(db: AppDatabase, outlet: MediaOutlet, date: Date): Promise<OutletAccessStop | null> {
   return (await outletDenial(db, outlet)) ?? outletDayStop(db, outlet, date);
 }
 
@@ -112,7 +152,7 @@ type OutletAttemptKind = "search" | "fetch" | "redirect" | "failure";
 export async function reserveOutletAttempt(
   db: AppDatabase,
   attempt: { runId: number; pass: MediaPass; appid: number; outlet: MediaOutlet; kind: "search" | "fetch"; url: string | null; date: Date },
-): Promise<{ attemptId: number } | { stop: string }> {
+): Promise<{ attemptId: number } | { stop: OutletAccessStop }> {
   return writeTransaction(db, async () => {
     const stop = await mediaOutletStop(db, attempt.outlet, attempt.date);
     if (stop) return { stop };
@@ -137,27 +177,100 @@ export async function finishOutletAttempt(
     .bind(outcome.kind, outcome.statusCode, outcome.succeeded ? 1 : 0, outcome.error, attemptId).run();
 }
 
-/**
- * Records how reserved attempt `attemptId` ended from the outlet's
- * `response`, and returns its status. Reading the response is part of the
- * attempt: if it throws, the attempt is recorded as a failure with the
- * bounded reason before the exception propagates, so no attempt is left
- * without an outcome.
- */
-export async function finishAnsweredAttempt(
+type ArticleFetchResult = { html: string; finalUrl: string } | { stop: OutletAccessStop; contacted: boolean } | null;
+
+type AnsweredAttempt = { status: number; ok: boolean; redirect: boolean };
+
+async function finishFailedAttempt(
+  db: AppDatabase, attemptId: number, error: unknown, answered?: AnsweredAttempt, secrets?: readonly (string | undefined)[],
+): Promise<void> {
+  await finishOutletAttempt(db, attemptId, {
+    kind: answered ? (answered.redirect ? "redirect" : "fetch") : "failure",
+    statusCode: answered?.status ?? null, succeeded: false, error: boundedMediaError(error, secrets),
+  });
+}
+
+async function recordAnsweredAttempt<T>(
   db: AppDatabase,
   attemptId: number,
   response: Response,
-): Promise<{ status: number; ok: boolean; redirect: boolean }> {
-  let answered: { status: number; ok: boolean; redirect: boolean };
+  read: (answered: AnsweredAttempt) => T | Promise<T>,
+  secrets?: readonly (string | undefined)[],
+): Promise<T> {
+  let answered: AnsweredAttempt | undefined;
+  let result: T;
   try {
     const status = response.status;
     answered = { status, ok: response.ok, redirect: status >= 300 && status < 400 };
+    result = await read(answered);
   } catch (error) {
-    const message = (error instanceof Error ? error.message : String(error)).replace(/[\r\n]+/g, " ").slice(0, 256);
-    await finishOutletAttempt(db, attemptId, { kind: "failure", statusCode: null, succeeded: false, error: message });
+    await finishFailedAttempt(db, attemptId, error, answered, secrets);
     throw error;
   }
-  await finishOutletAttempt(db, attemptId, { kind: answered.redirect ? "redirect" : "fetch", statusCode: answered.status, succeeded: answered.ok, error: answered.ok ? null : `HTTP ${answered.status}` });
-  return answered;
+  await finishOutletAttempt(db, attemptId, {
+    kind: answered.redirect ? "redirect" : "fetch",
+    statusCode: answered.status,
+    succeeded: answered.ok,
+    error: answered.ok ? null : `HTTP ${answered.status}`,
+  });
+  return result;
+}
+
+/**
+ * Reserves and records each request, following at most five redirects within
+ * the Outlet. Network failures skip the article. Exceptions reading a
+ * response are recorded and propagated to the caller's item error handler.
+ */
+export async function fetchOutletArticle(
+  db: AppDatabase,
+  options: {
+    url: string;
+    runId: number;
+    pass: MediaPass;
+    appid: number;
+    outlet: MediaOutlet;
+    clock: () => Date;
+    fetch: (url: string, init?: RequestInit) => Promise<Response | string>;
+    onAttempt?: () => void;
+    secrets?: readonly (string | undefined)[];
+  },
+): Promise<ArticleFetchResult> {
+  const { runId, pass, appid, outlet, clock } = options;
+  const config = MEDIA_OUTLETS.find((item) => item.name === outlet);
+  if (!config) return null;
+
+  let url = options.url;
+  for (let redirects = 0; redirects <= MAX_REDIRECTS; redirects += 1) {
+    if (!hostInOutlet(url, config)) return null;
+    const reservation = await reserveOutletAttempt(db, { runId, pass, appid, outlet, kind: "fetch", url, date: clock() });
+    if ("stop" in reservation) return { stop: reservation.stop, contacted: redirects > 0 };
+    const { attemptId } = reservation;
+
+    let response: Response | string;
+    try {
+      options.onAttempt?.();
+      response = await options.fetch(url, { redirect: "manual", headers: { Accept: "text/html,application/xhtml+xml" } });
+    } catch (error) {
+      await finishFailedAttempt(db, attemptId, error, undefined, options.secrets);
+      return null;
+    }
+    if (typeof response === "string") {
+      await finishOutletAttempt(db, attemptId, { kind: "fetch", statusCode: 200, succeeded: true, error: null });
+      return { html: response, finalUrl: url };
+    }
+    const reply = response;
+    const result = await recordAnsweredAttempt<ArticleFetchResult | { next: string }>(db, attemptId, reply, async (answered) => {
+      const stop = outletHttpStop(answered.status);
+      if (stop) return { stop, contacted: true };
+      if (answered.redirect && redirects < MAX_REDIRECTS) {
+        const location = reply.headers.get("location");
+        const next = location ? URL.parse(location, url) : null;
+        return next ? { next: next.href } : null;
+      }
+      return answered.ok ? { html: await reply.text(), finalUrl: url } : null;
+    }, options.secrets);
+    if (!result || !("next" in result)) return result;
+    url = result.next;
+  }
+  return null;
 }

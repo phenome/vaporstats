@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
-import { handleRequest } from "../src/server";
+import { handleRequest, sanitizeMediaProcessingSummary } from "../src/server";
 import { getDb } from "../src/lib/db";
+import { PAID_PROVIDERS, PROCESSING_STOP_REASONS, PROVIDER_PAUSE_REASONS } from "../src/lib/media-paid-providers";
 import { chmod, copyFile, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -318,5 +319,48 @@ describe("server media endpoint", () => {
       }
     });
     expect(attempted).toEqual([]);
+  });
+});
+
+describe("media processing summary stop reasons", () => {
+  function sanitizedStopReasons(stopReasons: string[]): string[] {
+    const costs = { monthToDateMicrousd: 0, allTimeMicrousd: 0 };
+    return sanitizeMediaProcessingSummary({
+      runId: 1, status: "waiting", submitted: 0, completed: 0, failed: 0, uncertain: 0,
+      outputs: { new: 0, reused: 0, replaced: 0, invalidated: 0, skipped: 0 },
+      overviewAppids: [],
+      stopReasons,
+      queued: { gemini: 0, openrouter: 0 },
+      providers: {
+        gemini: { provider: "gemini", paused: false, reason: null, pausedAt: null, checkedAt: null, checkOutcome: null },
+        openrouter: { provider: "openrouter", paused: false, reason: null, pausedAt: null, checkedAt: null, checkOutcome: null },
+      },
+      cost: { reportingOnly: true, month: "2026-11", providers: { gemini: costs, openrouter: costs }, uncertain: 0 },
+    }).stopReasons;
+  }
+
+  it("preserves every paid-provider pause and processing stop reason", () => {
+    const reasons = [
+      ...Object.values(PROCESSING_STOP_REASONS),
+      ...PAID_PROVIDERS.flatMap((provider) => PROVIDER_PAUSE_REASONS.map((reason) => `provider_paused:${provider}:${reason}`)),
+    ];
+    expect(sanitizedStopReasons(["item_error"])).toEqual(["item_error"]);
+    expect(sanitizedStopReasons(reasons)).toEqual(reasons);
+  });
+
+  it("preserves bounded stop reasons for each supported Outlet", () => {
+    const reasons = ["IGN", "Eurogamer", "GameSpot", "PC Gamer", "Kotaku", "GamesRadar+"].flatMap((outlet) =>
+      ["fetch_http_401", "fetch_http_403", "fetch_http_429", "daily_attempt_cap", "article_unreachable", "article_unusable"]
+        .map((reason) => `${outlet}:${reason}`));
+    expect(sanitizedStopReasons(reasons)).toEqual(reasons);
+  });
+
+  it("reports unknown and unbounded stop reasons as provider_failure", () => {
+    for (const reason of [
+      "unknown_reason", "__proto__", "Unknown:article_unusable", "IGN:fetch_http_500", "provider_paused:unknown:missing_key",
+      "provider_paused:gemini:arbitrary error detail", "item_error:exception detail", `count_tokens:${"x".repeat(4_096)}`,
+    ]) {
+      expect(sanitizedStopReasons([reason])).toEqual(["provider_failure"]);
+    }
   });
 });

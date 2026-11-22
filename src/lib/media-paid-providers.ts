@@ -40,11 +40,32 @@ export type ProviderOutcome =
   | { class: "uncertain"; reason: string }
   | { class: "missing_configuration"; reason: ConfigurationPauseReason };
 
-export type CreditPauseReason =
-  | "prepay_depleted" | "spend_cap"
-  | "key_limit" | "credits" | "guardrail_budget" | "workspace_budget";
-export type ConfigurationPauseReason = "missing_key" | "rejected_key" | "invalid_key" | "permission_denied" | "forbidden" | "failed_precondition" | "model_unavailable" | "unrecognized_client_error" | "output_truncated";
-export type ProviderPauseReason = CreditPauseReason | ConfigurationPauseReason;
+export const CREDIT_PAUSE_REASONS = [
+  "prepay_depleted", "spend_cap", "key_limit", "credits", "guardrail_budget", "workspace_budget",
+] as const;
+export type CreditPauseReason = (typeof CREDIT_PAUSE_REASONS)[number];
+
+export const CONFIGURATION_PAUSE_REASONS = [
+  "missing_key", "rejected_key", "invalid_key", "permission_denied", "forbidden", "failed_precondition",
+  "model_unavailable", "unrecognized_client_error", "output_truncated",
+] as const;
+export type ConfigurationPauseReason = (typeof CONFIGURATION_PAUSE_REASONS)[number];
+
+export const PROVIDER_PAUSE_REASONS = [...CREDIT_PAUSE_REASONS, ...CONFIGURATION_PAUSE_REASONS] as const;
+export type ProviderPauseReason = (typeof PROVIDER_PAUSE_REASONS)[number];
+
+/** Fixed processing summary reasons that can cross the internal server boundary. */
+export const PROCESSING_STOP_REASONS = {
+  INPUT_TOKEN_CAP: "input_token_cap",
+  PROVIDER_REFUSAL: "provider_refusal",
+  TERMINAL_FAILURE: "terminal_failure",
+  TRANSIENT_PROVIDER_FAILURE: "transient_provider_failure",
+  UNCERTAIN_SUBMISSION: "uncertain_submission",
+  MISSING_GEMINI_EMBEDDING_BATCH: "missing_gemini_embedding_batch",
+  ITEM_ERROR: "item_error",
+} as const;
+
+export type ProcessingStopReason = (typeof PROCESSING_STOP_REASONS)[keyof typeof PROCESSING_STOP_REASONS];
 
 /** A non-OK Gemini HTTP response, as the batch transport receives it. */
 export class GeminiHttpError extends Error {
@@ -565,36 +586,4 @@ export interface PaidWorkCost {
    * are not cost.
    */
   uncertain: number;
-}
-
-/**
- * Reports recorded cost: every attempt's settled charge, by the UTC month it
- * settled in, on the provider the attempt was sent to. A job recorded before
- * per-attempt records existed counts as its own one attempt. Reservations,
- * active or not, are never cost.
- */
-export async function paidWorkCost(db: AppDatabase, now: Date): Promise<PaidWorkCost> {
-  const monthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
-  const nextMonth = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1));
-  const providers = {} as PaidWorkCost["providers"];
-  for (const provider of PAID_PROVIDERS) {
-    const row = await db.prepare(
-      `SELECT
-         COALESCE(SUM(charged), 0) AS all_time,
-         COALESCE(SUM(CASE WHEN julianday(settled_at) >= julianday(?2) AND julianday(settled_at) < julianday(?3) THEN charged ELSE 0 END), 0) AS month_to_date
-       FROM (
-         SELECT charged_microusd AS charged, settled_at FROM media_processing_attempts
-         WHERE provider = ?1 AND charged_microusd IS NOT NULL
-         UNION ALL
-         SELECT charged_microusd, completed_at FROM media_processing_jobs AS job
-         WHERE provider = ?1 AND charged_microusd IS NOT NULL
-           AND NOT EXISTS (SELECT 1 FROM media_processing_attempts AS attempt WHERE attempt.job_id = job.id)
-       )`,
-    ).bind(provider, monthStart.toISOString(), nextMonth.toISOString()).first<{ all_time: number; month_to_date: number }>();
-    providers[provider] = { monthToDateMicrousd: Number(row?.month_to_date ?? 0), allTimeMicrousd: Number(row?.all_time ?? 0) };
-  }
-  const uncertain = await db.prepare(
-    "SELECT COUNT(*) AS count FROM media_processing_jobs WHERE status IN ('uncertain', 'uncertain_exhausted') OR (status = 'queued' AND retained = 0 AND error LIKE 'uncertain:%')",
-  ).first<{ count: number }>();
-  return { reportingOnly: true, month: monthStart.toISOString().slice(0, 7), providers, uncertain: Number(uncertain?.count ?? 0) };
 }

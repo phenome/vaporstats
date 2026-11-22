@@ -14,6 +14,7 @@ import {
   insertCompletedRun,
   insertSources,
   insertSubmittedGeminiExtraction,
+  overviewOutputForUrls,
   runMediaTick,
   seedApps,
   type MediaTickOptions,
@@ -99,6 +100,127 @@ describe("enrollment in the daily media run", () => {
     expect(next.mediaDailyRun).toMatchObject({ day: "2026-11-21", enrollmentStartDate: "2026-11-20", enrolled: [] });
     expect(enrollments(database).map(({ enrolled_at }) => enrolled_at)).toEqual(Array(3).fill("2026-11-20T06:00:00.000Z"));
     expect(activeOutputs(database)).toEqual(before);
+  });
+});
+
+describe("automatic Paid-work summaries", () => {
+  test("an OpenRouter-only tick reports its completed work without a Gemini key", async () => {
+    const database = experimentCatalog();
+    insertSources(database.native, CYBERPUNK, "initial", 1);
+    const sources = await getMediaSources(database.db, CYBERPUNK);
+    const openRouter = controlledOpenRouterApi();
+    openRouter.output("synthesis", overviewOutputForUrls(sources.map(({ originalUrl }) => originalUrl)));
+
+    const result = await tick(database, { openRouter }, "2026-11-20T06:00:00.000Z", { geminiApiKey: "" });
+
+    expect(openRouter.requests.map(({ stage }) => stage)).toEqual(["extraction", "synthesis"]);
+    expect(result.mediaProcessing).toMatchObject({
+      submitted: 2, completed: 2, status: "completed", overviewAppids: [CYBERPUNK],
+    });
+  });
+
+  test("a combined tick reports successful OpenRouter and Gemini work and sorts active Overview AppIDs", async () => {
+    const database = experimentCatalog();
+    insertSources(database.native, CYBERPUNK, "initial", 1);
+    insertSources(database.native, BALDURS_GATE, "initial", 1);
+    const providers = { openRouter: controlledOpenRouterApi(), gemini: controlledGeminiApi() };
+
+    providers.gemini.reply("poll", { status: 200, body: { metadata: { state: "BATCH_STATE_PENDING" } } });
+
+    const result = await tick(database, providers, "2026-11-20T06:00:00.000Z");
+
+    expect(providers.openRouter.requests).toHaveLength(4);
+    expect(providers.gemini.submitted).toHaveLength(2);
+    expect(result.mediaProcessing).toMatchObject({
+      submitted: 6, completed: 5, status: "waiting", overviewAppids: [BALDURS_GATE, CYBERPUNK],
+    });
+    const settled = await tick(database, providers, "2026-11-20T06:15:00.000Z");
+    expect(settled.mediaProcessing).toMatchObject({
+      submitted: 0, completed: 1, status: "completed", overviewAppids: [BALDURS_GATE, CYBERPUNK],
+    });
+    const idle = await tick(database, providers, "2026-11-20T06:30:00.000Z");
+    expect(idle.mediaProcessing).toMatchObject({
+      submitted: 0, completed: 0, status: "completed", overviewAppids: [BALDURS_GATE, CYBERPUNK],
+    });
+  });
+
+  test("a connection failure before an OpenRouter request is sent leaves work waiting without a submission", async () => {
+    const database = experimentCatalog();
+    insertSources(database.native, CYBERPUNK, "initial", 1);
+    const openRouter = controlledOpenRouterApi();
+    openRouter.reply("chat", { network: "connection refused", code: "ECONNREFUSED" });
+
+    const result = await tick(database, { openRouter }, "2026-11-20T06:00:00.000Z", { geminiApiKey: "" });
+
+    expect(result.mediaProcessing).toMatchObject({
+      submitted: 0, completed: 0, status: "waiting", overviewAppids: [], queued: { openrouter: 1 },
+    });
+  });
+
+  test.each([
+    { outcome: "a refusal", reply: { status: 400, body: { error: { message: "Invalid request" } } }, failed: 1, uncertain: 0 },
+    { outcome: "an uncertain send", reply: { network: "Socket closed" }, failed: 0, uncertain: 1 },
+  ])("an automatic tick counts $outcome from OpenRouter", async ({ reply, failed, uncertain }) => {
+    const database = experimentCatalog();
+    insertSources(database.native, CYBERPUNK, "initial", 1);
+    const openRouter = controlledOpenRouterApi();
+    openRouter.reply("chat", reply);
+
+    const result = await tick(database, { openRouter }, "2026-11-20T06:00:00.000Z", { geminiApiKey: "" });
+
+    expect(result.mediaProcessing).toMatchObject({ submitted: 1, completed: 0, failed, uncertain });
+  });
+
+  test("an automatic tick reports both runs' work and finishes the open manual authorization", async () => {
+    const database = experimentCatalog();
+    insertSources(database.native, CYBERPUNK, "initial", 1);
+    insertSources(database.native, BALDURS_GATE, "initial", 1);
+    const manualRun = insertCompletedRun(database.native, "initial:manual", [CYBERPUNK]);
+    await authorizeMediaProcessing(database.db, manualRun);
+    const providers = { openRouter: controlledOpenRouterApi(), gemini: controlledGeminiApi() };
+
+    const result = await tick(database, providers, "2026-11-20T06:00:00.000Z");
+
+    expect(result.mediaDailyRun?.discoveryRunId).toBeGreaterThan(manualRun);
+    expect(result.mediaProcessing).toMatchObject({
+      runId: result.mediaDailyRun?.discoveryRunId,
+      submitted: 6, completed: 6, failed: 0, uncertain: 0, status: "completed", overviewAppids: [BALDURS_GATE, CYBERPUNK],
+    });
+    expect(database.native.query("SELECT status FROM media_processing_authorizations WHERE run_id = ?").get(manualRun)).toEqual({ status: "completed" });
+  });
+
+  test("automatic work identifies its own run while polling an older pending batch", async () => {
+    const database = experimentCatalog();
+    insertSources(database.native, CYBERPUNK, "initial", 1);
+    const oldRun = insertCompletedRun(database.native, "initial:pre-cutover", [CYBERPUNK]);
+    const sourceId = database.native.query<{ id: number }, []>("SELECT id FROM media_sources").get()!.id;
+    insertSubmittedGeminiExtraction(database.native, { runId: oldRun, sourceId, batch: "batches/older" });
+    insertSources(database.native, BALDURS_GATE, "initial", 1);
+    const providers = { openRouter: controlledOpenRouterApi(), gemini: controlledGeminiApi() };
+    providers.gemini.batch("batches/older", "extraction");
+    providers.gemini.reply("poll", { status: 200, body: { metadata: { state: "BATCH_STATE_PENDING" } } });
+
+    const result = await tick(database, providers, "2026-11-20T06:00:00.000Z");
+
+    expect(result.mediaDailyRun?.discoveryRunId).toBeGreaterThan(oldRun);
+    expect(result.mediaProcessing).toMatchObject({
+      runId: result.mediaDailyRun?.discoveryRunId,
+      submitted: 3, completed: 3, failed: 0, uncertain: 1, status: "waiting", overviewAppids: [BALDURS_GATE],
+    });
+  });
+
+  test("paused Gemini work keeps the automatic summary waiting after OpenRouter completes", async () => {
+    const database = experimentCatalog();
+    insertSources(database.native, CYBERPUNK, "initial", 1);
+    const openRouter = controlledOpenRouterApi();
+
+    const result = await tick(database, { openRouter }, "2026-11-20T06:00:00.000Z", { geminiApiKey: "" });
+
+    expect(result.mediaProcessing).toMatchObject({
+      submitted: 2, completed: 2, status: "waiting", overviewAppids: [CYBERPUNK],
+      queued: { openrouter: 0, gemini: 1 },
+      providers: { gemini: { paused: true, reason: "missing_key" } },
+    });
   });
 });
 
@@ -320,7 +442,8 @@ describe("the automatic media ingestion switch", () => {
     // A text batch Gemini accepted before the move to OpenRouter is still out.
     insertSources(database.native, CYBERPUNK, "initial", 1);
     const sourceId = database.native.query<{ id: number }, []>("SELECT MAX(id) AS id FROM media_sources").get()!.id;
-    const jobId = insertSubmittedGeminiExtraction(database.native, { runId: insertCompletedRun(database.native, "initial:pre-cutover", [CYBERPUNK]), sourceId, batch: "batches/pre-cutover" });
+    const retainedRunId = insertCompletedRun(database.native, "initial:pre-cutover", [CYBERPUNK]);
+    const jobId = insertSubmittedGeminiExtraction(database.native, { runId: retainedRunId, sourceId, batch: "batches/pre-cutover" });
     providers.gemini.batch("batches/pre-cutover", "extraction");
     const before = { searches: providers.tavily.searches.length, usage: providers.tavily.usageCalls, openRouter: providers.openRouter.calls.length, gemini: providers.gemini.submitted.length };
 
@@ -331,6 +454,7 @@ describe("the automatic media ingestion switch", () => {
 
     expect(disabled.map((result) => result.mediaDailyRun)).toEqual([undefined, undefined, undefined]);
     expect(disabled.map((result) => result.mediaDiscovery)).toEqual([undefined, undefined, undefined]);
+    expect(disabled.map((result) => result.mediaProcessing?.runId)).toEqual([retainedRunId, undefined, undefined]);
     expect({ searches: providers.tavily.searches.length, usage: providers.tavily.usageCalls, openRouter: providers.openRouter.calls.length, gemini: providers.gemini.submitted.length }).toEqual(before);
     expect(providers.gemini.calls.filter((call) => call.kind === "poll").map((call) => call.key)).toEqual(["extraction:batches/pre-cutover"]);
     expect(database.native.query("SELECT status FROM media_processing_jobs WHERE id = ?").get(jobId)).toEqual({ status: "succeeded" });

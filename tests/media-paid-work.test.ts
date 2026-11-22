@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { authorizeMediaProcessing } from "../src/lib/media-processing";
+import { enqueuePaidWork, hasOpenExtraction, paidWorkCost, readyPaidWork, recordLegacyAttempt, resolveWithoutProvider } from "../src/lib/media-paid-ledger";
+import { advanceMediaProcessing, authorizeMediaProcessing } from "../src/lib/media-processing";
 import { getMediaOverview } from "../src/lib/media-overview";
 import { MEDIA_OUTLETS } from "../src/lib/media-discovery";
 import { openTestDatabase, openUpgradedTestDatabase, type TestDatabase } from "./support/db";
@@ -17,6 +18,8 @@ import {
   GEMINI_SPEND_CAP,
   insertCompletedRun,
   insertSources,
+  insertSubmittedGeminiExtraction,
+  manualProcessingOutcome,
   OPENROUTER_TRUNCATED,
   openRouterKeyLimit,
   overviewOutputForUrls,
@@ -87,6 +90,110 @@ function geminiStages(apis: Providers): string[] {
   return apis.gemini.submitted.map((key) => key.split(":")[0]!);
 }
 
+test("concurrent legacy attempt backfills record one attempt", async () => {
+  const { database, runId } = await authorizedGames();
+  const sourceId = database.native.query<{ id: number }, []>("SELECT id FROM media_sources").get()!.id;
+  const jobId = insertSubmittedGeminiExtraction(database.native, { runId, sourceId });
+
+  await Promise.all([recordLegacyAttempt(database.db, jobId), recordLegacyAttempt(database.db, jobId)]);
+
+  expect(database.native.query("SELECT attempt FROM media_processing_attempts WHERE job_id = ?").all(jobId)).toEqual([{ attempt: 1 }]);
+});
+
+test("a failed no-provider resolution rolls back its related writes and keeps the item ready", async () => {
+  const { database, runId } = await authorizedGames();
+  const now = new Date("2026-11-10T03:00:00.000Z");
+  await enqueuePaidWork(database.db, {
+    run_id: runId, appid: CYBERPUNK, provider: "openrouter", stage: "synthesis", source_id: null,
+    request_key: "resolution", input_identity: "overview", model: "test", config_version: "test", max_output_tokens: 100,
+  }, now);
+  const [job] = await readyPaidWork(database.db, "openrouter", now);
+
+  await expect(resolveWithoutProvider(database.db, job!, async () => {
+    await database.db.prepare("UPDATE media_discovery_runs SET attempt_count = 10 WHERE id = ?").bind(runId).run();
+    throw new Error("failed to prepare resolution");
+  })).rejects.toThrow("failed to prepare resolution");
+  expect(database.native.query("SELECT attempt_count FROM media_discovery_runs WHERE id = ?").get(runId)).toEqual({ attempt_count: 0 });
+  expect(await readyPaidWork(database.db, "openrouter", now)).toEqual([job]);
+});
+
+test("no-provider resolution preserves a legacy waiting charge and deletes a never-sent job", async () => {
+  const { database, runId } = await authorizedGames();
+  const now = new Date("2026-11-10T03:00:00.000Z");
+  for (const key of ["legacy", "unsent"]) {
+    await enqueuePaidWork(database.db, {
+      run_id: runId, appid: CYBERPUNK, provider: "openrouter", stage: "synthesis", source_id: null,
+      request_key: key, input_identity: key, model: "test", config_version: "test", max_output_tokens: 100,
+    }, now);
+  }
+  database.native.run("UPDATE media_processing_jobs SET charged_microusd = 150, completed_at = ? WHERE request_key = 'legacy'", [now.toISOString()]);
+
+  for (const job of await readyPaidWork(database.db, "openrouter", now)) {
+    await resolveWithoutProvider(database.db, job, async () => true);
+  }
+
+  expect(jobs(database)).toMatchObject([{ request_key: "legacy", status: "stale" }]);
+  expect(database.native.query("SELECT charged_microusd FROM media_processing_attempts").all()).toEqual([{ charged_microusd: 150 }]);
+  expect((await paidWorkCost(database.db, now)).providers.openrouter).toEqual({ monthToDateMicrousd: 150, allTimeMicrousd: 150 });
+});
+
+test.each(["openrouter", "gemini"] as const)("%s retains a charged answer when output persistence rolls back", async (provider) => {
+  const { database, runId } = await authorizedGames();
+  const apis = providers();
+  if (provider === "gemini") {
+    const sourceId = database.native.query<{ id: number }, []>("SELECT id FROM media_sources").get()!.id;
+    insertSubmittedGeminiExtraction(database.native, { runId, sourceId });
+    apis.gemini.batch("batches/test-1", "extraction");
+  }
+  database.native.exec(`
+    CREATE TEMP TRIGGER fail_contribution_write BEFORE UPDATE OF contribution_run_id ON media_sources
+    BEGIN SELECT RAISE(ABORT, 'test contribution write failed'); END
+  `);
+  const now = new Date("2026-11-10T03:00:00.000Z");
+  const result = await tick(database, apis, now.toISOString());
+
+  expect(result.mediaProcessing?.outputs).toMatchObject({ new: 0, replaced: 0, skipped: 0 });
+  expect(jobs(database)).toMatchObject([{ stage: "extraction", status: "queued", error: expect.stringContaining("test contribution write failed") }]);
+  expect(database.native.query("SELECT id FROM media_article_extractions").all()).toEqual([]);
+  const charge = provider === "openrouter" ? 150 : 200;
+  expect(database.native.query("SELECT outcome, generation_id, charged_microusd FROM media_processing_attempts").all()).toEqual([
+    { outcome: "uncertain", generation_id: provider === "openrouter" ? "gen-1" : null, charged_microusd: charge },
+  ]);
+  expect((await paidWorkCost(database.db, now)).providers[provider]).toEqual({ monthToDateMicrousd: charge, allTimeMicrousd: charge });
+});
+
+test("a charged OpenRouter error survives a failed queue transition", async () => {
+  const { database } = await authorizedGames();
+  const apis = providers();
+  apis.openRouter.reply("chat", OPENROUTER_TRUNCATED);
+  database.native.exec(`
+    CREATE TEMP TRIGGER fail_client_backoff BEFORE UPDATE OF client_error_pauses ON media_processing_jobs
+    BEGIN SELECT RAISE(ABORT, 'test client backoff failed'); END
+  `);
+  const now = new Date("2026-11-10T03:00:00.000Z");
+  await tick(database, apis, now.toISOString());
+
+  expect(database.native.query("SELECT outcome, generation_id, charged_microusd FROM media_processing_attempts").all()).toEqual([
+    { outcome: "uncertain", generation_id: "gen-truncated", charged_microusd: 900 },
+  ]);
+  expect((await paidWorkCost(database.db, now)).providers.openrouter).toEqual({ monthToDateMicrousd: 900, allTimeMicrousd: 900 });
+});
+
+test.each(["stopped", "completed"] as const)("an explicit %s authorization keeps its stored status with or without unrelated waiting work", async (status) => {
+  const { database, runId } = await authorizedGames();
+  database.native.run("UPDATE media_processing_authorizations SET status = ?, stop_reason = 'stored_reason' WHERE run_id = ?", [status, runId]);
+  const now = new Date("2026-11-10T03:00:00.000Z");
+  const advance = () => advanceMediaProcessing(database.db, { runId, now, submissionsPerTick: 0 });
+
+  expect(await advance()).toMatchObject({ runId, status, stopReasons: ["stored_reason"] });
+  const unrelatedRun = insertCompletedRun(database.native, "initial:unrelated", []);
+  await enqueuePaidWork(database.db, {
+    run_id: unrelatedRun, appid: CYBERPUNK, provider: "openrouter", stage: "synthesis", source_id: null,
+    request_key: "unrelated", input_identity: "unrelated", model: "test", config_version: "test", max_output_tokens: 100,
+  }, now);
+  expect(await advance()).toMatchObject({ runId, status, stopReasons: ["stored_reason"], queued: { openrouter: 1 } });
+});
+
 describe("retired lifetime allowance", () => {
   test("a database whose charges and reservations already exceed US$5 still submits new paid work, and keeps its old rows unchanged", async () => {
     const { database } = await authorizedGames();
@@ -155,6 +262,29 @@ describe("retained paid-job rows", () => {
 });
 
 describe("retained submitted batches", () => {
+  test("a retained batch stays pending until a 404 closes its attempt and releases the authorization", async () => {
+    const { database, runId } = await authorizedGames();
+    const sourceId = database.native.query<{ id: number }, []>("SELECT id FROM media_sources").get()!.id;
+    const jobId = insertSubmittedGeminiExtraction(database.native, { runId, sourceId });
+    database.native.run("UPDATE media_processing_jobs SET retained = 1 WHERE id = ?", [jobId]);
+    const apis = providers();
+    apis.gemini.reply("poll", { status: 200, body: { metadata: { state: "BATCH_STATE_PENDING" } } });
+    const pending = await tick(database, apis, "2026-11-10T03:00:00.000Z");
+
+    expect(pending.mediaProcessing).toMatchObject({ runId, status: "waiting" });
+    expect(await hasOpenExtraction(database.db, runId, sourceId)).toBe(true);
+
+    const lost = await tick(database, apis, "2026-11-10T03:15:00.000Z");
+
+    expect(lost.mediaProcessing).toMatchObject({ runId, status: "completed", uncertain: 1, queued: { gemini: 0, openrouter: 0 } });
+    expect(database.native.query("SELECT status FROM media_processing_authorizations WHERE run_id = ?").get(runId)).toEqual({ status: "completed" });
+    expect(jobs(database)).toMatchObject([{ status: "uncertain", error: "batch not found" }]);
+    expect(database.native.query("SELECT outcome, error FROM media_processing_attempts WHERE job_id = ?").get(jobId)).toEqual({ outcome: "uncertain", error: "batch not found" });
+    expect(await hasOpenExtraction(database.db, runId, sourceId)).toBe(false);
+    expect(apis.gemini.calls.map(({ kind }) => kind)).toEqual(["poll", "poll"]);
+    expect(apis.openRouter.requests).toEqual([]);
+  });
+
   test("a retained batch the provider expired ends stale with its recorded values kept, and is never returned to the queue or submitted", async () => {
     const database = openUpgradedTestDatabase("0022_paid_work_queue", (native) => {
       seedApps(native, [CYBERPUNK]);
@@ -244,10 +374,10 @@ describe("project-level provider errors", () => {
 
         expect(paused.mediaProcessing?.providers.gemini).toMatchObject({ paused: true, reason, pausedAt: "2026-11-10T07:00:00.000Z" });
         expect(embeddingJobs(database).map(({ status, attempt_count, error }) => ({ status, attempt_count, error }))).toEqual(Array(2).fill({ status: "queued", attempt_count: 0, error: null }));
-        expect(paused.mediaProcessing?.outputs.skipped).toBe(0);
+        expect(manualProcessingOutcome(database).skipped).toBe(0);
         expect(paused.mediaProcessing?.status).toBe("waiting");
-        expect(paused.mediaProcessing?.stopReasons).toContain(`provider_paused:gemini:${reason}`);
-        expect(paused.mediaProcessing?.stopReasons).not.toContain("provider_refusal");
+        expect(manualProcessingOutcome(database).stopReasons).toContain(`provider_paused:gemini:${reason}`);
+        expect(manualProcessingOutcome(database).stopReasons).not.toContain("provider_refusal");
 
         const callsWhilePaused = apis.gemini.calls.length;
         const later = await tick(database, apis, "2026-11-10T07:15:00.000Z");
@@ -277,8 +407,8 @@ describe("project-level provider errors", () => {
         { state: "queued", attempt_count: 0, error: null },
       ]);
       expect(jobs(database).some((job) => job.status === "refused")).toBe(false);
-      expect(paused.mediaProcessing?.outputs.skipped).toBe(0);
-      expect(paused.mediaProcessing?.stopReasons).toContain("provider_paused:gemini:unrecognized_client_error");
+      expect(manualProcessingOutcome(database).skipped).toBe(0);
+      expect(manualProcessingOutcome(database).stopReasons).toContain("provider_paused:gemini:unrecognized_client_error");
 
       const submits = apis.gemini.calls.filter((call) => call.kind === "submit").length;
       expect((await tick(database, apis, "2026-11-11T05:45:00.000Z")).mediaProcessing?.providers.gemini.paused).toBe(true);
@@ -301,8 +431,8 @@ describe("project-level provider errors", () => {
         { stage: "extraction", state: "queued", attempt_count: 1, error: "client_error:unrecognized_client_error" },
         { stage: "extraction", state: "queued", attempt_count: 0, error: null },
       ]);
-      expect(paused.mediaProcessing?.outputs.skipped).toBe(0);
-      expect(paused.mediaProcessing?.stopReasons).toContain("provider_paused:openrouter:unrecognized_client_error");
+      expect(manualProcessingOutcome(database).skipped).toBe(0);
+      expect(manualProcessingOutcome(database).stopReasons).toContain("provider_paused:openrouter:unrecognized_client_error");
 
       expect((await tick(database, apis, "2026-11-11T05:45:00.000Z")).mediaProcessing?.providers.openrouter.paused).toBe(true);
       expect(apis.openRouter.requests).toHaveLength(1);
@@ -405,8 +535,8 @@ describe("Gemini Credit pause", () => {
     expect(paused.mediaProcessing?.providers.openrouter.paused).toBe(false);
     expect(apis.gemini.calls.filter((call) => call.kind === "submit")).toHaveLength(1);
     expect(embeddingJobs(database).map(({ status, attempt_count, error }) => ({ status, attempt_count, error }))).toEqual(Array(2).fill({ status: "queued", attempt_count: 0, error: null }));
-    expect(paused.mediaProcessing?.outputs.skipped).toBe(0);
-    expect(paused.mediaProcessing?.stopReasons).toContain("provider_paused:gemini:prepay_depleted");
+    expect(manualProcessingOutcome(database).skipped).toBe(0);
+    expect(manualProcessingOutcome(database).stopReasons).toContain("provider_paused:gemini:prepay_depleted");
     expect(sourceTexts(database)).toEqual([null, null, null]);
 
     // A pause lasts until the next daily credit check, not the next tick.
@@ -672,7 +802,7 @@ describe("an answer cut off at the output cap", () => {
     const paused = await tick(database, apis, "2026-11-10T07:00:00.000Z");
 
     expect(paused.mediaProcessing?.providers.openrouter).toMatchObject({ paused: true, reason: "output_truncated", pausedAt: "2026-11-10T07:00:00.000Z" });
-    expect(paused.mediaProcessing?.stopReasons).toContain("provider_paused:openrouter:output_truncated");
+    expect(manualProcessingOutcome(database).stopReasons).toContain("provider_paused:openrouter:output_truncated");
     expect(item(database, BAD)).toEqual({
       status: "queued",
       attempt_count: 1,
@@ -682,7 +812,7 @@ describe("an answer cut off at the output cap", () => {
       usage_json: JSON.stringify({ promptTokens: 3_081, completionTokens: 1_200, reasoningTokens: 1_078 }),
     });
     expect(jobs(database).some((job) => job.status === "refused")).toBe(false);
-    expect(paused.mediaProcessing?.outputs.skipped).toBe(0);
+    expect(manualProcessingOutcome(database).skipped).toBe(0);
     expect(database.native.query("SELECT outcome, error, charged_microusd, generation_id FROM media_processing_attempts ORDER BY id").all()).toEqual([
       { outcome: "missing_configuration", error: "output_truncated", charged_microusd: 900, generation_id: "gen-truncated" },
     ]);
@@ -1028,6 +1158,7 @@ describe("cost reporting", () => {
     expect(database.native.query("SELECT status, reserved_microusd, reservation_active, charged_microusd, cost_source FROM media_processing_jobs").all()).toEqual([
       { status: "uncertain", reserved_microusd: 4_900_000, reservation_active: 1, charged_microusd: 0, cost_source: "unknown" },
     ]);
+    expect(settled.mediaProcessing?.status).toBe("completed");
     expect(settled.mediaProcessing?.cost.providers.gemini).toEqual({ monthToDateMicrousd: 0, allTimeMicrousd: 0 });
   });
 

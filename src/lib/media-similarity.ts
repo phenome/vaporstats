@@ -1,9 +1,10 @@
 import type { AppDatabase } from "./db";
+import { decodeVector, GEMINI_EMBEDDING_DIMENSIONS } from "./media-embedding-vector";
 import { getCanonicalChildPath } from "./related";
 import { getCanonicalGamePath } from "./slug";
 
 export const GEMINI_EMBEDDING_MODEL = "gemini-embedding-2";
-export const GEMINI_EMBEDDING_DIMENSIONS = 3072;
+export { GEMINI_EMBEDDING_DIMENSIONS } from "./media-embedding-vector";
 export const GEMINI_EMBEDDING_CONFIG_VERSION = "media-embedding-2026-09-13-v1";
 
 export type MediaMatchDimension = "gameplay" | "story_world";
@@ -66,21 +67,6 @@ type MatchPathRow = {
   parent_appid: number | null;
   parent_name: string | null;
 };
-
-function decodeVector(value: unknown): Float32Array | null {
-  const bytes = value instanceof Uint8Array
-    ? value
-    : value instanceof ArrayBuffer
-      ? new Uint8Array(value)
-      : null;
-  const byteLength = GEMINI_EMBEDDING_DIMENSIONS * Float32Array.BYTES_PER_ELEMENT;
-  if (!bytes || bytes.byteLength !== byteLength) return null;
-  const aligned = bytes.byteOffset % Float32Array.BYTES_PER_ELEMENT === 0;
-  const buffer = aligned ? bytes.buffer : bytes.slice().buffer;
-  const offset = aligned ? bytes.byteOffset : 0;
-  const decoded = new Float32Array(buffer, offset, GEMINI_EMBEDDING_DIMENSIONS);
-  return decoded.every(Number.isFinite) ? decoded : null;
-}
 
 function cosine(left: Float32Array, right: Float32Array): number | null {
   let dot = 0;

@@ -262,6 +262,7 @@ describe("outlet stops across passes", () => {
 
   test.each([
     ["a server error", "tavily_search_http_503", async (): Promise<Response> => new Response("", { status: 503 })],
+    ["malformed HTTP 200 JSON", "tavily_search_error", async (): Promise<Response> => new Response('{"results":')],
     ["a network error", "tavily_search_error", async (): Promise<Response> => { throw new TypeError("fetch failed"); }],
   ])("%s from the search provider stops searching without using the outlet's attempts, and the next authorized run issues the query once", async (_failure, reason, failingSearch) => {
     const database = fixture();
@@ -331,6 +332,7 @@ describe("provider stops for every search outcome", () => {
   const refusedWith = (status: number) => async (): Promise<Response> => new Response("", { status });
 
   const cases: ProviderStopCase[] = [
+    ...[302, 400, 402, 404, 422, 432].map((status) => ({ outcome: `HTTP ${status}`, outlet: "IGN" as const, reason: `tavily_search_http_${status}`, search: refusedWith(status), kept: { status: "queued", stop_reason: `tavily_search_http_${status}` } })),
     { outcome: "HTTP 401", outlet: "IGN", reason: "tavily_search_http_401", search: refusedWith(401), kept: { status: "queued", stop_reason: "tavily_search_http_401" } },
     { outcome: "HTTP 403", outlet: "IGN", reason: "tavily_search_http_403", search: refusedWith(403), kept: { status: "queued", stop_reason: "tavily_search_http_403" } },
     { outcome: "HTTP 429", outlet: "IGN", reason: "tavily_search_http_429", search: refusedWith(429), kept: { status: "stopped", stop_reason: "tavily_search_http_429" } },

@@ -14,6 +14,7 @@ import {
   insertSources,
   insertSubmittedGeminiExtraction,
   MALFORMED_ARTICLE_BODIES,
+  manualProcessingOutcome,
   runMediaTick,
   seedApps,
   throwingResponse,
@@ -127,7 +128,7 @@ describe("a paid-work item whose handling throws", () => {
       { appid: BALDURS_GATE, status: "succeeded" },
       { appid: HADES_II, status: "succeeded" },
     ]);
-    expect(result.mediaProcessing?.stopReasons).toContain("item_error");
+    expect(manualProcessingOutcome(database).stopReasons).toContain("item_error");
     // The outlet attempt the item reserved ended with an outcome.
     expect(unfinishedOutletAttempts(database)).toEqual([]);
     expect(database.native.query("SELECT kind, succeeded, error FROM media_discovery_attempts WHERE url = ?").all(CYBERPUNK_ARTICLE)).toEqual([

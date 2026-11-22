@@ -1,5 +1,7 @@
 import { parseHTML } from "linkedom";
 
+export const MIN_USABLE_ARTICLE_CHARS = 120;
+
 /**
  * Parses fetched article HTML into a document, or returns null when the
  * content cannot be one. A body that holds no root element (an empty or

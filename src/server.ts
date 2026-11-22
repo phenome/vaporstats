@@ -5,9 +5,10 @@ import { isAbsolute, relative, resolve, sep } from "node:path";
 import serverEntry from "@tanstack/react-start/server-entry";
 import { startIngestionScheduler } from "../workers/ingestion";
 import { MEDIA_GAME_CHOICES } from "./lib/media-discovery";
+import { MEDIA_OUTLETS, OUTLET_HTTP_STOPS, OUTLET_STOP_REASONS } from "./lib/media-outlet-access";
 import type { MediaProcessingSummary } from "./lib/media-processing";
 import { CACHE_POLICIES } from "./lib/cache";
-import { PAID_PROVIDERS } from "./lib/media-paid-providers";
+import { PAID_PROVIDERS, PROCESSING_STOP_REASONS, PROVIDER_PAUSE_REASONS } from "./lib/media-paid-providers";
 import { getDb } from "./lib/db";
 import { ensureReceptionPublicationReady } from "./lib/reception-publication";
 export const API_RATE_LIMIT_MAX_REQUESTS = 30;
@@ -244,38 +245,19 @@ function internalMediaResponse(status: number, body: Record<string, unknown>): R
  * `sanitizeMediaProcessingSummary`, this bounds what a response can carry
  * once a form that reports processing state is supported.
  */
-const SAFE_MEDIA_PROCESSING_STOP_REASONS: Record<string, true> = {
-  input_token_cap: true,
-  provider_refusal: true,
-  terminal_failure: true,
-  transient_provider_failure: true,
-  uncertain_submission: true,
-  missing_gemini_embedding_batch: true,
-  "provider_paused:gemini:missing_key": true,
-  "provider_paused:gemini:rejected_key": true,
-  "provider_paused:gemini:failed_precondition": true,
-  "provider_paused:gemini:model_unavailable": true,
-  "provider_paused:gemini:prepay_depleted": true,
-  "provider_paused:gemini:spend_cap": true,
-  "provider_paused:gemini:unrecognized_client_error": true,
-  "provider_paused:openrouter:missing_key": true,
-  "provider_paused:openrouter:invalid_key": true,
-  "provider_paused:openrouter:permission_denied": true,
-  "provider_paused:openrouter:forbidden": true,
-  "provider_paused:openrouter:model_unavailable": true,
-  "provider_paused:openrouter:key_limit": true,
-  "provider_paused:openrouter:credits": true,
-  "provider_paused:openrouter:guardrail_budget": true,
-  "provider_paused:openrouter:workspace_budget": true,
-  "provider_paused:openrouter:unrecognized_client_error": true,
-  "provider_paused:openrouter:output_truncated": true,
-};
+const SAFE_MEDIA_PROCESSING_STOP_REASONS: ReadonlySet<string> = new Set([
+  ...Object.values(PROCESSING_STOP_REASONS),
+  ...MEDIA_OUTLETS.flatMap(({ name }) =>
+    [...Object.values(OUTLET_HTTP_STOPS), ...Object.values(OUTLET_STOP_REASONS)].map((reason) => `${name}:${reason}`)),
+  ...PAID_PROVIDERS.flatMap((provider) =>
+    PROVIDER_PAUSE_REASONS.map((reason) => `provider_paused:${provider}:${reason}`)),
+]);
 
 function safeNonNegativeInteger(value: number): number {
   return Number.isSafeInteger(value) && value >= 0 ? value : 0;
 }
 
-function sanitizeMediaProcessingSummary(summary: MediaProcessingSummary): Pick<
+export function sanitizeMediaProcessingSummary(summary: MediaProcessingSummary): Pick<
   MediaProcessingSummary,
   "runId" | "status" | "submitted" | "completed" | "outputs" | "stopReasons" | "queued" | "providers" | "cost"
 > {
@@ -292,7 +274,7 @@ function sanitizeMediaProcessingSummary(summary: MediaProcessingSummary): Pick<
       skipped: safeNonNegativeInteger(summary.outputs.skipped),
     },
     stopReasons: [...new Set(summary.stopReasons.map((reason) =>
-      Object.prototype.hasOwnProperty.call(SAFE_MEDIA_PROCESSING_STOP_REASONS, reason) ? reason : "provider_failure"
+      SAFE_MEDIA_PROCESSING_STOP_REASONS.has(reason) ? reason : "provider_failure"
     ))],
     queued: Object.fromEntries(PAID_PROVIDERS.map((provider) => [provider, safeNonNegativeInteger(summary.queued[provider])])) as MediaProcessingSummary["queued"],
     providers: Object.fromEntries(PAID_PROVIDERS.map((provider) => {
