@@ -1,11 +1,12 @@
 import { Readability } from "@mozilla/readability";
-import { parseArticleDocument } from "./article-document";
+import { MIN_USABLE_ARTICLE_CHARS, parseArticleDocument } from "./article-document";
 import type { AppDatabase } from "./db";
 import { writeTransaction } from "./db-transaction";
 import { mainReleasedDate, type MainReleasedFields } from "./lifecycle-history";
-import { finishAnsweredAttempt, finishOutletAttempt, reserveOutletAttempt } from "./media-outlet-access";
+import { fetchOutletArticle, finishOutletAttempt, hostInOutlet, MEDIA_OUTLETS, reserveOutletAttempt, type MediaOutlet } from "./media-outlet-access";
 import { parsePreciseReleaseDate } from "./releases";
 import { ELIGIBLE_MEDIA_ENTITY_SQL } from "./media-similarity";
+import { createTavilyTransport } from "./media-tavily";
 
 const MEDIA_GAME_METADATA = [
   { choice: "cyberpunk-2077", appid: 1091500, name: "Cyberpunk 2077", aliases: ["cyberpunk 2077"] },
@@ -19,16 +20,7 @@ export const MEDIA_GAME_CHOICES = Object.fromEntries(
   MEDIA_GAME_METADATA.map(({ choice, appid }) => [choice, appid]),
 ) as Record<MediaGameChoice, number>;
 
-export const MEDIA_OUTLETS = [
-  { name: "IGN", domain: "ign.com" },
-  { name: "Eurogamer", domain: "eurogamer.net" },
-  { name: "GameSpot", domain: "gamespot.com" },
-  { name: "PC Gamer", domain: "pcgamer.com" },
-  { name: "Kotaku", domain: "kotaku.com" },
-  { name: "GamesRadar+", domain: "gamesradar.com" },
-] as const;
-
-export type MediaOutlet = (typeof MEDIA_OUTLETS)[number]["name"];
+export { MEDIA_OUTLETS, type MediaOutlet } from "./media-outlet-access";
 export type MediaPass = "initial" | "later";
 export type MediaArticleType = "review" | "preview";
 
@@ -109,7 +101,6 @@ export interface MediaDiscoveryOptions {
 
 /** The ceiling of accepted articles per exact entity, shared by the initial and later passes. */
 export const MAX_MEDIA_ARTICLES_PER_GAME = 15;
-const MAX_REDIRECTS = 5;
 
 type RunRow = {
   id: number;
@@ -553,16 +544,6 @@ export function authorizeMediaRun(
 }
 
 
-function hostInOutlet(url: string, outlet: (typeof MEDIA_OUTLETS)[number]): boolean {
-  try {
-    const host = new URL(url).hostname.toLowerCase();
-    const domain = outlet.domain.toLowerCase();
-    return host === domain || host.endsWith(`.${domain}`);
-  } catch {
-    return false;
-  }
-}
-
 function cleanText(value: unknown): string | null {
   const text = typeof value === "string" ? value.replace(/\s+/g, " ").trim() : "";
   return text ? text.slice(0, 500) : null;
@@ -606,7 +587,7 @@ function parseSource(html: string, finalUrl: string, target: MediaTarget, target
   const title = cleanText(titleMeta ?? readable?.title ?? document.querySelector("h1")?.textContent ?? document.title);
   const readableArticleText = readable?.textContent ?? document.querySelector("article")?.textContent ?? document.body?.textContent;
   const fullArticleText = typeof readableArticleText === "string" ? readableArticleText.replace(/\s+/g, " ").trim() : "";
-  if (!title || fullArticleText.length < 120) return null;
+  if (!title || fullArticleText.length < MIN_USABLE_ARTICLE_CHARS) return null;
   const titleLower = normalizeTitle(title);
   const bodyLower = normalizeTitle(fullArticleText);
   const articleLeadLower = bodyLower.slice(0, 240);
@@ -686,25 +667,6 @@ function candidateDate(candidate: MediaSource): number {
   return candidate.publishedAt ? Date.parse(candidate.publishedAt) : Number.MAX_SAFE_INTEGER;
 }
 
-function usageDetails(value: unknown): { plan: "free" | "rejected" | "unknown"; remainingCredits: number | null; planUsage: number | null; planLimit: number | null; paygoUsage: number | null; paygoLimit: number | null; valid: boolean } {
-  const root = jsonObject(value);
-  const account = jsonObject(root.account);
-  const planValue = String(account.current_plan ?? root.current_plan ?? account.plan ?? root.plan ?? root.tier ?? "").toLowerCase();
-  const plan: "free" | "rejected" | "unknown" = planValue === "free" || planValue === "researcher" ? "free" : planValue ? "rejected" : "unknown";
-  const numberValue = (...values: unknown[]): number | null => {
-    const value = values.find((candidate) => typeof candidate === "number" && Number.isFinite(candidate));
-    return typeof value === "number" ? value : null;
-  };
-  const planUsage = numberValue(account.plan_usage, root.plan_usage);
-  const planLimit = numberValue(account.plan_limit, root.plan_limit);
-  const paygoUsage = numberValue(account.paygo_usage, root.paygo_usage);
-  const paygoLimit = numberValue(account.paygo_limit, root.paygo_limit);
-  const fallbackRemaining = numberValue(root.remaining_credits, root.remainingCredits, account.remaining_credits, account.remainingCredits);
-  const remaining = planLimit !== null && planUsage !== null ? planLimit - planUsage : fallbackRemaining;
-  const valid = plan === "free" && remaining !== null && remaining > 0 && (paygoLimit === null || paygoLimit === 0) && paygoUsage === 0;
-  return { plan, remainingCredits: remaining, planUsage, planLimit, paygoUsage, paygoLimit, valid };
-}
-
 /** Stops a query for `reason` at `at`, the run's clock, which decides when a day-scoped stop reopens. */
 async function stopProgress(db: AppDatabase, progressId: number, reason: string, at: Date): Promise<void> {
   await db.prepare("UPDATE media_discovery_progress SET status = 'stopped', stop_reason = ?, stopped_at = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(reason.slice(0, 128), at.toISOString(), progressId).run();
@@ -718,42 +680,6 @@ async function stopProgress(db: AppDatabase, progressId: number, reason: string,
  */
 async function releaseRefusedQuery(db: AppDatabase, progressId: number, status: "queued" | "stopped", reason: string, at: Date): Promise<void> {
   await db.prepare("UPDATE media_discovery_progress SET status = ?, stop_reason = ?, stopped_at = ?, query_attempted_at = NULL, candidate_urls = '[]', candidate_index = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(status, reason, status === "stopped" ? at.toISOString() : null, progressId).run();
-}
-
-/**
- * Fetches an outlet article without following redirects off the outlet, or
- * returns why the outlet must not be contacted again and whether this
- * candidate reached it. Every request reserves its attempt first; any other
- * failure skips only this candidate.
- */
-async function fetchManual(fetchFn: MediaFetch, url: string, outlet: (typeof MEDIA_OUTLETS)[number], db: AppDatabase, runId: number, pass: MediaPass, appid: number, clock: MediaClock, issued: MediaRunSummary["issued"]): Promise<{ html: string; finalUrl: string } | { stop: string; contacted: boolean } | null> {
-  let current = url;
-  for (let redirect = 0; redirect <= MAX_REDIRECTS; redirect += 1) {
-    if (!hostInOutlet(current, outlet)) return null;
-    const reservation = await reserveOutletAttempt(db, { runId, pass, appid, outlet: outlet.name, kind: "fetch", url: current, date: clock() });
-    if ("stop" in reservation) return { stop: reservation.stop, contacted: redirect > 0 };
-    issued.attempts += 1;
-    let response: Response;
-    try {
-      response = await fetchFn(current, { redirect: "manual", headers: { Accept: "text/html,application/xhtml+xml" } });
-    } catch (error) {
-      await finishOutletAttempt(db, reservation.attemptId, { kind: "failure", statusCode: null, succeeded: false, error: boundedError(error) });
-      return null;
-    }
-    const answered = await finishAnsweredAttempt(db, reservation.attemptId, response);
-    if (answered.status === 401 || answered.status === 403 || answered.status === 429) return { stop: `fetch_http_${answered.status}`, contacted: true };
-    if (answered.redirect) {
-      const location = response.headers.get("location");
-      if (!location || redirect === MAX_REDIRECTS) return null;
-      const next = new URL(location, current).toString();
-      if (!hostInOutlet(next, outlet)) return null;
-      current = next;
-      continue;
-    }
-    if (!answered.ok) return null;
-    return { html: await response.text(), finalUrl: current };
-  }
-  return null;
 }
 
 /**
@@ -929,6 +855,7 @@ export async function runAuthorizedMediaDiscovery(db: AppDatabase, options: Medi
   const targetAppids = discoveryTargets.map((target) => target.appid);
   const fetchFn = options.fetch ?? fetch;
   const apiKey = options.tavilyApiKey ?? process.env.TAVILY_API_KEY;
+  const tavily = createTavilyTransport(apiKey, fetchFn);
   let usageSummary: MediaRunSummary["usage"] = { ...EMPTY_USAGE_SUMMARY };
   const issued: MediaRunSummary["issued"] = { searches: 0, attempts: 0, articles: 0 };
   try {
@@ -940,21 +867,14 @@ export async function runAuthorizedMediaDiscovery(db: AppDatabase, options: Medi
     let searchCreditBudget: number | null = null;
     let searchesIssued = 0;
     let searchCreditsConsumed = 0;
-  if (!apiKey) {
-    stopReasons.add("tavily_missing_key");
-  } else {
-    try {
-      const usageResponse = await fetchFn("https://api.tavily.com/usage", { headers: { Authorization: `Bearer ${apiKey}` } });
-      const usageBody = await usageResponse.json().catch(() => ({}));
-      const details = usageDetails(usageBody);
-      searchCreditBudget = details.remainingCredits;
-      usageSummary = { remainingCredits: details.remainingCredits, plan: details.plan, planUsageAtStart: details.planUsage, planUsage: details.planUsage, planLimit: details.planLimit, paygoUsage: details.paygoUsage, paygoLimit: details.paygoLimit, searchCreditsConsumed: 0 };
+    const usage = await tavily.usage();
+    if (usage.details) {
+      const { plan, remainingCredits, planUsage, planLimit, paygoUsage, paygoLimit } = usage.details;
+      searchCreditBudget = remainingCredits;
+      usageSummary = { remainingCredits, plan, planUsageAtStart: planUsage, planUsage, planLimit, paygoUsage, paygoLimit, searchCreditsConsumed: 0 };
       await db.prepare("UPDATE media_discovery_runs SET usage = ? WHERE id = ?").bind(JSON.stringify(usageSummary), run.id).run();
-      if (!usageResponse.ok || !details.valid) stopReasons.add(details.remainingCredits === 0 ? "tavily_credits_exhausted" : details.plan === "free" ? "tavily_free_credits_unavailable" : "tavily_account_not_free");
-    } catch {
-      stopReasons.add("tavily_usage_error");
     }
-  }
+    if (usage.stop) stopReasons.add(usage.stop);
   if (stopReasons.size === 0) {
     const progressRows = await rows<ProgressRow>(db, `SELECT ${PROGRESS_COLUMNS} FROM media_discovery_progress WHERE appid IN (SELECT value FROM json_each(?)) ORDER BY appid, id`, JSON.stringify(targetAppids));
     // A scheduled run takes its due passes oldest due first, then by entity,
@@ -1013,60 +933,23 @@ export async function runAuthorizedMediaDiscovery(db: AppDatabase, options: Medi
           await db.prepare(
             "UPDATE media_discovery_progress SET query_attempted_at = ?, status = 'searching', stop_reason = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
           ).bind(attemptNow.toISOString(), progressId).run();
-          let response: Response;
-          try {
-            response = await fetchFn("https://api.tavily.com/search", {
-              method: "POST",
-              headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
-              body: JSON.stringify({ query, search_depth: "basic", auto_parameters: false, include_domains: [outlet.domain], max_results: 10, include_answer: false, include_raw_content: false, include_usage: true }),
-            });
-          } catch (error) {
-            // The search provider could not be reached, so no search was served:
-            // stop searching for the rest of the run as a provider stop, leave
-            // every outlet open, and keep the query for the next authorized run.
-            await finishOutletAttempt(db, attemptId, { kind: "search", statusCode: null, succeeded: false, error: boundedError(error) });
-            await releaseRefusedQuery(db, progressId, "queued", "tavily_search_error", attemptNow);
-            stopReasons.add("tavily_search_error");
+          const outcome = await tavily.search(query, outlet.domain);
+          await finishOutletAttempt(db, attemptId, outcome.attempt);
+          if (outcome.class === "provider_stop") {
+            await releaseRefusedQuery(db, progressId, outcome.progress, outcome.reason, attemptNow);
+            stopReasons.add(outcome.reason);
+            if (outcome.action === "break_run") break;
             searchesStopped = true;
             continue;
           }
-          await finishOutletAttempt(db, attemptId, { kind: "search", statusCode: response.status, succeeded: response.ok, error: response.ok ? null : `HTTP ${response.status}` });
-          if (response.status === 401 || response.status === 403) {
-            // The search provider rejected the request, not the outlet: stop the
-            // whole run as a provider stop, leave every outlet open, and keep
-            // the unserved query for the next authorized run.
-            const reason = `tavily_search_http_${response.status}`;
-            await releaseRefusedQuery(db, progressId, "queued", reason, attemptNow);
-            stopReasons.add(reason);
-            break;
-          }
-          if (response.status === 429) {
-            // The search provider's rate limit, not the outlet's: stop searching
-            // for the rest of the run and retry this query on the next UTC day.
-            const reason = "tavily_search_http_429";
-            await releaseRefusedQuery(db, progressId, "stopped", reason, attemptNow);
-            stopReasons.add(reason);
-            searchesStopped = true;
-            continue;
-          }
-          if (response.status >= 500) {
-            // The search provider failed to serve the query: stop searching for
-            // the rest of the run as a provider stop, leave every outlet open,
-            // and keep the query for the next authorized run.
-            const reason = `tavily_search_http_${response.status}`;
-            await releaseRefusedQuery(db, progressId, "queued", reason, attemptNow);
-            stopReasons.add(reason);
-            searchesStopped = true;
-            continue;
-          }
-          const body = await response.json().catch(() => ({}));
+          const { body } = outcome;
           const providerRequestId = cleanText(jsonObject(body).request_id ?? jsonObject(body).requestId);
           const usage = jsonObject(jsonObject(body).usage);
           const reportedCredits = usage.credits ?? usage.credits_used;
           if (typeof reportedCredits === "number" && Number.isFinite(reportedCredits) && reportedCredits >= 0) {
             searchCreditsConsumed += reportedCredits;
           }
-          candidates = response.ok && Array.isArray(jsonObject(body).results)
+          candidates = Array.isArray(jsonObject(body).results)
             ? (jsonObject(body).results as TavilyResult[]).slice(0, 10).map((item) => ({ url: typeof item.url === "string" ? item.url : "", publishedDate: dateValue(item.published_date) })).filter((item) => item.url && hostInOutlet(item.url, outlet))
             : [];
           await db.prepare("UPDATE media_discovery_progress SET query_attempted_at = ?, status = 'fetching', candidate_urls = ?, candidate_index = 0, provider_request_id = ?, credits_used = ?, usage = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(attemptNow.toISOString(), JSON.stringify(candidates), providerRequestId, typeof (usage.credits ?? usage.credits_used) === "number" ? (usage.credits ?? usage.credits_used) : null, JSON.stringify(usage), progressId).run();
@@ -1083,7 +966,7 @@ export async function runAuthorizedMediaDiscovery(db: AppDatabase, options: Medi
             await db.prepare("UPDATE media_discovery_progress SET candidate_index = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(index + 1, progressId).run();
             continue;
           }
-          // fetchManual reserves each attempt before contacting the outlet, so
+          // fetchOutletArticle reserves each attempt before contacting the outlet, so
           // that reservation durably records that this candidate's fetch
           // started. Only the candidate a restart left unfinished can have
           // started; it may have reached its outlet, so it is never fetched
@@ -1093,10 +976,14 @@ export async function runAuthorizedMediaDiscovery(db: AppDatabase, options: Medi
             stopReasons.add(`${outlet.name}:fetch_interrupted`);
             continue;
           }
-          let fetched: Awaited<ReturnType<typeof fetchManual>>;
+          let fetched: Awaited<ReturnType<typeof fetchOutletArticle>>;
           let source: MediaSource | null;
           try {
-            fetched = await fetchManual(fetchFn, candidates[index]!.url, outlet, db, run.id, pass, appid, clock, issued);
+            fetched = await fetchOutletArticle(db, {
+              fetch: fetchFn, url: candidates[index]!.url, outlet: outlet.name, runId: run.id, pass, appid, clock,
+              onAttempt: () => { issued.attempts += 1; },
+              formatError: (error) => boundedError(error, apiKey),
+            });
             if (fetched && "stop" in fetched) {
               // A candidate the outlet answered is done; one refused before any
               // request is retried when the outlet reopens.

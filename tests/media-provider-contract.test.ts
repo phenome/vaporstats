@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { createOpenRouterTransport } from "../src/lib/media-openrouter";
+import { createTavilyTransport } from "../src/lib/media-tavily";
 import { classifyGeminiOutcome, classifyOpenRouterOutcome, GeminiBatchFailure, type ProviderOutcome } from "../src/lib/media-paid-providers";
 import { createGeminiBatchTransport, OPENROUTER_TEXT_MODEL } from "../src/lib/media-processing";
 import { GEMINI_EMBEDDING_MODEL } from "../src/lib/media-similarity";
@@ -146,5 +147,86 @@ describe("an answer cut off at the output cap pauses OpenRouter", () => {
   });
   test("a complete answer that ends with stop is a success", async () => {
     expect(await openRouterOutcome({ status: 200, body: { id: "gen-1", choices: [{ index: 0, finish_reason: "stop", native_finish_reason: "end_turn", message: { role: "assistant", content: "{}" } }] } })).toEqual({ class: "success" });
+  });
+});
+
+describe("Tavily response scopes", () => {
+  const searchFixtures = {
+    authorization: { statuses: [401, 403], progress: "queued", action: "break_run" },
+    day_limit: { statuses: [429], progress: "stopped", action: "stop_searches" },
+    unserved: { statuses: [302, 400, 402, 404, 422, 432, 500, 503], progress: "queued", action: "stop_searches" },
+  } as const;
+
+  for (const [scope, { statuses, progress, action }] of Object.entries(searchFixtures)) {
+    for (const status of statuses) {
+      test(`search ${scope} HTTP ${status} produces a Provider stop`, async () => {
+        const transport = createTavilyTransport("test-key", async (url, init) => {
+          expect(url).toBe("https://api.tavily.com/search");
+          expect(init?.redirect).toBe("manual");
+          return new Response(null, { status });
+        });
+        expect(await transport.search("a review", "ign.com")).toEqual({
+          class: "provider_stop", reason: `tavily_search_http_${status}`, progress, action,
+          attempt: { kind: "search", statusCode: status, succeeded: false, error: `HTTP ${status}` },
+        });
+      });
+    }
+  }
+
+  test("search network failure produces a Provider stop and redacts the key", async () => {
+    const transport = createTavilyTransport("test-key", async () => { throw new Error("Connection failed for test-key"); });
+    expect(await transport.search("a review", "ign.com")).toEqual({
+      class: "provider_stop", reason: "tavily_search_error", progress: "queued", action: "stop_searches",
+      attempt: { kind: "search", statusCode: null, succeeded: false, error: "Connection failed for [redacted]" },
+    });
+  });
+
+  test("a network error reading a successful search response leaves the query unserved", async () => {
+    const response = new Response(new ReadableStream({
+      start(controller) { controller.error(new TypeError("connection lost")); },
+    }));
+    const transport = createTavilyTransport("test-key", async () => response);
+    expect(await transport.search("a review", "ign.com")).toEqual({
+      class: "provider_stop", reason: "tavily_search_error", progress: "queued", action: "stop_searches",
+      attempt: { kind: "search", statusCode: null, succeeded: false, error: "connection lost" },
+    });
+  });
+
+  test("a served search returns its payload and successful attempt", async () => {
+    const body = { results: [{ url: "https://ign.com/review" }], usage: { credits: 1 } };
+    const transport = createTavilyTransport("test-key", async (_url, init) => {
+      expect(init?.method).toBe("POST");
+      expect(init?.headers).toMatchObject({ Authorization: "Bearer test-key" });
+      expect(JSON.parse(String(init?.body))).toMatchObject({ query: "a review", include_domains: ["ign.com"], include_usage: true });
+      return Response.json(body);
+    });
+    expect(await transport.search("a review", "ign.com")).toEqual({
+      class: "success", body, attempt: { kind: "search", statusCode: 200, succeeded: true, error: null },
+    });
+  });
+
+  const freeUsage = { account: { current_plan: "free" }, plan_usage: 5, plan_limit: 100, paygo_usage: 0 };
+  const usageFixtures = [
+    { label: "valid free credit", body: freeUsage, status: 200, stop: null },
+    { label: "rejected HTTP response", body: freeUsage, status: 432, stop: "tavily_free_credits_unavailable" },
+    { label: "paid account", body: { ...freeUsage, account: { current_plan: "paid" } }, status: 200, stop: "tavily_account_not_free" },
+    { label: "exhausted credit", body: { ...freeUsage, plan_usage: 100 }, status: 200, stop: "tavily_credits_exhausted" },
+    { label: "missing free credit details", body: { account: { current_plan: "free" } }, status: 200, stop: "tavily_free_credits_unavailable" },
+  ] as const;
+  for (const { label, body, status, stop } of usageFixtures) {
+    test(`usage classifies ${label}`, async () => {
+      const transport = createTavilyTransport("test-key", async (url) => {
+        expect(url).toBe("https://api.tavily.com/usage");
+        return Response.json(body, { status });
+      });
+      expect((await transport.usage()).stop).toBe(stop);
+    });
+  }
+
+  test("usage classifies a network failure and a missing key", async () => {
+    const transport = createTavilyTransport("test-key", async () => { throw new Error("network failure"); });
+    expect(await transport.usage()).toEqual({ stop: "tavily_usage_error", details: null });
+    expect(await createTavilyTransport(undefined, async () => { throw new Error("unexpected request"); }).usage())
+      .toEqual({ stop: "tavily_missing_key", details: null });
   });
 });

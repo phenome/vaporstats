@@ -207,7 +207,7 @@ An outlet closed for the rest of a UTC day because it reached its daily attempt 
 _Avoid_: Outlet throttle, outlet cooldown
 
 **Provider stop**:
-A run's stop caused by any Search provider failure: HTTP 401, 403, 429, or 5xx, a network error, exhausted free credits, or a missing key. It never denies or day-stops an outlet and uses none of an outlet's daily attempts; the unserved query is kept for the next Daily media run, and the run stops with a `tavily_*` reason.
+A run's stop with a `tavily_*` reason after a Search provider failure. Causes include any non-2xx HTTP response (including Tavily's HTTP 432 plan or key limit), a network error, exhausted free credits, and a missing key. The outlet keeps its daily attempt allowance and access state. The unserved query remains due for a later Daily media run.
 _Avoid_: Outlet denial, outlet rate limit, search denial
 
 **Assessment pass**:

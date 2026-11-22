@@ -39,7 +39,7 @@ A query or run resumed after a restart or an Outlet day stop keeps every per-que
 
 ## 3. Classifier scopes
 
-Each paid provider classifies every response in one classifier (CODING_STANDARDS.md, "Classify each external-response class in one place"). The class must fit the response's scope:
+Each external response class has one classifier (CODING_STANDARDS.md, "Classify each external-response class in one place"). The class must fit the response's scope:
 
 | Scope | Allowed classes |
 |---|---|
@@ -52,6 +52,8 @@ Each paid provider classifies every response in one classifier (CODING_STANDARDS
 | `provider_transient` | Transient: a rate limit, an in-flight budget, a timeout response or a server error; never a refusal or a pause |
 
 - Covered by [`tests/media-provider-contract.test.ts`](../../tests/media-provider-contract.test.ts) over `GEMINI_SCOPED_FIXTURES` and `OPENROUTER_SCOPED_FIXTURES`. Their type, `ScopedProviderFixtures`, does not compile when a scope is missing.
+- Tavily's `/usage` and `/search` scopes are covered in the same contract test. Every non-2xx search response and network failure produces a Provider stop. [Shared limits](../../tests/media-shared-limits.test.ts) verifies the query stays due and the attempt leaves the Outlet's daily allowance intact.
+- [Outlet article response scopes](../../tests/media-outlet-contract.test.ts) cover denials, day stops, same-Outlet redirects, the redirect limit, and throwing responses through `fetchOutletArticle`. The [static guard](../../tests/media-boundaries.test.ts) checks production callers for bypasses of Outlet access and Tavily classification.
 - A new response class or status code adds a fixture under its scope. A new provider exports its own scoped fixtures and joins `PROVIDERS` in the contract test.
 - A fixture that breaks the contract is listed in `KNOWN_VIOLATIONS` with its reason and needs a spec decision; do not change its class in an unrelated change.
 
@@ -76,7 +78,7 @@ A rule the specification does not settle is a gap, not a design choice (CODING_S
 - Put the choice behind one named function or constant, and list it first in the change description.
 - Record a known mismatch between code and specification as a known failure (`test.failing`, `knownFailure`, or `KNOWN_VIOLATIONS`) with its reason, rather than asserting the current behavior as correct.
 - Open gaps currently recorded in tests: none. #80 settled the two earlier ones on 2026-11-18: a Gemini batch that failed after acceptance is uncertain, and an unrecognized 4xx pauses its provider with `unrecognized_client_error`.
-- Open gap, not recorded in tests (2026-11-18): the usable-article threshold. An article is usable when its cleaned text has at least 120 characters (`cleanArticle` in `src/lib/media-processing.ts`, and the same bound in discovery's article check in `src/lib/media-discovery.ts`). The first live run sent an article whose text was a few hundred tokens of mostly non-review content (job B, a 642-token prompt), and its complete answer was legitimately empty. Refusing such an article before sending would need a substantially higher bound or a different measure of a usable review, which the specification does not settle. The threshold is unchanged.
+- Open gap, not recorded in tests (2026-11-18): the usable-article threshold. An article is usable when its cleaned text has at least 120 characters (`MIN_USABLE_ARTICLE_CHARS` alongside `parseArticleDocument` in [article-document.ts](../../src/lib/article-document.ts), shared by discovery and processing). The first live run sent an article whose text was a few hundred tokens of mostly non-review content (job B, a 642-token prompt), and its complete answer was legitimately empty. Refusing such an article before sending would need a substantially higher bound or a different measure of a usable review, which the specification does not settle. The shared threshold preserves the current 120-character bound.
 
 ## 7. Exceptions stay at their item and at the media boundary
 

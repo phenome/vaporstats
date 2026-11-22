@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { Readability } from "@mozilla/readability";
-import { parseArticleDocument } from "./article-document";
+import { MIN_USABLE_ARTICLE_CHARS, parseArticleDocument } from "./article-document";
 import type { AppDatabase } from "./db";
 import { writeTransaction } from "./db-transaction";
 import {
@@ -13,11 +13,10 @@ import {
 import {
   MAX_MEDIA_ARTICLES_PER_GAME,
   MEDIA_GAME_CHOICES,
-  MEDIA_OUTLETS,
   type MediaOutlet,
   type MediaPass,
 } from "./media-discovery";
-import { finishAnsweredAttempt, finishOutletAttempt, isOutletDenialStop, reserveOutletAttempt } from "./media-outlet-access";
+import { fetchOutletArticle, isOutletDenialStop } from "./media-outlet-access";
 import {
   createOpenRouterTransport,
   type OpenRouterChatRequest,
@@ -108,7 +107,6 @@ const OPENROUTER_MAX_INPUT_TOKENS = 60_000;
  */
 const ESTIMATE_BYTES_PER_TOKEN = 3;
 const MAX_EMBEDDING_INPUT_TOKENS = 8_192;
-const MAX_REDIRECTS = 5;
 const MAX_ERROR_LENGTH = 256;
 const SIMILARITY_DIMENSIONS = ["gameplay", "story_world"] as const;
 type SimilarityDimension = (typeof SIMILARITY_DIMENSIONS)[number];
@@ -457,15 +455,6 @@ function normalizeBatchOutput(value: unknown): unknown {
   return value;
 }
 
-function outletFor(value: string): (typeof MEDIA_OUTLETS)[number] | null {
-  try {
-    const hostname = new URL(value).hostname.toLowerCase();
-    return MEDIA_OUTLETS.find((item) => hostname === item.domain || hostname.endsWith(`.${item.domain}`)) ?? null;
-  } catch {
-    return null;
-  }
-}
-
 function cleanLine(value: string): string {
   return value.replace(/[\t ]+/g, " ").replace(/\s+([,.;!?])/g, "$1").trim();
 }
@@ -485,7 +474,7 @@ function cleanArticle(html: string): { content: string; hash: string } | null {
     if (readable?.content) root = parseArticleDocument(`<!doctype html><html><body>${readable.content}</body></html>`)?.body ?? root;
     if (!root && readable?.textContent) {
       const text = readable.textContent.split(/\n+/).map(cleanLine).filter(Boolean).join("\n");
-      return text.length >= 120 ? { content: text, hash: sha256(text) } : null;
+      return text.length >= MIN_USABLE_ARTICLE_CHARS ? { content: text, hash: sha256(text) } : null;
     }
   } catch { /* article fallback below */ }
   root ??= document.body;
@@ -499,7 +488,7 @@ function cleanArticle(html: string): { content: string; hash: string } | null {
   }
   if (lines.length === 0) lines.push(...(root.textContent ?? "").split(/\n+/).map(cleanLine).filter(Boolean));
   const content = lines.join("\n");
-  return content.length >= 120 ? { content, hash: sha256(content) } : null;
+  return content.length >= MIN_USABLE_ARTICLE_CHARS ? { content, hash: sha256(content) } : null;
 }
 
 function metadataFor(source: SourceRow): Record<string, unknown> {
@@ -842,44 +831,6 @@ async function enqueueItem(db: AppDatabase, item: QueueInput, now: Date): Promis
   return inserted.meta.changes === 1;
 }
 
-/**
- * Fetches a source's article, or returns why its outlet must not be contacted
- * again in this run: an access denial, the shared UTC-day attempt cap, or a
- * same-day rate limit. Every request reserves its attempt for the source's
- * pass first; any other failure skips only this source.
- */
-async function fetchArticle(db: AppDatabase, source: SourceRow, runId: number, fetchFn: ArticleFetch, clock: () => Date): Promise<string | { outletStop: string } | null> {
-  let current = source.original_url;
-  const outlet = outletFor(current);
-  if (!outlet || outlet.name !== source.outlet) return null;
-  for (let redirect = 0; redirect <= MAX_REDIRECTS; redirect += 1) {
-    const reservation = await reserveOutletAttempt(db, { runId, pass: source.pass, appid: source.appid, outlet: source.outlet, kind: "fetch", url: current, date: clock() });
-    if ("stop" in reservation) return { outletStop: reservation.stop };
-    let response: Response | string;
-    try { response = await fetchFn(current, { redirect: "manual", headers: { Accept: "text/html,application/xhtml+xml" } }); }
-    catch (error) {
-      await finishOutletAttempt(db, reservation.attemptId, { kind: "failure", statusCode: null, succeeded: false, error: boundedError(error) });
-      return null;
-    }
-    if (typeof response === "string") {
-      await finishOutletAttempt(db, reservation.attemptId, { kind: "fetch", statusCode: 200, succeeded: true, error: null });
-      return response;
-    }
-    const answered = await finishAnsweredAttempt(db, reservation.attemptId, response);
-    if (answered.status === 401 || answered.status === 403 || answered.status === 429) return { outletStop: `fetch_http_${answered.status}` };
-    if (answered.redirect) {
-      const location = response.headers.get("location");
-      if (!location || redirect === MAX_REDIRECTS) return null;
-      const next = new URL(location, current).toString();
-      if (!outletFor(next) || outletFor(next)?.name !== source.outlet) return null;
-      current = next;
-      continue;
-    }
-    if (!answered.ok) return null;
-    return response.text();
-  }
-  return null;
-}
 function estimatedCharge(inputTokens: number, outputTokens: number, stage: JobStage): number {
   return stage === "embedding"
     ? Math.ceil(inputTokens * EMBEDDING_INPUT_PRICE_MICRO_USD_PER_TOKEN)
@@ -2111,16 +2062,19 @@ async function takeExtractionTurn(advance: QueueAdvance, job: JobRow): Promise<b
     // A day stop holds the item waiting; it keeps its place.
     return false;
   }
-  const body = await fetchArticle(db, source, job.run_id, advance.articleFetch, advance.clock);
-  if (body && typeof body === "object") {
-    advance.outletStops.set(source.outlet, body.outletStop);
-    noteReason(advance, job.run_id, `${source.outlet}:${body.outletStop}`);
-    if (isOutletDenialStop(body.outletStop)) await refuseItem(db, job, "outlet_denied", now);
+  const fetched = await fetchOutletArticle(db, {
+    url: source.original_url, outlet: source.outlet, appid: source.appid, pass: source.pass,
+    runId: job.run_id, fetch: advance.articleFetch, clock: advance.clock,
+  });
+  if (fetched && "stop" in fetched) {
+    advance.outletStops.set(source.outlet, fetched.stop);
+    noteReason(advance, job.run_id, `${source.outlet}:${fetched.stop}`);
+    if (isOutletDenialStop(fetched.stop)) await refuseItem(db, job, "outlet_denied", now);
     return true;
   }
-  const cleaned = body === null ? null : cleanArticle(body);
+  const cleaned = fetched ? cleanArticle(fetched.html) : null;
   if (!cleaned) {
-    const reason = body === null ? "article_unreachable" : "article_unusable";
+    const reason = fetched === null ? "article_unreachable" : "article_unusable";
     await refuseItem(db, job, reason, now);
     noteReason(advance, job.run_id, `${source.outlet}:${reason}`);
     return true;
