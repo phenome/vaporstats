@@ -74,3 +74,43 @@ test("the media glossary records the Provider stop and links to its contract pro
   expect(probes).toContain("media-provider-contract.test.ts");
   expect(probes).toContain("MIN_USABLE_ARTICLE_CHARS");
 });
+
+const paidWorkLedger = "src/lib/media-paid-ledger.ts";
+
+function paidWorkWriteViolations(file: string, source: string): string[] {
+  if (file === paidWorkLedger) return [];
+  const sql = source
+    .replace(/\\n/g, "\n")
+    .replace(/\\t/g, "\t")
+    .replace(/\\(["'`])/g, "$1")
+    .replace(/(["'`])\s*\+\s*\1/g, "")
+    .replace(/\/\*[\s\S]*?\*\//g, " ").replace(/--[^\r\n]*/g, " ");
+  const mutation = /\b(?:insert(?:\s+or\s+\w+)?\s+into|replace\s+into|update(?:\s+or\s+\w+)?|delete\s+from)\s+(?:(?:[\w"'`\[\]]+)\s*\.\s*)?["'`\[]?media_processing_(?:jobs|attempts)\b/i;
+  const drizzleMutation = /\.\s*(?:insert|update|delete)\s*\(\s*(?:\w+\s*\.\s*)?mediaProcessing(?:Jobs|Attempts)\b/;
+  return mutation.test(sql) || drizzleMutation.test(source)
+    ? [`${file}: use the Paid-work ledger interface in ${paidWorkLedger} for job and attempt transitions`]
+    : [];
+}
+
+test("production writes Paid-work jobs and attempts through src/lib/media-paid-ledger.ts", async () => {
+  const productionFiles = [...new Bun.Glob("{src,workers,scripts}/**/*.{ts,tsx,js,jsx,mts,cts,mjs,cjs}").scanSync(root)]
+    // The migration check seeds historical schemas in temporary databases.
+    .filter((file) => file !== "scripts/check-migrations.ts")
+    .sort();
+  const violations = await Promise.all(productionFiles.map(async (file) =>
+    paidWorkWriteViolations(file, await Bun.file(join(root, file)).text())));
+  expect(violations.flat()).toEqual([]);
+});
+
+test.each([
+  ['db.exec("INSERT OR IGNORE INTO media_processing_jobs VALUES (?)")'],
+  ['db.prepare(`update /* reason */ main."media_processing_jobs" SET status = ?`)'],
+  ['db.exec(`WITH old AS (SELECT 1) DELETE\nFROM [media_processing_attempts] WHERE id = 1`)'],
+  ['db.insert(schema.mediaProcessingAttempts).values(attempt)'],
+  ['db.exec("UPDATE " + "media_processing_attempts SET error = NULL")'],
+  ["db.exec(`UPDATE 'media_processing_jobs' SET error = NULL`)"],
+  [String.raw`db.exec("DELETE -- remove abandoned work\nFROM media_processing_jobs")`],
+])("reports the Paid-work ledger for a forbidden write in %s", (source) => {
+  expect(paidWorkWriteViolations("src/lib/queue.ts", source).join("\n")).toContain(paidWorkLedger);
+  expect(paidWorkWriteViolations(paidWorkLedger, source)).toEqual([]);
+});

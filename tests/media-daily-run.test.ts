@@ -14,6 +14,7 @@ import {
   insertCompletedRun,
   insertSources,
   insertSubmittedGeminiExtraction,
+  overviewOutputForUrls,
   runMediaTick,
   seedApps,
   type MediaTickOptions,
@@ -99,6 +100,75 @@ describe("enrollment in the daily media run", () => {
     expect(next.mediaDailyRun).toMatchObject({ day: "2026-11-21", enrollmentStartDate: "2026-11-20", enrolled: [] });
     expect(enrollments(database).map(({ enrolled_at }) => enrolled_at)).toEqual(Array(3).fill("2026-11-20T06:00:00.000Z"));
     expect(activeOutputs(database)).toEqual(before);
+  });
+});
+
+describe("automatic Paid-work summaries", () => {
+  test("an OpenRouter-only tick reports its completed work without a Gemini key", async () => {
+    const database = experimentCatalog();
+    insertSources(database.native, CYBERPUNK, "initial", 1);
+    const sources = await getMediaSources(database.db, CYBERPUNK);
+    const openRouter = controlledOpenRouterApi();
+    openRouter.output("synthesis", overviewOutputForUrls(sources.map(({ originalUrl }) => originalUrl)));
+
+    const result = await tick(database, { openRouter }, "2026-11-20T06:00:00.000Z", { geminiApiKey: "" });
+
+    expect(openRouter.requests.map(({ stage }) => stage)).toEqual(["extraction", "synthesis"]);
+    expect(result.mediaProcessing).toMatchObject({
+      submitted: 2, completed: 2, status: "completed", overviewAppids: [CYBERPUNK],
+    });
+  });
+
+  test("a combined tick reports successful OpenRouter and Gemini work and sorts active Overview AppIDs", async () => {
+    const database = experimentCatalog();
+    insertSources(database.native, CYBERPUNK, "initial", 1);
+    insertSources(database.native, BALDURS_GATE, "initial", 1);
+    const providers = { openRouter: controlledOpenRouterApi(), gemini: controlledGeminiApi() };
+
+    providers.gemini.reply("poll", { status: 200, body: { metadata: { state: "BATCH_STATE_PENDING" } } });
+
+    const result = await tick(database, providers, "2026-11-20T06:00:00.000Z");
+
+    expect(providers.openRouter.requests).toHaveLength(4);
+    expect(providers.gemini.submitted).toHaveLength(2);
+    expect(result.mediaProcessing).toMatchObject({
+      submitted: 6, completed: 5, status: "waiting", overviewAppids: [BALDURS_GATE, CYBERPUNK],
+    });
+    const settled = await tick(database, providers, "2026-11-20T06:15:00.000Z");
+    expect(settled.mediaProcessing).toMatchObject({
+      submitted: 0, completed: 1, status: "completed", overviewAppids: [BALDURS_GATE, CYBERPUNK],
+    });
+    const idle = await tick(database, providers, "2026-11-20T06:30:00.000Z");
+    expect(idle.mediaProcessing).toMatchObject({
+      submitted: 0, completed: 0, status: "completed", overviewAppids: [BALDURS_GATE, CYBERPUNK],
+    });
+  });
+
+  test("a connection failure before an OpenRouter request is sent leaves work waiting without a submission", async () => {
+    const database = experimentCatalog();
+    insertSources(database.native, CYBERPUNK, "initial", 1);
+    const openRouter = controlledOpenRouterApi();
+    openRouter.reply("chat", { network: "connection refused", code: "ECONNREFUSED" });
+
+    const result = await tick(database, { openRouter }, "2026-11-20T06:00:00.000Z", { geminiApiKey: "" });
+
+    expect(result.mediaProcessing).toMatchObject({
+      submitted: 0, completed: 0, status: "waiting", overviewAppids: [], queued: { openrouter: 1 },
+    });
+  });
+
+  test("paused Gemini work keeps the automatic summary waiting after OpenRouter completes", async () => {
+    const database = experimentCatalog();
+    insertSources(database.native, CYBERPUNK, "initial", 1);
+    const openRouter = controlledOpenRouterApi();
+
+    const result = await tick(database, { openRouter }, "2026-11-20T06:00:00.000Z", { geminiApiKey: "" });
+
+    expect(result.mediaProcessing).toMatchObject({
+      submitted: 2, completed: 2, status: "waiting", overviewAppids: [CYBERPUNK],
+      queued: { openrouter: 0, gemini: 1 },
+      providers: { gemini: { paused: true, reason: "missing_key" } },
+    });
   });
 });
 

@@ -1028,6 +1028,7 @@ describe("cost reporting", () => {
     expect(database.native.query("SELECT status, reserved_microusd, reservation_active, charged_microusd, cost_source FROM media_processing_jobs").all()).toEqual([
       { status: "uncertain", reserved_microusd: 4_900_000, reservation_active: 1, charged_microusd: 0, cost_source: "unknown" },
     ]);
+    expect(settled.mediaProcessing?.status).toBe("completed");
     expect(settled.mediaProcessing?.cost.providers.gemini).toEqual({ monthToDateMicrousd: 0, allTimeMicrousd: 0 });
   });
 
