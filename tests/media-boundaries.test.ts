@@ -21,10 +21,17 @@ function boundaryViolations(file: string, source: string): string[] {
   }
   const outletResponse = new RegExp(String.raw`\b(?:(?:article|outlet)\w*(?:response|reply)|answered)\s*${responseProperty}`, "i");
   const mediaArticleCaller = /^lib\/(?:article-document|media-[^/]+)\.ts$/.test(file);
-  const manualRedirect = /\bredirect\s*:\s*["']manual["']/;
+  const mediaTransportModule = new Set([
+    "lib/media-outlet-access.ts",
+    "lib/media-tavily.ts",
+    "lib/media-gemini.ts",
+    "lib/media-openrouter.ts",
+    "lib/media-paid-providers.ts",
+  ]);
+  const rawOutletContact = /\bredirect\s*:\s*["']manual["']|\b(?:fetch|fetchFn)\s*\(|\b(?:status|statusCode)\s*===?\s*(?:401|403|429)\b/;
   if (file !== "lib/media-outlet-access.ts" && (
     /["\x27]text\/html,application\/xhtml\+xml["\x27]|fetch_http_\$\{|\b(?:finishAnsweredAttempt|articleFetch|outletFetch)\s*\(/.test(source) || outletResponse.test(source)
-    || (mediaArticleCaller && file !== "lib/media-tavily.ts" && manualRedirect.test(source))
+    || (mediaArticleCaller && !mediaTransportModule.has(file) && rawOutletContact.test(source))
   )) {
     violations.push(`${file}: use fetchOutletArticle to contact an Outlet and classify its response`);
   }
@@ -51,6 +58,7 @@ test("production media callers use the Outlet, provider and embedding vector int
 test.each([
   ["lib/article-document.ts", "await outletFetch(url)", "fetchOutletArticle"],
   ["lib/media-processing.ts", "await advance.articleFetch(url)", "fetchOutletArticle"],
+  ["lib/media-processing.ts", "const response = await fetch(source.original_url); if (response.status === 403) return null;", "fetchOutletArticle"],
   ["lib/media-discovery.ts", "if (answered.status === 403) return null", "fetchOutletArticle"],
   ["lib/media-discovery.ts", 'await request("https://api.tavily.com/search")', "createTavilyTransport"],
   ["lib/media-discovery.ts", "if (searchResponse.status === 432) return", "classifyTavilySearchOutcome"],

@@ -930,8 +930,10 @@ async function pollSubmittedJob(advance: QueueAdvance, job: JobRow, summary: Sub
     summary.uncertain += 1;
     return;
   }
+  let failureDetail: string | null = null;
   if (result.state === "failed") {
-    const outcome = classifyGeminiOutcome("poll", new GeminiBatchFailure(boundedMediaError(result.error ?? "batch failed", secrets), result.batchState ?? null));
+    failureDetail = boundedMediaError(result.error ?? "batch failed", secrets);
+    const outcome = classifyGeminiOutcome("poll", new GeminiBatchFailure(failureDetail, result.batchState ?? null));
     if (outcome.class === "credit_pause" || outcome.class === "missing_configuration" || outcome.class === "transient") {
       const report = await returnUnrunBatch(db, job, outcome, now, queuedIdentity);
       if (report.paused) advance.paused.add(job.provider);
@@ -943,7 +945,7 @@ async function pollSubmittedJob(advance: QueueAdvance, job: JobRow, summary: Sub
       // The batch was accepted and then failed: it may have run and been
       // charged. Its reported usage is recorded, and the item is resent.
       await holdItem(advance, job, outcome, {
-        detail: boundedMediaError(result.error ?? "batch failed", secrets),
+        detail: failureDetail,
         answer: { provider: "gemini", usage: result.usage ?? null },
       });
       summary.uncertain += 1;
@@ -951,7 +953,7 @@ async function pollSubmittedJob(advance: QueueAdvance, job: JobRow, summary: Sub
     }
   }
   const status = await settleOutput(db, job, now, { provider: "gemini", usage: result.usage ?? null }, async () => {
-    if (result.state === "failed") return { status: "refused", error: boundedMediaError(result.error, secrets) };
+    if (result.state === "failed") return { status: "refused", error: failureDetail ?? boundedMediaError(result.error, secrets) };
     if (job.stage === "extraction") return persistExtraction(db, job, result.output, now);
     if (job.stage === "embedding") return persistEmbedding(db, job, result.output, now);
     if (job.stage === "explanation") return { status: "stale" };

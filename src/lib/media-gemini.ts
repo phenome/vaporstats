@@ -1,4 +1,3 @@
-import { boundedMediaError } from "./media-error";
 import { GeminiHttpError, GeminiMissingKeyError } from "./media-paid-providers";
 
 export type GeminiRequest = Record<string, unknown>;
@@ -140,11 +139,15 @@ export function createGeminiBatchTransport(apiKey: string, fetchFn: GeminiFetch 
           ?? inlineResponse.usage,
       );
       if (!stateValue || /PENDING|RUNNING|QUEUED|PROCESSING|ACTIVE/.test(stateValue)) return { state: "pending" };
-      if (/FAIL|CANCEL|EXPIRE|ERROR/.test(stateValue)) return { state: "failed", error: boundedMediaError(jsonObject(root.error).message ?? root.error ?? stateValue, [apiKey]), usage, batchState: stateValue };
+      if (/FAIL|CANCEL|EXPIRE|ERROR/.test(stateValue)) {
+        const message = jsonObject(root.error).message ?? root.error ?? stateValue;
+        return { state: "failed", error: typeof message === "string" ? message : String(message), usage, batchState: stateValue };
+      }
       if (!/SUCCEED|COMPLETE|DONE/.test(stateValue)) return { state: "pending" };
       const inlineError = inline.error ?? inlineResponse.error;
       if (inlineError) {
-        return { state: "failed", error: boundedMediaError(jsonObject(inlineError).message ?? inlineError, [apiKey]), usage };
+        const message = jsonObject(inlineError).message ?? inlineError;
+        return { state: "failed", error: typeof message === "string" ? message : String(message), usage };
       }
       const output = normalizeBatchOutput(responseBody);
       return { state: "succeeded", output, usage };
