@@ -22,6 +22,18 @@ The final validation held back a claim that surface and underworld runs alternat
 
 In responsive Chromium at 390 and 1280 CSS pixels, activating a Cyberpunk citation opened the closed IGN group and focused the specific article row.
 
+## Article discovery and extraction audit
+
+The read-only audit of the private database snapshot and saved v13 requests found these article fates:
+
+| Brief | Discovery and extraction evidence | Fate in the v13 synthesis request |
+|---|---|---|
+| Baldur's Gate 3 | IGN's October 2020 Early Access article has an active v4 extraction; the request carries eight Early Access observations. Discovery also retained GamesRadar's August 2023 full-release review, but its extraction job exhausted on `item_error` and has no active extraction. A GameSpot review-page fetch returned HTTP 403. | Only IGN Early Access evidence was available. The nine surviving statements therefore do not establish full-release coverage or current-release agreement. |
+| Cyberpunk 2077 | The three December 2020 PC reviews (PC Gamer, IGN, Eurogamer) and IGN's June 2025 Switch 2 update all have active extractions. The candidate set also recorded an unrelated GameFAQs review-board fetch failure (HTTP 403). | All four articles were included. The PC statement on scene-interrupting animation glitches cites the separate IGN and Eurogamer articles; the Switch 2 comparison stays with IGN's port review. |
+| Hades II | IGN and Eurogamer Early Access, PC Gamer 1.0, and Eurogamer's September 2025 follow-up all have active extractions. The later Eurogamer extraction has five contributions, including its description of more considered combat and two distinct routes. Kotaku's September 2025 review was refused as `article_unusable`; a GameSpot review-page fetch returned HTTP 403. | **The later Eurogamer article is absent from the saved v13 request and every surviving claim.** The request includes only IGN Early Access, Eurogamer Early Access, and PC Gamer 1.0. The active brief therefore did not assess the later Eurogamer follow-up despite its successful extraction. |
+
+These outcomes distinguish discovery from usable evidence: a retained source row alone does not mean the article contributed to a brief. For the later Eurogamer extraction, Overview 27 records 16 questions about version/platform scope and 14 about the scope of tag labels. Its legacy observations were held before the model saw them. The Hades II omission remains a coverage gap in the evaluated v13 result.
+
 ## Regression coverage
 
 | Criterion or probe | Verification |

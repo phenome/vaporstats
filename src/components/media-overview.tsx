@@ -1,5 +1,6 @@
 import type { MediaFinding, MediaOverview } from "../lib/media-overview";
 import type { MediaSource } from "../lib/media-discovery";
+import { presentMediaFindingText } from "../lib/media-finding-presentation";
 import { AppLink } from "./app-link";
 import { getMediaSourceReferences, type MediaSourceReference } from "./media-source-references";
 
@@ -33,6 +34,11 @@ function CitationNotes({
   return notes;
 }
 
+// Consecutive findings can share a patch caption while retaining separate citations.
+function sharedPatch(text: string) {
+  return / \(((?:\d+\s?GB )?Day[- ]0 patch), PC\)([.!?]?)$/i.exec(text);
+}
+
 function CitedFindings({
   findings,
   references,
@@ -40,20 +46,30 @@ function CitedFindings({
   findings: MediaFinding[];
   references: SourceReferences;
 }) {
-  return findings.map((finding, index) => (
-    <p key={`${finding.text}-${index}`}>
-      {finding.contested && (
-        <span
-          data-contested
-          className="mr-2 inline-flex border border-zinc-700 bg-zinc-900 px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-wide text-zinc-400"
-        >
-          Contested
-        </span>
-      )}
-      {finding.text}
-      <CitationNotes sourceUrls={finding.sourceUrls} references={references} />
-    </p>
-  ));
+  return findings.map((finding, index) => {
+    const patch = sharedPatch(finding.text);
+    const samePatch = (other?: MediaFinding) => Boolean(other && patch && sharedPatch(other.text)?.[1] === patch[1]);
+    const continued = samePatch(findings[index - 1]);
+    const grouped = patch && (continued || samePatch(findings[index + 1]));
+    const wording = grouped ? finding.text.slice(0, patch.index) + patch[2] : presentMediaFindingText(finding.text);
+    return (
+      <span key={`${finding.text}-${index}`}>
+        {index > 0 && " "}
+        {finding.contested && (
+          <span
+            data-contested
+            className="mr-2 inline-flex border border-zinc-700 bg-zinc-900 px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-wide text-zinc-400"
+          >
+            Contested
+          </span>
+        )}
+        {grouped && !continued && <span className="font-medium text-[#dec79f]">PC with the {patch[1]} · </span>}
+        {wording}
+        <CitationNotes sourceUrls={finding.sourceUrls} references={references} />
+        {/[.!?]$/.test(wording) ? "" : "."}
+      </span>
+    );
+  });
 }
 
 function findingTextKey(text: string): string {
@@ -111,13 +127,13 @@ function Topics({
   heading?: "h3" | "h4";
 }) {
   return categories.map((category) => (
-    <div key={category.name} className="space-y-1">
-      <Heading className="font-mono text-xs font-semibold uppercase tracking-wider text-zinc-300">
+    <div key={category.name} className={Heading === "h3" ? "space-y-1 border-t border-[#424047] pt-3" : "space-y-1"}>
+      <Heading className="text-xs font-semibold uppercase tracking-wider text-[#dec79f]">
         {category.name}
       </Heading>
-      <div className="space-y-1 text-sm leading-6 text-zinc-300">
+      <p className="max-w-[70ch] text-[15px] leading-relaxed text-zinc-300">
         <CitedFindings findings={category.findings} references={references} />
-      </div>
+      </p>
     </div>
   ));
 }
@@ -142,7 +158,7 @@ export function MediaOverviewSection({
   })).filter((category) => category.findings.length > 0);
 
   return (
-    <section id="media-overview" aria-labelledby="media-overview-title" className="min-w-0 space-y-4 rounded-lg border border-zinc-800 bg-zinc-900/70 p-4 sm:p-6">
+    <section id="media-overview" aria-labelledby="media-overview-title" className="min-w-0 space-y-4 rounded-lg border border-[#323339] bg-[#1c1d22] p-4 sm:p-7">
       <div className="flex flex-wrap items-baseline justify-between gap-2">
         <h2 id="media-overview-title" className="font-serif text-3xl font-semibold tracking-tight text-zinc-100">
           Overview
@@ -154,27 +170,13 @@ export function MediaOverviewSection({
           How this works
         </AppLink>
       </div>
-      <div className="max-w-prose space-y-1 text-base leading-7 text-zinc-100">
+      <p className="max-w-[68ch] text-base leading-relaxed text-zinc-100">
         <CitedFindings findings={statements} references={references} />
-      </div>
-      {overview.tags.length > 0 && (
-        <nav aria-label="Media tags" className="flex flex-wrap gap-2" data-media-tags>
-          {overview.tags.map((tag) => (
-            <AppLink
-              key={tag.slug}
-              href={`/games/?mediaTag=${encodeURIComponent(tag.label)}`}
-              aria-label={`Browse games tagged ${tag.label}`}
-              className="inline-flex max-w-full items-center border border-orange-700/70 bg-orange-950/30 px-2.5 py-1 font-mono text-[11px] font-semibold text-orange-300 transition-colors hover:border-orange-400 hover:bg-orange-900/50 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-orange-500"
-            >
-              {tag.label}
-            </AppLink>
-          ))}
-        </nav>
-      )}
+      </p>
       <Topics categories={generalTopics} references={references} />
       {chapters.map(({ edition, date, categories: topics }) => (
         <section key={edition} className="grid gap-3 border-t border-zinc-700 pt-3 sm:grid-cols-[minmax(7rem,24%)_1fr]">
-          <div className="self-start border-l-2 border-orange-700/70 pl-3">
+          <div className="border-l-2 border-[#d6b071] pl-3">
             {date && (
               <time dateTime={date} className="font-mono text-[11px] uppercase text-zinc-400">
                 {editionMonth.format(new Date(`${date}-01T00:00:00Z`))}
@@ -182,14 +184,14 @@ export function MediaOverviewSection({
             )}
             <h3 className="font-semibold text-zinc-100">{edition}</h3>
           </div>
-          <div className="min-w-0 space-y-3">
+          <div className="min-w-0 space-y-4">
             <Topics categories={topics} references={references} heading="h4" />
           </div>
         </section>
       ))}
       {overview.prosCons && (
         <section aria-labelledby="media-pros-cons-title" className="space-y-2 border-t border-zinc-800 pt-3">
-          <h3 id="media-pros-cons-title" className="font-mono text-xs font-semibold uppercase tracking-wider text-zinc-300">
+          <h3 id="media-pros-cons-title" className="text-xs font-semibold uppercase tracking-wider text-[#dec79f]">
             Pros &amp; cons
           </h3>
           <div className="grid gap-3 sm:grid-cols-2">
@@ -207,6 +209,21 @@ export function MediaOverviewSection({
             )}
           </div>
         </section>
+      )}
+      {overview.tags.length > 0 && (
+        <nav aria-label="Media tags" className="flex flex-wrap items-baseline gap-x-3 gap-y-1 border-t border-zinc-700 pt-3 text-xs" data-media-tags>
+          <span className="text-zinc-400">Related tags</span>
+          {overview.tags.map((tag) => (
+            <AppLink
+              key={tag.slug}
+              href={`/games/?mediaTag=${encodeURIComponent(tag.label)}`}
+              aria-label={`Browse games tagged ${tag.label}`}
+              className="text-zinc-300 underline decoration-zinc-600 underline-offset-2 hover:text-amber-200"
+            >
+              {tag.label.replace(/^Supports (?=\S)/, "")}
+            </AppLink>
+          ))}
+        </nav>
       )}
     </section>
   );
