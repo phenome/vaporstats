@@ -43,5 +43,10 @@
     "appid": 1091500,
     "saved": "Visual scenes look striking and lively on PC with the 50GB Day 0 patch.",
     "display": "Visual scenes look striking and lively."
+  },
+  {
+    "appid": 1091500,
+    "saved": "Bugs range from UI issues and scripting errors to vehicles spawning inside one another on PC with the 50GB Day 0 patch.",
+    "display": "In the day-one PC build, bugs ranged from UI issues and scripting errors to vehicles spawning inside one another."
   }
 ]
