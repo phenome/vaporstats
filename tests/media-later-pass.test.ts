@@ -11,7 +11,13 @@ import {
   controlledTavilyApi,
   CYBERPUNK,
   discoveryArticleHtml,
+  emptySynthesisSelection,
   GAME_NAMES,
+  extractionAppid,
+  extractionOutput,
+  mediaObservation,
+  synthesisEvidence,
+  synthesisSelectionId,
   HADES_II,
   runMediaTick,
   seedApps,
@@ -76,7 +82,7 @@ function world(options: { later?: (appid: number, outlet: Outlet) => Array<{ url
   for (const appid of EXPERIMENT) {
     for (const outlet of MEDIA_OUTLETS) {
       // Each article has its own text, so no two are one originating assessment.
-      const body = (when: string) => `${GAME_NAMES[appid]} offers a substantial playable campaign with detailed systems, as ${outlet.name}'s ${when} assessment describes at length. `.repeat(5);
+      const body = (when: string) => `${GAME_NAMES[appid]} offers a substantial playable campaign with detailed systems, as ${outlet.name}'s ${when} assessment describes at length. `.repeat(5) + "Builds reward experimentation.";
       page(articleUrl(appid, outlet), discoveryArticleHtml(appid, `${GAME_NAMES[appid]} Review`, { date: "2026-11-10T00:00:00.000Z", author: `${outlet.name} critic`, body: body("first") }));
       page(articleUrl(appid, outlet, "-revisited"), discoveryArticleHtml(appid, `${GAME_NAMES[appid]} Review Revisited`, { date: "2026-11-19T00:00:00.000Z", author: `${outlet.name} critic`, body: body("second") }));
     }
@@ -344,21 +350,45 @@ describe("one article per entity and query across resumes", () => {
 describe("later articles in processing and results", () => {
   test("later articles feed synthesis, the Overview evidence map, Sources, citations and tag results without counting as additional outlet endorsements", async () => {
     const database = experimentCatalog();
-    const { openRouter, tick } = world();
+    const { openRouter, tick, page, pages } = world();
     const [ignInitial, ignLater, eurogamerInitial] = [articleUrl(CYBERPUNK, IGN), articleUrl(CYBERPUNK, IGN, "-revisited"), articleUrl(CYBERPUNK, EUROGAMER)];
+    const story = "Night City rewards exploring its districts on foot.";
+    const combat = "Combat supports both stealth and gunplay builds.";
+    const tag = "Reworked skill trees";
+    const additions = [[ignInitial, [story, combat]], [ignLater, [story, tag]], [eurogamerInitial, [combat]]] as const;
+    for (const [url, excerpts] of additions) {
+      const html = await pages.get(url)!().text();
+      page(url, html.replace("</article>", `<p>${excerpts.join(" ")}</p></article>`));
+    }
     const syntheses: Array<{ urls: string[]; content: string }> = [];
     openRouter.onChat = (request) => {
-      if (request.stage !== "synthesis") return;
+      if (request.stage === "extraction") {
+        if (extractionAppid(request) !== CYBERPUNK) return;
+        const article = request.body.messages[1]!.content;
+        const choices = [["story", "finding", story], ["combat-detail", "finding", combat], ["skill-trees", "tag", tag]] as const;
+        const { observations } = extractionOutput({ gameplay: true })(request);
+        if (choices.some(([, , excerpt]) => article.includes(excerpt))) {
+          openRouter.output("extraction", { observations: [
+            ...observations,
+            ...choices.flatMap(([id, kind, excerpt]) => article.includes(excerpt)
+              ? [mediaObservation(CYBERPUNK, id, kind, excerpt, excerpt, id === "story" ? "Story & world" : kind === "finding" ? "Gameplay & systems" : "")]
+              : []),
+          ] });
+        }
+        return;
+      }
       syntheses.push({ urls: request.urls, content: JSON.stringify(request.body.messages) });
-      if (!request.urls.includes(ignLater)) return;
+      if (!request.urls.includes(ignLater) || !request.urls.includes(eurogamerInitial)) return;
+      const sources = synthesisEvidence(request.body);
+      const selectionId = (url: string, id: string) => synthesisSelectionId(sources.find(({ sourceUrl }) => sourceUrl === url)!, id);
       // The model lists the statement with two IGN articles first.
       openRouter.output("synthesis", {
+        ...emptySynthesisSelection(sources),
         statements: [
-          { text: "Night City rewards exploring its districts on foot.", sourceUrls: [ignInitial, ignLater] },
-          { text: "Combat supports both stealth and gunplay builds.", sourceUrls: [ignInitial, eurogamerInitial] },
+          [selectionId(ignInitial, "story"), selectionId(ignLater, "story")],
+          [selectionId(ignInitial, "combat-detail"), selectionId(eurogamerInitial, "combat-detail")],
         ],
-        tags: [{ label: "Reworked skill trees", sourceUrls: [ignLater] }],
-        similarityInputs: { gameplay: ["Stealth and gunplay builds"] },
+        tags: [[selectionId(ignLater, "skill-trees")]],
       });
     };
     for (const at of ["2026-11-20T06:00", "2026-11-20T06:15", "2026-11-20T06:30", "2026-11-21T06:00", "2026-11-21T06:15", "2026-11-21T06:30"]) await tick(database, `${at}:00.000Z`);
@@ -372,7 +402,7 @@ describe("later articles in processing and results", () => {
     const { sources, mediaOverview } = await detail(database, CYBERPUNK);
     expect(sources.map(({ originalUrl }) => originalUrl)).toEqual(expect.arrayContaining([ignInitial, ignLater]));
     // Two IGN articles are one outlet's support; IGN and Eurogamer are two.
-    expect(mediaOverview?.statements).toEqual([
+    expect(mediaOverview?.statements.map(({ text, sourceUrls }) => ({ text, sourceUrls }))).toEqual([
       { text: "Combat supports both stealth and gunplay builds.", sourceUrls: [ignInitial, eurogamerInitial] },
       { text: "Night City rewards exploring its districts on foot.", sourceUrls: [ignInitial, ignLater] },
     ]);

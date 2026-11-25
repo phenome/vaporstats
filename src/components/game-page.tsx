@@ -8,6 +8,7 @@ import {
 } from "../lib/prices";
 import { getCanonicalPublisherPath } from "../lib/slug";
 import { getCommunityIconUrl } from "../lib/lqip";
+import { getActiveGameSection } from "../lib/game-section-navigation";
 import { PlayerPanel } from "./player-panel";
 import { PlayerHistoryChart } from "./player-history";
 import { PriceHistoryChart } from "./price-history";
@@ -494,31 +495,24 @@ export function GamePageView({
     };
 
     const updateFromScroll = () => {
-      const navRect = nav.getBoundingClientRect();
-      const readingLine = navRect.bottom + 20;
-      let activeId: string | null = null;
+      const navBottom = nav.getBoundingClientRect().bottom;
+      const fragment = document.getElementById(window.location.hash.slice(1));
+      const fragmentSection = fragment && targets.find((target) => target.contains(fragment));
+      const scrollRoot = document.scrollingElement;
+      const fragmentPosition = fragment && fragmentSection && scrollRoot ? {
+        sectionId: fragmentSection.id,
+        top: fragment.getBoundingClientRect().top,
+        inset: (parseFloat(getComputedStyle(scrollRoot).scrollPaddingTop) || 0)
+          + (parseFloat(getComputedStyle(fragment).scrollMarginTop) || 0),
+        scrollTop: scrollRoot.scrollTop,
+        maxScrollTop: scrollRoot.scrollHeight - scrollRoot.clientHeight,
+      } : undefined;
 
-      for (const target of targets) {
-        const rect = target.getBoundingClientRect();
-        if (rect.top <= readingLine && rect.bottom > readingLine) {
-          activeId = target.id;
-          break;
-        }
-      }
-
-      if (!activeId && targets.length > 0) {
-        if (targets[0].getBoundingClientRect().top > readingLine) {
-          activeId = targets[0].id;
-        } else {
-          for (let i = targets.length - 1; i >= 0; i--) {
-            if (targets[i].getBoundingClientRect().top <= readingLine) {
-              activeId = targets[i].id;
-              break;
-            }
-          }
-        }
-      }
-
+      const sections = targets.map((target) => {
+        const { top, bottom } = target.getBoundingClientRect();
+        return { id: target.id, top, bottom };
+      });
+      const activeId = getActiveGameSection(sections, navBottom, fragmentPosition);
       if (activeId) {
         updateActiveLink(activeId);
       }
@@ -532,10 +526,14 @@ export function GamePageView({
 
     updateFromScroll();
     window.addEventListener("scroll", onScroll, { passive: true });
+    window.addEventListener("hashchange", onScroll);
+    window.addEventListener("resize", onScroll);
 
     return () => {
       cancelAnimationFrame(frameId);
       window.removeEventListener("scroll", onScroll);
+      window.removeEventListener("hashchange", onScroll);
+      window.removeEventListener("resize", onScroll);
     };
   }, [mediaOverview, mediaMatches, related, sources]);
   const geometry = useHeroGeometry(heroRef, identityRefs, game.appid);

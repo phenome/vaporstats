@@ -5,6 +5,7 @@ import { readMigrationFiles } from "drizzle-orm/migrator";
 import { applyMigrations, DRIZZLE_MIGRATION_TABLE, MIGRATION_TABLE } from "../src/lib/migrations";
 import { openSqliteAppDatabase } from "../src/lib/db";
 import { testTemporaryRoot } from "../tests/support/tmpdir";
+import { emptySynthesisSelection, synthesisEvidence, synthesisSelectionId } from "../tests/support/media";
 import {
   advanceMediaProcessing,
   type GeminiBatchTransport,
@@ -640,12 +641,18 @@ async function verifyWaitingRunResumesAfterUpgrade(): Promise<void> {
     };
     const openRouter: OpenRouterTransport = {
       complete: async (request) => {
-        requested.push(JSON.stringify(request.messages).includes("sourceUrl") ? "synthesis" : "extraction");
+        requested.push(JSON.stringify(request.messages).includes(url) ? "synthesis" : "extraction");
+        const evidence = synthesisEvidence(request);
+        const source = evidence.find(({ sourceIdentity, sourceUrl }) => sourceIdentity === "waiting-identity" && sourceUrl === url);
+        if (!source) throw new Error("An upgraded synthesis did not include the retained extraction");
         return {
           generationId: "gen-upgrade",
           model: request.model,
           provider: "Anthropic",
-          content: JSON.stringify({ statements: [{ text: "The game presents flexible combat.", sourceUrls: [url] }], tags: [{ label: "Build experimentation", sourceUrls: [url] }] }),
+          content: JSON.stringify({
+            ...emptySynthesisSelection(evidence),
+            statements: [[synthesisSelectionId(source, "legacy-1")]],
+          }),
           usage: { promptTokens: 100, completionTokens: 20, cost: 0.00002 },
         };
       },

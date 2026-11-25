@@ -8,7 +8,7 @@ import {
   experimentWorld,
   ControlledGeminiTransport,
   controlledOpenRouterApi,
-  extractionOutput,
+  legacyExtractionOutput,
   HADES_II,
   insertCompletedRun,
   insertSources,
@@ -169,7 +169,7 @@ describe("a submitted batch whose settlement throws", () => {
     const throwing = { state: "succeeded", usage: { inputTokens: 1_000, outputTokens: 100 } } as const;
     Object.defineProperty(throwing, "output", { enumerable: true, get() { throw new Error("settlement defect"); } });
     transport.polls.set(`batches/${CYBERPUNK}`, throwing as never);
-    transport.polls.set(`batches/${HADES_II}`, { state: "succeeded", output: extractionOutput(), usage: { inputTokens: 1_000, outputTokens: 100 } });
+    transport.polls.set(`batches/${HADES_II}`, { state: "succeeded", output: legacyExtractionOutput(), usage: { inputTokens: 1_000, outputTokens: 100 } });
 
     const summary = await advanceMediaProcessing(database.db, { transport, openRouter: transport.openRouter, now: new Date("2026-11-18T20:30:00.000Z"), pollOnly: true });
 

@@ -7,11 +7,39 @@ import {
   type MediaProcessingSummary,
 } from "../src/lib/media-processing";
 import { openTestDatabase } from "./support/db";
-import { ControlledGeminiTransport, CYBERPUNK, insertCompletedRun, refuseRequests, seedApps, type Refusal } from "./support/media";
+import {
+  ControlledGeminiTransport,
+  CYBERPUNK,
+  extractionAppid,
+  insertCompletedRun,
+  mediaObservation,
+  overviewOutput,
+  refuseRequests,
+  seedApps,
+  type ChatOutput,
+  type Refusal,
+} from "./support/media";
 
 const APPID = CYBERPUNK;
 const URL = "https://ign.com/articles/cyberpunk-review";
-const ARTICLE_HTML = "<!doctype html><html><body><article><h1>Cyberpunk 2077 Review</h1><p>Cyberpunk 2077 has a focused campaign with flexible combat and memorable encounters. This preview was played on PC during Early Access and does not assess the final release.</p></article></body></html>";
+const FINDING = "The campaign includes a series of hand-authored encounters";
+const FLEXIBLE_GAMEPLAY = "Combat supports flexible builds";
+const TACTICAL_GAMEPLAY = "Combat supports tactical builds";
+const CITY_STORY = "The campaign follows factions across a dense city";
+const INITIAL_EVIDENCE = { gameplay: FLEXIBLE_GAMEPLAY, storyWorld: CITY_STORY };
+const TACTICAL_EVIDENCE = { gameplay: TACTICAL_GAMEPLAY, storyWorld: CITY_STORY };
+
+interface MatchEvidence {
+  gameplay?: string;
+  storyWorld?: string;
+}
+
+function articleHtml(evidence: MatchEvidence, detail = "The opening encounter is set at night."): string {
+  const excerpts = [...new Set(Object.values(evidence))].map((text) => `${text}.`).join(" ");
+  return `<!doctype html><html><body><article><h1>Cyberpunk Review</h1><p>${FINDING}. ${detail} ${excerpts} This preview was played on PC during Early Access and does not assess the final release.</p></article></body></html>`;
+}
+
+const ARTICLE_HTML = articleHtml(INITIAL_EVIDENCE);
 const cleanups: Array<() => void> = [];
 
 afterEach(() => { while (cleanups.length > 0) cleanups.pop()!(); });
@@ -31,28 +59,17 @@ function fixture(): EmbeddingFixture {
   return { native: database.native, db: database.db, runId };
 }
 
-function extractionOutput(): Record<string, unknown> {
-  return {
-    contributions: [
-      { text: "Combat supports flexible builds", category: "Gameplay & systems" },
-      { text: "The campaign follows factions across a dense city", category: "Story & world" },
-    ],
-    similarityInputs: {
-      gameplay: ["Combat supports flexible builds"],
-      storyWorld: ["The campaign follows factions across a dense city"],
-    },
-    qualifications: ["Early Access", "PC preview"],
-    provenance: [],
-  };
-}
-
-function overviewOutput(input: { gameplay?: string[]; storyWorld?: string[] } = {
-  gameplay: ["Combat supports flexible builds", "Excellent quality and fun"],
-  storyWorld: ["The campaign follows factions across a dense city"],
-}): Record<string, unknown> {
-  return {
-    statements: [{ text: "The game combines flexible combat with a faction-driven city campaign.", sourceUrls: [URL] }],
-    similarityInputs: input,
+function extractionOutput({ gameplay, storyWorld }: MatchEvidence = INITIAL_EVIDENCE): ChatOutput {
+  return (request) => {
+    const appid = extractionAppid(request);
+    const qualifiers = ["PC", "Early Access"];
+    return {
+      observations: [
+        { ...mediaObservation(appid, "encounters", "finding", FINDING, FINDING), qualifiers },
+        ...(gameplay ? [{ ...mediaObservation(appid, "combat", "gameplay", gameplay, gameplay), qualifiers }] : []),
+        ...(storyWorld ? [{ ...mediaObservation(appid, "campaign", "storyWorld", storyWorld, storyWorld), qualifiers }] : []),
+      ],
+    };
   };
 }
 
@@ -63,13 +80,13 @@ function embeddingOutput(value: number): Record<string, unknown> {
 const advanceCounts = new WeakMap<EmbeddingFixture, number>();
 
 /** Advances the fixture's current run one ingestion tick (15 minutes) after its previous advance. */
-async function advance(value: EmbeddingFixture, transport: ControlledGeminiTransport, article = ARTICLE_HTML): Promise<MediaProcessingSummary> {
+async function advance(value: EmbeddingFixture, transport: ControlledGeminiTransport, article: string | ((url: string) => string) = ARTICLE_HTML): Promise<MediaProcessingSummary> {
   const ticks = advanceCounts.get(value) ?? 0;
   advanceCounts.set(value, ticks + 1);
   return advanceMediaProcessing(value.db, {
     runId: value.runId,
     transport, openRouter: transport.openRouter,
-    articleFetch: async () => article,
+    articleFetch: async (url) => typeof article === "string" ? article : article(url),
     now: new Date(Date.parse("2026-09-11T00:00:00.000Z") + ticks * 15 * 60 * 1_000),
   });
 }
@@ -80,7 +97,7 @@ async function completeInitial(value: EmbeddingFixture, transport: ControlledGem
   // and submits the Overview's embeddings, which settle when polled.
   transport.nextPolls.push(
     { state: "succeeded", output: extractionOutput(), usage: { inputTokens: 100, outputTokens: 20 } },
-    { state: "succeeded", output: overviewOutput(), usage: { inputTokens: 100, outputTokens: 20 } },
+    { state: "succeeded", output: overviewOutput(URL), usage: { inputTokens: 100, outputTokens: 20 } },
     { state: "succeeded", output: embeddingOutput(1), usage: { inputTokens: 100 } },
     { state: "succeeded", output: embeddingOutput(2), usage: { inputTokens: 100 } },
   );
@@ -96,26 +113,22 @@ function sourceIds(value: EmbeddingFixture): number[] {
   return value.native.query<{ id: number }, []>("SELECT id FROM media_sources ORDER BY id").all().map(({ id }) => id);
 }
 
-const TACTICAL_GAMEPLAY = ["Combat supports tactical builds"];
-const CITY_STORY = ["The campaign follows factions across a dense city"];
-
 /**
- * Starts a run whose affected article now reads `article`, so the run rebuilds
- * the game's Overview with `input`. Returns once the rebuilt Overview is active
- * and its embedding work is submitted; `embeddings` answer that work.
+ * Rebuilds the game's Overview from revised article evidence and advances
+ * the embedding work with the supplied provider answers.
  */
 async function rebuildOverview(
   value: EmbeddingFixture,
   transport: ControlledGeminiTransport,
   key: string,
-  input: { gameplay?: string[]; storyWorld?: string[] },
-  article: string,
+  evidence: MatchEvidence,
   embeddings: readonly (Record<string, unknown> | { state: "pending" })[] = [],
 ): Promise<void> {
   await startNextRun(value, key, sourceIds(value));
+  const article = articleHtml(evidence);
   transport.nextPolls.push(
-    { state: "succeeded", output: extractionOutput(), usage: { inputTokens: 100, outputTokens: 20 } },
-    { state: "succeeded", output: overviewOutput(input), usage: { inputTokens: 100, outputTokens: 20 } },
+    { state: "succeeded", output: extractionOutput(evidence), usage: { inputTokens: 100, outputTokens: 20 } },
+    { state: "succeeded", output: overviewOutput(URL), usage: { inputTokens: 100, outputTokens: 20 } },
     ...embeddings.map((output) => ("state" in output && output.state === "pending" ? { state: "pending" as const } : { state: "succeeded" as const, output, usage: { inputTokens: 100 } })),
   );
   await advance(value, transport, article);
@@ -137,8 +150,8 @@ describe("game overview aggregate embeddings", () => {
     expect(embeddings.results?.every((row) => row.appid === APPID && row.model === "gemini-embedding-2" && row.dimensions === 3072 && row.active === 1)).toBe(true);
     const overview = await value.db.prepare("SELECT output_json FROM media_game_overviews WHERE appid = ? AND active = 1").bind(APPID).first<{ output_json: string }>();
     expect(JSON.parse(overview?.output_json ?? "{}").similarityInputs).toEqual({
-      gameplay: ["Combat supports flexible builds"],
-      storyWorld: ["The campaign follows factions across a dense city"],
+      gameplay: [`${FLEXIBLE_GAMEPLAY} (PC, Early Access)`],
+      storyWorld: [`${CITY_STORY} (PC, Early Access)`],
     });
     expect(await value.db.prepare("SELECT COUNT(*) AS count FROM media_processing_jobs WHERE stage = 'explanation'").first<{ count: number }>()).toEqual({ count: 0 });
     expect(transport.embeddingSubmissions).toHaveLength(2);
@@ -151,30 +164,42 @@ describe("game overview aggregate embeddings", () => {
     value.native.prepare("INSERT INTO apps (appid, name, slug, type, parent_appid) VALUES (?, ?, ?, 'expansion', ?)").run(childAppid, "Cyberpunk 2077: Phantom Liberty", "cyberpunk-2077-phantom-liberty", APPID);
     value.native.prepare("INSERT INTO media_sources (appid, pass, original_url, title, outlet, retrieved_at, type, hands_on, platform, build_context) VALUES (?, 'initial', ?, ?, 'IGN', ?, 'review', 1, 'PC', 'Early Access')").run(childAppid, childUrl, "Phantom Liberty Review", "2026-09-11T00:00:00.000Z");
     await authorizeMediaProcessing(value.db, value.runId);
-    const childOverview = {
-      ...overviewOutput(),
-      statements: [{ text: "The expansion combines flexible combat with a faction-driven city campaign.", sourceUrls: [childUrl] }],
+    const childEvidence = {
+      gameplay: "Combat adds a route for stealth builds",
+      storyWorld: "The expansion follows undercover agents through a walled district",
     };
     const transport = new ControlledGeminiTransport({ embeddings: true });
     transport.nextPolls.push(
       { state: "succeeded", output: extractionOutput(), usage: { inputTokens: 100, outputTokens: 20 } },
-      { state: "succeeded", output: extractionOutput(), usage: { inputTokens: 100, outputTokens: 20 } },
-      { state: "succeeded", output: overviewOutput(), usage: { inputTokens: 100, outputTokens: 20 } },
-      { state: "succeeded", output: childOverview, usage: { inputTokens: 100, outputTokens: 20 } },
+      { state: "succeeded", output: extractionOutput(childEvidence), usage: { inputTokens: 100, outputTokens: 20 } },
+      { state: "succeeded", output: overviewOutput(URL), usage: { inputTokens: 100, outputTokens: 20 } },
+      { state: "succeeded", output: overviewOutput(childUrl), usage: { inputTokens: 100, outputTokens: 20 } },
       { state: "succeeded", output: embeddingOutput(1), usage: { inputTokens: 100 } },
       { state: "succeeded", output: embeddingOutput(2), usage: { inputTokens: 100 } },
       { state: "succeeded", output: embeddingOutput(3), usage: { inputTokens: 100 } },
       { state: "succeeded", output: embeddingOutput(4), usage: { inputTokens: 100 } },
     );
-    await advance(value, transport);
-    await advance(value, transport);
-    await advance(value, transport);
+    const fetchArticle = (url: string) => url === childUrl ? articleHtml(childEvidence) : ARTICLE_HTML;
+    await advance(value, transport, fetchArticle);
+    await advance(value, transport, fetchArticle);
+    await advance(value, transport, fetchArticle);
     const activeSources = await value.db.prepare(
-      "SELECT s.appid, s.original_url FROM media_article_extractions e JOIN media_sources s ON s.id = e.source_id WHERE e.active = 1 ORDER BY s.appid",
-    ).all<{ appid: number; original_url: string }>();
-    expect(activeSources.results).toEqual([
-      { appid: APPID, original_url: URL },
-      { appid: childAppid, original_url: childUrl },
+      "SELECT s.appid, s.original_url, e.output_json FROM media_article_extractions e JOIN media_sources s ON s.id = e.source_id WHERE e.active = 1 ORDER BY s.appid",
+    ).all<{ appid: number; original_url: string; output_json: string }>();
+    expect(activeSources.results?.map(({ appid, original_url, output_json }) => ({
+      appid,
+      url: original_url,
+      evidence: JSON.parse(output_json).observations.map(({ appid, text }: { appid: number; text: string }) => [appid, text]),
+    }))).toEqual([
+      { appid: APPID, url: URL, evidence: [[APPID, FINDING], [APPID, FLEXIBLE_GAMEPLAY], [APPID, CITY_STORY]] },
+      { appid: childAppid, url: childUrl, evidence: [[childAppid, FINDING], [childAppid, childEvidence.gameplay], [childAppid, childEvidence.storyWorld]] },
+    ]);
+    const overviews = value.native.query<{ appid: number; output_json: string }, []>(
+      "SELECT appid, output_json FROM media_game_overviews WHERE active = 1 ORDER BY appid",
+    ).all();
+    expect(overviews.map(({ appid, output_json }) => [appid, JSON.parse(output_json).similarityInputs])).toEqual([
+      [APPID, { gameplay: [`${FLEXIBLE_GAMEPLAY} (PC, Early Access)`], storyWorld: [`${CITY_STORY} (PC, Early Access)`] }],
+      [childAppid, { gameplay: [`${childEvidence.gameplay} (PC, Early Access)`], storyWorld: [`${childEvidence.storyWorld} (PC, Early Access)`] }],
     ]);
     const vectors = await value.db.prepare(
       "SELECT appid, dimension, active FROM media_game_embeddings WHERE active = 1 ORDER BY appid, dimension",
@@ -192,19 +217,54 @@ describe("game overview aggregate embeddings", () => {
     const transport = new ControlledGeminiTransport({ embeddings: true });
     await completeInitial(value, transport);
     const before = transport.embeddingSubmissions.length;
-    const changed = ARTICLE_HTML.replace("memorable", "notable");
-    await rebuildOverview(value, transport, "changed-category", { gameplay: TACTICAL_GAMEPLAY, storyWorld: CITY_STORY }, changed, [embeddingOutput(3)]);
-    await advance(value, transport, changed);
+    const activeEmbeddings = value.native.query<{ id: number; dimension: string }, [number]>(
+      "SELECT id, dimension FROM media_game_embeddings WHERE appid = ? AND active = 1 ORDER BY dimension",
+    );
+    const original = activeEmbeddings.all(APPID);
+    await rebuildOverview(value, transport, "changed-category", TACTICAL_EVIDENCE, [embeddingOutput(3)]);
     expect(transport.embeddingSubmissions.length - before).toBe(1);
     expect(transport.embeddingSubmissions.at(-1)).toContain(":gameplay:");
-    const activeAfterChange = await value.db.prepare("SELECT dimension FROM media_game_embeddings WHERE appid = ? AND active = 1 ORDER BY dimension").bind(APPID).all<{ dimension: string }>();
-    expect(activeAfterChange.results?.map(({ dimension }) => dimension)).toEqual(["gameplay", "story_world"]);
+    const replaced = activeEmbeddings.all(APPID);
+    expect(replaced.map(({ dimension }) => dimension)).toEqual(["gameplay", "story_world"]);
+    expect(replaced[0]?.id).not.toBe(original[0]?.id);
+    expect(replaced[1]).toEqual(original[1]);
 
-    await rebuildOverview(value, transport, "removed-category", { gameplay: TACTICAL_GAMEPLAY }, ARTICLE_HTML.replace("memorable", "vivid"));
-    const active = await value.db.prepare("SELECT dimension FROM media_game_embeddings WHERE appid = ? AND active = 1 ORDER BY dimension").bind(APPID).all<{ dimension: string }>();
-    expect(active.results?.map(({ dimension }) => dimension)).toEqual(["gameplay"]);
+    await rebuildOverview(value, transport, "removed-category", { gameplay: TACTICAL_GAMEPLAY });
+    expect(activeEmbeddings.all(APPID)).toEqual([replaced[0]]);
     expect(transport.embeddingSubmissions.length - before).toBe(1);
   });
+  test.each([
+    ["quality", "Excellent writing and outstanding quality"],
+    ["popularity", "A popular game with a large following"],
+    ["technical complaints", "Frequent crashes and framerate problems"],
+  ])("retires both match dimensions when a replacement supplies only %s", async (reason, observation) => {
+    const value = fixture();
+    const transport = new ControlledGeminiTransport({ embeddings: true });
+    await completeInitial(value, transport);
+    const submissions = transport.embeddingSubmissions.length;
+    await rebuildOverview(value, transport, reason, {
+      gameplay: observation,
+      storyWorld: observation,
+    });
+
+    const extraction = value.native.query<{ output_json: string }, []>(
+      "SELECT output_json FROM media_article_extractions WHERE active = 1",
+    ).get();
+    expect(JSON.parse(extraction?.output_json ?? "{}").observations).toEqual([
+      expect.objectContaining({ kind: "finding", text: FINDING }),
+      expect.objectContaining({ kind: "gameplay", text: observation }),
+      expect.objectContaining({ kind: "storyWorld", text: observation }),
+    ]);
+    const active = value.native.query("SELECT dimension FROM media_game_embeddings WHERE appid = ? AND active = 1").all(APPID);
+    expect(active).toEqual([]);
+    expect(transport.embeddingSubmissions).toHaveLength(submissions);
+    const current = value.native.query<{ output_json: string }, [number]>(
+      "SELECT output_json FROM media_game_overviews WHERE appid = ? AND active = 1",
+    ).get(APPID);
+    expect(current).not.toBeNull();
+    expect(JSON.parse(current!.output_json)).not.toHaveProperty("similarityInputs");
+  });
+
   test("reuses vectors when only the Overview identity changes", async () => {
     const value = fixture();
     const transport = new ControlledGeminiTransport({ embeddings: true });
@@ -214,10 +274,10 @@ describe("game overview aggregate embeddings", () => {
     await startNextRun(value, "overview-identity", sourceIds(value));
     transport.nextPolls.push(
       { state: "succeeded", output: extractionOutput(), usage: { inputTokens: 100, outputTokens: 20 } },
-      { state: "succeeded", output: overviewOutput(), usage: { inputTokens: 100, outputTokens: 20 } },
+      { state: "succeeded", output: overviewOutput(URL), usage: { inputTokens: 100, outputTokens: 20 } },
     );
-    await advance(value, transport, ARTICLE_HTML.replace("memorable", "notable"));
-    await advance(value, transport, ARTICLE_HTML.replace("memorable", "notable"));
+    await advance(value, transport, articleHtml(INITIAL_EVIDENCE, "The opening encounter is set at dawn."));
+    await advance(value, transport, articleHtml(INITIAL_EVIDENCE, "The opening encounter is set at dawn."));
     const current = await value.db.prepare("SELECT input_identity FROM media_game_overviews WHERE appid = ? AND active = 1").bind(APPID).first<{ input_identity: string }>();
     const vectors = await value.db.prepare("SELECT dimension, overview_input_identity FROM media_game_embeddings WHERE appid = ? AND active = 1 ORDER BY dimension").bind(APPID).all<{ dimension: string; overview_input_identity: string }>();
     expect(current?.input_identity).not.toBe(previous?.input_identity);
@@ -232,14 +292,14 @@ describe("game overview aggregate embeddings", () => {
     await completeInitial(value, transport);
     const before = transport.embeddingSubmissions.length;
     // The embedding is still in flight when the next change happens.
-    await rebuildOverview(value, transport, "stale-completion", { gameplay: TACTICAL_GAMEPLAY, storyWorld: CITY_STORY }, ARTICLE_HTML.replace("memorable", "notable"), [{ state: "pending" }]);
+    await rebuildOverview(value, transport, "stale-completion", TACTICAL_EVIDENCE, [{ state: "pending" }]);
     expect(transport.embeddingSubmissions.length).toBe(before + 1);
     transport.polls.set(`batches/embed-${transport.embeddingSubmissions.length}`, { state: "succeeded", output: embeddingOutput(4), usage: { inputTokens: 100 } });
     await value.db.prepare("UPDATE media_game_overviews SET input_identity = ? WHERE appid = ? AND active = 1").bind("c".repeat(64), APPID).run();
     const result = await advanceMediaProcessing(value.db, {
       runId: value.runId,
       transport, openRouter: transport.openRouter,
-      articleFetch: async () => "<!doctype html><html><body><article><p>Cyberpunk 2077 has a focused campaign with flexible combat and memorable encounters. This preview was played on PC during Early Access and does not assess the final release.</p></article></body></html>",
+      articleFetch: async () => articleHtml(TACTICAL_EVIDENCE),
     });
     expect(result.failed).toBeGreaterThan(0);
     const stale = await value.db.prepare("SELECT COUNT(*) AS count FROM media_processing_jobs WHERE stage = 'embedding' AND status = 'stale'").first<{ count: number }>();
@@ -251,7 +311,7 @@ describe("game overview aggregate embeddings", () => {
     await completeInitial(value, transport);
     const before = transport.embeddingSubmissions.length;
     // The embedding is still in flight when the next change happens.
-    await rebuildOverview(value, transport, "lost-eligibility", { gameplay: TACTICAL_GAMEPLAY, storyWorld: CITY_STORY }, ARTICLE_HTML.replace("memorable", "notable"), [{ state: "pending" }]);
+    await rebuildOverview(value, transport, "lost-eligibility", TACTICAL_EVIDENCE, [{ state: "pending" }]);
     expect(transport.embeddingSubmissions.length).toBe(before + 1);
     transport.polls.set(`batches/embed-${transport.embeddingSubmissions.length}`, { state: "succeeded", output: embeddingOutput(4), usage: { inputTokens: 100 } });
     await value.db.prepare("UPDATE apps SET is_eligible = 0 WHERE appid = ?").bind(APPID).run();
@@ -279,7 +339,7 @@ describe("game overview aggregate embeddings", () => {
     await authorizeMediaProcessing(value.db, value.runId);
     transport.nextPolls.push(
       { state: "succeeded", output: extractionOutput(), usage: { inputTokens: 100, outputTokens: 20 } },
-      { state: "succeeded", output: overviewOutput(), usage: { inputTokens: 100, outputTokens: 20 } },
+      { state: "succeeded", output: overviewOutput(URL), usage: { inputTokens: 100, outputTokens: 20 } },
       { state: "succeeded", output: embeddingOutput(Number.MAX_VALUE), usage: { inputTokens: 100 } },
       { state: "succeeded", output: embeddingOutput(2), usage: { inputTokens: 100 } },
     );
@@ -298,7 +358,7 @@ describe("game overview aggregate embeddings", () => {
     await authorizeMediaProcessing(value.db, value.runId);
     transport.nextPolls.push(
       { state: "succeeded", output: extractionOutput(), usage: { inputTokens: 100, outputTokens: 20 } },
-      { state: "succeeded", output: overviewOutput(), usage: { inputTokens: 100, outputTokens: 20 } },
+      { state: "succeeded", output: overviewOutput(URL), usage: { inputTokens: 100, outputTokens: 20 } },
     );
     await advance(value, transport);
     await advance(value, transport);
@@ -314,7 +374,7 @@ describe("game overview aggregate embeddings", () => {
     await authorizeMediaProcessing(value.db, value.runId);
     transport.nextPolls.push(
       { state: "succeeded", output: extractionOutput(), usage: { inputTokens: 100, outputTokens: 20 } },
-      { state: "succeeded", output: overviewOutput(), usage: { inputTokens: 100, outputTokens: 20 } },
+      { state: "succeeded", output: overviewOutput(URL), usage: { inputTokens: 100, outputTokens: 20 } },
     );
     if (undone === "failed batch") transport.nextPolls.push({ state: "failed", error: "embedding failed" }, { state: "failed", error: "embedding failed" });
     await advance(value, transport);
@@ -353,7 +413,7 @@ describe("game overview aggregate embeddings", () => {
     await authorizeMediaProcessing(value.db, value.runId);
     transport.nextPolls.push(
       { state: "succeeded", output: extractionOutput(), usage: { inputTokens: 100, outputTokens: 20 } },
-      { state: "succeeded", output: overviewOutput(), usage: { inputTokens: 100, outputTokens: 20 } },
+      { state: "succeeded", output: overviewOutput(URL), usage: { inputTokens: 100, outputTokens: 20 } },
     );
     await advance(value, transport);
     await advance(value, transport);
@@ -370,7 +430,7 @@ describe("game overview aggregate embeddings", () => {
     await authorizeMediaProcessing(value.db, value.runId);
     transport.nextPolls.push(
       { state: "succeeded", output: extractionOutput(), usage: { inputTokens: 100, outputTokens: 20 } },
-      { state: "succeeded", output: overviewOutput(), usage: { inputTokens: 100, outputTokens: 20 } },
+      { state: "succeeded", output: overviewOutput(URL), usage: { inputTokens: 100, outputTokens: 20 } },
     );
     // One advance extracts, synthesizes, and fails both embeddings' first count.
     const failed = await advance(value, transport);

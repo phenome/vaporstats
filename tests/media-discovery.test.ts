@@ -132,7 +132,7 @@ describe("bounded media discovery", () => {
     const authorization = await authorizeMediaRun(db, { pass: "initial", games: [1091500, 1086940, 1145350] });
     const result = await runAuthorizedMediaDiscovery(db, { runId: authorization.runId, tavilyApiKey: "test-key", fetch: fetchFn, now: new Date("2026-09-10T00:00:00.000Z") });
     const rootSources = await getMediaSources(db, 1091500);
-    const childSources = await getMediaSources(db, childAppid);
+    const childSources = await getMediaSources(db, childAppid, { includeUnpublished: true });
     const progressRows = await db.prepare("SELECT appid FROM media_discovery_progress ORDER BY appid").all<{ appid: number }>();
     expect(searchQueries).toContain("Cyberpunk 2077 review preview");
     expect(searchQueries).toContain("Phantom Liberty review preview");
@@ -178,7 +178,7 @@ describe("bounded media discovery", () => {
     const authorization = await authorizeMediaRun(db, { pass: "initial", games: [1145350] });
     await runAuthorizedMediaDiscovery(db, { runId: authorization.runId, tavilyApiKey: "test-key", fetch: fetchFn, now: new Date("2026-09-10T00:00:00.000Z") });
     const rootSources = await getMediaSources(db, 1145350);
-    const childSources = await getMediaSources(db, childAppid);
+    const childSources = await getMediaSources(db, childAppid, { includeUnpublished: true });
     expect(rootSources.some((source) => source.originalUrl.includes("root-child"))).toBe(false);
     expect(rootSources.some((source) => source.originalUrl.includes("root-exact"))).toBe(true);
     expect(childSources).toEqual(expect.arrayContaining([
@@ -228,7 +228,7 @@ describe("bounded media discovery", () => {
       expect(laterQueries.length).toBeLessThanOrEqual(18);
       expect(laterQueries.every((query) => query === "Phantom Liberty review preview")).toBe(true);
       expect(later.queries).toBe(24);
-      expect(await getMediaSources(db, childAppid)).toEqual(expect.arrayContaining([
+      expect(await getMediaSources(db, childAppid, { includeUnpublished: true })).toEqual(expect.arrayContaining([
         expect.objectContaining({
           appid: childAppid,
           originalUrl: "https://ign.com/articles/phantom-liberty",
@@ -268,19 +268,22 @@ describe("bounded media discovery", () => {
     cleanup();
   });
 
-  test("persists Early Access context without retaining article text", async () => {
+  test.each([
+    ["This Early Access review covers the playable build.", "Early Access"],
+    ["Fresh out of Early Access, the released game has new systems.", null],
+  ])("infers the assessed build from %s", async (lead, expected) => {
     const { db, cleanup } = fixture();
     const { fetchFn } = discoveryFetch({
       variants: {
         "https://ign.com/articles/1091500-ign-com": {
-          body: html(1091500, "Cyberpunk 2077 Review", { body: `This Early Access review covers the playable build and its systems. ${"Detailed hands-on observations follow. ".repeat(8)}` }),
+          body: html(1091500, "Cyberpunk 2077 Review", { body: `${lead} ${"Detailed hands-on observations follow. ".repeat(8)}` }),
         },
       },
     });
     const authorization = await authorizeMediaRun(db, { pass: "initial", games: [1091500] });
     await runAuthorizedMediaDiscovery(db, { runId: authorization.runId, tavilyApiKey: "test-key", fetch: fetchFn, now: new Date("2026-09-10T00:00:00.000Z") });
     const source = (await getMediaSources(db, 1091500)).find((item) => item.outlet === "IGN");
-    expect(source).toEqual(expect.objectContaining({ buildContext: "Early Access" }));
+    expect(source).toEqual(expect.objectContaining({ buildContext: expected }));
     expect(source).not.toHaveProperty("body");
     cleanup();
   });

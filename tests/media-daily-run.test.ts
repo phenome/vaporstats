@@ -15,6 +15,7 @@ import {
   insertSources,
   insertSubmittedGeminiExtraction,
   overviewOutputForUrls,
+  extractionOutput,
   runMediaTick,
   seedApps,
   type MediaTickOptions,
@@ -109,6 +110,7 @@ describe("automatic Paid-work summaries", () => {
     insertSources(database.native, CYBERPUNK, "initial", 1);
     const sources = await getMediaSources(database.db, CYBERPUNK);
     const openRouter = controlledOpenRouterApi();
+    openRouter.output("extraction", extractionOutput());
     openRouter.output("synthesis", overviewOutputForUrls(sources.map(({ originalUrl }) => originalUrl)));
 
     const result = await tick(database, { openRouter }, "2026-11-20T06:00:00.000Z", { geminiApiKey: "" });

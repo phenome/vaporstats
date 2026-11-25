@@ -1,6 +1,8 @@
 import React from "react";
 import { renderToString } from "react-dom/server";
 import { Navigate, createFileRoute, notFound } from "@tanstack/react-router";
+import { createServerOnlyFn } from "@tanstack/react-start";
+import { getRequest } from "@tanstack/react-start/server";
 import { QueryClientProvider, useQuery } from "@tanstack/react-query";
 import { getGameByAppId } from "../lib/catalog";
 import { getRelatedApps } from "../lib/related";
@@ -17,7 +19,7 @@ import { createQueryClient } from "../lib/query-client";
 import { GamePageView } from "../components/game-page";
 import { GamePageSkeleton } from "../components/route-skeletons";
 import { AppLink } from "../components/app-link";
-import type { GameDetailResponseData } from "./api.games.$appid.detail";
+import { handleGameDetailRequest, type GameDetailResponseData } from "./api.games.$appid.detail";
 import {
   parseNumericRange,
   parseNumericPriceRange,
@@ -32,6 +34,10 @@ import { CACHE_POLICIES, getEntityCacheHeaders } from "../lib/cache";
 
 export async function fetchGameDetail(appid: number): Promise<GameDetailResponseData> {
   const response = await fetch(`/api/games/${appid}/detail`);
+  return readGameDetailResponse(response, appid);
+}
+
+async function readGameDetailResponse(response: Response, appid: number): Promise<GameDetailResponseData> {
   if (!response.ok) {
     throw new Error(`Failed to load game detail for ${appid}`);
   }
@@ -41,6 +47,12 @@ export async function fetchGameDetail(appid: number): Promise<GameDetailResponse
   }
   return result.data;
 }
+
+const fetchServerGameDetail = createServerOnlyFn(async (appid: number) => {
+  const response = await handleGameDetailRequest(getRequest(), await getDb(), appid);
+  if (response.status === 404) throw notFound();
+  return readGameDetailResponse(response, appid);
+});
 
 export function gameDetailQueryOptions(appid: number) {
   return {
@@ -72,18 +84,26 @@ export const Route = createFileRoute("/games/$game")({
   loaderDeps: ({ search }) => ({
     range: parseNumericRange(search.range),
   }),
-  loader: ({ params, deps, context }) => {
+  loader: async ({ params, deps, context }) => {
     const parsed = parseGameSlug(params.game);
     if (!parsed) {
       throw notFound();
     }
-    if (typeof window !== "undefined") {
-      // Start browser prefetches without delaying navigation or hover.
-      const historyRange = NUMERIC_TO_HISTORY_RANGE[deps.range];
-      void context.queryClient.prefetchQuery(gameDetailQueryOptions(parsed.appid));
-      void context.queryClient.prefetchQuery(gameScoreSummaryQueryOptions(parsed.appid));
-      void context.queryClient.prefetchQuery(gameScoreHistoryQueryOptions(parsed.appid, historyRange));
+    const detailQuery = gameDetailQueryOptions(parsed.appid);
+    if (typeof window === "undefined") {
+      const initialDetail = await context.queryClient.ensureQueryData({
+        ...detailQuery,
+        queryFn: () => fetchServerGameDetail(parsed.appid),
+      });
+      return { appid: parsed.appid, slug: parsed.slug, initialDetail };
     }
+
+    const detailReady = context.queryClient.prefetchQuery(detailQuery);
+    const historyRange = NUMERIC_TO_HISTORY_RANGE[deps.range];
+    void context.queryClient.prefetchQuery(gameScoreSummaryQueryOptions(parsed.appid));
+    void context.queryClient.prefetchQuery(gameScoreHistoryQueryOptions(parsed.appid, historyRange));
+    // The router restores scroll after rendering, so resolve the detail query first.
+    await detailReady;
     return { appid: parsed.appid, slug: parsed.slug };
   },
   component: GameRouteComponent,
@@ -91,13 +111,16 @@ export const Route = createFileRoute("/games/$game")({
 });
 
 function GameRouteComponent() {
-  const { appid, slug } = Route.useLoaderData();
+  const { appid, slug, initialDetail } = Route.useLoaderData();
   const search = Route.useSearch();
   const navigate = Route.useNavigate();
   const numericRange = parseNumericRange(search.range);
   const numericPriceRange = parseNumericPriceRange(search.pricerange);
   const activeEvent = search.event ?? null;
-  const { data, isLoading, isError } = useQuery(gameDetailQueryOptions(appid));
+  const { data, isLoading, isError } = useQuery({
+    ...gameDetailQueryOptions(appid),
+    initialData: initialDetail,
+  });
 
   if (isError) {
     return <GameNotFoundComponent />;

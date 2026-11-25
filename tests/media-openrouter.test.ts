@@ -9,6 +9,7 @@ import {
   BALDURS_GATE,
   CYBERPUNK,
   controlledGeminiApi,
+  mediaObservation,
   controlledOpenRouterApi,
   HADES_II,
   insertCompletedRun,
@@ -103,9 +104,53 @@ describe("text generation through OpenRouter", () => {
     ]);
     for (const request of providers.openRouter.requests) {
       expect(request.authorization).toBe("Bearer test-openrouter-key");
-      expect(request.body.response_format).toEqual({ type: "json_object" });
       expect(request.body.max_tokens).toBeGreaterThan(0);
     }
+    const [extraction, synthesis] = providers.openRouter.requests;
+    expect(extraction!.body.response_format).toEqual({ type: "json_object" });
+    expect(extraction!.body).not.toHaveProperty("provider");
+    expect(synthesis!.body).toMatchObject({
+      provider: { require_parameters: true },
+      response_format: {
+        type: "json_schema",
+        json_schema: {
+          name: "media_overview",
+          strict: true,
+          schema: {
+            type: "object",
+            additionalProperties: false,
+            required: ["statements", "categories", "prosCons", "tags"],
+            properties: {
+              statements: { type: "array", items: {
+                type: "array",
+                items: { type: "string", enum: ["o1"] },
+              } },
+              categories: {
+                type: "object",
+                additionalProperties: false,
+                required: ["Gameplay & systems"],
+                properties: {
+                  "Gameplay & systems": { type: "array", items: {
+                    additionalProperties: false,
+                    required: ["observationIds", "contested"],
+                    properties: {
+                      observationIds: { type: "array", items: { type: "string", enum: ["o1"] } },
+                      contested: { type: "boolean" },
+                    },
+                  } },
+                },
+              },
+              prosCons: { additionalProperties: false, required: ["pros", "cons"], properties: { pros: { type: "null" }, cons: { type: "null" } } },
+              tags: { type: "array", items: { type: "array", items: { type: "string", enum: ["o2"] } } },
+            },
+          },
+        },
+      },
+    });
+    expect(database.native.query("SELECT stage, config_version FROM media_processing_jobs WHERE stage IN ('extraction', 'synthesis') ORDER BY id").all()).toEqual([
+      { stage: "extraction", config_version: "media-extraction-2026-11-25-v7" },
+      { stage: "synthesis", config_version: "media-synthesis-2026-11-25-v11" },
+    ]);
     // Embeddings stay on Gemini Batch; no text is submitted to Gemini.
     expect(providers.gemini.submitted.map((key) => key.split(":")[0])).toEqual(["embedding"]);
     expect(textJobs(database).map(({ stage, provider, model, status }) => ({ stage, provider, model, status }))).toEqual([
@@ -518,7 +563,7 @@ describe("request lifecycle", () => {
   test("an uncertain Overview request is resent automatically with backoff", async () => {
     const { database } = await authorizedGames();
     const providers = apis();
-    providers.openRouter.reply("chat", { status: 200, body: { id: "gen-ok", provider: "Anthropic", model: HAIKU, choices: [{ message: { content: JSON.stringify({ contributions: [{ text: "The combat supports flexible builds", category: "Gameplay & systems" }], traits: ["build experimentation"], qualifications: [], provenance: [] }) } }], usage: { cost: 0.0001 } } }, { hang: true });
+    providers.openRouter.reply("chat", { status: 200, body: { id: "gen-ok", provider: "Anthropic", model: HAIKU, choices: [{ message: { content: JSON.stringify({ observations: [mediaObservation(CYBERPUNK, "combat", "finding", "Builds reward experimentation", "Builds reward experimentation")] }) } }], usage: { cost: 0.0001 } } }, { hang: true });
 
     await tick(database, providers, "2026-11-18T07:00:00.000Z", { openRouterTimeoutMs: 20 });
     expect(textJobs(database).map(({ stage, status, next_attempt_at }) => ({ stage, status, next_attempt_at }))).toEqual([
@@ -535,7 +580,7 @@ describe("request lifecycle", () => {
   test("a resent item whose work no longer needs a provider ends stale and keeps its attempts and their cost", async () => {
     const { database } = await authorizedGames();
     const providers = apis();
-    const extracted = { status: 200, body: { id: "gen-ok", provider: "Anthropic", model: HAIKU, choices: [{ message: { content: JSON.stringify({ contributions: [{ text: "The combat supports flexible builds", category: "Gameplay & systems" }], traits: ["build experimentation"], qualifications: [], provenance: [] }) } }], usage: { cost: 0.00015 } } };
+    const extracted = { status: 200, body: { id: "gen-ok", provider: "Anthropic", model: HAIKU, choices: [{ message: { content: JSON.stringify({ observations: [mediaObservation(CYBERPUNK, "combat", "finding", "Builds reward experimentation", "Builds reward experimentation")] }) } }], usage: { cost: 0.00015 } } };
     providers.openRouter.reply("chat", extracted, { status: 200, body: { id: "gen-overview", usage: { prompt_tokens: 1_000, completion_tokens: 0, cost: 0.0001 }, error: { code: 502, message: "Provider returned error" } } });
     await tick(database, providers, "2026-11-18T07:00:00.000Z");
     expect(textJobs(database).map(({ stage, status }) => ({ stage, status }))).toEqual([{ stage: "extraction", status: "succeeded" }, { stage: "synthesis", status: "queued" }]);
@@ -813,6 +858,9 @@ describe("input cap", () => {
   test("a long article under the cap is sent whole, never cut short", async () => {
     const { database } = await authorizedGames();
     const providers = apis();
+    providers.openRouter.output("extraction", { observations: [
+      mediaObservation(CYBERPUNK, "builds", "finding", "The campaign rewards careful build experimentation across its systems.", "The campaign rewards careful build experimentation across its systems."),
+    ] });
 
     await tick(database, providers, "2026-11-18T07:00:00.000Z", { outlet: () => new Response(longArticle(150_000, "Closing verdict marker.")) });
 

@@ -262,7 +262,7 @@ describe("processing scope", () => {
     expect(transport.submissions.length - submissionsBefore).toBe(3);
     expect(rebuilt.status).toBe("completed");
     expect(rebuilt.outputs).toEqual({ new: 1, reused: 1, replaced: 1, invalidated: 0, skipped: 0 });
-    expect((await getMediaOverview(database.db, CYBERPUNK, { includeUnpublished: true }))?.statements[0]?.sourceUrls).toEqual([reusedUrl, newUrl]);
+    expect((await getMediaOverview(database.db, CYBERPUNK, { includeUnpublished: true }))?.statements[0]?.sourceUrls?.slice().sort()).toEqual([reusedUrl, newUrl].sort());
   });
 
   test("a transient text-generation failure holds no article text and leaves the extraction queued for the run to retry", async () => {
@@ -581,8 +581,8 @@ describe("processing scope", () => {
     const original = processingArticleHtml(CYBERPUNK);
     const corrected = original.replace("flexible combat", "deliberate tactical combat");
     transport.nextPolls.push(
-      { state: "succeeded", output: extractionOutput("tactical depth"), usage: SUCCEEDED_USAGE },
-      { state: "succeeded", output: { ...overviewOutputForUrls([url!]), tags: [{ label: "Tactical depth", sourceUrls: [url!] }] }, usage: SUCCEEDED_USAGE },
+      { state: "succeeded", output: extractionOutput({ trait: "Tactical depth", traitQuote: "deliberate tactical combat" }), usage: SUCCEEDED_USAGE },
+      { state: "succeeded", output: overviewOutputForUrls([url!]), usage: SUCCEEDED_USAGE },
     );
     const correction = await authorizeRun(database, "tactical", sourceIds(database));
     for (const minute of [0, 1]) {

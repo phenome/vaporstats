@@ -22,7 +22,9 @@ import {
   manualProcessingOutcome,
   OPENROUTER_TRUNCATED,
   openRouterKeyLimit,
-  overviewOutputForUrls,
+  extractionAppid,
+  extractionOutput,
+  mediaObservation,
   processingArticleHtml,
   runMediaTick,
   seedApps,
@@ -697,7 +699,7 @@ describe("an unrecognized client error tied to one item", () => {
   type Where = "gemini count" | "gemini submit" | "openrouter chat";
   const BAD = BALDURS_GATE;
   const GOOD = CYBERPUNK;
-  const MARKER = "Unrecognized marker input";
+  const MARKER = "Turn-based combat rewards careful positioning";
 
   /** Providers that answer `status` to every request of `where` for Baldur's Gate 3, and normally to everything else. */
   function badItemProviders(where: Where, status: number) {
@@ -706,9 +708,14 @@ describe("an unrecognized client error tied to one item", () => {
     let triggered = 0;
     const unrecognized = () => { triggered += 1; return { status, body: { error: { code: status, message: "Unrecognized" } } }; };
     apis.openRouter.onChat = (record) => {
-      if (where === "openrouter chat" && record.stage === "extraction" && JSON.stringify(record.body.messages).includes(`Steam app ${BAD}`)) apis.openRouter.reply("chat", unrecognized());
-      // Baldur's Gate 3's Overview gets its own similarity input, so its embedding's token count can be told apart.
-      if (record.stage === "synthesis" && record.urls.some((url) => url.includes(`/${BAD}-`))) apis.openRouter.output("synthesis", { ...overviewOutputForUrls(record.urls), similarityInputs: { gameplay: [MARKER] } });
+      if (record.stage !== "extraction" || extractionAppid(record) !== BAD) return;
+      if (where === "openrouter chat") {
+        apis.openRouter.reply("chat", unrecognized());
+        return;
+      }
+      // Give Baldur's Gate 3 its own gameplay observation to identify its token count.
+      const { observations } = extractionOutput()(record);
+      apis.openRouter.output("extraction", { observations: [...observations, mediaObservation(BAD, "positioning", "gameplay", MARKER, MARKER)] });
     };
     const wrapped = {
       ...gemini,
@@ -737,25 +744,30 @@ describe("an unrecognized client error tied to one item", () => {
         const { apis, triggered } = badItemProviders(where, status);
         const provider = providerOf(where);
 
-        const first = await tick(database, apis, "2026-11-10T07:00:00.000Z");
+        const tickBadItem = (at: string) => tick(database, apis, at, {
+          outlet: (url) => url.includes(`/${BAD}-`)
+            ? new Response(processingArticleHtml(BAD).replace("</article>", `<p>${MARKER}.</p></article>`))
+            : undefined,
+        });
+        const first = await tickBadItem("2026-11-10T07:00:00.000Z");
         expect(first.mediaProcessing?.providers[provider]).toMatchObject({ paused: true, reason: "unrecognized_client_error" });
         expect(item(database, where, BAD)).toEqual({ status: "queued", attempt_count: 1, next_attempt_at: "2026-11-10T07:15:00.000Z" });
         expect(triggered()).toBe(1);
 
         // The pause lifts at the daily check; the other game's item goes first and settles that day.
-        await tick(database, apis, "2026-11-11T06:00:00.000Z");
+        await tickBadItem("2026-11-11T06:00:00.000Z");
         expect(item(database, where, GOOD)?.status).toBe("succeeded");
         expect(triggered()).toBe(2);
         expect(item(database, where, BAD)).toMatchObject({ status: "queued", attempt_count: 2 });
 
-        await tick(database, apis, "2026-11-12T06:00:00.000Z");
+        await tickBadItem("2026-11-12T06:00:00.000Z");
         expect(triggered()).toBe(3);
         expect(item(database, where, BAD)?.status).toBe("client_error_exhausted");
         expect(jobs(database).some((job) => job.status === "refused")).toBe(false);
 
         // It no longer triggers pauses; the other game finishes its work.
-        const after = await tick(database, apis, "2026-11-13T06:00:00.000Z");
-        await tick(database, apis, "2026-11-13T06:15:00.000Z");
+        const after = await tickBadItem("2026-11-13T06:00:00.000Z");
+        await tickBadItem("2026-11-13T06:15:00.000Z");
         expect(triggered()).toBe(3);
         expect(after.mediaProcessing?.providers[provider].paused).toBe(false);
         expect(database.native.query(`SELECT stage, status FROM media_processing_jobs WHERE appid = ${GOOD} ORDER BY id`).all()).toEqual([

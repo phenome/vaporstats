@@ -1,4 +1,5 @@
 import type { AppDatabase } from "./db";
+import { isMediaOverviewPublic, PUBLIC_MEDIA_ROOT_SQL } from "./media-publication";
 import { ELIGIBLE_MEDIA_ENTITY_SQL } from "./media-similarity";
 
 export const MEDIA_CATEGORY_NAMES = [
@@ -25,15 +26,34 @@ export interface MediaOverview {
   tags: Array<{ label: string; slug: string }>;
 }
 
+// Keep paired parentheses at a label boundary, such as the platform in “Aiming (Switch 2)”.
+function trimTagDecoration(value: string): string {
+  const opens: number[] = [];
+  const paired = new Set<number>();
+  for (let i = 0; i < value.length; i++) {
+    if (value[i] === "(") opens.push(i);
+    if (value[i] === ")" && opens.length) {
+      paired.add(opens.pop()!);
+      paired.add(i);
+    }
+  }
+  const leading = /^[\p{P}\p{S}]+/u.exec(value)?.[0].length ?? 0;
+  const trailing = /[\p{P}\p{S}]+$/u.exec(value)?.index ?? value.length;
+  let start = 0;
+  let end = value.length;
+  while (start < leading && !paired.has(start)) start++;
+  while (end > trailing && !paired.has(end - 1)) end--;
+  return value.slice(start, end).trim();
+}
+
 export function normalizeMediaTag(value: unknown): { label: string; slug: string } | null {
   if (typeof value !== "string") return null;
-  const label = value
+  const cleaned = value
     .normalize("NFKC")
     .replace(/[\u0000-\u001f]+/g, " ")
     .replace(/\s+/g, " ")
-    .trim()
-    .replace(/^[\p{P}\p{S}]+|[\p{P}\p{S}]+$/gu, "")
     .trim();
+  const label = trimTagDecoration(cleaned);
   if (!label || label.length > 120) return null;
   const slug = label
     .toLocaleLowerCase("en-US")
@@ -48,21 +68,34 @@ export interface MediaEvidenceSource {
   current?: boolean;
 }
 
-function jsonObject(value: unknown): Record<string, unknown> {
-  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+function isJsonObject(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
 }
+
+function jsonObject(value: unknown): Record<string, unknown> {
+  return isJsonObject(value) ? value : {};
+}
+
+const MALFORMED_JSON = Symbol("malformed JSON");
 
 function parseJson(value: unknown): unknown {
   if (typeof value !== "string") return value;
   const trimmed = value.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
-  try { return JSON.parse(trimmed); } catch { return null; }
+  try { return JSON.parse(trimmed); } catch { return MALFORMED_JSON; }
 }
 
 function cleanLine(value: string): string {
   return value.replace(/[\t ]+/g, " ").replace(/\s+([,.;!?])/g, "$1").trim();
 }
 
-const SOURCE_SUPPORT_LANGUAGE = /\b(?:agreement|agreed|agree|assessments?|commonly|consensus|concurred|coverage|critics?|generally|outlets?|publications?|reviews?|reviewers?|sources?|unanimously|universally|widely)\b/i;
+export const LEGACY_V10_SOURCE_SUPPORT_LANGUAGE = /\b(?:agreement|agreed|agree|assessments?|commonly|consensus|concurred|coverage|critics?|generally|outlets?|publications?|reviews?|reviewers?|sources?|unanimously|universally|widely)\b/i;
+
+const SOURCE_COUNTS = /\b(?:\d+|zero|one|two|three|four|five|six|seven|eight|nine|ten|single|each|every|no)\s+(?:article|assessment|critic|outlet|publication|review|reviewer|source)s?\b/i;
+const COLLECTIVE_SUPPORT = /\b(?:agreement|agreed|agrees?|articles|assessments|commonly|consensus|concur(?:s|red)?|coverage|critics|generally|outlets|publications|reviews|reviewers|sources|unanimously|universally|widely)\b/i;
+
+export function sourceSupportTrigger(text: string): string | undefined {
+  return SOURCE_COUNTS.exec(text)?.[0] ?? COLLECTIVE_SUPPORT.exec(text)?.[0];
+}
 
 export function createMediaEvidenceSource(input: {
   outlet: string;
@@ -144,7 +177,7 @@ function parseFinding(value: unknown, sources: ReadonlyMap<string, MediaEvidence
     ? [...new Set(object.sourceUrls.filter((url): url is string => typeof url === "string" && sources.has(url)))]
     : [];
   if (!text || sourceUrls.length === 0) return null;
-  if (SOURCE_SUPPORT_LANGUAGE.test(text)) return null;
+  if (sourceSupportTrigger(text)) return null;
   return { text, sourceUrls, ...(object.contested === true ? { contested: true } : {}) };
 }
 
@@ -202,14 +235,30 @@ export function parseMediaOverview(
   appid: number,
   sources: ReadonlyMap<string, MediaEvidenceSource>,
 ): MediaOverview | null {
-  const parsed = jsonObject(parseJson(value));
+  const result = validateMediaOverview(value, appid, sources);
+  return "overview" in result ? result.overview : null;
+}
+
+type MediaOverviewValidation =
+  | { overview: MediaOverview }
+  | { error: "malformed JSON" | "expected a JSON object" | "no cited statements" };
+
+export function validateMediaOverview(
+  value: unknown,
+  appid: number,
+  sources: ReadonlyMap<string, MediaEvidenceSource>,
+): MediaOverviewValidation {
+  const parsed = parseJson(value);
+  if (parsed === MALFORMED_JSON) return { error: "malformed JSON" };
+  if (!isJsonObject(parsed)) return { error: "expected a JSON object" };
+
   const rawStatements = Array.isArray(parsed.statements)
     ? parsed.statements
     : Array.isArray(jsonObject(parsed.overview).statements)
       ? jsonObject(parsed.overview).statements as unknown[]
       : [];
   const statements = parseFindings(rawStatements, sources);
-  if (statements.length === 0) return null;
+  if (statements.length === 0) return { error: "no cited statements" };
 
   const categories: MediaOverview["categories"] = [];
   const rawCategories = Array.isArray(parsed.categories) ? parsed.categories : [];
@@ -224,11 +273,13 @@ export function parseMediaOverview(
   const cons = parseFindings(rawProsCons.cons, sources);
   const tags = parseMediaTagEvidence(parsed, sources).map(({ tag }) => tag);
   return {
-    appid,
-    statements,
-    categories,
-    prosCons: pros.length > 0 || cons.length > 0 ? { pros, cons } : null,
-    tags,
+    overview: {
+      appid,
+      statements,
+      categories,
+      prosCons: pros.length > 0 || cons.length > 0 ? { pros, cons } : null,
+      tags,
+    },
   };
 }
 
@@ -238,8 +289,7 @@ export async function getMediaOverview(
   options: { includeUnpublished?: boolean } = {},
 ): Promise<MediaOverview | null> {
   if (!Number.isInteger(appid) || appid <= 0) return null;
-  const publicEnabled = typeof process !== "undefined" && process.env?.MEDIA_OVERVIEW_PUBLIC === "true";
-  if (!options.includeUnpublished && !publicEnabled) return null;
+  if (!options.includeUnpublished && !isMediaOverviewPublic()) return null;
   const row = await first<{ output_json: string }>(
     db,
     `SELECT overview.output_json
@@ -249,6 +299,7 @@ export async function getMediaOverview(
       AND app.is_eligible = 1
       AND ${ELIGIBLE_MEDIA_ENTITY_SQL}
      WHERE overview.appid = ? AND overview.active = 1
+       ${options.includeUnpublished ? "" : `AND ${PUBLIC_MEDIA_ROOT_SQL}`}
      ORDER BY overview.id DESC
      LIMIT 1`,
     appid,

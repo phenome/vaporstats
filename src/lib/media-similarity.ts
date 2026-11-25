@@ -1,5 +1,6 @@
 import type { AppDatabase } from "./db";
 import { decodeVector, GEMINI_EMBEDDING_DIMENSIONS } from "./media-embedding-vector";
+import { isMediaOverviewPublic, PUBLIC_MEDIA_ROOT_SQL } from "./media-publication";
 import { getCanonicalChildPath } from "./related";
 import { getCanonicalGamePath } from "./slug";
 
@@ -97,8 +98,8 @@ export async function getMediaGameMatches(
   options: { limit?: number; includeUnpublished?: boolean } = {},
 ): Promise<MediaGameMatch[]> {
   if (!Number.isInteger(appid) || appid <= 0) return [];
-  const publicEnabled = typeof process !== "undefined" && process.env?.MEDIA_OVERVIEW_PUBLIC === "true";
-  if (!options.includeUnpublished && !publicEnabled) return [];
+  if (!options.includeUnpublished && !isMediaOverviewPublic()) return [];
+  const publicScope = options.includeUnpublished ? "" : `AND ${PUBLIC_MEDIA_ROOT_SQL}`;
   const limit = normalizeLimit(options.limit);
   if (limit === 0) return [];
 
@@ -107,6 +108,7 @@ export async function getMediaGameMatches(
      FROM apps AS app
      WHERE app.appid = ? AND app.is_eligible = 1
        AND ${ELIGIBLE_MEDIA_ENTITY_SQL}
+       ${publicScope}
      LIMIT 1`,
   ).bind(appid).first<GameRow>();
   if (!currentGame) return [];
@@ -155,6 +157,7 @@ export async function getMediaGameMatches(
          ON app.appid = embedding.appid
         AND app.is_eligible = 1
         AND ${ELIGIBLE_MEDIA_ENTITY_SQL}
+        ${publicScope}
        JOIN media_game_overviews AS overview
          ON overview.appid = embedding.appid
         AND overview.active = 1

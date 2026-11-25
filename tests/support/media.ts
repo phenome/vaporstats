@@ -5,6 +5,7 @@ import { copyTestDatabase, openTestDatabase, type TestDatabase } from "./db";
 import type { GeminiBatchPoll, GeminiBatchTransport } from "../../src/lib/media-processing";
 import { createOpenRouterTransport, type OpenRouterTransport } from "../../src/lib/media-openrouter";
 import { GeminiHttpError, MAX_CLIENT_ERROR_PAUSES, MAX_UNCERTAIN_SENDS } from "../../src/lib/media-paid-providers";
+import type { MediaObservation } from "../../src/lib/media-observations";
 import { MEDIA_OUTLETS, type MediaPass } from "../../src/lib/media-discovery";
 
 export const CYBERPUNK = 1091500;
@@ -155,6 +156,7 @@ export class ControlledGeminiTransport implements GeminiBatchTransport {
     if (answer.state === "pending") return { network: "The operation timed out.", name: "TimeoutError" };
     if (answer.state === "failed") return { status: 400, body: { error: { code: 400, message: "Invalid request" } } };
     if (answer.state === "http") return { status: answer.status, body: { error: { code: answer.status, message: `HTTP ${answer.status}` } } };
+    const output = resolveChatOutput(answer.output, request);
     const usage = answer.usage
       ? { prompt_tokens: answer.usage.inputTokens ?? 0, completion_tokens: answer.usage.outputTokens ?? 0, cost: ((answer.usage.inputTokens ?? 0) * 0.1 + (answer.usage.outputTokens ?? 0) * 0.5) / 1_000_000 }
       : undefined;
@@ -165,7 +167,7 @@ export class ControlledGeminiTransport implements GeminiBatchTransport {
         object: "chat.completion",
         model: request.model,
         provider: "Anthropic",
-        choices: [{ index: 0, finish_reason: "stop", message: { role: "assistant", content: typeof answer.output === "string" ? answer.output : JSON.stringify(answer.output ?? null) } }],
+        choices: [{ index: 0, finish_reason: "stop", message: { role: "assistant", content: typeof output === "string" ? output : JSON.stringify(output ?? null) } }],
         ...(usage ? { usage } : {}),
       },
     };
@@ -270,7 +272,7 @@ export function discoveryArticleHtml(
   title: string,
   options: { date?: string | null; author?: string; affiliation?: string; body?: string } = {},
 ): string {
-  const body = options.body ?? `${GAME_NAMES[appid]} delivers a substantial playable campaign with detailed systems and memorable encounters. `.repeat(5);
+  const body = options.body ?? (`${GAME_NAMES[appid]} delivers a substantial playable campaign with detailed systems and memorable encounters. `.repeat(5) + "Builds reward experimentation.");
   const affiliation = options.affiliation ? `<meta name="author_affiliation" content="${options.affiliation}">` : "";
   const published = options.date === null ? "" : `<meta property="article:published_time" content="${options.date ?? "2025-01-01"}">`;
   return `<!doctype html><html><head><meta property="og:title" content="${title}">${published}<meta name="author" content="${options.author ?? "Reviewer"}">${affiliation}</head><body><article><h1>${title}</h1><p>${body}</p></article></body></html>`;
@@ -312,18 +314,92 @@ export function processingArticleHtml(appid: number): string {
   return `<!doctype html><html><head><title>${name} Review</title><script>secret-not-content</script></head><body><nav>Navigation noise</nav><article><h1>${name} Review</h1><p>${name} has a focused campaign with flexible combat and memorable encounters.</p><h2>Qualifications</h2><p>This preview was played on PC during Early Access and does not assess the final release.</p><ul><li>Builds reward experimentation</li><li>Performance varies by platform</li></ul></article><aside class="advertisement">Advertisement noise</aside></body></html>`;
 }
 
-export function extractionOutput(trait = "build experimentation"): Record<string, unknown> {
-  return { contributions: [{ text: "The combat supports flexible builds", category: "Gameplay & systems" }], traits: [trait], qualifications: ["Early Access", "PC preview"], provenance: [] };
+export type ChatOutput = (request: OpenRouterRequestRecord) => unknown;
+
+function resolveChatOutput(output: unknown, request: OpenRouterRequestRecord): unknown {
+  return typeof output === "function" ? (output as ChatOutput)(request) : output;
 }
 
-export function overviewOutput(url: string): Record<string, unknown> {
-  return {
-    statements: [{ text: "The game presents a focused campaign with flexible combat, with the preview's Early Access and PC qualification retained.", sourceUrls: [url] }],
-    tags: [{ label: "Build.Experimentation", sourceUrls: [url] }],
+export function extractionAppid(request: OpenRouterRequestRecord): number {
+  const match = request.body.messages[0]?.content.match(/^Analyze the article about Steam app (\d+)\./);
+  if (!match) throw new Error("Missing target app in extraction request");
+  return Number(match[1]);
+}
+
+export function mediaObservation(appid: number, id: string, kind: MediaObservation["kind"], text: string, quote: string, category = kind === "finding" ? "Gameplay & systems" : "") {
+  return { id, appid, kind, text, quote, category, qualifiers: [] };
+}
+
+const BUILD_QUOTE = "Builds reward experimentation";
+
+export function extractionOutput(options: string | { trait?: string; traitQuote?: string; gameplay?: boolean } = {}) {
+  const { trait = "build experimentation", traitQuote = BUILD_QUOTE, gameplay = false } = typeof options === "string" ? { trait: options } : options;
+  return (request: OpenRouterRequestRecord) => {
+    const appid = extractionAppid(request);
+    return { observations: [
+      mediaObservation(appid, "combat", "finding", BUILD_QUOTE, BUILD_QUOTE),
+      mediaObservation(appid, "build", "tag", trait, traitQuote),
+      ...(gameplay ? [mediaObservation(appid, "gameplay", "gameplay", BUILD_QUOTE, BUILD_QUOTE)] : []),
+    ] };
   };
 }
 
-export function overviewOutputForUrls(urls: readonly string[]): Record<string, unknown> {
+type SynthesisSource = { sourceIdentity: string; sourceUrl: string; extraction: { observations: Array<MediaObservation & { selectionId: string }> } };
+
+export function synthesisEvidence({ messages }: Pick<OpenRouterRequestRecord["body"], "messages">): SynthesisSource[] {
+  const content = messages[0]?.content ?? "";
+  if (!content.startsWith("Synthesize the current assessments")) return [];
+  return JSON.parse(content.slice(content.lastIndexOf("\n") + 1)) as SynthesisSource[];
+}
+
+export function synthesisSelectionId(source: SynthesisSource, observationId: string): string {
+  const selectionId = source.extraction.observations.find(({ id }) => id === observationId)?.selectionId;
+  if (!selectionId) throw new Error(`Missing selection ID for observation ${observationId} at ${source.sourceUrl}`);
+  return selectionId;
+}
+
+export function emptySynthesisSelection(sources: readonly SynthesisSource[]) {
+  const observations = sources.flatMap(({ extraction }) => extraction.observations);
+  const groups = (kind: "finding" | "pro" | "con" | "tag"): string[][] | null =>
+    observations.some((observation) => observation.kind === kind) ? [] : null;
+  const categories = Object.fromEntries(observations.filter(({ kind }) => kind === "finding").map(({ category }) => [category, []]));
+  return { statements: groups("finding"), categories, prosCons: { pros: groups("pro"), cons: groups("con") }, tags: groups("tag") };
+}
+
+export function overviewOutput(url: string): ChatOutput {
+  return overviewOutputForUrls([url]);
+}
+
+export function overviewOutputForUrls(urls: readonly string[], { tags = true }: { tags?: boolean } = {}): ChatOutput {
+  return ({ body }) => {
+    const evidence = synthesisEvidence(body);
+    const sources = evidence.filter(({ sourceUrl }) => urls.includes(sourceUrl));
+    const empty = emptySynthesisSelection(evidence);
+    const entries = (kind: "finding" | "tag") => {
+      const groups = new Map<string, string[]>();
+      for (const source of sources) {
+        const item = source.extraction.observations.find((observation) => observation.kind === kind);
+        if (!item) continue;
+        const key = JSON.stringify([item.text, [...item.qualifiers].sort()]);
+        const selectionIds = groups.get(key) ?? [];
+        selectionIds.push(item.selectionId);
+        groups.set(key, selectionIds);
+      }
+      return [...groups.values()];
+    };
+    return {
+      ...empty,
+      statements: empty.statements === null ? null : entries("finding"),
+      tags: tags && empty.tags !== null ? entries("tag") : empty.tags,
+    };
+  };
+}
+
+export function legacyExtractionOutput(trait = "build experimentation"): Record<string, unknown> {
+  return { contributions: [{ text: "At launch, the combat supports flexible builds", category: "Gameplay & systems" }], traits: [trait], qualifications: ["Early Access", "PC preview"], provenance: [] };
+}
+
+function legacyOverviewOutputForUrls(urls: readonly string[]): Record<string, unknown> {
   return {
     statements: [{ text: "The game presents a focused campaign with flexible combat.", sourceUrls: [...urls] }],
     tags: [{ label: "Build experimentation", sourceUrls: [...urls] }],
@@ -377,8 +453,8 @@ export function controlledGeminiApi() {
       return { embedding: { values: Array.from({ length: 3072 }, (_, index) => (index % 7) / 7) }, usageMetadata: { promptTokenCount: 1_000 } };
     }
     const text = stage === "synthesis"
-      ? JSON.stringify({ ...overviewOutputForUrls([...new Set(JSON.stringify(body).match(/https:\/\/[^"\\]+\/articles\/[^"\\]+/g) ?? [])]), similarityInputs: { gameplay: ["Flexible combat builds"] } })
-      : JSON.stringify(extractionOutput());
+      ? JSON.stringify({ ...legacyOverviewOutputForUrls([...new Set(JSON.stringify(body).match(/https:\/\/[^"\\]+\/articles\/[^"\\]+/g) ?? [])]), similarityInputs: { gameplay: ["Flexible combat builds"] } })
+      : JSON.stringify(legacyExtractionOutput());
     return { candidates: [{ content: { parts: [{ text }] } }], usageMetadata: { promptTokenCount: 1_000, candidatesTokenCount: 100 } };
   };
   const fetchFn = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
@@ -445,7 +521,7 @@ export type OpenRouterCall = "chat" | "key";
 
 /** One chat completion the controlled OpenRouter API received. */
 export interface OpenRouterRequestRecord {
-  /** `extraction` or `synthesis`, by whether the request cites article URLs. */
+  /** The stage named in the request's prompt. */
   stage: "extraction" | "synthesis";
   model: string;
   body: { model: string; messages: Array<{ role: string; content: string }>; response_format?: unknown; max_tokens?: number; reasoning?: unknown };
@@ -498,15 +574,17 @@ export function controlledOpenRouterApi() {
     }
     if (url !== "https://openrouter.ai/api/v1/chat/completions") return Response.json({ error: { code: 404, message: "Not Found" } }, { status: 404 });
     const body = JSON.parse(String(init?.body)) as OpenRouterRequestRecord["body"];
-    const urls = [...new Set(JSON.stringify(body.messages).match(/https:\/\/[^"\\]+\/articles\/[^"\\]+/g) ?? [])];
-    const record: OpenRouterRequestRecord = { stage: urls.length > 0 ? "synthesis" : "extraction", model: body.model, body, authorization, urls };
+    const evidence = synthesisEvidence(body);
+    const urls = evidence.map(({ sourceUrl }) => sourceUrl);
+    const stage = body.messages[0]?.content.startsWith("Synthesize the current assessments") ? "synthesis" : "extraction";
+    const record: OpenRouterRequestRecord = { stage, model: body.model, body, authorization, urls };
     requests.push(record);
     calls.push({ kind: "chat", stage: record.stage });
     await api.onChat?.(record);
     const reply = replies.chat.shift();
     if (reply) return answer(reply, init?.signal);
-    const output = outputs[record.stage].shift()
-      ?? (record.stage === "synthesis" ? { ...overviewOutputForUrls(urls), similarityInputs: { gameplay: ["Flexible combat builds"] } } : extractionOutput());
+    const output = resolveChatOutput(outputs[record.stage].shift()
+      ?? (record.stage === "synthesis" ? overviewOutputForUrls(urls) : extractionOutput({ gameplay: true })), record);
     return Response.json({
       id: `gen-${requests.length}`,
       object: "chat.completion",
@@ -1282,7 +1360,7 @@ export function experimentWorld(): MediaWorld {
   const pages = new Map<string, string>();
   for (const appid of [CYBERPUNK, BALDURS_GATE, HADES_II]) {
     for (const outlet of MEDIA_OUTLETS) {
-      const body = (when: string) => `${GAME_NAMES[appid]} offers a substantial playable campaign with detailed systems, as ${outlet.name}'s ${when} assessment describes at length. `.repeat(5);
+      const body = (when: string) => `${GAME_NAMES[appid]} offers a substantial playable campaign with detailed systems, as ${outlet.name}'s ${when} assessment describes at length. `.repeat(5) + "Builds reward experimentation.";
       const page = (suffix: string, title: string, date: string, when: string) =>
         pages.set(experimentArticleUrl(appid, outlet.domain, suffix), discoveryArticleHtml(appid, `${GAME_NAMES[appid]} ${title}`, { date, author: `${outlet.name} critic`, body: body(when) }));
       page("-preview", "Hands-on Preview", "2026-10-01T00:00:00.000Z", "preview");
@@ -1416,7 +1494,7 @@ export function seedProductionLike(native: Database): void {
     const metadata = { appid: source.appid, originalUrl: source.original_url, title: source.title, outlet: source.outlet, author: source.author, publishedAt: source.published_at, updatedAt: source.updated_at, type: source.type, handsOn: source.hands_on, affiliation: source.affiliation, platform: source.platform, buildContext: source.build_context };
     const identity = recordedIdentity({ stage: "extraction", hash, cleanupVersion: cleanup, model: gemini, configVersion: extractionConfig, metadata });
     native.prepare("UPDATE media_sources SET normalized_content_hash = ?, cleanup_version = ?, processing_input_identity = ?, processing_run_id = ?, contribution_run_id = ? WHERE id = ?").run(hash, cleanup, identity, runId, runId, sourceId);
-    const output = { ...extractionOutput(), contributions: [{ text: "The combat supports flexible builds", category: "Gameplay & systems", sourceIdentity: identity }], provenance: [{ sourceIdentity: identity, sourceUrl: source.original_url }] };
+    const output = { ...legacyExtractionOutput(), contributions: [{ text: "The combat supports flexible builds", category: "Gameplay & systems", sourceIdentity: identity }], provenance: [{ sourceIdentity: identity, sourceUrl: source.original_url }] };
     if (active) native.prepare("UPDATE media_article_extractions SET active = 0 WHERE source_id = ?").run(sourceId);
     native.prepare("INSERT INTO media_article_extractions (source_id, input_identity, content_hash, cleanup_version, model, config_version, output_json, active, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
       .run(sourceId, identity, hash, cleanup, gemini, extractionConfig, JSON.stringify(output), active ? 1 : 0, `2026-09-1${runId}T12:00:00.000Z`);
@@ -1427,7 +1505,7 @@ export function seedProductionLike(native: Database): void {
     const identity = recordedIdentity({ stage: "synthesis", appid: CP, model: gemini, configVersion: synthesisConfig, extractions: extractions.map(({ sourceId, identity: inputIdentity }) => ({ sourceId, inputIdentity })).sort((a, b) => a.sourceId - b.sourceId) });
     const urls = extractions.map(({ sourceId }) => native.query<{ original_url: string }, [number]>("SELECT original_url FROM media_sources WHERE id = ?").get(sourceId)!.original_url);
     native.prepare("INSERT INTO media_game_overviews (appid, input_identity, model, config_version, output_json, active, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
-      .run(CP, identity, gemini, synthesisConfig, JSON.stringify({ ...overviewOutputForUrls(urls), similarityInputs: { gameplay: ["Open-world action role-playing with flexible builds"], storyWorld: ["A dense neon megacity shaped by corporate power"] } }), active ? 1 : 0, `2026-09-1${runId}T13:00:00.000Z`);
+      .run(CP, identity, gemini, synthesisConfig, JSON.stringify({ ...legacyOverviewOutputForUrls(urls), similarityInputs: { gameplay: ["Open-world action role-playing with flexible builds"], storyWorld: ["A dense neon megacity shaped by corporate power"] } }), active ? 1 : 0, `2026-09-1${runId}T13:00:00.000Z`);
     job.run(runId, "synthesis", CP, null, `synthesis:${CP}:${identity}`, identity, gemini, synthesisConfig, 2400, 240, "succeeded", `2026-09-1${runId}T12:30:00.000Z`, "estimated", `batches/synthesis-${runId}`, `2026-09-1${runId}T12:31:00.000Z`, `2026-09-1${runId}T13:00:00.000Z`);
   };
   const first = [extract(4, 4, "first IGN text", true), extract(5, 4, "Eurogamer text", true), extract(6, 4, "PC Gamer text", true)];

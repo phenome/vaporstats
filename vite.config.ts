@@ -38,7 +38,8 @@ export default defineConfig({
     dedupe: ["react", "react-dom", "@tanstack/react-router", "@tanstack/react-start", "@tanstack/react-query"],
   },
   ssr: {
-    noExternal: ["react", "react-dom", "@tanstack/react-router", "@tanstack/react-start", "@tanstack/react-query"],
+    // Recharts uses React hooks during SSR and must share the renderer's React instance.
+    noExternal: ["react", "react-dom", "@tanstack/react-router", "@tanstack/react-start", "@tanstack/react-query", "recharts"],
   },
   environments: {
     ssr: {

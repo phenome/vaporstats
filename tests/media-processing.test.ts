@@ -11,12 +11,19 @@ import { openTestDatabase } from "./support/db";
 import {
   ControlledGeminiTransport as ControlledTransport,
   GAME_NAMES,
+  emptySynthesisSelection,
   extractionOutput,
+  extractionAppid,
+  legacyExtractionOutput,
+  mediaObservation,
+  synthesisEvidence,
+  synthesisSelectionId,
+  type ChatOutput,
   insertCompletedRun,
   overviewOutput,
   overviewOutputForUrls,
   insertSubmittedGeminiExtraction,
-  processingArticleHtml as articleHtml,
+  processingArticleHtml,
   seedApps,
 } from "./support/media";
 
@@ -26,64 +33,69 @@ const URLS: Record<number, string> = {
   1086940: "https://ign.com/articles/baldurs-review",
 };
 
+function articleHtml(appid: number): string {
+  return processingArticleHtml(appid).replace(
+    "This preview was played on PC during Early Access and does not assess the final release.",
+    "The review covers the finished PC release.",
+  );
+}
+
 function fixture(appids: readonly number[] = [APPIDS[0]]) {
   const database = openTestDatabase("vaporstats-media-processing-");
   seedApps(database.native, appids);
   const runId = insertCompletedRun(database.native, `initial:${appids.join(",")}:test`, appids);
   for (const appid of appids) {
-    database.native.prepare("INSERT INTO media_sources (appid, pass, original_url, title, outlet, retrieved_at, type, hands_on, platform, build_context) VALUES (?, 'initial', ?, ?, 'IGN', ?, 'preview', 1, 'PC', 'Early Access')").run(appid, URLS[appid], `${GAME_NAMES[appid]} Review`, "2026-09-11T00:00:00.000Z");
+    database.native.prepare("INSERT INTO media_sources (appid, pass, original_url, title, outlet, retrieved_at, type, hands_on, platform, build_context) VALUES (?, 'initial', ?, ?, 'IGN', ?, 'review', 1, 'PC', 'release')").run(appid, URLS[appid], `${GAME_NAMES[appid]} Review`, "2026-09-11T00:00:00.000Z");
   }
   return { ...database, runId };
 }
 
-function extractionOutputWithUnsupportedCategories(): Record<string, unknown> {
-  return {
-    categories: { "Gameplay & systems": ["Supported category evidence"], "Unsupported category": ["Must not persist"] },
-    contributions: [
-      { text: "Supported contribution", category: "Gameplay & systems" },
-      { text: "Unsupported contribution", category: "Unsupported category" },
-      { text: "Missing category contribution" },
-    ],
-    traits: [],
-    qualifications: [],
-    provenance: [],
-  };
+function extractionOutputWithUnsupportedCategories(request: Parameters<ChatOutput>[0]) {
+  const appid = extractionAppid(request);
+  const quote = "Builds reward experimentation";
+  return { observations: [
+    mediaObservation(appid, "supported", "finding", "Supported contribution", quote),
+    mediaObservation(appid, "supported-category", "finding", "Supported category evidence", quote),
+    mediaObservation(appid, "wrong-category", "finding", "Unsupported contribution", quote, "Unsupported category"),
+    mediaObservation(appid, "missing-category", "finding", "Missing category contribution", quote, ""),
+  ] };
 }
 
-function overviewOutputWithoutTags(url: string): Record<string, unknown> {
-  return {
-    statements: [{ text: "The game presents a focused campaign with flexible combat.", sourceUrls: [url] }],
-  };
+function overviewOutputWithoutTags(url: string): ChatOutput {
+  return overviewOutputForUrls([url], { tags: false });
 }
 
-function richOverviewOutput(urls: {
-  ign: string;
-  followup: string;
-  eurogamer: string;
-  republication: string;
-  explicitRepublication: string;
-}): Record<string, unknown> {
-  return {
-    statements: [
-      { text: "Critics agree that one outlet saw flexible combat.", sourceUrls: [urls.ign, urls.followup] },
-      { text: "Flexible combat has material differences in pacing.", sourceUrls: [urls.ign, urls.eurogamer, urls.republication, urls.explicitRepublication] },
-    ],
-    categories: [
-      {
-        name: "Gameplay & systems",
-        findings: [
-          { text: "Flexible builds support experimentation.", sourceUrls: [urls.ign] },
-          { text: "Combat pacing can feel deliberate or sluggish depending on build.", sourceUrls: [urls.ign, urls.eurogamer, urls.republication, urls.explicitRepublication], contested: true },
-          { text: "Outlets agree on a duplicated observation.", sourceUrls: [urls.eurogamer, urls.republication, urls.explicitRepublication] },
+const RICH_FINDINGS = {
+  stray: "Critics agree that one outlet saw flexible combat.",
+  pacing: "Flexible combat has material differences in pacing.",
+  flexible: "Flexible builds support experimentation.",
+  deliberate: "Combat pacing feels deliberate.",
+  sluggish: "Combat pacing feels sluggish.",
+  duplicate: "Outlets agree on a duplicated observation.",
+  city: "The city presentation stands out.",
+  pro: "Flexible builds reward experimentation.",
+};
+
+function richOverviewOutput(urls: Record<"ign" | "followup" | "eurogamer" | "republication" | "explicitRepublication", string>): ChatOutput {
+  return ({ body }) => {
+    const sources = synthesisEvidence(body);
+    const ids = (id: keyof typeof RICH_FINDINGS, ...sourceUrls: string[]) => sourceUrls.map((url) => synthesisSelectionId(sources.find(({ sourceUrl }) => sourceUrl === url)!, id));
+    const finding = (id: keyof typeof RICH_FINDINGS, ...sourceUrls: string[]) => ({ observationIds: ids(id, ...sourceUrls), contested: false });
+    const syndicated = [urls.eurogamer, urls.republication, urls.explicitRepublication];
+    const empty = emptySynthesisSelection(sources);
+    return {
+      ...empty,
+      statements: [ids("pacing", urls.ign, ...syndicated)],
+      categories: {
+        ...empty.categories,
+        "Gameplay & systems": [
+          finding("flexible", urls.ign),
+          { observationIds: [...ids("deliberate", urls.ign), ...ids("sluggish", ...syndicated)], contested: true },
         ],
+        "Visuals & audio": [finding("city", urls.followup)],
       },
-      { name: "Visuals & audio", findings: [{ text: "The city presentation stands out.", sourceUrls: [urls.followup] }] },
-      { name: "Unsupported category", findings: [{ text: "Must remain absent.", sourceUrls: [urls.ign] }] },
-    ],
-    prosCons: {
-      pros: [{ text: "Flexible builds reward experimentation.", sourceUrls: [urls.ign, urls.eurogamer] }],
-      cons: [],
-    },
+      prosCons: { ...empty.prosCons, pros: [ids("pro", urls.ign, urls.eurogamer)] },
+    };
   };
 }
 
@@ -92,7 +104,7 @@ function sourceIds(fixtureValue: ReturnType<typeof fixture>): number[] {
 }
 
 async function finishSingle(fixtureValue: ReturnType<typeof fixture>, transport: ControlledTransport) {
-  transport.nextPolls.push({ state: "succeeded", output: extractionOutput(), usage: { inputTokens: 100, outputTokens: 30, thinkingTokens: 5 } });
+  transport.nextPolls.push({ state: "succeeded", output: extractionOutput("Build.Experimentation"), usage: { inputTokens: 100, outputTokens: 30, thinkingTokens: 5 } });
   transport.nextPolls.push({ state: "succeeded", output: overviewOutput(URLS[APPIDS[0]]), usage: { inputTokens: 100, outputTokens: 30, thinkingTokens: 5 } });
   // Text answers settle as they arrive: one advance extracts and synthesizes.
   const summary = await advanceMediaProcessing(fixtureValue.db, { runId: fixtureValue.runId, transport, openRouter: transport.openRouter, articleFetch: async () => articleHtml(APPIDS[0]), now: new Date("2026-09-11T00:00:00.000Z") });
@@ -110,6 +122,7 @@ afterEach(() => { while (cleanups.length > 0) cleanups.pop()!(); });
       tags: [
         { label: "  First-Person Shooter! ", sourceUrls: [url] },
         { label: "first person shooter", sourceUrls: [url] },
+        { label: "Joy-Con mouse-style aiming (Switch 2 port)!", sourceUrls: [url] },
         { label: "unsupported", sourceUrls: ["https://example.test/not-current"] },
       ],
     }, APPIDS[0], new Map([[url, { outlet: "IGN", identities: ["current"] }]]));
@@ -117,7 +130,10 @@ afterEach(() => { while (cleanups.length > 0) cleanups.pop()!(); });
       label: "First.Person Shooter",
       slug: "first-person-shooter",
     });
-    expect(parsed?.tags).toEqual([{ label: "First-Person Shooter", slug: "first-person-shooter" }]);
+    expect(parsed?.tags).toEqual([
+      { label: "First-Person Shooter", slug: "first-person-shooter" },
+      { label: "Joy-Con mouse-style aiming (Switch 2 port)", slug: "joy-con-mouse-style-aiming-switch-2-port" },
+    ]);
     expect(parsed?.categories[0]?.findings[0]?.contested).toBe(true);
   });
 
@@ -183,7 +199,7 @@ describe("bounded Gemini media processing", () => {
     const childAppid = 2138330;
     const childUrl = "https://ign.com/articles/phantom-liberty-review";
     value.native.prepare("INSERT INTO apps (appid, name, slug, type, parent_appid) VALUES (?, ?, ?, 'expansion', ?)").run(childAppid, "Cyberpunk 2077: Phantom Liberty", "cyberpunk-2077-phantom-liberty", APPIDS[0]);
-    value.native.prepare("INSERT INTO media_sources (appid, pass, original_url, title, outlet, retrieved_at, type, hands_on, platform, build_context) VALUES (?, 'initial', ?, ?, 'IGN', ?, 'review', 1, 'PC', 'Early Access')").run(childAppid, childUrl, "Phantom Liberty Review", "2026-09-11T00:00:00.000Z");
+    value.native.prepare("INSERT INTO media_sources (appid, pass, original_url, title, outlet, retrieved_at, type, hands_on, platform, build_context) VALUES (?, 'initial', ?, ?, 'IGN', ?, 'review', 1, 'PC', 'release')").run(childAppid, childUrl, "Phantom Liberty Review", "2026-09-11T00:00:00.000Z");
     await authorizeMediaProcessing(value.db, value.runId);
     const transport = new ControlledTransport();
     transport.nextPolls.push(
@@ -206,7 +222,7 @@ describe("bounded Gemini media processing", () => {
     expect(await getMediaOverview(value.db, APPIDS[0], { includeUnpublished: true })).not.toBeNull();
     expect(await getMediaOverview(value.db, childAppid, { includeUnpublished: true })).not.toBeNull();
     await value.db.prepare("UPDATE apps SET type = 'soundtrack' WHERE appid = ?").bind(childAppid).run();
-    expect(await getMediaSources(value.db, childAppid)).toEqual([]);
+    expect(await getMediaSources(value.db, childAppid, { includeUnpublished: true })).toEqual([]);
     expect(await getMediaOverview(value.db, childAppid, { includeUnpublished: true })).toBeNull();
     await value.db.prepare("UPDATE apps SET type = 'expansion' WHERE appid = ?").bind(childAppid).run();
     const overviewAppids = await value.db.prepare("SELECT appid FROM media_game_overviews WHERE active = 1 ORDER BY appid").all<{ appid: number }>();
@@ -259,7 +275,7 @@ describe("bounded Gemini media processing", () => {
     transport.nextPolls.push(
       { state: "succeeded", output: extractionOutput(), usage: { inputTokens: 100, outputTokens: 20 } },
       { state: "succeeded", output: extractionOutput(), usage: { inputTokens: 100, outputTokens: 20 } },
-      { state: "succeeded", output: extractionOutput("flexible character builds"), usage: { inputTokens: 100, outputTokens: 20 } },
+      { state: "succeeded", output: extractionOutput(), usage: { inputTokens: 100, outputTokens: 20 } },
       { state: "succeeded", output: overviewOutput(URLS[APPIDS[1]]), usage: { inputTokens: 100, outputTokens: 20 } },
       { state: "succeeded", output: overviewOutputForUrls([URLS[APPIDS[0]], secondUrl]), usage: { inputTokens: 100, outputTokens: 20 } },
     );
@@ -336,6 +352,8 @@ describe("bounded Gemini media processing", () => {
     expect(transport.submissions).toHaveLength(3);
     expect(summary.submitted).toBe(3);
     const synthesisRequest = JSON.stringify(transport.requestBodies.at(-1));
+    expect(synthesisRequest).not.toContain(RICH_FINDINGS.stray);
+    expect(synthesisRequest).not.toContain(RICH_FINDINGS.duplicate);
     expect(synthesisRequest).toContain(URLS[APPIDS[0]]);
     expect(synthesisRequest).toContain(secondUrl);
   });
@@ -451,7 +469,7 @@ describe("bounded Gemini media processing", () => {
     expect(fetches).toBe(0);
     expect(transport.submissions).toHaveLength(0);
     await value.db.prepare("UPDATE media_processing_jobs SET error = 'transient provider lookup failure' WHERE stage = 'extraction'").run();
-    transport.polls.set("batches/test-1", { state: "succeeded", output: extractionOutput(), usage: { inputTokens: 100, outputTokens: 20 } });
+    transport.polls.set("batches/test-1", { state: "succeeded", output: legacyExtractionOutput(), usage: { inputTokens: 100, outputTokens: 20 } });
     await advanceMediaProcessing(value.db, { runId: value.runId, transport, openRouter: transport.openRouter, articleFetch });
     const recovered = await value.db.prepare("SELECT status, error FROM media_processing_jobs WHERE stage = 'extraction'").first<{ status: string; error: string | null }>();
     expect(recovered).toEqual({ status: "succeeded", error: null });
@@ -496,11 +514,11 @@ describe("bounded Gemini media processing", () => {
     expect(extractions.find((row) => row.active === 1)?.input_identity).not.toBe(oldExtraction?.input_identity);
   });
 
-  test("filters unsupported and missing contribution categories before persistence and synthesis", async () => {
+  test("filters unsupported and missing observation categories before persistence and synthesis", async () => {
     const value = fixture(); cleanups.push(value.cleanup);
     await authorizeMediaProcessing(value.db, value.runId);
     const transport = new ControlledTransport();
-    transport.nextPolls.push({ state: "succeeded", output: extractionOutputWithUnsupportedCategories(), usage: { inputTokens: 100, outputTokens: 20 } });
+    transport.nextPolls.push({ state: "succeeded", output: extractionOutputWithUnsupportedCategories, usage: { inputTokens: 100, outputTokens: 20 } });
     transport.nextPolls.push({ state: "succeeded", output: overviewOutput(URLS[APPIDS[0]]), usage: { inputTokens: 100, outputTokens: 20 } });
     const summary = await advanceMediaProcessing(value.db, { runId: value.runId, transport, openRouter: transport.openRouter, articleFetch: async () => articleHtml(APPIDS[0]) });
     expect(summary.submitted).toBe(2);
@@ -518,6 +536,92 @@ describe("bounded Gemini media processing", () => {
     expect(synthesisRequest).not.toContain("Missing category contribution");
   });
 
+  test("excludes review factboxes from gameplay evidence while retaining article prose and product context", async () => {
+    const value = fixture();
+    cleanups.push(value.cleanup);
+    value.native.prepare("UPDATE media_sources SET type = 'preview', build_context = 'Early Access'").run();
+    await authorizeMediaProcessing(value.db, value.runId);
+    const transport = new ControlledTransport();
+    transport.nextPolls.push(
+      { state: "succeeded", output: { observations: [mediaObservation(APPIDS[0], "coop", "finding", "Drop-in cooperation", "a second player could drop into the same mission", "Social play")] } },
+      { state: "succeeded", output: overviewOutputWithoutTags(URLS[APPIDS[0]]) },
+    );
+    const html = processingArticleHtml(APPIDS[0]).replace("<html>", '<html class="ads-enabled">').replace("<body>", '<body class="reading">').replace("</article>", `
+      <div class="ad-slot"><p>Paid placement for a multiplayer game</p></div>
+      <div class="fancy-box">
+        <div class="fancy_box-title">Need to Know</div>
+        <div class="fancy_box_body">
+          <p><strong>Multiplayer:</strong> Yes<br><strong>Steam Deck:</strong> Verified</p>
+        </div>
+      </div>
+      <div class="fancy-box">
+        <div class="fancy_box-title">Playing Together</div>
+        <p>During the preview, a second player could drop into the same mission and take a different role.</p>
+      </div>
+      <p class="reading">The Early Access character creator offers four distinct playable classes.</p>
+    </article>`);
+
+    const summary = await advanceMediaProcessing(value.db, {
+      runId: value.runId,
+      transport,
+      openRouter: transport.openRouter,
+      articleFetch: async () => html,
+    });
+
+    expect(summary).toMatchObject({ submitted: 2, completed: 2 });
+    const extraction = transport.openRouterApi.requests[0]!.body.messages;
+    expect(extraction[1]?.content).toContain('"buildContext":"Early Access"');
+    expect(extraction[1]?.content).not.toContain("Paid placement");
+    expect(extraction[1]?.content).toContain("a second player could drop into the same mission");
+    expect(extraction[1]?.content).toContain("character creator offers four distinct playable classes");
+    expect(extraction[1]?.content).not.toContain("Multiplayer:");
+    expect(extraction[1]?.content).not.toContain("Verified");
+    const synthesis = transport.openRouterApi.requests[1]!.body.messages[0]?.content;
+    expect(extraction[0]?.content).toContain("how human players cooperate");
+    expect(synthesis).toContain("choose findings from that exact category");
+    expect(synthesis).toContain("Set contested to true only for genuine disagreements");
+    expect(synthesis).toContain("Drop-in cooperation");
+    expect(synthesis).toContain('"buildContext":"Early Access"');
+  });
+
+  const citedSynthesis = JSON.stringify({ statements: [["unknown"]], categories: { "Gameplay & systems": [] }, prosCons: { pros: null, cons: null }, tags: [] });
+  test.each([
+    {
+      scenario: "a prematurely closed root object",
+      output: `${citedSynthesis},"categories":[]}`,
+      error: "invalid_output: malformed JSON",
+    },
+    {
+      scenario: "a valid object without usable citations",
+      output: citedSynthesis,
+      error: "invalid_output: no cited statements",
+    },
+    {
+      scenario: "a valid JSON array",
+      output: `[${citedSynthesis}]`,
+      error: "invalid_output: expected a JSON object",
+    },
+  ])("records the synthesis refusal for $scenario", async ({ output, error }) => {
+    const value = fixture(); cleanups.push(value.cleanup);
+    await authorizeMediaProcessing(value.db, value.runId);
+    const transport = new ControlledTransport();
+    transport.nextPolls.push(
+      { state: "succeeded", output: extractionOutput() },
+      { state: "succeeded", output },
+    );
+
+    await advanceMediaProcessing(value.db, {
+      runId: value.runId,
+      transport,
+      openRouter: transport.openRouter,
+      articleFetch: async () => articleHtml(APPIDS[0]),
+    });
+
+    expect(value.native.query("SELECT status, error FROM media_processing_jobs WHERE stage = 'synthesis'").all())
+      .toEqual([{ status: "refused", error }]);
+    expect(value.native.query("SELECT id FROM media_game_overviews").all()).toEqual([]);
+  });
+
   test("persists ordered cited synthesis without false cross-outlet support", async () => {
     const value = fixture(); cleanups.push(value.cleanup);
     const urls = {
@@ -527,38 +631,40 @@ describe("bounded Gemini media processing", () => {
       republication: "https://www.gamesradar.com/cyberpunk-2077-review",
       explicitRepublication: "https://kotaku.com/cyberpunk-2077-review-republication",
     };
-    for (const [url, outlet, platform, build] of [
-      [urls.followup, "IGN", "PC", "release"],
-      [urls.eurogamer, "Eurogamer", null, null],
-      [urls.republication, "GamesRadar+", "PC", "release"],
-      [urls.explicitRepublication, "Kotaku", "PC", "release"],
+    value.native.prepare("UPDATE media_sources SET type = 'review', platform = NULL, build_context = NULL").run();
+    for (const [url, outlet] of [
+      [urls.followup, "IGN"],
+      [urls.eurogamer, "Eurogamer"],
+      [urls.republication, "GamesRadar+"],
+      [urls.explicitRepublication, "Kotaku"],
     ] as const) {
       value.native.prepare(
-        "INSERT INTO media_sources (appid, pass, original_url, title, outlet, retrieved_at, type, hands_on, platform, build_context) VALUES (?, 'initial', ?, ?, ?, ?, 'review', 1, ?, ?)",
-      ).run(APPIDS[0], url, "Cyberpunk 2077 review", outlet, "2026-09-11T00:00:00.000Z", platform, build);
+        "INSERT INTO media_sources (appid, pass, original_url, title, outlet, retrieved_at, type, hands_on) VALUES (?, 'initial', ?, ?, ?, ?, 'review', 1)",
+      ).run(APPIDS[0], url, "Cyberpunk 2077 review", outlet, "2026-09-11T00:00:00.000Z");
     }
     value.native.prepare("UPDATE media_sources SET author = 'Wire Author', title = 'Wire Original' WHERE original_url = ?").run(urls.eurogamer);
 
+    const supported: Record<string, (keyof typeof RICH_FINDINGS)[]> = {
+      [urls.ign]: ["stray", "pacing", "flexible", "deliberate", "pro"],
+      [urls.followup]: ["stray", "city"],
+      [urls.eurogamer]: ["pacing", "sluggish", "duplicate", "pro"],
+      [urls.republication]: ["pacing", "sluggish", "duplicate", "pro"],
+      [urls.explicitRepublication]: ["pacing", "sluggish", "duplicate"],
+    };
+    const articleFetch = async (url: string) => articleHtml(APPIDS[0]).replace("</article>",
+      `<p>${supported[url]!.map((id) => RICH_FINDINGS[id]).join(" ")}</p></article>`);
     await authorizeMediaProcessing(value.db, value.runId);
     const transport = new ControlledTransport();
-    transport.nextPolls.push(
-      { state: "succeeded", output: extractionOutput(), usage: { inputTokens: 100, outputTokens: 20 } },
-      { state: "succeeded", output: extractionOutput(), usage: { inputTokens: 100, outputTokens: 20 } },
-      { state: "succeeded", output: extractionOutput(), usage: { inputTokens: 100, outputTokens: 20 } },
-      { state: "succeeded", output: extractionOutput(), usage: { inputTokens: 100, outputTokens: 20 } },
-      { state: "succeeded", output: { ...extractionOutput(), originatingAssessment: "Wire Author|Wire Original" }, usage: { inputTokens: 100, outputTokens: 20 } },
-      { state: "succeeded", output: richOverviewOutput(urls), usage: { inputTokens: 100, outputTokens: 60 } },
-    );
-    const articleFetch = async (url: string) => {
-      if (url === urls.eurogamer || url === urls.republication) {
-        return articleHtml(APPIDS[0]).replace("memorable encounters", "measured encounters");
-      }
-      if (url === urls.explicitRepublication) {
-        return articleHtml(APPIDS[0]).replace("memorable encounters", "republished encounters");
-      }
-      if (url === urls.followup) return articleHtml(APPIDS[0]).replace("memorable encounters", "later encounters");
-      return articleHtml(APPIDS[0]);
-    };
+    for (const url of Object.values(urls)) {
+      const observations = supported[url]!.map((id) => mediaObservation(APPIDS[0], id, id === "pro" ? "pro" : "finding",
+        RICH_FINDINGS[id], RICH_FINDINGS[id], id === "city" ? "Visuals & audio" : id === "pro" ? "" : "Gameplay & systems"));
+      transport.nextPolls.push({
+        state: "succeeded",
+        output: { observations, ...(url === urls.explicitRepublication ? { originatingAssessment: "Wire Author|Wire Original" } : {}) },
+        usage: { inputTokens: 100, outputTokens: 20 },
+      });
+    }
+    transport.nextPolls.push({ state: "succeeded", output: richOverviewOutput(urls), usage: { inputTokens: 100, outputTokens: 60 } });
     const first = await advanceMediaProcessing(value.db, { runId: value.runId, transport, openRouter: transport.openRouter, articleFetch });
     expect(first.submitted).toBe(6);
     await advanceMediaProcessing(value.db, { runId: value.runId, transport, openRouter: transport.openRouter, articleFetch });
@@ -572,7 +678,7 @@ describe("bounded Gemini media processing", () => {
       "Visuals & audio",
     ]);
     expect(overview?.categories[0]?.findings.map((finding) => finding.text)).toEqual([
-      "Combat pacing can feel deliberate or sluggish depending on build.",
+      `${RICH_FINDINGS.deliberate} / ${RICH_FINDINGS.sluggish}`,
       "Flexible builds support experimentation.",
     ]);
     expect(overview?.categories[0]?.findings[0]?.contested).toBe(true);
@@ -620,7 +726,7 @@ describe("bounded Gemini media processing", () => {
 
     const laterRunId = insertCompletedRun(value.native, "initial:later-authorization:test", [APPIDS[0]]);
     await authorizeMediaProcessing(value.db, laterRunId);
-    transport.polls.set("batches/test-1", { state: "succeeded", output: extractionOutput(), usage: { inputTokens: 100, outputTokens: 20 } });
+    transport.polls.set("batches/test-1", { state: "succeeded", output: legacyExtractionOutput(), usage: { inputTokens: 100, outputTokens: 20 } });
     transport.nextPolls.push({ state: "succeeded", output: overviewOutput(URLS[APPIDS[0]]), usage: { inputTokens: 100, outputTokens: 20 } });
 
     const result = await advanceMediaProcessing(value.db, { runId: laterRunId, transport, openRouter: transport.openRouter, articleFetch: async () => articleHtml(APPIDS[0]) });
@@ -644,7 +750,7 @@ describe("bounded Gemini media processing", () => {
     const second = await advanceMediaProcessing(value.db, { runId: correctionRunId, transport, openRouter: transport.openRouter, articleFetch: async () => articleHtml(APPIDS[0]).replace("flexible combat", "deliberate combat") });
     expect(transport.submissions).toEqual(["extraction:chat-1"]);
     expect(second.uncertain).toBe(1);
-    transport.polls.set("batches/test-1", { state: "succeeded", output: extractionOutput(), usage: { inputTokens: 100, outputTokens: 20 } });
+    transport.polls.set("batches/test-1", { state: "succeeded", output: legacyExtractionOutput(), usage: { inputTokens: 100, outputTokens: 20 } });
     await advanceMediaProcessing(value.db, { runId: correctionRunId, transport, openRouter: transport.openRouter, articleFetch: async () => articleHtml(APPIDS[0]) });
     const rejected = await value.db.prepare("SELECT status FROM media_processing_jobs WHERE provider_batch_id = 'batches/test-1'").first<{ status: string }>();
     expect(rejected?.status).toBe("stale");
@@ -666,7 +772,7 @@ describe("bounded Gemini media processing", () => {
       articleFetch: async () => articleHtml(APPIDS[0]),
     });
     await value.db.prepare("UPDATE media_processing_authorizations SET status = 'completed' WHERE run_id = ?").bind(value.runId).run();
-    transport.polls.set("batches/test-1", { state: "succeeded", output: extractionOutput(), usage: { inputTokens: 100, outputTokens: 20 } });
+    transport.polls.set("batches/test-1", { state: "succeeded", output: legacyExtractionOutput(), usage: { inputTokens: 100, outputTokens: 20 } });
     const result = await advanceMediaProcessing(value.db, {
       transport, openRouter: transport.openRouter,
       articleFetch: async () => articleHtml(APPIDS[0]),
@@ -690,7 +796,7 @@ describe("bounded Gemini media processing", () => {
       articleFetch: async () => articleHtml(APPIDS[0]),
     });
     await value.db.prepare("DELETE FROM media_processing_authorizations WHERE run_id = ?").bind(value.runId).run();
-    transport.polls.set("batches/test-1", { state: "succeeded", output: extractionOutput(), usage: { inputTokens: 100, outputTokens: 20 } });
+    transport.polls.set("batches/test-1", { state: "succeeded", output: legacyExtractionOutput(), usage: { inputTokens: 100, outputTokens: 20 } });
 
     const result = await advanceMediaProcessing(value.db, {
       transport, openRouter: transport.openRouter,
@@ -710,7 +816,7 @@ describe("bounded Gemini media processing", () => {
       transport, openRouter: transport.openRouter,
       articleFetch: async () => articleHtml(APPIDS[0]),
     });
-    transport.polls.set("batches/test-1", { state: "succeeded", output: extractionOutput() });
+    transport.polls.set("batches/test-1", { state: "succeeded", output: legacyExtractionOutput() });
     const result = await advanceMediaProcessing(value.db, {
       runId: value.runId,
       transport, openRouter: transport.openRouter,
@@ -767,7 +873,7 @@ describe("bounded Gemini media processing", () => {
       articleFetch: async () => articleHtml(APPIDS[0]),
     });
     await value.db.prepare("UPDATE media_processing_authorizations SET status = 'completed' WHERE run_id = ?").bind(value.runId).run();
-    transport.polls.set("batches/test-1", { state: "succeeded", output: extractionOutput(), usage: { inputTokens: 100, outputTokens: 20 } });
+    transport.polls.set("batches/test-1", { state: "succeeded", output: legacyExtractionOutput(), usage: { inputTokens: 100, outputTokens: 20 } });
     const result = await advanceMediaProcessing(value.db, { transport, openRouter: transport.openRouter });
     const job = await value.db.prepare("SELECT status, reservation_active FROM media_processing_jobs WHERE stage = 'extraction'").first<{ status: string; reservation_active: number }>();
     expect(result.status).toBe("completed");

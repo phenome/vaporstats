@@ -405,12 +405,12 @@ export async function recoverInFlight(db: AppDatabase, now: Date, retryIdentity:
 }
 
 /** Refuses `job` for its input identity with `reason`, counting it skipped once. */
-export async function refuseItem(db: AppDatabase, job: JobRow, reason: string, now: Date): Promise<void> {
-  await transaction(db, () => recordRefusal(db, job, reason, now));
+export async function refuseItem(db: AppDatabase, job: JobRow, reason: string, now: Date, outputJson?: string): Promise<void> {
+  await transaction(db, () => recordRefusal(db, job, reason, now, outputJson));
 }
 
-async function recordRefusal(db: AppDatabase, job: JobRow, reason: string, now: Date): Promise<void> {
-  const refused = await db.prepare(`UPDATE media_processing_jobs SET status = 'refused', error = ?, next_attempt_at = NULL, completed_at = ? WHERE id = ? AND ${WAITING_OR_SENDING}`).bind(reason, now.toISOString(), job.id).run();
+async function recordRefusal(db: AppDatabase, job: JobRow, reason: string, now: Date, outputJson?: string): Promise<void> {
+  const refused = await db.prepare(`UPDATE media_processing_jobs SET status = 'refused', error = ?, output_json = ?, next_attempt_at = NULL, completed_at = ? WHERE id = ? AND ${WAITING_OR_SENDING}`).bind(reason, outputJson ?? null, now.toISOString(), job.id).run();
   if (refused.meta.changes !== 1) return;
   await countOutputs(db, job.run_id, "skipped");
   await closeAttempt(db, job.id, "refused", reason);
@@ -647,7 +647,7 @@ export async function returnUnrunBatch(db: AppDatabase, job: JobRow, outcome: Un
 
 export type OutputSettlement =
   | { status: "succeeded"; outputJson: string; replaced: boolean }
-  | { status: "refused"; error: string | null }
+  | { status: "refused"; error: string | null; outputJson?: string }
   | { status: "stale" };
 
 async function recordProviderAnswer(db: AppDatabase, job: JobRow, answer: ProviderAnswer, now: Date): Promise<void> {
@@ -673,8 +673,8 @@ export async function settleOutput(
     } else {
       const error = result.status === "refused" ? result.error : null;
       const recordedError = error ?? (answer.provider === "gemini" ? job.error : null);
-      await db.prepare("UPDATE media_processing_jobs SET status = ?, error = ?, completed_at = ? WHERE id = ?")
-        .bind(result.status, recordedError, now.toISOString(), job.id).run();
+      await db.prepare("UPDATE media_processing_jobs SET status = ?, error = ?, output_json = ?, completed_at = ? WHERE id = ?")
+        .bind(result.status, recordedError, result.status === "refused" ? result.outputJson ?? null : null, now.toISOString(), job.id).run();
       if (job.stage !== "explanation") await countOutputs(db, job.run_id, "skipped");
     }
     await closeAttempt(db, job.id, result.status);
@@ -777,10 +777,27 @@ export async function hasRequestKey(db: AppDatabase, requestKey: string): Promis
   return (await first(db, "SELECT id FROM media_processing_jobs WHERE request_key = ?", requestKey)) !== null;
 }
 
+export async function hasDefiniteEditorialRefusal(db: AppDatabase, stage: "extraction" | "synthesis", identity: string): Promise<boolean> {
+  const error = stage === "extraction" ? "invalid_output: no supported contributions" : "invalid_output: no cited statements";
+  return (await first(db, "SELECT id FROM media_processing_jobs WHERE stage = ? AND input_identity = ? AND status = 'refused' AND error = ? AND (stage = 'extraction' OR output_json IS NOT NULL) LIMIT 1", stage, identity, error)) !== null;
+}
+
 export async function hasSubmittedOrSucceededExtraction(db: AppDatabase, job: JobRow, sourceId: number, identity: string): Promise<boolean> {
   return (await first(db, "SELECT id FROM media_processing_jobs WHERE id <> ? AND stage = 'extraction' AND source_id = ? AND input_identity = ? AND status IN ('submitted', 'succeeded') LIMIT 1", job.id, sourceId, identity)) !== null;
 }
 
 export async function setWaitingInputIdentity(db: AppDatabase, job: JobRow, identity: string): Promise<void> {
   await db.prepare(`UPDATE media_processing_jobs SET input_identity = ? WHERE id = ? AND ${WAITING}`).bind(identity, job.id).run();
+}
+
+/** Preserve the attempts of a waiting item when switching its next send to the current text protocol. */
+export async function upgradeWaitingTextJob(
+  db: AppDatabase, job: JobRow, next: Pick<JobRow, "model" | "config_version" | "max_output_tokens" | "input_identity">,
+  requestKey: string,
+): Promise<boolean> {
+  const updated = await db.prepare(`UPDATE media_processing_jobs
+    SET model = ?, config_version = ?, max_output_tokens = ?, input_identity = ?, request_key = ?
+    WHERE id = ? AND ${WAITING} AND config_version = ?`)
+    .bind(next.model, next.config_version, next.max_output_tokens, next.input_identity, requestKey, job.id, job.config_version).run();
+  return updated.meta.changes === 1;
 }

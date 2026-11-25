@@ -38,8 +38,10 @@ describe("entity route prefetch", () => {
   test("SSR loaders start no browser prefetches", () => {
     const queryClient = createQueryClient();
     const prefetch = spyOn(queryClient, "prefetchQuery").mockResolvedValue(undefined);
+    const ensure = spyOn(queryClient, "ensureQueryData").mockResolvedValue(undefined);
     runEntityLoaders(queryClient);
     expect(prefetch).not.toHaveBeenCalled();
+    expect(ensure.mock.calls.map(([options]) => options.queryKey)).toEqual([["game-detail", 901]]);
   });
 
   test("request-local queries schedule no GC timers", () => {
@@ -66,6 +68,38 @@ describe("entity route prefetch", () => {
       ]);
       expect(queryClient.getDefaultOptions().queries?.staleTime).toBe(DEFAULT_QUERY_STALE_TIME);
       expect(queryClient.getDefaultOptions().queries?.gcTime).toBe(300_000);
+    } finally {
+      if (windowDescriptor) Object.defineProperty(globalThis, "window", windowDescriptor);
+      else Reflect.deleteProperty(globalThis, "window");
+    }
+  });
+
+  test("browser game loader waits for detail before the router can restore scroll", async () => {
+    const windowDescriptor = Object.getOwnPropertyDescriptor(globalThis, "window");
+    Object.defineProperty(globalThis, "window", { configurable: true, value: {} });
+    try {
+      const queryClient = createQueryClient();
+      const detail = Promise.withResolvers<void>();
+      const prefetch = spyOn(queryClient, "prefetchQuery").mockImplementation(({ queryKey }) =>
+        queryKey[0] === "game-detail" ? detail.promise : Promise.resolve(),
+      );
+      const loader = gameRoute.options.loader;
+      if (typeof loader !== "function") throw new Error("Expected game route loader");
+      let loaded = false;
+      const result = Promise.resolve(loader({
+        params: { game: "901-fixture-game" },
+        deps: { range: 1 },
+        context: { queryClient },
+      } as Parameters<typeof loader>[0])).then((data) => {
+        loaded = true;
+        return data;
+      });
+
+      await Promise.resolve();
+      expect(prefetch).toHaveBeenCalledTimes(3);
+      expect(loaded).toBe(false);
+      detail.resolve();
+      expect(await result).toMatchObject({ appid: 901, slug: "fixture-game" });
     } finally {
       if (windowDescriptor) Object.defineProperty(globalThis, "window", windowDescriptor);
       else Reflect.deleteProperty(globalThis, "window");

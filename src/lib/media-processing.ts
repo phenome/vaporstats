@@ -3,6 +3,9 @@ import { Readability } from "@mozilla/readability";
 import { MIN_USABLE_ARTICLE_CHARS, parseArticleDocument } from "./article-document";
 import type { AppDatabase } from "./db";
 import { writeTransaction } from "./db-transaction";
+import { isOmissionAmendment, mediaAmendment, mediaAmendmentIdentity } from "./media-amendments";
+import { parseArticleObservations, readArticleObservations, synthesisSelections, validateObservationSynthesis, validateSynthesisSelections, extractionReviewIssues, type EditorialOmission } from "./media-observations";
+import { legacyObservationEvidence } from "./media-legacy-observations";
 import { boundedMediaError } from "./media-error";
 import { decodeVector, encodeVector, GEMINI_EMBEDDING_DIMENSIONS } from "./media-embedding-vector";
 import {
@@ -15,9 +18,10 @@ import {
 import {
   createMediaEvidenceSource,
   MEDIA_CATEGORY_NAMES,
-  parseMediaOverview,
+  normalizeMediaTag,
   parseMediaTagEvidence,
   type MediaEvidenceSource,
+  validateMediaOverview,
 } from "./media-overview";
 import {
   MAX_MEDIA_ARTICLES_PER_GAME,
@@ -65,6 +69,7 @@ import {
   automaticRequestKey,
   countOutputs,
   enqueuePaidWork,
+  hasDefiniteEditorialRefusal,
   hasOpenExtraction,
   hasPendingExtractions,
   hasRequestKey,
@@ -88,6 +93,7 @@ import {
   returnUnrunBatch,
   runRequestKey,
   setWaitingInputIdentity,
+  upgradeWaitingTextJob,
   settleOutput,
   submittedPaidWork,
   type JobRow,
@@ -108,9 +114,11 @@ export type { MediaProcessingOutputCounts } from "./media-paid-ledger";
 
 /** The model that generates extractions and Overviews, through OpenRouter chat completions. */
 export const OPENROUTER_TEXT_MODEL = "anthropic/claude-haiku-5.5";
-const EXTRACTION_CONFIG_VERSION = "media-extraction-2026-09-13-v3";
-const SYNTHESIS_CONFIG_VERSION = "media-synthesis-2026-11-18-v6";
-const CLEANUP_VERSION = "media-cleanup-2026-09-11-v1";
+const EXTRACTION_CONFIG_VERSION = "media-extraction-2026-11-25-v7";
+const OBSERVATION_TEXT_SYNTHESIS_VERSION = "media-synthesis-2026-11-25-v9";
+const ORIGINAL_SELECTION_VERSION = "media-synthesis-2026-11-25-v10";
+const SYNTHESIS_CONFIG_VERSION = "media-synthesis-2026-11-25-v11";
+const CLEANUP_VERSION = "media-cleanup-2026-11-25-v3";
 /** How many paid items each provider may take from the queue in one ingestion tick. */
 export const DEFAULT_PAID_SUBMISSIONS_PER_TICK = 60;
 /** How long one advance may spend taking paid items from the queue before the rest wait for the next tick. */
@@ -272,6 +280,14 @@ function cleanLine(value: string): string {
   return value.replace(/[\t ]+/g, " ").replace(/\s+([,.;!?])/g, "$1").trim();
 }
 
+function removeReviewMetadataPanels(document: Document): void {
+  // Future's review metadata panel lives inside the article body, alongside
+  // editorial boxes containing actual reporting. Remove only the facts panel.
+  for (const title of Array.from(document.querySelectorAll(".fancy-box > .fancy_box-title"))) {
+    if (cleanLine(title.textContent ?? "").toLowerCase() === "need to know") title.parentElement?.remove();
+  }
+}
+
 /**
  * The article's readable text and its hash. The whole text is kept: the
  * per-request input cap alone decides whether it can be sent, so an article
@@ -280,7 +296,8 @@ function cleanLine(value: string): string {
 function cleanArticle(html: string): { content: string; hash: string } | null {
   const document = parseArticleDocument(html);
   if (!document) return null;
-  for (const node of Array.from(document.querySelectorAll("script,style,noscript,template,nav,header,footer,aside,form,iframe,svg,[aria-label*='ad' i],[class*='ad' i],[id*='ad' i]"))) node.remove();
+  for (const node of Array.from(document.body.querySelectorAll("script,style,noscript,template,nav,header,footer,aside,form,iframe,svg,[aria-label='advertisement' i],[class~='ad' i],[class~='advertisement' i],[class~='ad-slot' i],[id^='ad-slot-' i],[id^='div-gpt-ad' i]"))) node.remove();
+  removeReviewMetadataPanels(document);
   let root: Element | null = document.querySelector("article");
   try {
     const readable = new Readability(document).parse() as { content?: string; textContent?: string } | null;
@@ -345,13 +362,37 @@ function synthesisIsCurrent(job: JobRow, extractions: ExtractionRow[]): boolean 
   return synthesisIdentityFor(job.appid, extractions, job.model, job.config_version) === job.input_identity;
 }
 
-function synthesisIdentityFor(appid: number, extractions: ExtractionRow[], model: string, configVersion: string): string {
-  return sha256(stableJson({ stage: "synthesis", appid, model, configVersion, extractions: extractions.map((row) => ({ sourceId: row.source_id, inputIdentity: row.input_identity })).sort((a, b) => a.sourceId - b.sourceId) }));
+function usesObservationExtraction(version: string): boolean {
+  return version === EXTRACTION_CONFIG_VERSION || version === "media-extraction-2026-11-25-v5" || version === "media-extraction-2026-11-25-v6";
 }
 
-/** One OpenRouter chat completion for the text model that asks for JSON output. */
-function chatRequest(maxTokens: number, ...messages: OpenRouterChatRequest["messages"]): OpenRouterChatRequest {
-  return { model: OPENROUTER_TEXT_MODEL, messages, response_format: { type: "json_object" }, reasoning: TEXT_REASONING, max_tokens: maxTokens };
+function usesObservationSynthesis(configVersion: string): boolean {
+  return configVersion === SYNTHESIS_CONFIG_VERSION || configVersion === ORIGINAL_SELECTION_VERSION || configVersion === OBSERVATION_TEXT_SYNTHESIS_VERSION;
+}
+
+function synthesisIdentityFor(appid: number, extractions: ExtractionRow[], model: string, configVersion: string, priorAmendments?: string[]): string {
+  const amendments = usesObservationSynthesis(configVersion) ? priorAmendments ?? amendmentIdentities(extractions, appid) : [];
+  return sha256(stableJson({ stage: "synthesis", appid, model, configVersion, extractions: extractions.map((row) => ({ sourceId: row.source_id, inputIdentity: row.input_identity })).sort((a, b) => a.sourceId - b.sourceId), ...(amendments.length ? { amendments } : {}) }));
+}
+
+function amendmentIdentities(rows: ExtractionRow[], appid: number): string[] {
+  return rows.flatMap((row) => synthesisAmendments(row, appid)).sort();
+}
+
+function synthesisAmendments(row: ExtractionRow, appid: number): string[] {
+  const current = readArticleObservations(row.output_json, appid);
+  const legacy = current.length || usesObservationExtraction(row.config_version) ? undefined : legacyObservationEvidence(row.output_json, appid);
+  const ids = new Set([
+    ...(legacy?.observations ?? current).map(({ id }) => id),
+    ...readPendingObservations(row, appid).map(({ id }) => id),
+    ...(legacy?.editorialOmissions ?? []).map(({ observationId }) => observationId),
+  ]);
+  return [...ids].flatMap((id) => mediaAmendmentIdentity(row.input_identity, id) ?? []);
+}
+
+/** Shared settings for OpenRouter chat completions for the text model. */
+function chatRequest(maxTokens: number, ...messages: OpenRouterChatRequest["messages"]) {
+  return { model: OPENROUTER_TEXT_MODEL, messages, reasoning: TEXT_REASONING, max_tokens: maxTokens };
 }
 
 /** A conservative local estimate of `request`'s input tokens. */
@@ -359,25 +400,119 @@ function estimatedInputTokens(request: OpenRouterChatRequest): number {
   return Math.ceil(Buffer.byteLength(JSON.stringify(request.messages), "utf8") / ESTIMATE_BYTES_PER_TOKEN);
 }
 
+const CATEGORY_GUIDANCE = `Use these category boundaries:
+- Gameplay & systems: actions, mechanics, character creation, progression, challenge, and level design.
+- Story & world: narrative, characters, setting, themes, lore, and relationships with non-player characters.
+- Visuals & audio: art direction, animation, music, sound, and voice work.
+- Social play: how human players cooperate, compete, communicate, or take on roles with one another. Playable classes on their own, party companions, and interactions with non-player characters do not establish Social play.
+- Technical experience & accessibility: performance, stability, controls, readability, and access options.
+Split mixed evidence where appropriate and omit categories without evidence.`;
+
 function makeExtractionRequest(source: SourceRow, content: string): OpenRouterChatRequest {
-  return chatRequest(EXTRACTION_MAX_OUTPUT_TOKENS, { role: "system", content: `Analyze only this article about Steam app ${source.appid}. Return JSON only. Keep wording grounded in article evidence. Use these optional category names inside categories and contribution.category: ${MEDIA_CATEGORY_NAMES.join("; ")}. Top-level keys must be categories, contributions, traits, qualifications, provenance, and optional originatingAssessment and similarityInputs. similarityInputs may contain gameplay and storyWorld arrays of direct descriptive evidence about game mechanics or story/world themes. Do not use quality, ratings, popularity, praise, criticism, or technical complaints as similarity inputs. Do not invent unsupported dimensions. Contributions are objects with text and category; traits and qualifications are arrays of strings. Traits must be concise, factual game descriptors sourced only from the article.` }, { role: "user", content });
+  const request = chatRequest(
+    EXTRACTION_MAX_OUTPUT_TOKENS,
+    { role: "system", content: `Analyze the article about Steam app ${source.appid}. Return JSON only.
+Return {observations, originatingAssessment}. Each observation has id (unique short stable identifier), appid (the target Steam app ID as a JSON integer), kind ("finding", "pro", "con", "tag", "gameplay", or "storyWorld"), category (one of the categories below for findings, "" otherwise), text (one independently checkable assertion), quote (verbatim supporting excerpt, 12–480 characters), and qualifiers (array, empty only when scope does not materially change the claim). Omit originatingAssessment if unknown.
+${CATEGORY_GUIDANCE}
+Ground every observation in substantive reporting about the target game. Omit factboxes, page metadata, incidental comparisons, and other games or editions. Preserve platform, edition, build, patch, preview, announced, and release-state limits as qualifiers when material to the observation. Copy them from its excerpt or explicit platform/build context. Include them in qualifiers even when the text contains them. Publication dates do not establish the build played. If interpretation is uncertain, include a short reviewQuestion on the candidate observation identifying the unresolved issue; the candidate is held for editorial review.
+Tags must be concise factual characteristics with explicit evidence. Omit quality judgments, popularity, ratings, scores, performance and technical complaints. Playing solo does not establish a single-player mode. A past build does not establish a general characteristic. A concrete announced feature must remain announced. Use pro and con only for supported assessments. For similarity, separately record directly described mechanics or progression as gameplay observations and directly described settings, characters or narrative premises as storyWorld observations. When the same excerpt also supports a category finding, give the similarity observation its own id and the same supported scope. Exclude praise alone, ratings, popularity, technical complaints and hardware mappings from similarity. Omit any dimension the article does not describe.` },
+    { role: "user", content: `Article metadata: ${JSON.stringify({
+      type: source.type,
+      handsOn: source.hands_on,
+      platform: source.platform,
+      buildContext: source.build_context,
+    })}\n\nArticle text:\n${content}` },
+  );
+  return { ...request, response_format: { type: "json_object" } };
 }
 
-function makeSynthesisRequest(appid: number, name: string, extractions: ExtractionRow[], sources: SourceRow[]): OpenRouterChatRequest {
+function strictObject(properties: Record<string, unknown>) {
+  return { type: "object", properties, required: Object.keys(properties), additionalProperties: false };
+}
+
+function synthesisResponseSchema({ choices }: ReturnType<typeof synthesisSelections>) {
+  function ids(allowedIds: string[]) {
+    return { type: "array", items: { type: "string", enum: allowedIds } };
+  }
+  function section(name: "statements" | "pros" | "cons" | "tags") {
+    const allowedIds = choices.get(name);
+    return allowedIds ? { type: "array", items: ids(allowedIds) } : { type: "null" };
+  }
+  const categories = Object.fromEntries(MEDIA_CATEGORY_NAMES.flatMap((name) => {
+    const allowedIds = choices.get(name);
+    return allowedIds ? [[name, {
+      type: "array",
+      items: strictObject({ observationIds: ids(allowedIds), contested: { type: "boolean" } }),
+    }]] : [];
+  }));
+  return strictObject({
+    statements: section("statements"),
+    categories: strictObject(categories),
+    prosCons: strictObject({ pros: section("pros"), cons: section("cons") }),
+    tags: section("tags"),
+  });
+}
+
+function observationReviewOutput(
+  checked: ReturnType<typeof validateObservationSynthesis>,
+  sources: ReturnType<typeof effectiveObservationSources>,
+) {
+  const issues = [...sources.flatMap(({ editorialOmissions }) => editorialOmissions), ...checked.editorialOmissions];
+  const unique = new Map(issues.map((issue) => [JSON.stringify([issue.sourceIdentity, issue.observationId, issue.question]), issue]));
+  return { editorialOmissions: [...unique.values()], observationOmissions: checked.diagnostics };
+}
+
+function readPendingObservations(row: ExtractionRow, appid: number) {
+  const stored = jsonObject(parseJson(row.output_json));
+  return readArticleObservations({ observations: stored.pendingObservations }, appid);
+}
+
+function storedExtractionQuestions(row: ExtractionRow): EditorialOmission[] {
+  const questions = jsonObject(parseJson(row.output_json)).editorialOmissions;
+  return Array.isArray(questions) ? questions.filter((issue): issue is EditorialOmission =>
+    issue?.sourceIdentity === row.input_identity && typeof issue.observationId === "string" && typeof issue.question === "string") : [];
+}
+
+function effectiveObservationSources(appid: number, extractions: ExtractionRow[], sources: SourceRow[]) {
   const sourceById = new Map(sources.map((source) => [source.id, source]));
-  const evidence = extractions.map((row) => {
+  return extractions.flatMap((row) => {
     const source = sourceById.get(row.source_id);
-    return source ? {
-      sourceIdentity: row.input_identity,
-      sourceUrl: source.original_url,
-      outlet: source.outlet,
-      pass: source.pass,
-      contentHash: row.content_hash,
-      context: metadataFor(source),
-      extraction: parseExtraction(row.output_json),
-    } : null;
-  }).filter((item) => item !== null);
-  return chatRequest(SYNTHESIS_MAX_OUTPUT_TOKENS, { role: "user", content: `Synthesize the current assessments for ${name || `game ${appid}`}: each outlet's initial assessment (pass "initial") and any later assessment by an outlet already represented (pass "later"). A later article from the same outlet is that outlet's own follow-up, not additional support. A null publishedAt is an unknown date; never place such an article in time by inference. Return JSON only as {"statements":[{"text":"...","sourceUrls":["..."]}],"categories":[{"name":"...","findings":[{"text":"...","sourceUrls":["..."],"contested":true}]}],"prosCons":{"pros":[{"text":"...","sourceUrls":["..."]}],"cons":[...]},"tags":[{"label":"...","sourceUrls":["..."]}],"similarityInputs":{"gameplay":["..."],"storyWorld":["..."]}}. Write flowing, concise, game-first Overview statements. Write every Overview text field as a direct game observation; never mention coverage, critics, reviewers, reviews, outlets, publications, sources, assessments, agreement, consensus, or frequency. Multiple citation URLs communicate repeated support. Include only supported sections named ${MEDIA_CATEGORY_NAMES.join("; ")}; omit unsupported sections. Provide one global pros/cons overview, omit unsupported sides, and do not force neutral characteristics into pros or cons. Every entry must cite every supporting article URL. Tags are concise factual game descriptors and must be derived only from the supplied extraction.traits arrays, never from statements, categories, pros/cons, or summary wording. Cite every current extraction that supports each tag. Normalize semantically equivalent supported trait descriptions to one meaningful label without merging distinct characteristics or inventing missing traits. Preserve disputed traits when a supplied extraction supports them; do not include quality judgments, rankings, scores, reception, popularity, praise, performance, bugs, or technical complaints as tags. Return similarityInputs as the canonical aggregate of all supplied current extraction.contributions and any directly supported mechanics or story/world themes. Use gameplay for mechanics, systems, controls, combat, progression, and player-facing structure; use storyWorld for setting, narrative, characters, factions, and world themes. Keep each item a concise direct game description and omit a dimension when no supported evidence exists. Never put quality, praise, popularity, ratings, reception, criticism, performance, bugs, optimization, framerate, or other technical complaints in similarityInputs. Do not use Overview prose, tags, pros, or cons as similarityInputs. Evidence belongs only to app ${appid}; do not transfer incidental comparisons, DLC, expansion, bundle, or focused edition evidence.\n${JSON.stringify(evidence)}` });
+    if (!source || source.appid !== appid) return [];
+    const sourceIdentity = row.input_identity;
+    const current = readArticleObservations(row.output_json, appid);
+    const legacy = current.length || usesObservationExtraction(row.config_version)
+      ? undefined : legacyObservationEvidence(row.output_json, appid, source.build_context, sourceIdentity);
+    const pending = readPendingObservations(row, appid);
+    const editorialOmissions = storedExtractionQuestions(row).filter(({ observationId }) => {
+      const amendment = mediaAmendment(sourceIdentity, observationId);
+      return !isOmissionAmendment(amendment) && (amendment === undefined || !pending.some(({ id }) => id === observationId));
+    });
+    if (legacy) editorialOmissions.push(...legacy.editorialOmissions.map((item) => ({ ...item, sourceIdentity })));
+    const candidates = [...current, ...pending.filter(({ id }) => mediaAmendment(sourceIdentity, id) !== undefined)];
+    const observations = legacy?.observations ?? candidates.flatMap((observation) => {
+      const amendment = mediaAmendment(sourceIdentity, observation.id);
+      if (amendment === undefined) return [observation];
+      if (isOmissionAmendment(amendment)) return [];
+      return readArticleObservations({ observations: [{ ...observation, text: cleanLine(amendment) }] }, appid);
+    });
+    return [{ sourceIdentity, sourceUrl: source.original_url, outlet: source.outlet,
+      pass: source.pass, contentHash: row.content_hash, context: metadataFor(source), observations, editorialOmissions }];
+  });
+}
+
+function makeSynthesisRequest(appid: number, name: string, selections: ReturnType<typeof synthesisSelections<ReturnType<typeof effectiveObservationSources>[number]>>): OpenRouterChatRequest {
+  const request = chatRequest(SYNTHESIS_MAX_OUTPUT_TOKENS, { role: "user", content: `Synthesize the current assessments for ${name || `game ${appid}`}: each outlet's initial assessment (pass "initial") and any later assessment by an outlet already represented (pass "later"). A later article from the same outlet is that outlet's own follow-up and adds no separate endorsement. A null publishedAt is an unknown date.
+Return JSON matching the response schema. Select observations using their selectionId values. Each inner array of IDs forms one entry. Choose game-first statements from finding observations. For each category, choose findings from that exact category. Choose pros, cons, and tags from observations of kind pro, con, and tag respectively. Use null for sections whose schema is null and empty arrays when selecting nothing from an available section.
+Group IDs in an entry only for identical wording and scope. For a contested finding, group distinct observations about the same facet and scope in display order. Set contested to true only for genuine disagreements. Keep neutral characteristics out of pros and cons.
+${JSON.stringify(selections.evidence.map(({ observations, editorialOmissions: _editorialOmissions, ...source }) => ({ ...source, extraction: { observations } })))}` });
+  return {
+    ...request,
+    provider: { require_parameters: true },
+    response_format: {
+      type: "json_schema",
+      json_schema: { name: "media_overview", strict: true, schema: synthesisResponseSchema(selections) },
+    },
+  };
 }
 
 const CATEGORY_NAMES = new Set<string>(MEDIA_CATEGORY_NAMES);
@@ -622,7 +757,7 @@ async function sendItem(advance: QueueAdvance, job: JobRow, model: string, reque
  * once and acted on here.
  * Without an OpenRouter transport, OpenRouter waits paused for its key.
  */
-async function sendTextItem(advance: QueueAdvance, job: JobRow, request: OpenRouterChatRequest): Promise<void> {
+async function sendTextItem(advance: QueueAdvance, job: JobRow, request: OpenRouterChatRequest, article?: string): Promise<void> {
   const { db, now, openRouter } = advance;
   if (!openRouter) return holdItem(advance, job, { class: "missing_configuration", reason: "missing_key" });
   const estimated = estimatedInputTokens(request);
@@ -649,7 +784,7 @@ async function sendTextItem(advance: QueueAdvance, job: JobRow, request: OpenRou
   const answer = completion!;
   const status = await settleOutput(db, job, now, { provider: "openrouter", answer }, () =>
     job.stage === "extraction"
-      ? persistExtraction(db, job, answer.content, now)
+      ? persistExtraction(db, job, answer.content, now, article)
       : persistOverview(db, job, answer.content, now));
   if (status === "succeeded") advance.textSucceeded += 1;
   else advance.textFailed += 1;
@@ -682,7 +817,7 @@ function overviewSimilarityInput(value: unknown, dimension: SimilarityDimension)
   return inputs?.[dimension === "gameplay" ? "gameplay" : "storyWorld"] ?? [];
 }
 
-async function persistExtraction(db: AppDatabase, job: JobRow, output: unknown, now: Date): Promise<OutputSettlement> {
+async function persistExtraction(db: AppDatabase, job: JobRow, output: unknown, now: Date, article?: string): Promise<OutputSettlement> {
   if (job.source_id === null) return { status: "refused", error: null };
   const source = await currentSource(db, job.source_id!);
   if (!source || source.processing_input_identity !== job.input_identity) {
@@ -699,11 +834,21 @@ async function persistExtraction(db: AppDatabase, job: JobRow, output: unknown, 
     return { status: "stale" };
   }
   const parsed = parseExtraction(output);
-  if (parsed.contributions.length === 0 && parsed.traits.length === 0 && !parsed.categories && !parsed.similarityInputs) {
+  const context = [source.platform, source.build_context, source.type === "preview" ? "preview" : null];
+  const observations = article === undefined ? [] : parseArticleObservations(output, source.appid, article, context);
+  const pendingObservations = article === undefined ? [] : parseArticleObservations(output, source.appid, article, context, true);
+  const hasLegacyOutput = article === undefined && (parsed.contributions.length > 0 || parsed.traits.length > 0 || parsed.categories || parsed.similarityInputs);
+  const editorialOmissions = article === undefined ? [] : extractionReviewIssues(output, source.appid, job.input_identity, observations, article, context);
+  if (observations.length === 0 && pendingObservations.length === 0 && !hasLegacyOutput) {
     await db.prepare("UPDATE media_sources SET processing_content = NULL WHERE id = ?").bind(source.id).run();
-    return { status: "refused", error: "invalid_output: no supported contributions" };
+    return { status: "refused", error: "invalid_output: no supported contributions", ...(editorialOmissions.length ? { outputJson: JSON.stringify({ editorialOmissions }) } : {}) };
   }
-  const stored = storedExtractionJson(output, job.input_identity, source.original_url);
+  const stored = article === undefined ? storedExtractionJson(output, job.input_identity, source.original_url) : JSON.stringify({
+    observations,
+    pendingObservations,
+    originatingAssessment: parsed.originatingAssessment,
+    editorialOmissions,
+  });
   const earlier = await first<{ id: number }>(db, "SELECT id FROM media_article_extractions WHERE source_id = ? LIMIT 1", source.id);
   await db.prepare("UPDATE media_article_extractions SET active = 0 WHERE source_id = ? AND active = 1").bind(source.id).run();
   await db.prepare("INSERT OR IGNORE INTO media_article_extractions (source_id, input_identity, content_hash, cleanup_version, model, config_version, output_json, active, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)").bind(source.id, job.input_identity, source.normalized_content_hash ?? "", CLEANUP_VERSION, job.model, job.config_version, stored, now.toISOString()).run();
@@ -770,15 +915,37 @@ async function persistOverview(db: AppDatabase, job: JobRow, output: unknown, no
   if (!synthesisIsCurrent(job, evidence.extractions)) {
     return { status: "stale" };
   }
-  const tagEvidence = parseMediaTagEvidence(output, evidenceSources);
-  const overview = parseMediaOverview(output, job.appid, evidenceSources);
-  if (!overview) {
-    return { status: "refused", error: "invalid_output: no cited statements" };
+  const observationSources = effectiveObservationSources(job.appid, evidence.extractions, evidence.sources);
+  const usesObservations = usesObservationSynthesis(job.config_version);
+  const parsed = parseJson(output);
+  const invalidRoot = usesObservations && (typeof parsed !== "object" || parsed === null || Array.isArray(parsed));
+  const originalSelection = job.config_version === ORIGINAL_SELECTION_VERSION;
+  const checked = originalSelection || job.config_version === SYNTHESIS_CONFIG_VERSION
+    ? validateSynthesisSelections(parsed, job.appid, observationSources, synthesisSelections(observationSources, { legacyV10: originalSelection }))
+    : usesObservations ? validateObservationSynthesis(parsed, job.appid, observationSources) : null;
+  const editorial = checked ? observationReviewOutput(checked, observationSources) : undefined;
+  const candidate = checked ? checked.overview : output;
+  const validation = validateMediaOverview(invalidRoot ? output : candidate, job.appid, evidenceSources);
+  if ("error" in validation) {
+    return { status: "refused", error: `invalid_output: ${validation.error}`, ...(editorial ? { outputJson: JSON.stringify(editorial) } : {}) };
   }
-  const similarityInputs = similarityInputsForOverview(output);
+  const tagEvidence = parseMediaTagEvidence(candidate, evidenceSources);
+  const similarityInputs = similarityInputsForOverview(candidate);
   const storedOverview = {
-    ...overview,
-    tags: tagEvidence.map(({ tag, sourceUrls }) => ({ ...tag, sourceUrls })),
+    ...validation.overview,
+    ...(checked ? {
+      statements: checked.overview.statements,
+      categories: checked.overview.categories,
+      prosCons: validation.overview.prosCons ? checked.overview.prosCons : null,
+    } : {}),
+    ...editorial,
+    ...(checked ? { amendmentIdentities: amendmentIdentities(evidence.extractions, job.appid) } : {}),
+    tags: tagEvidence.map(({ tag, sourceUrls }) => {
+      const observationRefs = checked?.overview.tags
+        .filter(({ label }) => normalizeMediaTag(label)?.slug === tag.slug)
+        .flatMap(({ observationRefs }) => observationRefs);
+      return { ...tag, sourceUrls, ...(observationRefs ? { observationRefs } : {}) };
+    }),
     ...(similarityInputs ? { similarityInputs } : {}),
   };
   const previous = await first<{ output_json: string }>(db, "SELECT output_json FROM media_game_overviews WHERE appid = ? AND active = 1 ORDER BY id DESC LIMIT 1", job.appid);
@@ -1170,8 +1337,13 @@ async function enqueueOverviewWork(advance: QueueAdvance, runId: number, entitie
     if (evidence.extractions.length === 0) continue;
     // An Overview stays current while it was built from exactly the game's
     // current contributions, whatever model or configuration built it.
-    const activeOverview = await first<{ input_identity: string; model: string; config_version: string }>(db, "SELECT input_identity, model, config_version FROM media_game_overviews WHERE appid = ? AND active = 1 ORDER BY id DESC LIMIT 1", appid);
-    if (activeOverview && synthesisIdentityFor(appid, evidence.extractions, activeOverview.model, activeOverview.config_version) === activeOverview.input_identity) continue;
+    const activeOverview = await first<{ input_identity: string; model: string; config_version: string; output_json: string }>(db, "SELECT input_identity, model, config_version, output_json FROM media_game_overviews WHERE appid = ? AND active = 1 ORDER BY id DESC LIMIT 1", appid);
+    if (activeOverview) {
+      const previousAmendments = jsonObject(parseJson(activeOverview.output_json)).amendmentIdentities;
+      const currentIdentity = synthesisIdentityFor(appid, evidence.extractions, activeOverview.model, activeOverview.config_version,
+        automatic ? (Array.isArray(previousAmendments) ? previousAmendments : []) : undefined);
+      if (currentIdentity === activeOverview.input_identity) continue;
+    }
     const identity = synthesisIdentity(appid, evidence.extractions);
     const old = await first<{ id: number; output_json: string }>(db, "SELECT id, output_json FROM media_game_overviews WHERE appid = ? AND input_identity = ? ORDER BY id DESC LIMIT 1", appid, identity);
     if (old) {
@@ -1182,6 +1354,7 @@ async function enqueueOverviewWork(advance: QueueAdvance, runId: number, entitie
       });
       continue;
     }
+    if (await hasDefiniteEditorialRefusal(db, "synthesis", identity)) continue;
     const requestKey = automatic
       ? await automaticRequestKey(db, `synthesis:${appid}:${identity}`, runId)
       : await runRequestKey(db, `synthesis:${appid}:${identity}`, runId);
@@ -1291,8 +1464,8 @@ async function takeExtractionTurn(advance: QueueAdvance, job: JobRow): Promise<b
     if (!current) return false;
     identity = extractionIdentity(current, cleaned.hash);
     const prior = await first<ExtractionRow>(db, "SELECT id, source_id, input_identity, content_hash, cleanup_version, model, config_version, output_json, active FROM media_article_extractions WHERE source_id = ? AND active = 1 LIMIT 1", source.id);
-    // Only changed cleaned content re-extracts. A metadata, model,
-    // configuration or cleanup version change keeps the active extraction.
+    // Unchanged content keeps its extraction; legacy scope is checked when
+    // the stored observations are used in new synthesis.
     kept = prior !== null && prior.content_hash === cleaned.hash;
     if (prior && !kept) {
       const extractions = await db.prepare("UPDATE media_article_extractions SET active = 0 WHERE source_id = ? AND active = 1").bind(source.id).run();
@@ -1322,8 +1495,12 @@ async function takeExtractionTurn(advance: QueueAdvance, job: JobRow): Promise<b
     await resolveWithoutProvider(db, job);
     return true;
   }
+  if (await hasDefiniteEditorialRefusal(db, "extraction", identity)) {
+    await resolveWithoutProvider(db, job);
+    return true;
+  }
   await setWaitingInputIdentity(db, job, identity);
-  await sendTextItem(advance, { ...job, input_identity: identity }, makeExtractionRequest(current, cleaned.content));
+  await sendTextItem(advance, { ...job, input_identity: identity }, makeExtractionRequest(current, cleaned.content), cleaned.content);
   return true;
 }
 
@@ -1343,7 +1520,14 @@ async function takeSynthesisTurn(advance: QueueAdvance, job: JobRow): Promise<bo
     return false;
   }
   const game = await first<{ name: string }>(db, "SELECT name FROM apps WHERE appid = ?", job.appid);
-  await sendTextItem(advance, job, makeSynthesisRequest(job.appid, game?.name ?? "", evidence.extractions, evidence.sources));
+  const sources = effectiveObservationSources(job.appid, evidence.extractions, evidence.sources);
+  const selections = synthesisSelections(sources);
+  if (!selections.choices.has("statements")) {
+    const checked = validateSynthesisSelections({}, job.appid, sources, selections);
+    await refuseItem(db, job, "invalid_output: no cited statements", advance.now, JSON.stringify(observationReviewOutput(checked, sources)));
+    return true;
+  }
+  await sendTextItem(advance, job, makeSynthesisRequest(job.appid, game?.name ?? "", selections));
   return true;
 }
 
@@ -1368,6 +1552,28 @@ async function takeEmbeddingTurn(advance: QueueAdvance, job: JobRow): Promise<bo
 }
 
 async function takeTurn(advance: QueueAdvance, job: JobRow): Promise<boolean> {
+  // Items already waiting at deploy time must record the contract actually sent.
+  // Submitted legacy work still settles under the version recorded at submission.
+  if (job.provider === "openrouter" && job.config_version !==
+      (job.stage === "extraction" ? EXTRACTION_CONFIG_VERSION : SYNTHESIS_CONFIG_VERSION)) {
+    const { db } = advance;
+    const next = await queuedIdentity(db, job);
+    let requestKey = job.request_key;
+    if (job.stage === "synthesis") {
+      if (next.input_identity === job.input_identity) {
+        await resolveWithoutProvider(db, job);
+        return false;
+      }
+      const availableKey = await automaticRequestKey(db, `synthesis:${job.appid}:${next.input_identity}`, job.run_id);
+      if (!availableKey) {
+        await resolveWithoutProvider(db, job);
+        return false;
+      }
+      requestKey = availableKey;
+    }
+    if (!await upgradeWaitingTextJob(db, job, next, requestKey)) return false;
+    job = { ...job, ...next, request_key: requestKey };
+  }
   if (job.stage === "extraction") return takeExtractionTurn(advance, job);
   if (job.stage === "synthesis") return takeSynthesisTurn(advance, job);
   if (job.stage === "embedding") return takeEmbeddingTurn(advance, job);

@@ -183,12 +183,13 @@ describe("Catalog Foundation", () => {
     const previous = process.env.MEDIA_OVERVIEW_PUBLIC;
     process.env.MEDIA_OVERVIEW_PUBLIC = "true";
     try {
-      await upsertApp(freshDb, { appid: 9101, name: "Tagged One", type: "game", is_playable: true, is_eligible: true });
-      await upsertApp(freshDb, { appid: 9102, name: "Tagged Two", type: "game", is_playable: true, is_eligible: true });
-      await upsertApp(freshDb, { appid: 9103, name: "Child", type: "game", is_playable: true, is_eligible: true, parent_appid: 9101 });
-      await upsertApp(freshDb, { appid: 9104, name: "Invalidated Overview", type: "game", is_playable: true, is_eligible: true });
+      await upsertApp(freshDb, { appid: 1086940, name: "Tagged One", type: "game", is_playable: true, is_eligible: true });
+      await upsertApp(freshDb, { appid: 1091500, name: "Tagged Two", type: "game", is_playable: true, is_eligible: true });
+      await upsertApp(freshDb, { appid: 9103, name: "Child", type: "game", is_playable: true, is_eligible: true, parent_appid: 1086940 });
+      await upsertApp(freshDb, { appid: 1145350, name: "Invalidated Overview", type: "game", is_playable: true, is_eligible: true });
+      await upsertApp(freshDb, { appid: 9105, name: "Outside Experiment", type: "game", is_playable: true, is_eligible: true });
 
-      for (const [appid, url] of [[9101, "https://ign.com/tagged-one"], [9102, "https://ign.com/tagged-two"], [9103, "https://ign.com/child"], [9104, "https://ign.com/invalidated"]] as const) {
+      for (const [appid, url] of [[1086940, "https://ign.com/tagged-one"], [1091500, "https://ign.com/tagged-two"], [9103, "https://ign.com/child"], [1145350, "https://ign.com/invalidated"], [9105, "https://ign.com/outside"]] as const) {
         await freshDb
           .prepare("INSERT INTO media_sources (appid, pass, original_url, title, outlet, retrieved_at, type, hands_on) VALUES (?, 'initial', ?, ?, 'IGN', '2026-09-13T00:00:00.000Z', 'review', 1)")
           .bind(appid, url, `${appid} review`)
@@ -204,18 +205,21 @@ describe("Catalog Foundation", () => {
           .run();
         await freshDb
           .prepare("INSERT INTO media_game_overviews (appid, input_identity, model, config_version, output_json, active) VALUES (?, ?, 'model', 'config', '{}', ?)")
-          .bind(appid, `overview-${appid}`, appid === 9104 ? 0 : 1)
+          .bind(appid, `overview-${appid}`, appid === 1145350 ? 0 : 1)
           .run();
       }
 
-      expect((await listPlayableGames(freshDb, { limit: 100, mediaTag: "First-person shooter" })).map((game) => game.appid)).toEqual([9101, 9102]);
+      expect((await listPlayableGames(freshDb, { limit: 100, mediaTag: "First-person shooter" })).map((game) => game.appid)).toEqual([1086940, 1091500]);
+      expect((await listPlayableGames(freshDb, { limit: 1, mediaTag: "First-person shooter" })).map((game) => game.appid)).toEqual([1086940]);
 
       const response = await handleCatalogRequest(
         new Request("https://vaporstats.test/api/catalog?limit=100&media_tag=First-person%20shooter"),
         freshDb,
       );
       expect(response.status).toBe(200);
-      expect((await response.json() as { data: CatalogEntity[] }).data.map((game) => game.appid)).toEqual([9101, 9102]);
+      expect((await response.json() as { data: CatalogEntity[] }).data.map((game) => game.appid)).toEqual([1086940, 1091500]);
+
+      expect((await listPlayableGames(freshDb, { limit: 100 })).map((game) => game.appid)).toContain(9105);
 
       process.env.MEDIA_OVERVIEW_PUBLIC = "false";
       expect(await listPlayableGames(freshDb, { mediaTag: "First-person shooter" })).toEqual([]);

@@ -5,22 +5,12 @@ import { writeTransaction } from "./db-transaction";
 import { boundedMediaError } from "./media-error";
 import { mainReleasedDate, type MainReleasedFields } from "./lifecycle-history";
 import { fetchOutletArticle, finishOutletAttempt, hostInOutlet, MEDIA_OUTLETS, OUTLET_HTTP_STOPS, OUTLET_STOP_REASONS, reserveOutletAttempt, type MediaOutlet } from "./media-outlet-access";
+import { MEDIA_EXPERIMENT_GAMES, PUBLIC_MEDIA_ROOT_SQL } from "./media-publication";
 import { parsePreciseReleaseDate } from "./releases";
 import { ELIGIBLE_MEDIA_ENTITY_SQL } from "./media-similarity";
 import { createTavilyTransport } from "./media-tavily";
 
-const MEDIA_GAME_METADATA = [
-  { choice: "cyberpunk-2077", appid: 1091500, name: "Cyberpunk 2077", aliases: ["cyberpunk 2077"] },
-  { choice: "baldurs-gate-3", appid: 1086940, name: "Baldur's Gate 3", aliases: ["baldur's gate 3", "baldurs gate 3"] },
-  { choice: "hades-ii", appid: 1145350, name: "Hades II", aliases: ["hades ii", "hades 2"] },
-] as const;
-
-export type MediaGameChoice = (typeof MEDIA_GAME_METADATA)[number]["choice"];
-
-export const MEDIA_GAME_CHOICES = Object.fromEntries(
-  MEDIA_GAME_METADATA.map(({ choice, appid }) => [choice, appid]),
-) as Record<MediaGameChoice, number>;
-
+export { MEDIA_GAME_CHOICES, type MediaGameChoice } from "./media-publication";
 export { MEDIA_OUTLETS, type MediaOutlet } from "./media-outlet-access";
 export type MediaPass = "initial" | "later";
 export type MediaArticleType = "review" | "preview";
@@ -210,7 +200,7 @@ async function loadMediaTargets(db: AppDatabase, roots: readonly number[]): Prom
   );
   return targetRows.map((row) => {
     const metadata = row.parent_appid === null
-      ? MEDIA_GAME_METADATA.find((game) => game.appid === row.appid)
+      ? MEDIA_EXPERIMENT_GAMES.find((game) => game.appid === row.appid)
       : undefined;
     const normalizedName = normalizeTitle(row.name);
     const parentName = row.parent_appid === null
@@ -227,7 +217,7 @@ async function loadMediaTargets(db: AppDatabase, roots: readonly number[]): Prom
 
 
 function validGameIds(games: readonly number[]): number[] {
-  const valid = new Set(MEDIA_GAME_METADATA.map((game) => game.appid));
+  const valid = new Set(MEDIA_EXPERIMENT_GAMES.map((game) => game.appid));
   if (!Array.isArray(games) || games.length === 0) throw new Error("games must be a non-empty array");
   const result = [...new Set(games)];
   if (result.length !== games.length || result.some((id) => !Number.isInteger(id) || !valid.has(id))) {
@@ -635,7 +625,7 @@ function parseSource(html: string, finalUrl: string, target: MediaTarget, target
   if (!outletConfig || !hostInOutlet(normalizedUrl, outletConfig)) return null;
   const articleType: MediaArticleType = isReview ? "review" : "preview";
   const platform = cleanText(platformMeta) ?? (/\b(pc|playstation|xbox|switch)\b/i.exec(fullArticleText.slice(0, 4_000))?.[1] ?? null);
-  const buildContext = cleanText(buildMeta) ?? (/\bearly\s+access\b/i.test(`${title} ${fullArticleText}`) ? "Early Access" : null);
+  const buildContext = cleanText(buildMeta) ?? (/\bearly access (?:review|preview|build)\b|\breview(?:ed)? in early access\b/i.test(title) || /\bthis early access (?:review|build|preview)\b/i.test(fullArticleText) ? "Early Access" : null);
   return {
     appid: attributedTarget.appid,
     originalUrl: normalizedUrl,
@@ -1091,12 +1081,17 @@ export async function runAuthorizedMediaDiscovery(db: AppDatabase, options: Medi
 }
 
 /**
+ * Public source metadata is available for the experiment roots independently of synthesis.
  * `appid`'s accepted articles from every assessment pass: dated articles by
  * publication date, then undated articles in the order they were accepted.
  * An undated article keeps its unknown date and is never placed in time by
  * when it was retrieved.
  */
-export async function getMediaSources(db: AppDatabase, appid: number): Promise<MediaSource[]> {
+export async function getMediaSources(
+  db: AppDatabase,
+  appid: number,
+  options: { includeUnpublished?: boolean } = {},
+): Promise<MediaSource[]> {
   if (!Number.isInteger(appid) || appid <= 0) return [];
   const sourceRows = await rows<{
     appid: number; original_url: string; discovery_url: string | null; title: string; outlet: MediaOutlet;
@@ -1113,6 +1108,7 @@ export async function getMediaSources(db: AppDatabase, appid: number): Promise<M
       AND app.is_eligible = 1
       AND ${ELIGIBLE_MEDIA_ENTITY_SQL}
      WHERE source.appid = ?
+       ${options.includeUnpublished ? "" : `AND ${PUBLIC_MEDIA_ROOT_SQL}`}
      ORDER BY source.published_at IS NULL, source.published_at, source.id`,
     appid,
   );

@@ -20,14 +20,22 @@ export interface OpenRouterReasoning {
   effort: "low" | "medium" | "high";
 }
 
-export interface OpenRouterChatRequest {
+export type OpenRouterChatRequest = {
   model: string;
   messages: Array<{ role: "system" | "user"; content: string }>;
-  response_format: { type: "json_object" };
   reasoning: OpenRouterReasoning;
   /** The output cap, reasoning and answer combined. */
   max_tokens: number;
-}
+} & (
+  | { response_format: { type: "json_object" }; provider?: never }
+  | {
+    response_format: {
+      type: "json_schema";
+      json_schema: { name: string; strict: true; schema: Record<string, unknown> };
+    };
+    provider: { require_parameters: true };
+  }
+);
 
 /** The parts of a chat-completion answer that processing records. */
 export interface OpenRouterCompletion {

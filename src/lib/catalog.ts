@@ -1,6 +1,8 @@
 import type { AppDatabase } from "./db";
 import { toSlug } from "./slug";
 import { normalizeMediaTag } from "./media-overview";
+import { isMediaOverviewPublic, PUBLIC_MEDIA_ROOT_SQL } from "./media-publication";
+import { ELIGIBLE_MEDIA_ENTITY_SQL } from "./media-similarity";
 import { getChildApp, type RelatedAppEntity } from "./related";
 
 export type ReleaseDateSource =
@@ -150,11 +152,8 @@ export async function listPlayableGames(
   const offset = options.offset ?? 0;
   const normalizedTag = options.mediaTag ? normalizeMediaTag(options.mediaTag) : null;
 
-  const publicEnabled = typeof process !== "undefined" && process.env?.MEDIA_OVERVIEW_PUBLIC === "true";
   if (options.mediaTag && !normalizedTag) return [];
-  if (normalizedTag && !publicEnabled) {
-    return [];
-  }
+  if (normalizedTag && !isMediaOverviewPublic()) return [];
 
   const stmt = db
     .prepare(
@@ -174,9 +173,9 @@ export async function listPlayableGames(
            JOIN media_game_overviews AS overview
              ON overview.appid = app.appid
             AND overview.active = 1
-           WHERE app.is_playable = 1
-             AND app.is_eligible = 1
-             AND app.parent_appid IS NULL
+           WHERE app.is_eligible = 1
+             AND ${PUBLIC_MEDIA_ROOT_SQL}
+             AND ${ELIGIBLE_MEDIA_ENTITY_SQL}
            ORDER BY app.appid ASC
            LIMIT ? OFFSET ?`
         : `SELECT * FROM apps
