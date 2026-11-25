@@ -34,24 +34,17 @@ function CitationNotes({
   return notes;
 }
 
-// Consecutive findings can share a patch caption while retaining separate citations.
-function sharedPatch(text: string) {
-  return / \(((?:\d+\s?GB )?Day[- ]0 patch), PC\)([.!?]?)$/i.exec(text);
-}
-
 function CitedFindings({
+  appid,
   findings,
   references,
 }: {
+  appid: number;
   findings: MediaFinding[];
   references: SourceReferences;
 }) {
   return findings.map((finding, index) => {
-    const patch = sharedPatch(finding.text);
-    const samePatch = (other?: MediaFinding) => Boolean(other && patch && sharedPatch(other.text)?.[1] === patch[1]);
-    const continued = samePatch(findings[index - 1]);
-    const grouped = patch && (continued || samePatch(findings[index + 1]));
-    const wording = grouped ? finding.text.slice(0, patch.index) + patch[2] : presentMediaFindingText(finding.text);
+    const wording = presentMediaFindingText(finding.text, appid);
     return (
       <span key={`${finding.text}-${index}`}>
         {index > 0 && " "}
@@ -63,7 +56,6 @@ function CitedFindings({
             Contested
           </span>
         )}
-        {grouped && !continued && <span className="font-medium text-[#dec79f]">PC with the {patch[1]} · </span>}
         {wording}
         <CitationNotes sourceUrls={finding.sourceUrls} references={references} />
         {/[.!?]$/.test(wording) ? "" : "."}
@@ -118,10 +110,12 @@ function getEditionChapters(categories: MediaOverview["categories"], references:
 }
 
 function Topics({
+  appid,
   categories,
   references,
   heading: Heading = "h3",
 }: {
+  appid: number;
   categories: MediaOverview["categories"];
   references: SourceReferences;
   heading?: "h3" | "h4";
@@ -132,7 +126,7 @@ function Topics({
         {category.name}
       </Heading>
       <p className="max-w-[70ch] text-[15px] leading-relaxed text-zinc-300">
-        <CitedFindings findings={category.findings} references={references} />
+        <CitedFindings appid={appid} findings={category.findings} references={references} />
       </p>
     </div>
   ));
@@ -171,9 +165,9 @@ export function MediaOverviewSection({
         </AppLink>
       </div>
       <p className="max-w-[68ch] text-base leading-relaxed text-zinc-100">
-        <CitedFindings findings={statements} references={references} />
+        <CitedFindings appid={overview.appid} findings={statements} references={references} />
       </p>
-      <Topics categories={generalTopics} references={references} />
+      <Topics appid={overview.appid} categories={generalTopics} references={references} />
       {chapters.map(({ edition, date, categories: topics }) => (
         <section key={edition} className="grid gap-3 border-t border-zinc-700 pt-3 sm:grid-cols-[minmax(7rem,24%)_1fr]">
           <div className="border-l-2 border-[#d6b071] pl-3">
@@ -185,7 +179,7 @@ export function MediaOverviewSection({
             <h3 className="font-semibold text-zinc-100">{edition}</h3>
           </div>
           <div className="min-w-0 space-y-4">
-            <Topics categories={topics} references={references} heading="h4" />
+            <Topics appid={overview.appid} categories={topics} references={references} heading="h4" />
           </div>
         </section>
       ))}
@@ -198,13 +192,13 @@ export function MediaOverviewSection({
             {overview.prosCons.pros.length > 0 && (
               <div className="space-y-2 border-l-2 border-emerald-900/70 pl-3 text-sm leading-6 text-zinc-300">
                 <h4 className="font-mono text-[10px] uppercase tracking-wider text-zinc-500">Pros</h4>
-                <CitedFindings findings={overview.prosCons.pros} references={references} />
+                <CitedFindings appid={overview.appid} findings={overview.prosCons.pros} references={references} />
               </div>
             )}
             {overview.prosCons.cons.length > 0 && (
               <div className="space-y-2 border-l-2 border-red-950 pl-3 text-sm leading-6 text-zinc-300">
                 <h4 className="font-mono text-[10px] uppercase tracking-wider text-zinc-500">Cons</h4>
-                <CitedFindings findings={overview.prosCons.cons} references={references} />
+                <CitedFindings appid={overview.appid} findings={overview.prosCons.cons} references={references} />
               </div>
             )}
           </div>

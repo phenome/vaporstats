@@ -1,3 +1,5 @@
+import legacyBriefCopy from "./media-legacy-brief-copy.json";
+
 const PC_SCOPE = /^(?:On PC|In the (?:reviewed )?PC (?:version|build)),|(?<!than )(?<!as )(?<!like )(?<!not )\bon PC$/i;
 const SWITCH_2_SCOPE = /^(?:On (?:the )?(?:Nintendo )?Switch 2(?: (?:port|version))?,|The (?:Nintendo )?Switch 2 (?:port|version)\b)|(?<!than )(?<!as )(?<!like )(?<!not )\bon (?:the )?(?:Nintendo )?Switch 2(?: (?:port|version))?$/i;
 const EARLY_ACCESS_SCOPE = /^(?:In |During |The )?Early Access\b|\b(?:in|during) (?:the )?Early Access(?: (?:build|version))?$/i;
@@ -5,7 +7,9 @@ const DAY_ZERO_SCOPE = /^(PC, )?((?:\d+\s?GB )?Day[- ]0 patch)(, PC)?$/i;
 
 // Format the explicit qualifier on a saved finding. Leave unfamiliar qualifier
 // lists and composite findings intact, since their scope may apply to only one clause.
-export function presentMediaFindingText(text: string): string {
+export function presentMediaFindingText(text: string, appid?: number): string {
+  const revision = legacyBriefCopy.find((entry) => entry.appid === appid && entry.saved === text);
+  if (revision) return revision.display;
   if (text.includes(" / ")) return text;
 
   const suffix = /^(.+) \(([^()]+)\)([.!?]?)$/.exec(text);

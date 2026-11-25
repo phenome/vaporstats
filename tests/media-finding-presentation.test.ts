@@ -2,12 +2,15 @@ import { expect, test } from "bun:test";
 import { presentMediaFindingText } from "../src/lib/media-finding-presentation";
 
 test.each([
+  ["Combat feels fluid and enjoyable on PC (reviewed PC version)", "Combat feels fluid and enjoyable"],
+  ["Visual scenes look striking and lively on PC with the 50GB Day 0 patch.", "Visual scenes look striking and lively."],
+  ["Optional quests are only available on PC (reviewed PC version)", "Optional quests are only available on PC"],
   ["Animation glitches interrupt dramatic scenes on PC (reviewed PC version)",
-    "Animation glitches interrupt dramatic scenes on PC"],
-  ["Optional quests can influence the ending (reviewed PC version).",
-    "Optional quests can influence the ending in the reviewed PC version."],
+    "Animation glitches interrupted dramatic scenes"],
+  ["Optional quests can influence the ending on PC (reviewed PC version)",
+    "Optional quests can influence the ending"],
   ["Enemy AI is rote and lacks tactical challenge (50GB Day 0 patch, PC)",
-    "Enemy AI is rote and lacks tactical challenge on PC with the 50GB Day 0 patch"],
+    "Enemy AI is rote and lacks tactical challenge"],
   ["Vehicles can spawn inside each other on PC (PC, Day 0 patch).",
     "Vehicles can spawn inside each other on PC with the Day 0 patch."],
   ["Vehicles can spawn inside each other (Day 0 patch)",
@@ -27,7 +30,7 @@ test.each([
   ["Resources unlock new weapons in the Early Access build (Early Access).",
     "Resources unlock new weapons in the Early Access build."],
 ])("presents the saved wording %s", (saved, expected) => {
-  expect(presentMediaFindingText(saved)).toBe(expected);
+  expect(presentMediaFindingText(saved, 1091500)).toBe(expected);
 });
 
 test.each([
@@ -36,7 +39,11 @@ test.each([
   "The builds allow flexible experimentation (PC 1.0)",
   "The Early Access version includes six classes (Fighter, Wizard, Cleric, Rogue, Ranger, and Warlock).",
   "Textures could load late (Day 0 patch, PC) / Neon stands out (Switch 2)",
-  "Visual scenes look striking and lively on PC with the 50GB Day 0 patch.",
+  "The update fixed broken quests on PC with the 50GB Day 0 patch.",
 ])("preserves unfamiliar or already natural wording %s", (saved) => {
   expect(presentMediaFindingText(saved)).toBe(saved);
+});
+
+test("a reviewed legacy wording correction stays with its game", () => {
+  expect(presentMediaFindingText("Combat feels fluid and enjoyable on PC (reviewed PC version)", 42)).toBe("Combat feels fluid and enjoyable on PC");
 });

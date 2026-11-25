@@ -110,7 +110,7 @@ describe("game media sources", () => {
         JSON.stringify({
           appid: source.appid,
           statements: [{
-            text: "Optional quests can influence the ending on PC (reviewed PC version).",
+            text: "Optional quests can influence the ending on PC (reviewed PC version)",
             sourceUrls: [source.originalUrl],
           }],
         }),
@@ -125,7 +125,7 @@ describe("game media sources", () => {
         data: { mediaOverview: { statements: Array<{ text: string; sourceUrls: string[] }> } };
       };
       expect(body.data.mediaOverview.statements[0]).toEqual({
-        text: "Optional quests can influence the ending on PC (reviewed PC version).",
+        text: "Optional quests can influence the ending on PC (reviewed PC version)",
         sourceUrls: [source.originalUrl],
       });
 
@@ -140,7 +140,7 @@ describe("game media sources", () => {
         sources: [source],
       }));
       expect(overviewHtml).toContain("Overview");
-      expect(overviewHtml).toContain("Optional quests can influence the ending on PC.");
+      expect(overviewHtml).toContain("Optional quests can influence the ending");
       expect(overviewHtml).not.toContain("reviewed PC version");
       expect(overviewHtml).toContain('href="#media-source-1"');
       expect(overviewHtml).toContain('title="IGN: Cyberpunk 2077 Review"');
@@ -153,7 +153,7 @@ describe("game media sources", () => {
         db,
       );
       const ssrHtml = await ssrResponse.text();
-      expect(ssrHtml).toContain("Optional quests can influence the ending on PC.");
+      expect(ssrHtml).toContain("Optional quests can influence the ending");
       expect(ssrHtml).toContain('id=\"media-source-1\"');
     } finally {
       native.close(true);
