@@ -132,7 +132,11 @@ describe("game media sources", () => {
       const overviewHtml = renderToString(React.createElement(MediaOverviewSection, {
         overview: {
           appid: source.appid,
-          statements: body.data.mediaOverview.statements,
+          statements: [
+            ...body.data.mediaOverview.statements,
+            { text: "Night City's open world feels vast and dense at middle to long distances (50GB Day 0 patch, PC)", sourceUrls: [source.originalUrl] },
+            { text: "Gunplay feels satisfying and offers creative build variety (50GB Day 0 patch, PC)", sourceUrls: [source.originalUrl] },
+          ],
           tags: [{ label: "First-person shooter", slug: "first-person-shooter" }],
           categories: [],
           prosCons: null,
@@ -142,6 +146,8 @@ describe("game media sources", () => {
       expect(overviewHtml).toContain("Overview");
       expect(overviewHtml).toContain("Optional quests can influence the ending");
       expect(overviewHtml).not.toContain("reviewed PC version");
+      expect(overviewHtml).toContain("Gunplay feels satisfying and offers creative build variety");
+      expect(overviewHtml).not.toContain("Day 0 patch");
       expect(overviewHtml).toContain('href="#media-source-1"');
       expect(overviewHtml).toContain('title="IGN: Cyberpunk 2077 Review"');
       expect(overviewHtml).toContain('aria-label="Source 1: Cyberpunk 2077 Review on IGN"');
