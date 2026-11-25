@@ -197,19 +197,13 @@ export async function runPlayerCollectionTick(
   // Execute outbound requests using the 6-worker pool
   const { results: outcomes, metrics } = await executeWithConnectionPool<
     TrackedGame,
-    { game: TrackedGame; count: number | null; success: boolean }
+    { game: TrackedGame; count: number | null }
   >(
     dueGames,
     concurrency,
     async (game: TrackedGame) => {
       const count = await fetchSteamCurrentPlayers(game.appid, customFetch);
-      const suspiciousZero =
-        count === 0 && game.latest_players !== null && game.latest_players > 0;
-      return {
-        game,
-        count: suspiciousZero ? null : count,
-        success: count !== null && !suspiciousZero,
-      };
+      return { game, count };
     }
   );
 
@@ -219,10 +213,10 @@ export async function runPlayerCollectionTick(
   const observedAtIso = anchorTime.toISOString();
 
   for (const outcome of outcomes) {
-    const { game, count, success } = outcome;
+    const { game, count } = outcome;
     const nextDueIso = calculateNextDueAt(anchorTime, game.tier, game.appid).toISOString();
 
-    if (success && count !== null) {
+    if (count !== null) {
       succeeded++;
       stmts.push(prepareObservationInsert(db, game.appid, count, observedAtIso));
       stmts.push(prepareSuccessTrackingUpdate(db, game.appid, nextDueIso, count, observedAtIso));

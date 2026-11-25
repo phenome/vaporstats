@@ -17,6 +17,7 @@ import {
   TIER_DAILY_MAX,
   DAILY_REQUEST_CAP,
   TICK_REQUEST_CAP,
+  getDailyRequestCount,
 } from "../src/lib/player";
 function createAppDatabase(): AppDatabase {
   const native = new Database(":memory:");
@@ -241,7 +242,7 @@ describe("Bun ingestion scheduling and player rollups", () => {
       .first<{ current_players: number }>();
     expect(observation?.current_players).toBe(1234);
   });
-  test("rejects an explicit zero after a positive player observation", async () => {
+  test("records zero after a positive player observation and retains it through a Steam API error", async () => {
     const db = createAppDatabase();
     const appid = 730;
     const anchorTime = new Date("2026-09-05T03:10:00.000Z");
@@ -252,35 +253,49 @@ describe("Bun ingestion scheduling and player rollups", () => {
       .bind(appid, 42, priorObservedAt)
       .run();
     await db
-      .prepare("UPDATE tracked_games SET latest_players = ?, last_successful_at = ? WHERE appid = ?")
+      .prepare("UPDATE tracked_games SET latest_players = ?, last_successful_at = ?, consecutive_failures = 2 WHERE appid = ?")
       .bind(42, priorObservedAt, appid)
       .run();
 
     const customFetch = (async () => Response.json({ response: { result: 1, player_count: 0 } })) as unknown as typeof fetch;
     const result = await runPlayerCollectionTick(db, { anchorTime, customFetch });
 
-    expect(result).toMatchObject({ attempted: 1, succeeded: 0, failed: 1 });
-    expect(await db.prepare("SELECT COUNT(*) AS count FROM observations WHERE appid = ?").bind(appid).first<number>("count")).toBe(1);
-    expect(
-      await db
-        .prepare(
-          "SELECT latest_players, consecutive_failures, last_attempted_at, last_successful_at, next_due_at FROM tracked_games WHERE appid = ?"
-        )
-        .bind(appid)
-        .first<{
-          latest_players: number | null;
-          consecutive_failures: number;
-          last_attempted_at: string | null;
-          last_successful_at: string | null;
-          next_due_at: string;
-        }>(),
-    ).toEqual({
-      latest_players: 42,
-      consecutive_failures: 1,
+    const nextDueAt = calculateNextDueAt(anchorTime, "fast", appid);
+    const readTracking = () => db.prepare(
+      "SELECT latest_players, consecutive_failures, last_attempted_at, last_successful_at, next_due_at FROM tracked_games WHERE appid = ?",
+    ).bind(appid).first();
+    const readObservations = () => db.prepare(
+      "SELECT current_players, observed_at FROM observations WHERE appid = ? ORDER BY observed_at",
+    ).bind(appid).all();
+    const observations = [
+      { current_players: 42, observed_at: priorObservedAt },
+      { current_players: 0, observed_at: anchorTime.toISOString() },
+    ];
+
+    expect(result).toMatchObject({ attempted: 1, succeeded: 1, failed: 0, dailyCount: 1 });
+    expect((await readObservations()).results).toEqual(observations);
+    expect(await readTracking()).toEqual({
+      latest_players: 0,
+      consecutive_failures: 0,
       last_attempted_at: anchorTime.toISOString(),
-      last_successful_at: priorObservedAt,
-      next_due_at: calculateNextDueAt(anchorTime, "fast", appid).toISOString(),
+      last_successful_at: anchorTime.toISOString(),
+      next_due_at: nextDueAt.toISOString(),
     });
+    expect(await getDailyRequestCount(db, "2026-09-05")).toBe(1);
+
+    const failedFetch = (async () => Response.json({ response: { result: 2, player_count: 0 } })) as unknown as typeof fetch;
+    const failed = await runPlayerCollectionTick(db, { anchorTime: nextDueAt, customFetch: failedFetch });
+
+    expect(failed).toMatchObject({ attempted: 1, succeeded: 0, failed: 1, dailyCount: 2 });
+    expect((await readObservations()).results).toEqual(observations);
+    expect(await readTracking()).toEqual({
+      latest_players: 0,
+      consecutive_failures: 1,
+      last_attempted_at: nextDueAt.toISOString(),
+      last_successful_at: anchorTime.toISOString(),
+      next_due_at: calculateNextDueAt(nextDueAt, "fast", appid).toISOString(),
+    });
+    expect(await getDailyRequestCount(db, "2026-09-05")).toBe(2);
   });
 
   test("accepts an initial explicit zero player observation", async () => {
