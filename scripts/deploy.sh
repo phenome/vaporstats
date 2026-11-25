@@ -11,7 +11,7 @@ readonly CONTAINER_NAME=vaporstats
 readonly IMAGE_REPOSITORY=vaporstats
 readonly ROLLBACK_IMAGE="$IMAGE_REPOSITORY:previous"
 # Allow bounded source-only publication before the candidate opens its listener.
-readonly HEALTH_TIMEOUT_SECONDS="${DEPLOY_HEALTH_TIMEOUT_SECONDS:-90}"
+readonly HEALTH_TIMEOUT_SECONDS="${DEPLOY_HEALTH_TIMEOUT_SECONDS:-180}"
 
 fail() {
   printf 'deploy: %s\n' "$*" >&2
@@ -97,13 +97,14 @@ restore_database() {
 wait_for_healthy() {
   local deadline=$((SECONDS + HEALTH_TIMEOUT_SECONDS))
   local status
+  local container_state
   local expected_image_id
   local running_image_id
   expected_image_id=$(docker image inspect "$IMAGE_REPOSITORY:$VAPORSTATS_IMAGE_TAG" --format '{{.Id}}' 2>/dev/null || true)
   [[ -n "$expected_image_id" ]] || return 1
   while (( SECONDS < deadline )); do
-    status=$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$CONTAINER_NAME" 2>/dev/null || true)
-    running_image_id=$(docker inspect --format '{{.Image}}' "$CONTAINER_NAME" 2>/dev/null || true)
+    container_state=$(docker inspect --format '{{.Image}} {{if and .State.Running .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$CONTAINER_NAME" 2>/dev/null || true)
+    read -r running_image_id status <<< "$container_state"
     if [[ "$running_image_id" == "$expected_image_id" ]]; then
       case "$status" in
         healthy)

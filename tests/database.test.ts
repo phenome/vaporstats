@@ -1,8 +1,9 @@
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { copyFileSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { basename, dirname, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { Database } from "bun:sqlite";
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import fs from "node:fs";
+import { spyOn, afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { closeDb, createDailySnapshot, getDb } from "../src/lib/db";
 import { applyMigrations, DRIZZLE_MIGRATION_TABLE, MIGRATION_TABLE } from "../src/lib/migrations";
 import type { AppDatabase } from "../src/lib/db";
@@ -834,6 +835,8 @@ describe("Bun SQLite persistence", () => {
     }
     const writtenPath = await createDailySnapshot(db, "2025-01-31");
     expect(writtenPath).toBe(join(directory, "vaporstats-2025-01-31.sqlite"));
+    expect(existsSync(writtenPath + "-wal")).toBe(false);
+    expect(existsSync(writtenPath + "-shm")).toBe(false);
     const snapshot = new Database(writtenPath, { readonly: true });
     try {
       expect(snapshot.prepare("SELECT name FROM apps WHERE appid = ?").get(21)).toEqual({ name: "Committed WAL" });
@@ -843,10 +846,10 @@ describe("Bun SQLite persistence", () => {
     }
     expect(existsSync(join(directory, "vaporstats-2025-01-02.sqlite"))).toBe(false);
     expect(existsSync(process.env.DATABASE_PATH!)).toBe(true);
-    expect(readdirSync(directory).some((name) => name.endsWith(".tmp"))).toBe(false);
+    expect(readdirSync(directory).every((name) => /^vaporstats-\d{4}-\d{2}-\d{2}\.sqlite$/.test(name))).toBe(true);
   });
 
-  test("failed serialization preserves the previous good snapshot and does not prune", async () => {
+  test("a closed source preserves the previous good snapshot and does not prune", async () => {
     const db = await getDb();
     const output = await createDailySnapshot(db, "2025-01-31");
     const previous = readFileSync(output);
@@ -855,11 +858,12 @@ describe("Bun SQLite persistence", () => {
     for (let day = 1; day <= 30; day++) {
       writeFileSync(join(directory, `vaporstats-2025-01-${String(day).padStart(2, "0")}.sqlite`), "must survive failure");
     }
+    const inventory = readdirSync(directory).sort();
     await closeDb();
     await expect(createDailySnapshot(db, "2025-01-31")).rejects.toThrow();
     expect(readFileSync(output)).toEqual(previous);
     expect(readFileSync(old, "utf8")).toBe("must survive failure");
-    expect(readdirSync(directory).some((name) => name.endsWith(".tmp"))).toBe(false);
+    expect(readdirSync(directory).sort()).toEqual(inventory);
   });
 
   test("failed atomic publication removes its temporary file without pruning", async () => {
@@ -867,20 +871,147 @@ describe("Bun SQLite persistence", () => {
     const previousPath = await createDailySnapshot(db, "2025-01-30");
     const previous = readFileSync(previousPath);
     const directory = process.env.DATABASE_SNAPSHOT_DIR!;
-    const blockedOutput = join(directory, "vaporstats-2025-01-31.sqlite");
-    mkdirSync(blockedOutput);
     const old = join(directory, "vaporstats-2025-01-02.sqlite");
     for (let day = 1; day <= 29; day++) {
       writeFileSync(join(directory, `vaporstats-2025-01-${String(day).padStart(2, "0")}.sqlite`), "must survive publication failure");
     }
-    await expect(createDailySnapshot(db, "2025-01-31")).rejects.toThrow();
+    const inventory = readdirSync(directory).sort();
+    const rename = spyOn(fs, "renameSync").mockImplementationOnce(() => {
+      throw new Error("simulated publication failure");
+    });
+    try {
+      await expect(createDailySnapshot(db, "2025-01-31")).rejects.toThrow("simulated publication failure");
+    } finally {
+      rename.mockRestore();
+    }
     expect(readFileSync(previousPath)).toEqual(previous);
     expect(readFileSync(old, "utf8")).toBe("must survive publication failure");
-    expect(statSync(blockedOutput).isDirectory()).toBe(true);
-    expect(readdirSync(directory).some((name) => name.endsWith(".tmp"))).toBe(false);
-    // A failed request does not poison serialization of subsequent requests.
+    expect(readdirSync(directory).sort()).toEqual(inventory);
+    // The queue still accepts requests after a publication failure.
     await createDailySnapshot(db, "2025-02-01");
   });
+
+  function interceptSnapshotWorker(before: () => void, after?: () => void) {
+    const spawn = Bun.spawn;
+    const intercept = (...args: Parameters<typeof spawn>) => {
+      before();
+      const child = spawn(...args);
+      if (after) {
+        const exited = child.exited.then((code) => {
+          after();
+          return code;
+        });
+        Object.defineProperty(child, "exited", { value: exited });
+      }
+      return child;
+    };
+    return spyOn(Bun, "spawn").mockImplementationOnce(intercept as typeof spawn);
+  }
+
+  for (const change of ["symlink", "file", "parent", "during backup"] as const) {
+    test(`rejects source replacement (${change}) while the live connection still reads its original data`, async () => {
+      const configured = process.env.DATABASE_PATH!;
+      const live = change === "symlink" ? join(temporaryDirectory, "live.sqlite") : configured;
+      if (change === "symlink") {
+        mkdirSync(dirname(configured));
+        symlinkSync(live, configured);
+      }
+      const db = await getDb();
+      await db.exec("CREATE TABLE source_marker (value TEXT); INSERT INTO source_marker VALUES ('live')");
+      const directory = process.env.DATABASE_SNAPSHOT_DIR!;
+      const output = await createDailySnapshot(db, "2025-01-31");
+      const previous = readFileSync(output);
+      const old = join(directory, "vaporstats-2025-01-02.sqlite");
+      for (let day = 1; day <= 30; day++) {
+        writeFileSync(join(directory, `vaporstats-2025-01-${String(day).padStart(2, "0")}.sqlite`), "old recovery point");
+      }
+      const inventory = readdirSync(directory).sort();
+
+      function replaceSource(): void {
+        if (change === "symlink") {
+          unlinkSync(configured);
+          symlinkSync(join(temporaryDirectory, "replacement.sqlite"), configured);
+        } else if (change === "parent") {
+          renameSync(dirname(configured), join(temporaryDirectory, "moved-source"));
+          mkdirSync(dirname(configured));
+        } else {
+          renameSync(configured, join(temporaryDirectory, "moved-source.sqlite"));
+        }
+        const replacement = new Database(configured);
+        replacement.exec("CREATE TABLE source_marker (value TEXT); INSERT INTO source_marker VALUES ('replacement')");
+        replacement.close();
+      }
+
+      if (change === "during backup") {
+        const hook = interceptSnapshotWorker(() => {}, replaceSource);
+        try {
+          await expect(createDailySnapshot(db, "2025-01-31")).rejects.toThrow("source database changed");
+        } finally {
+          hook.mockRestore();
+        }
+      } else {
+        replaceSource();
+        await expect(createDailySnapshot(db, "2025-01-31")).rejects.toThrow("source database changed");
+      }
+      expect(await db.prepare("SELECT value FROM source_marker").first<{ value: string }>()).toEqual({ value: "live" });
+      expect(readFileSync(output)).toEqual(previous);
+      expect(readFileSync(old, "utf8")).toBe("old recovery point");
+      expect(readdirSync(directory).sort()).toEqual(inventory);
+    });
+  }
+
+  for (const change of ["parent", "staging directory", "staging file", "sidecar", "sidecar before backup", "staging directory before backup", "staging file before backup"] as const) {
+    test(`preserves a substituted ${change} and cleans only the owned staging file`, async () => {
+      const db = await getDb();
+      const directory = process.env.DATABASE_SNAPSHOT_DIR!;
+      const output = await createDailySnapshot(db, "2025-01-31");
+      const previous = readFileSync(output);
+      const movedParent = join(temporaryDirectory, "moved-parent");
+      const movedStaging = join(directory, "moved-staging");
+      let staging: string;
+      let sentinel: string;
+      const beforeBackup = change.endsWith("before backup");
+      function substitute(): void {
+        const name = basename(staging);
+        const stagedFile = join(staging, "snapshot.sqlite");
+        if (change === "parent") {
+          renameSync(directory, movedParent);
+          mkdirSync(staging, { recursive: true });
+          sentinel = join(directory, name, "unrelated");
+        } else if (change.startsWith("staging directory")) {
+          renameSync(staging, movedStaging);
+          mkdirSync(staging);
+          sentinel = join(staging, "unrelated");
+        } else if (change.startsWith("staging file")) {
+          renameSync(stagedFile, join(staging, "moved.sqlite"));
+          sentinel = stagedFile;
+        } else {
+          sentinel = stagedFile + "-journal";
+        }
+        writeFileSync(sentinel, "unrelated contents");
+      }
+      const hook = interceptSnapshotWorker(() => {
+        staging = join(directory, readdirSync(directory).find((name) => name.startsWith(".snapshot-tmp-"))!);
+        if (beforeBackup) substitute();
+      }, beforeBackup ? undefined : substitute);
+      try {
+        await expect(createDailySnapshot(db, "2025-01-31")).rejects.toThrow();
+      } finally {
+        hook.mockRestore();
+      }
+      expect(readFileSync(sentinel!, "utf8")).toBe("unrelated contents");
+      const previousPath = change === "parent" ? join(movedParent, basename(output)) : output;
+      expect(readFileSync(previousPath)).toEqual(previous);
+      if (change === "parent") {
+        const originalStaging = join(movedParent, basename(staging!));
+        if (process.platform === "linux" && existsSync("/proc/self/fd")) expect(existsSync(originalStaging)).toBe(false);
+      } else if (change.startsWith("staging directory")) {
+        expect(existsSync(movedStaging)).toBe(false);
+      } else {
+        expect(readdirSync(staging!)).toEqual([basename(sentinel!)]);
+      }
+    });
+  }
 
   test("custom destinations never prune neighboring managed files", async () => {
     const db = await getDb();
@@ -895,6 +1026,49 @@ describe("Bun SQLite persistence", () => {
     expect(readFileSync(join(directory, "vaporstats-2025-01-02.sqlite"), "utf8")).toBe("old snapshot");
     await expect(createDailySnapshot(db, process.env.DATABASE_PATH!)).rejects.toThrow("source database");
     expect(await db.prepare("PRAGMA integrity_check").first<{ integrity_check: string }>()).toEqual({ integrity_check: "ok" });
+  });
+
+  test("rejects symlinks, source aliases and destinations with SQLite sidecars", async () => {
+    const db = await getDb();
+    const source = process.env.DATABASE_PATH!;
+    const target = join(temporaryDirectory, "existing.sqlite");
+    writeFileSync(target, "previous snapshot");
+    const symlink = join(temporaryDirectory, "alias.sqlite");
+    symlinkSync(target, symlink);
+    const dangling = join(temporaryDirectory, "dangling.sqlite");
+    symlinkSync(join(temporaryDirectory, "missing.sqlite"), dangling);
+    const hardlink = join(temporaryDirectory, "source-alias.sqlite");
+    linkSync(source, hardlink);
+    await expect(createDailySnapshot(db, symlink)).rejects.toThrow("regular file");
+    await expect(createDailySnapshot(db, dangling)).rejects.toThrow("regular file");
+    await expect(createDailySnapshot(db, hardlink)).rejects.toThrow("source database");
+    await expect(createDailySnapshot(db, source + "-wal")).rejects.toThrow("source database");
+    writeFileSync(target + "-wal", "pending WAL");
+    await expect(createDailySnapshot(db, target)).rejects.toThrow("SQLite sidecars");
+    expect(readFileSync(target, "utf8")).toBe("previous snapshot");
+    expect(readFileSync(target + "-wal", "utf8")).toBe("pending WAL");
+    expect(statSync(hardlink).ino).toBe(statSync(source).ino);
+  });
+
+  test("replaces the same-day snapshot atomically and preserves implicit row IDs", async () => {
+    const db = await getDb();
+    await db.exec("CREATE TABLE rowids (content TEXT)");
+    await db.exec("INSERT INTO rowids (rowid, content) VALUES (500, 'before')");
+    const output = await createDailySnapshot(db, "2025-01-31");
+    const previous = new Database(output, { readonly: true });
+    try {
+      await db.exec("UPDATE rowids SET content = 'after'");
+      await createDailySnapshot(db, "2025-01-31");
+      const current = new Database(output, { readonly: true });
+      try {
+        expect(previous.query("SELECT rowid, content FROM rowids").all()).toEqual([{ rowid: 500, content: "before" }]);
+        expect(current.query("SELECT rowid, content FROM rowids").all()).toEqual([{ rowid: 500, content: "after" }]);
+      } finally {
+        current.close(true);
+      }
+    } finally {
+      previous.close(true);
+    }
   });
 
   test("serializes overlapping publications without deleting the newest published path", async () => {
@@ -912,7 +1086,10 @@ describe("Bun SQLite persistence", () => {
         snapshot.close(true);
       }
     }
-    expect(readdirSync(process.env.DATABASE_SNAPSHOT_DIR!).some((name) => name.endsWith(".tmp"))).toBe(false);
+    expect(readdirSync(process.env.DATABASE_SNAPSHOT_DIR!).sort()).toEqual([
+      "vaporstats-2025-01-30.sqlite",
+      "vaporstats-2025-01-31.sqlite",
+    ]);
   });
 
   test("weekly evidence migration preserves retained buckets, source links, and immutable score history", async () => {

@@ -77,11 +77,13 @@ export const Route = createFileRoute("/games/$game")({
     if (!parsed) {
       throw notFound();
     }
-    const historyRange = NUMERIC_TO_HISTORY_RANGE[deps.range];
-    // Start unawaited prefetch so navigation/hover proceeds immediately.
-    void context.queryClient.prefetchQuery(gameDetailQueryOptions(parsed.appid));
-    void context.queryClient.prefetchQuery(gameScoreSummaryQueryOptions(parsed.appid));
-    void context.queryClient.prefetchQuery(gameScoreHistoryQueryOptions(parsed.appid, historyRange));
+    if (typeof window !== "undefined") {
+      // Start browser prefetches without delaying navigation or hover.
+      const historyRange = NUMERIC_TO_HISTORY_RANGE[deps.range];
+      void context.queryClient.prefetchQuery(gameDetailQueryOptions(parsed.appid));
+      void context.queryClient.prefetchQuery(gameScoreSummaryQueryOptions(parsed.appid));
+      void context.queryClient.prefetchQuery(gameScoreHistoryQueryOptions(parsed.appid, historyRange));
+    }
     return { appid: parsed.appid, slug: parsed.slug };
   },
   component: GameRouteComponent,

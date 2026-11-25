@@ -8,7 +8,8 @@ export function createQueryClient(): QueryClient {
     defaultOptions: {
       queries: {
         staleTime: DEFAULT_QUERY_STALE_TIME,
-        gcTime: DEFAULT_QUERY_GC_TIME,
+        // Server query clients are request-local. A GC timer would keep them reachable.
+        gcTime: typeof window === "undefined" ? Infinity : DEFAULT_QUERY_GC_TIME,
         refetchOnWindowFocus: false,
       },
     },

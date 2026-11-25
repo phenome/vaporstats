@@ -38,7 +38,9 @@ export const Route = createFileRoute("/publisher/$publisher")({
       throw notFound();
     }
 
-    void context.queryClient.prefetchQuery(publisherQueryOptions(parsed.slug));
+    if (typeof window !== "undefined") {
+      void context.queryClient.prefetchQuery(publisherQueryOptions(parsed.slug));
+    }
     return {
       slug: parsed.slug,
       requestPath: "/publisher/" + params.publisher,

@@ -102,9 +102,11 @@ export const Route = createFileRoute("/games/$game_/$child")({
       throw notFound();
     }
 
-    void context.queryClient.prefetchQuery(
-      childQueryOptions(p.appid, c.appid, NUMERIC_TO_PRICE_RANGE[deps.pricerange]),
-    );
+    if (typeof window !== "undefined") {
+      void context.queryClient.prefetchQuery(
+        childQueryOptions(p.appid, c.appid, NUMERIC_TO_PRICE_RANGE[deps.pricerange]),
+      );
+    }
     return {
       parentAppId: p.appid,
       childAppId: c.appid,

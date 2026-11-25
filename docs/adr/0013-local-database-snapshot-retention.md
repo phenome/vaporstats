@@ -10,7 +10,7 @@ For valid, non-future `vaporstats-YYYY-MM-DD.sqlite` files, select the newest sn
 
 The retained set is the union of these selections: one file may satisfy several levels without extra copies. Counts describe available recovery periods, not a fixed file total or moving age bands. Missing days, weeks, or months are not fabricated; older successful periods can fill the counts. A file does not need to survive an age threshold before it can represent a week, month, or year.
 
-The daily job still rolls up the prior UTC day and applies raw-observation retention before creating its database snapshot. The producer serializes to a unique sibling temporary file, publishes it by atomic rename, then applies snapshot retention through the same filesystem helper as the maintenance command. Failed publication never triggers cleanup. The newly published file is protected during that cleanup. Explicit custom destination files remain operational snapshots and do not trigger directory cleanup.
+The daily job still rolls up the prior UTC day and applies raw-observation retention before creating its database snapshot. The producer uses SQLite backup to write a standalone file in a private temporary directory beside the destination. This isolates SQLite sidecars and keeps publication on the same filesystem. The producer publishes the file by atomic rename, then applies snapshot retention through the same filesystem helper as the maintenance command. Failed publication never triggers cleanup. The newly published file is protected during that cleanup. Explicit custom destination files remain operational snapshots and do not trigger directory cleanup.
 
 ## Managed files and safeguards
 

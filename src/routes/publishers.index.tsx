@@ -38,7 +38,9 @@ export const Route = createFileRoute("/publishers/")({
   validateSearch: (search: Record<string, unknown>) => ({ page: validPage(search.page) }),
   loaderDeps: ({ search: { page } }) => ({ page }),
   loader: ({ deps: { page }, context }) => {
-    void context.queryClient.prefetchQuery(publishersQueryOptions(page));
+    if (typeof window !== "undefined") {
+      void context.queryClient.prefetchQuery(publishersQueryOptions(page));
+    }
   },
   component: PublishersRouteComponent,
 });

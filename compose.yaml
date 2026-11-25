@@ -28,8 +28,9 @@ services:
       interval: 5s
       timeout: 5s
       retries: 3
-      # Source-only publication completes before the HTTP listener opens.
-      start_period: 60s
+      # Allow source-only publication before the listener opens and leave time
+      # for health retries within the default 180s deployment deadline.
+      start_period: 150s
 
 networks:
   caddy:

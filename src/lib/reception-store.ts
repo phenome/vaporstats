@@ -1,4 +1,5 @@
 import type { AppDatabase, AppPreparedStatement } from "./db";
+import { writeTransaction } from "./db-transaction";
 import {
   calculatePlayerScoreCandidate,
   getPlayerScoreWindow,
@@ -748,66 +749,126 @@ export interface CompactReviewEvidenceResult {
 export async function compactReviewEvidence(db: AppDatabase, now: Date | string = new Date()): Promise<CompactReviewEvidenceResult> {
   const asOf = new Date(iso(now));
   const cutoff = new Date(Date.UTC(asOf.getUTCFullYear() - 1, asOf.getUTCMonth(), asOf.getUTCDate(), asOf.getUTCHours(), asOf.getUTCMinutes(), asOf.getUTCSeconds(), asOf.getUTCMilliseconds()));
-  const daily = await rows<StoredReviewBucket>(db, `SELECT appid, source_id, granularity, period_start, period_end, positive_count, negative_count, observed_at, provenance FROM review_buckets WHERE granularity = 'daily' AND period_end <= ? ORDER BY appid, source_id, period_start`, cutoff.toISOString());
-  const monthly = await rows<StoredReviewBucket>(db, `SELECT appid, source_id, granularity, period_start, period_end, positive_count, negative_count, observed_at, provenance FROM review_buckets WHERE granularity = 'monthly'`);
-  const monthlyMap = new Map(monthly.map((row) => [JSON.stringify([row.appid, row.source_id, row.period_start, row.period_end]), row]));
-  const grouped = new Map<string, StoredReviewBucket[]>();
-  for (const row of daily) {
-    const month = monthStart(new Date(row.period_start));
-    const end = nextMonth(month);
-    const key = JSON.stringify([row.appid, row.source_id, month.toISOString(), end.toISOString()]);
-    const list = grouped.get(key) ?? [];
-    list.push(row);
-    grouped.set(key, list);
-  }
-  const writes: { row: StoredReviewBucket; days: StoredReviewBucket[] }[] = [];
-  for (const [key, list] of grouped) {
-    const [appid, sourceId, periodStart, periodEnd] = JSON.parse(key) as [number, string, string, string];
-    const month = new Date(periodStart);
-    const end = new Date(periodEnd);
-    const expectedDays = Math.round((end.getTime() - month.getTime()) / DAY_MS);
-    const byStart = new Map(list.map((row) => [row.period_start, row]));
-    const complete = byStart.size === expectedDays && [...byStart.values()].every((row) => new Date(row.period_start).getUTCHours() === 0 && new Date(row.period_end).getTime() - new Date(row.period_start).getTime() === DAY_MS);
-    if (!complete) {
-          const replacement = monthlyMap.get(key);
-          const latestPartial = list.map((row) => row.observed_at).sort().at(-1) ?? "";
-          if (!replacement || replacement.observed_at < latestPartial) continue;
-          writes.push({ row: replacement, days: list });
-          continue;
+  const cutoffIso = cutoff.toISOString();
+  const pageSize = 512;
+  type Scope = Pick<StoredReviewBucket, "appid" | "source_id">;
+  type DailyBucket = Pick<StoredReviewBucket, "period_start" | "period_end" | "positive_count" | "negative_count" | "observed_at">;
+
+  return writeTransaction(db, async () => {
+    // The raw primary key drives paging. Stage one app/source at a time in
+    // SQLite's file-backed temp store so Date parsing can drive month grouping.
+    await db.exec(`CREATE TEMP TABLE review_compaction_days (
+      month_start TEXT NOT NULL, period_start TEXT NOT NULL, period_end TEXT NOT NULL,
+      positive_count INTEGER NOT NULL, negative_count INTEGER NOT NULL, observed_at TEXT NOT NULL,
+      PRIMARY KEY (month_start, period_start, period_end)
+    ) WITHOUT ROWID`);
+    const eligible = `SELECT appid, source_id FROM review_buckets WHERE +granularity = 'daily' AND period_end <= ?`;
+    const firstScope = db.prepare(`${eligible} ORDER BY appid, source_id, granularity, period_start LIMIT 1`);
+    const nextScope = db.prepare(`${eligible} AND (appid, source_id) > (?, ?)
+      ORDER BY appid, source_id, granularity, period_start LIMIT 1`);
+    const daily = `SELECT period_start, period_end, positive_count, negative_count, observed_at FROM review_buckets
+      WHERE appid = ? AND source_id = ? AND granularity = 'daily' AND period_end <= ?`;
+    const firstDays = db.prepare(`${daily} ORDER BY period_start, period_end LIMIT ?`);
+    const nextDays = db.prepare(`${daily} AND (period_start, period_end) > (?, ?)
+      ORDER BY period_start, period_end LIMIT ?`);
+    const stage = db.prepare(`INSERT INTO temp.review_compaction_days VALUES (?, ?, ?, ?, ?, ?)`);
+    const firstMonth = db.prepare(`SELECT month_start FROM temp.review_compaction_days ORDER BY month_start LIMIT 1`);
+    const nextMonthStart = db.prepare(`SELECT month_start FROM temp.review_compaction_days WHERE month_start > ?
+      ORDER BY month_start LIMIT 1`);
+    const staged = `SELECT period_start, period_end, positive_count, negative_count, observed_at
+      FROM temp.review_compaction_days WHERE month_start = ?`;
+    const firstStaged = db.prepare(`${staged} ORDER BY period_start, period_end LIMIT ?`);
+    const nextStaged = db.prepare(`${staged} AND (period_start, period_end) > (?, ?)
+      ORDER BY period_start, period_end LIMIT ?`);
+    const monthly = db.prepare(`SELECT observed_at FROM review_buckets
+      WHERE appid = ? AND source_id = ? AND granularity = 'monthly' AND period_start = ? AND period_end = ?`);
+    const upsertMonth = db.prepare(`INSERT INTO review_buckets
+      (appid, source_id, granularity, period_start, period_end, positive_count, negative_count, observed_at, provenance)
+      VALUES (?, ?, 'monthly', ?, ?, ?, ?, ?, 'derived.complete-calendar-month')
+      ON CONFLICT(appid, source_id, granularity, period_start, period_end) DO UPDATE SET
+        positive_count = excluded.positive_count,
+        negative_count = excluded.negative_count,
+        observed_at = excluded.observed_at,
+        provenance = excluded.provenance
+      WHERE excluded.observed_at > review_buckets.observed_at OR (excluded.observed_at = review_buckets.observed_at
+        AND (excluded.positive_count <> review_buckets.positive_count OR excluded.negative_count <> review_buckets.negative_count))`);
+    const deleteDay = db.prepare(`DELETE FROM review_buckets
+      WHERE appid = ? AND source_id = ? AND granularity = 'daily' AND period_start = ? AND period_end = ?`);
+    const deletePartial = db.prepare(`DELETE FROM review_buckets
+      WHERE appid = ? AND source_id = ? AND granularity = 'daily' AND (period_start, period_end) IN
+        (SELECT period_start, period_end FROM temp.review_compaction_days WHERE month_start = ?)`);
+    // Count direct deletes separately from publication invalidation trigger writes.
+    const directChanges = db.prepare("SELECT changes() AS count");
+
+    let compacted = 0;
+    let deleted = 0;
+    let scope = await firstScope.bind(cutoffIso).first<Scope>();
+    while (scope) {
+      const { appid, source_id: sourceId } = scope;
+      const scopeKey = [appid, sourceId, cutoffIso] as const;
+      let { results: page } = await firstDays.bind(...scopeKey, pageSize).all<DailyBucket>();
+      while (page.length) {
+        for (const day of page) {
+          const periodStart = monthStart(new Date(day.period_start)).toISOString();
+          await stage.bind(periodStart, day.period_start, day.period_end, day.positive_count, day.negative_count, day.observed_at).run();
         }
-    const existing = monthlyMap.get(key);
-    const latestObserved = [...byStart.values()].map((row) => row.observed_at).sort().at(-1)!;
-    const totalPositive = [...byStart.values()].reduce((sum, row) => sum + row.positive_count, 0);
-    const totalNegative = [...byStart.values()].reduce((sum, row) => sum + row.negative_count, 0);
-    const row: StoredReviewBucket = {
-      appid,
-      source_id: sourceId,
-      granularity: "monthly",
-      period_start: periodStart,
-      period_end: periodEnd,
-      positive_count: totalPositive,
-      negative_count: totalNegative,
-      observed_at: latestObserved,
-      provenance: "derived.complete-calendar-month",
-    };
-    writes.push({ row: existing && existing.observed_at > latestObserved ? existing : row, days: [...byStart.values()] });
-  }
-  const statements: AppPreparedStatement[] = [];
-  let deleted = 0;
-  for (const { row, days } of writes) {
-    statements.push(db.prepare(
-      `INSERT INTO review_buckets (appid, source_id, granularity, period_start, period_end, positive_count, negative_count, observed_at, provenance)
-       VALUES (?, ?, 'monthly', ?, ?, ?, ?, ?, ?)
-       ON CONFLICT(appid, source_id, granularity, period_start, period_end) DO UPDATE SET positive_count = excluded.positive_count, negative_count = excluded.negative_count, observed_at = excluded.observed_at, provenance = excluded.provenance
-       WHERE excluded.observed_at > review_buckets.observed_at OR (excluded.observed_at = review_buckets.observed_at AND (excluded.positive_count <> review_buckets.positive_count OR excluded.negative_count <> review_buckets.negative_count))`,
-    ).bind(row.appid, row.source_id, row.period_start, row.period_end, row.positive_count, row.negative_count, row.observed_at, row.provenance));
-    if (row.granularity === "monthly") {
-      for (const day of days) {
-        statements.push(db.prepare(`DELETE FROM review_buckets WHERE appid = ? AND source_id = ? AND granularity = 'daily' AND period_start = ? AND period_end = ?`).bind(day.appid, day.source_id, day.period_start, day.period_end));
-        deleted++;
+        if (page.length < pageSize) break;
+        const last = page.at(-1)!;
+        ({ results: page } = await nextDays.bind(...scopeKey, last.period_start, last.period_end, pageSize).all<DailyBucket>());
       }
+
+      let cursor = await firstMonth.first<{ month_start: string }>();
+      while (cursor) {
+        const periodStart = cursor.month_start;
+        const month = new Date(periodStart);
+        const end = nextMonth(month);
+        const expectedDays = (end.getTime() - month.getTime()) / DAY_MS;
+        const monthKey = [appid, sourceId, periodStart, end.toISOString()] as const;
+        const existing = await monthly.bind(...monthKey).first<{ observed_at: string }>();
+
+        // Ascending raw ends make the last row for each raw start the winner.
+        // Stop collecting winners once the month has too many distinct starts.
+        const byStart = new Map<string, DailyBucket>();
+        let latestPartial = "";
+        let { results: days } = await firstStaged.bind(periodStart, pageSize).all<DailyBucket>();
+        while (days.length) {
+          for (const day of days) {
+            if (byStart.size <= expectedDays) byStart.set(day.period_start, day);
+            if (day.observed_at > latestPartial) latestPartial = day.observed_at;
+          }
+          if (days.length < pageSize) break;
+          const last = days.at(-1)!;
+          ({ results: days } = await nextStaged.bind(periodStart, last.period_start, last.period_end, pageSize).all<DailyBucket>());
+        }
+        const winners = [...byStart.values()];
+        const complete = winners.length === expectedDays && winners.every((day) => {
+          const start = new Date(day.period_start);
+          return start.getUTCHours() === 0 && Date.parse(day.period_end) - start.getTime() === DAY_MS;
+        });
+
+        if (complete) {
+          const latestObserved = winners.map((day) => day.observed_at).sort().at(-1)!;
+          if (!existing || existing.observed_at <= latestObserved) {
+            const positive = winners.reduce((sum, day) => sum + day.positive_count, 0);
+            const negative = winners.reduce((sum, day) => sum + day.negative_count, 0);
+            await upsertMonth.bind(...monthKey, positive, negative, latestObserved).run();
+          }
+          for (const day of winners) {
+            await deleteDay.bind(appid, sourceId, day.period_start, day.period_end).run();
+            deleted += (await directChanges.first<{ count: number }>())!.count;
+          }
+          compacted++;
+        } else if (existing && existing.observed_at >= latestPartial) {
+          await deletePartial.bind(appid, sourceId, periodStart).run();
+          deleted += (await directChanges.first<{ count: number }>())!.count;
+          compacted++;
+        }
+        cursor = await nextMonthStart.bind(periodStart).first<{ month_start: string }>();
+      }
+      await db.exec(`DELETE FROM temp.review_compaction_days`);
+      scope = await nextScope.bind(cutoffIso, appid, sourceId).first<Scope>();
     }
-  }
-  if (statements.length > 0) await db.batch(statements);
-  return { monthsCompacted: writes.length, dailyBucketsDeleted: deleted, monthlyBucketsWritten: writes.length };
+    await db.exec(`DROP TABLE temp.review_compaction_days`);
+    return { monthsCompacted: compacted, dailyBucketsDeleted: deleted, monthlyBucketsWritten: compacted };
+  });
 }

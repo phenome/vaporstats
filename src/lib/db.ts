@@ -1,11 +1,17 @@
-import { mkdirSync, realpathSync, renameSync, statSync, unlinkSync } from "node:fs";
-import { open } from "node:fs/promises";
-import { randomUUID } from "node:crypto";
+import fs, { closeSync, fstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, realpathSync, rmdirSync, statSync, unlinkSync, type Stats } from "node:fs";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { basename, dirname, join, resolve } from "node:path";
 import { Database, type SQLQueryBindings, type Statement } from "bun:sqlite";
 import { applyMigrations } from "./migrations";
-import { runSnapshotRetention } from "./snapshot-storage";
+import { optionalStat, sameIdentity, runSnapshotRetention, SnapshotDirectory } from "./snapshot-storage";
+
+interface SqliteSource {
+  requestedPath: string;
+  requestedParent: Stats;
+  path: string;
+  parent: Stats;
+  identity: Stats;
+}
 
 export interface AppPreparedStatement {
   bind(...values: unknown[]): AppPreparedStatement;
@@ -104,16 +110,16 @@ class SqlitePreparedStatement implements AppPreparedStatement {
 
 class SqliteAppDatabase implements AppDatabase {
   readonly native: Database;
-  readonly path: string;
+  readonly source?: SqliteSource;
   /** Identifies the async call chain that owns the open write transaction. */
   readonly #owner = new AsyncLocalStorage<symbol>();
   #active: symbol | undefined;
   #idle: Promise<void> = Promise.resolve();
   #queue: Promise<void> = Promise.resolve();
 
-  constructor(native: Database, path: string) {
+  constructor(native: Database, source?: SqliteSource) {
     this.native = native;
-    this.path = path;
+    this.source = source;
   }
 
   /**
@@ -219,12 +225,35 @@ function configureDatabase(database: Database): void {
  * adapter and foreign-key state match production.
  */
 export function openSqliteAppDatabase(databasePath: string, migrationsDirectory?: string): SqliteAppDatabase {
-  if (databasePath !== ":memory:") mkdirSync(dirname(databasePath), { recursive: true });
-  const native = new Database(databasePath);
+  const path = databasePath === ":memory:" ? databasePath : resolve(databasePath);
+  const fileBacked = path !== ":memory:";
+  if (fileBacked) mkdirSync(dirname(path), { recursive: true });
+  const requestedParent = fileBacked ? statSync(dirname(path)) : undefined;
+  const existing = fileBacked ? optionalStat(path, true) : undefined;
+  const resolved = existing ? realpathSync(path) : undefined;
+  const parent = resolved ? statSync(dirname(resolved)) : undefined;
+  const native = new Database(resolved ?? path);
   try {
+    // Ask the open connection which filename SQLite chose, including when it
+    // created a new file through a symlink.
+    let source: SqliteSource | undefined;
+    if (requestedParent) {
+      const { file } = native.query<{ file: string }, []>("PRAGMA database_list").get()!;
+      const actualPath = realpathSync(file);
+      if (resolved && actualPath !== resolved) throw new Error("Snapshot source database changed while opening");
+      source = {
+        requestedPath: path,
+        requestedParent,
+        path: actualPath,
+        parent: parent ?? statSync(dirname(actualPath)),
+        identity: existing ?? statSync(actualPath),
+      };
+      assertSnapshotSource(source);
+    }
     configureDatabase(native);
     applyMigrations(native, migrationsDirectory);
-    return new SqliteAppDatabase(native, databasePath);
+    if (source) assertSnapshotSource(source);
+    return new SqliteAppDatabase(native, source);
   } catch (error) {
     native.close(true);
     throw error;
@@ -251,6 +280,154 @@ function utcDateKey(value: Date | string): string {
   if (typeof value === "string") return value.slice(0, 10);
   return value.toISOString().slice(0, 10);
 }
+
+const SQLITE_SIDECARS = ["-wal", "-shm", "-journal"];
+
+function assertSnapshotSource(source: SqliteSource): void {
+  const file = optionalStat(source.requestedPath, true);
+  const requestedParent = optionalStat(dirname(source.requestedPath), true);
+  const parent = optionalStat(dirname(source.path), true);
+  if (!file?.isFile() || !sameIdentity(source.identity, file) ||
+      !parent || !sameIdentity(source.parent, parent) ||
+      !requestedParent || !sameIdentity(source.requestedParent, requestedParent) ||
+      realpathSync(source.requestedPath) !== source.path) {
+    throw new Error("Snapshot source database changed");
+  }
+}
+
+function checkSnapshotDestination(path: string, source: SqliteSource, resolved: string): void {
+  const existing = optionalStat(path);
+  if (resolved === source.path || SQLITE_SIDECARS.some((suffix) => resolved === source.path + suffix) ||
+      (existing && sameIdentity(source.identity, existing))) {
+    throw new Error("A snapshot cannot replace its source database or its sidecars");
+  }
+  if (existing && !existing.isFile()) {
+    throw new Error("A snapshot destination must be a regular file");
+  }
+  if (SQLITE_SIDECARS.some((suffix) => optionalStat(path + suffix))) {
+    throw new Error("A snapshot cannot replace a database with SQLite sidecars");
+  }
+}
+
+async function copySnapshot(
+  source: SqliteSource,
+  sourceDirectory: SnapshotDirectory,
+  staging: SnapshotDirectory,
+  name: string,
+  identity: Stats,
+): Promise<void> {
+  const descriptors: number[] = [];
+  const childPath = (directory: SnapshotDirectory, filename: string) => {
+    if (directory.fd === undefined) return join(directory.path, filename);
+    return join("/proc/self/fd", String(descriptors.push(directory.fd) + 2), filename);
+  };
+  const paths = [
+    childPath(sourceDirectory, basename(source.path)),
+    childPath(staging, name),
+  ];
+  // Bun runs SQLite backup synchronously. Use a separate process so the server
+  // can continue serving requests. The inline entry point also works in dist.
+  const child = Bun.spawn([process.execPath, "-e", `
+    import { lstatSync, statSync } from "node:fs";
+    import { dirname } from "node:path";
+    import { backup, DatabaseSync } from "node:sqlite";
+    const [sourcePath, targetPath, identities, sidecars] = process.argv.slice(1);
+    const [sourceIdentity, targetIdentity] = JSON.parse(identities);
+    function verify(path, [dev, ino, parentDev, parentIno]) {
+      const parent = statSync(dirname(path));
+      const file = lstatSync(path);
+      if (parent.dev !== parentDev || parent.ino !== parentIno ||
+          !file.isFile() || file.dev !== dev || file.ino !== ino) {
+        throw new Error("SQLite snapshot file changed: " + path);
+      }
+    }
+    function verifyTarget() {
+      verify(targetPath, targetIdentity);
+      for (const suffix of JSON.parse(sidecars)) {
+        try {
+          lstatSync(targetPath + suffix);
+          throw new Error("Unexpected staging sidecar");
+        } catch (error) {
+          if (error.code !== "ENOENT") throw error;
+        }
+      }
+    }
+    function verifySource() {
+      verify(sourcePath, sourceIdentity);
+    }
+    verifySource();
+    const source = new DatabaseSync(sourcePath, { readOnly: true });
+    try {
+      verifySource();
+      source.exec("PRAGMA busy_timeout = 5000; BEGIN");
+      // Pin a read view so concurrent WAL commits cannot restart the backup.
+      source.prepare("SELECT 1 FROM sqlite_schema LIMIT 1").get();
+      verifySource();
+      verifyTarget();
+      await backup(source, targetPath);
+    } finally {
+      source.close();
+    }
+    verifyTarget();
+    const target = new DatabaseSync(targetPath);
+    try {
+      verifyTarget();
+      if (target.prepare("PRAGMA journal_mode = DELETE").get().journal_mode !== "delete") {
+        throw new Error("Could not make snapshot standalone");
+      }
+    } finally {
+      target.close();
+    }
+  `, "--", ...paths, JSON.stringify([
+    [source.identity.dev, source.identity.ino, sourceDirectory.identity.dev, sourceDirectory.identity.ino],
+    [identity.dev, identity.ino, staging.identity.dev, staging.identity.ino],
+  ]), JSON.stringify(SQLITE_SIDECARS)], {
+    stdio: ["ignore", "ignore", "pipe", ...descriptors],
+  });
+  const [exitCode, stderr] = await Promise.all([child.exited, new Response(child.stderr).text()]);
+  if (exitCode !== 0) throw new Error("SQLite snapshot backup failed (" + exitCode + "): " + stderr.trim());
+}
+
+function findOwnedEntry(directory: string, name: string, identity: Stats): string | undefined {
+  const preferred = join(directory, name);
+  const current = optionalStat(preferred);
+  if (current && sameIdentity(current, identity)) return preferred;
+  for (const entry of readdirSync(directory)) {
+    const path = join(directory, entry);
+    const candidate = optionalStat(path);
+    if (candidate && sameIdentity(candidate, identity)) return path;
+  }
+}
+
+function cleanupSnapshotStaging(
+  parent: SnapshotDirectory,
+  staging: SnapshotDirectory,
+  name: string,
+  identity?: Stats,
+): void {
+  // A renamed staging directory can still be cleaned through its descriptor.
+  // On the fallback path only inspect it after finding its original inode.
+  if (parent.fd === undefined) {
+    const current = optionalStat(parent.accessPath);
+    if (!current?.isDirectory() || !sameIdentity(current, parent.identity)) return;
+  }
+  const entry = findOwnedEntry(parent.accessPath, basename(staging.path), staging.identity);
+  const access = staging.fd === undefined ? entry : staging.accessPath;
+  if (identity && access) {
+    const file = findOwnedEntry(access, name, identity);
+    const current = file && optionalStat(file);
+    if (file && current && sameIdentity(current, identity)) unlinkSync(file);
+  }
+  const current = entry && optionalStat(entry);
+  if (entry && current && sameIdentity(current, staging.identity)) {
+    try {
+      rmdirSync(entry);
+    } catch (error) {
+      if (!["ENOENT", "ENOTEMPTY", "EEXIST"].includes((error as NodeJS.ErrnoException).code ?? "")) throw error;
+    }
+  }
+}
+
 let snapshotQueue: Promise<unknown> = Promise.resolve();
 
 export async function createDailySnapshot(
@@ -268,44 +445,70 @@ export async function createDailySnapshot(
     if (!(db instanceof SqliteAppDatabase)) {
       throw new Error("Daily snapshots require the Bun SQLite AppDatabase");
     }
-    mkdirSync(dirname(outputPath), { recursive: true });
-    const sourceIdentity = statSync(db.path);
-    const resolvedOutput = join(realpathSync(dirname(outputPath)), basename(outputPath));
-    let outputIdentity;
+    // Wait for another call chain's open write transaction before taking the copy.
+    await db.whenFree(() => {
+      if (db.native.inTransaction) throw new Error("Cannot create a snapshot inside a write transaction");
+    });
+    const source = db.source;
+    if (!source) throw new Error("Daily snapshots require a file-backed SQLite database");
+    assertSnapshotSource(source);
+    const outputDirectory = dirname(outputPath);
+    mkdirSync(outputDirectory, { recursive: true });
+    const parent = new SnapshotDirectory(outputDirectory);
     try {
-      outputIdentity = statSync(outputPath);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-    }
-    if (resolvedOutput === realpathSync(db.path) ||
-      (outputIdentity && sourceIdentity.dev === outputIdentity.dev && sourceIdentity.ino === outputIdentity.ino)) {
-      throw new Error("A snapshot cannot replace its source database");
-    }
-    const temporaryPath = outputPath + "." + randomUUID() + ".tmp";
-    let temporaryCreated = false;
-    try {
-      // Wait for any open write transaction so the copy holds committed state only.
-      const serialized = await db.whenFree(() => db.native.serialize());
-      const temporaryFile = await open(temporaryPath, "wx");
-      temporaryCreated = true;
+      const sourceDirectory = new SnapshotDirectory(dirname(source.path));
       try {
-        await temporaryFile.writeFile(serialized);
+        if (!sameIdentity(source.parent, sourceDirectory.identity)) throw new Error("Snapshot source directory changed");
+        const destinationName = basename(outputPath);
+        const resolvedOutput = join(parent.path, destinationName);
+        const destination = join(parent.accessPath, destinationName);
+        checkSnapshotDestination(destination, source, resolvedOutput);
+
+        const staging = new SnapshotDirectory(mkdtempSync(join(parent.accessPath, ".snapshot-tmp-")));
+        const name = "snapshot.sqlite";
+        let file: number | undefined;
+        let identity: Stats | undefined;
+        let published = false;
+        try {
+          const path = join(staging.accessPath, name);
+          file = openSync(path, "wx", 0o600);
+          identity = fstatSync(file);
+          await copySnapshot(source, sourceDirectory, staging, name, identity);
+          parent.assertCurrent();
+          staging.assertCurrent();
+          assertSnapshotSource(source);
+          const current = optionalStat(path);
+          if (!current?.isFile() || !sameIdentity(current, identity) ||
+              SQLITE_SIDECARS.some((suffix) => optionalStat(path + suffix))) {
+            throw new Error("Snapshot staging file or its sidecars changed during backup");
+          }
+          checkSnapshotDestination(destination, source, resolvedOutput);
+          fs.renameSync(path, destination);
+          published = true;
+        } finally {
+          try {
+            cleanupSnapshotStaging(parent, staging, name, published ? undefined : identity);
+          } finally {
+            if (file !== undefined) closeSync(file);
+            staging.close();
+          }
+        }
+
+        if (managed) {
+          assertSnapshotSource(source);
+          await runSnapshotRetention({
+            directory: parent.path,
+            activeDatabasePath: source.path,
+            referenceDate: new Date(date + "T23:59:59.999Z"),
+            mode: "apply",
+            preservePaths: [resolvedOutput],
+          }, parent);
+        }
       } finally {
-        await temporaryFile.close();
+        sourceDirectory.close();
       }
-      renameSync(temporaryPath, outputPath);
-      temporaryCreated = false;
     } finally {
-      if (temporaryCreated) unlinkSync(temporaryPath);
-    }
-    if (managed) {
-      await runSnapshotRetention({
-        directory: dirname(outputPath),
-        activeDatabasePath: db.path,
-        referenceDate: new Date(date + "T23:59:59.999Z"),
-        mode: "apply",
-        preservePaths: [outputPath],
-      });
+      parent.close();
     }
     return outputPath;
   });
