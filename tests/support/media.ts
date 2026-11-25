@@ -344,7 +344,7 @@ export function extractionOutput(options: string | { trait?: string; traitQuote?
   };
 }
 
-type SynthesisSource = { sourceIdentity: string; sourceUrl: string; extraction: { observations: Array<MediaObservation & { selectionId: string }> } };
+type SynthesisSource = { sourceIdentity: string; sourceUrl: string; extraction: { observations: Array<MediaObservation & { selectionId: string; scopeGroup?: string }> } };
 
 export function synthesisEvidence({ messages }: Pick<OpenRouterRequestRecord["body"], "messages">): SynthesisSource[] {
   const content = messages[0]?.content ?? "";
@@ -376,21 +376,21 @@ export function overviewOutputForUrls(urls: readonly string[], { tags = true }: 
     const sources = evidence.filter(({ sourceUrl }) => urls.includes(sourceUrl));
     const empty = emptySynthesisSelection(evidence);
     const entries = (kind: "finding" | "tag") => {
-      const groups = new Map<string, string[]>();
+      const groups = new Map<string, { text: string; observationIds: string[] }>();
       for (const source of sources) {
         const item = source.extraction.observations.find((observation) => observation.kind === kind);
         if (!item) continue;
-        const key = JSON.stringify([item.text, [...item.qualifiers].sort()]);
-        const selectionIds = groups.get(key) ?? [];
-        selectionIds.push(item.selectionId);
-        groups.set(key, selectionIds);
+        const key = JSON.stringify([item.text, item.scopeGroup ?? [...item.qualifiers].sort()]);
+        const group = groups.get(key) ?? { text: item.text, observationIds: [] };
+        group.observationIds.push(item.selectionId);
+        groups.set(key, group);
       }
       return [...groups.values()];
     };
     return {
       ...empty,
       statements: empty.statements === null ? null : entries("finding"),
-      tags: tags && empty.tags !== null ? entries("tag") : empty.tags,
+      tags: tags && empty.tags !== null ? entries("tag").map(({ observationIds }) => observationIds) : empty.tags,
     };
   };
 }

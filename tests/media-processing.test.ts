@@ -67,7 +67,7 @@ function overviewOutputWithoutTags(url: string): ChatOutput {
 
 const RICH_FINDINGS = {
   stray: "Critics agree that one outlet saw flexible combat.",
-  pacing: "Flexible combat has material differences in pacing.",
+  pacing: "Stealth and gunplay support different approaches to fights.",
   flexible: "Flexible builds support experimentation.",
   deliberate: "Combat pacing feels deliberate.",
   sluggish: "Combat pacing feels sluggish.",
@@ -80,21 +80,26 @@ function richOverviewOutput(urls: Record<"ign" | "followup" | "eurogamer" | "rep
   return ({ body }) => {
     const sources = synthesisEvidence(body);
     const ids = (id: keyof typeof RICH_FINDINGS, ...sourceUrls: string[]) => sourceUrls.map((url) => synthesisSelectionId(sources.find(({ sourceUrl }) => sourceUrl === url)!, id));
-    const finding = (id: keyof typeof RICH_FINDINGS, ...sourceUrls: string[]) => ({ observationIds: ids(id, ...sourceUrls), contested: false });
+    const finding = (id: keyof typeof RICH_FINDINGS, ...sourceUrls: string[]) => ({ text: RICH_FINDINGS[id], observationIds: ids(id, ...sourceUrls) });
     const syndicated = [urls.eurogamer, urls.republication, urls.explicitRepublication];
     const empty = emptySynthesisSelection(sources);
     return {
       ...empty,
-      statements: [ids("pacing", urls.ign, ...syndicated)],
+      statements: [
+        { ...finding("pacing", urls.ign, ...syndicated), text: "Fights accommodate both stealth and gunplay." },
+        finding("stray", urls.ign),
+      ],
       categories: {
         ...empty.categories,
         "Gameplay & systems": [
           finding("flexible", urls.ign),
-          { observationIds: [...ids("deliberate", urls.ign), ...ids("sluggish", ...syndicated)], contested: true },
+          finding("deliberate", urls.ign),
+          finding("sluggish", ...syndicated),
+          { ...finding("pacing", urls.ign, ...syndicated), text: "Fights accommodate both stealth and gunplay." },
         ],
         "Visuals & audio": [finding("city", urls.followup)],
       },
-      prosCons: { ...empty.prosCons, pros: [ids("pro", urls.ign, urls.eurogamer)] },
+      prosCons: { ...empty.prosCons, pros: [finding("pro", urls.ign, urls.eurogamer)] },
     };
   };
 }
@@ -578,13 +583,13 @@ describe("bounded Gemini media processing", () => {
     expect(extraction[1]?.content).not.toContain("Verified");
     const synthesis = transport.openRouterApi.requests[1]!.body.messages[0]?.content;
     expect(extraction[0]?.content).toContain("how human players cooperate");
-    expect(synthesis).toContain("choose findings from that exact category");
-    expect(synthesis).toContain("Set contested to true only for genuine disagreements");
+    expect(synthesis).toContain("under the exact finding categories");
+    expect(synthesis).toContain("Give each differing assessment its own concrete clause and citations");
     expect(synthesis).toContain("Drop-in cooperation");
     expect(synthesis).toContain('"buildContext":"Early Access"');
   });
 
-  const citedSynthesis = JSON.stringify({ statements: [["unknown"]], categories: { "Gameplay & systems": [] }, prosCons: { pros: null, cons: null }, tags: [] });
+  const citedSynthesis = JSON.stringify({ statements: [{ text: "Combat rewards experimentation.", observationIds: ["unknown"] }], categories: { "Gameplay & systems": [] }, prosCons: { pros: null, cons: null }, tags: [] });
   test.each([
     {
       scenario: "a prematurely closed root object",
@@ -671,19 +676,19 @@ describe("bounded Gemini media processing", () => {
 
     const overview = await getMediaOverview(value.db, APPIDS[0], { includeUnpublished: true });
     expect(overview?.statements.map((finding) => finding.text)).toEqual([
-      "Flexible combat has material differences in pacing.",
+      "Fights accommodate both stealth and gunplay.",
     ]);
     expect(overview?.categories.map((category) => category.name)).toEqual([
       "Gameplay & systems",
       "Visuals & audio",
     ]);
     expect(overview?.categories[0]?.findings.map((finding) => finding.text)).toEqual([
-      `${RICH_FINDINGS.deliberate} / ${RICH_FINDINGS.sluggish}`,
-      "Flexible builds support experimentation.",
+      RICH_FINDINGS.flexible,
+      RICH_FINDINGS.deliberate,
+      RICH_FINDINGS.sluggish,
     ]);
-    expect(overview?.categories[0]?.findings[0]?.contested).toBe(true);
-    expect(overview?.categories[0]?.findings[0]?.sourceUrls).toEqual([
-      urls.ign,
+    expect(overview?.categories[0]?.findings[1]?.sourceUrls).toEqual([urls.ign]);
+    expect(overview?.categories[0]?.findings[2]?.sourceUrls).toEqual([
       urls.eurogamer,
       urls.republication,
       urls.explicitRepublication,

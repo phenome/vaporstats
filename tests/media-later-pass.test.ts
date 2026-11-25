@@ -385,8 +385,8 @@ describe("later articles in processing and results", () => {
       openRouter.output("synthesis", {
         ...emptySynthesisSelection(sources),
         statements: [
-          [selectionId(ignInitial, "story"), selectionId(ignLater, "story")],
-          [selectionId(ignInitial, "combat-detail"), selectionId(eurogamerInitial, "combat-detail")],
+          { text: story, observationIds: [selectionId(ignInitial, "story"), selectionId(ignLater, "story")] },
+          { text: combat, observationIds: [selectionId(ignInitial, "combat-detail"), selectionId(eurogamerInitial, "combat-detail")] },
         ],
         tags: [[selectionId(ignLater, "skill-trees")]],
       });
@@ -569,7 +569,7 @@ describe("the later pass end to end", () => {
       const { sources, mediaOverview } = await detail(database, appid);
       const ownLater = laterUrls.filter((url) => url.includes(`/${appid}-`) && url !== lost && url !== crashedFetch);
       expect(sources.map(({ originalUrl }) => originalUrl)).toEqual(expect.arrayContaining(ownLater));
-      expect(mediaOverview?.statements[0]?.sourceUrls).toEqual(expect.arrayContaining(ownLater));
+      expect(mediaOverview?.statements.flatMap(({ sourceUrls }) => sourceUrls)).toEqual(expect.arrayContaining(ownLater));
     }
 
     const before = { articles: (await Promise.all(EXPERIMENT.map(async (appid) => (await detail(database, appid)).sources.length))), fetched: fetched.length, openRouter: openRouter.requests.length, gemini: gemini.submitted.length };

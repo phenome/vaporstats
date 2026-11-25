@@ -154,6 +154,7 @@ Keep the generated HTML comment markers when editing an entry. Between the `medi
   - Observation: legacy\-1
 
 <!-- media-amendment 18094c892afd73fcec3eb6ed8077c89f61a65fca0fb2947aed0c10afa2ed1b08 -->
+Optional quests could influence the ending in the reviewed PC version.
 <!-- /media-amendment -->
 
 <!-- media-follow-up 67e6ee5eb60c4fdcfaad18e86f521cab511882ff5099b70cf300b3b3a0655f9f -->
@@ -184,6 +185,7 @@ Keep the generated HTML comment markers when editing an entry. Between the `medi
   - Observation: legacy\-4
 
 <!-- media-amendment 9a83ddf08e1595bf90516584e4947db69cf53e9c1aed8c8fc4c35f26bf36cf7d -->
+Broken character animations interrupted scenes in the reviewed PC version.
 <!-- /media-amendment -->
 
 <!-- media-follow-up 5fa2e73eb122c3feb78fd005141c224248ed15c14cc29c8a2ff993e0a6b43f67 -->
@@ -244,6 +246,7 @@ Keep the generated HTML comment markers when editing an entry. Between the `medi
   - Observation: legacy\-1
 
 <!-- media-amendment 877fb0ed4685c171fbdb995c8d2b157b0274f93ab041aa68fc387c911fae33f6 -->
+In the reviewed PC version, the central cast stood out for its writing and performances.
 <!-- /media-amendment -->
 
 <!-- media-follow-up 53c28128b457418308dabb688f039ef133852b09d583d131bccc6f2c121cf261 -->
@@ -254,6 +257,7 @@ Keep the generated HTML comment markers when editing an entry. Between the `medi
   - Observation: legacy\-2
 
 <!-- media-amendment 4fcdde83cf7d33e6052ffcabf4d4855c15a9e2cba9d60d11fbbb25b5a539ed57 -->
+Combat in the reviewed PC version felt fluid and enjoyable.
 <!-- /media-amendment -->
 
 <!-- media-follow-up 85c8ccff28fede36070354a576773e3aff23a924565912f35385268a23a12afd -->
@@ -284,6 +288,7 @@ Keep the generated HTML comment markers when editing an entry. Between the `medi
   - Observation: legacy\-5
 
 <!-- media-amendment 3f698764dbcd9b1953bbfdd4b2cf86c195e9b3e9c498a757c84b0abfa6f6595b -->
+A recurring animation glitch interrupted dramatic scenes in the reviewed PC version.
 <!-- /media-amendment -->
 
 <!-- media-follow-up a6f0acb3dd73f8e35081c1492ae780502c49787992a80da77132a3cc5a30742f -->

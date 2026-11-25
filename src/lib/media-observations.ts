@@ -1,3 +1,4 @@
+import { MEDIA_OUTLETS } from "./media-outlet-access";
 import { LEGACY_V10_SOURCE_SUPPORT_LANGUAGE, MEDIA_CATEGORY_NAMES, normalizeMediaTag, sourceSupportTrigger } from "./media-overview";
 
 const kinds = ["finding", "pro", "con", "tag", "gameplay", "storyWorld"] as const;
@@ -17,6 +18,7 @@ export interface ObservationSource {
   sourceIdentity: string;
   sourceUrl: string;
   observations: MediaObservation[];
+  editionContext?: { platform: string | null; build: string | null };
 }
 
 export interface ObservationReference {
@@ -176,12 +178,13 @@ type EditorialSection = "statements" | "pros" | "cons" | "tags" | (typeof MEDIA_
 /** One catalog defines the model's choices and the aliases accepted at settlement. */
 export function synthesisSelections<T extends ObservationSource>(
   sources: readonly T[],
-  { legacyV10 = false }: { legacyV10?: boolean } = {},
+  { legacyV10 = false, clauses }: { legacyV10?: boolean; clauses?: "v12" | "v13" } = {},
 ) {
   const observationsById = new Map<string, { observation: MediaObservation; ref: ObservationReference }>();
   const choices = new Map<EditorialSection, string[]>();
   const editorialOmissions: EditorialOmission[] = [];
   const diagnostics: Array<{ section: string } & DisplayIssue> = [];
+  const scopeGroups = new Map<string, string>();
   const evidence = [...sources].sort((a, b) => a.sourceIdentity.localeCompare(b.sourceIdentity)).flatMap((source) => {
     const observations = source.observations.flatMap((observation) => {
       if (observation.kind === "gameplay" || observation.kind === "storyWorld") return [];
@@ -194,7 +197,7 @@ export function synthesisSelections<T extends ObservationSource>(
       // A reply to a v10 request uses aliases assigned before the wording check changed.
       const excluded = legacyV10 && observation.kind !== "tag"
         ? text.length > 1_500 || LEGACY_V10_SOURCE_SUPPORT_LANGUAGE.test(text)
-        : issue !== null;
+        : issue !== null && (!clauses || observation.kind === "tag");
       if (excluded) {
         if (issue) {
           editorialOmissions.push({ ...ref, question: editorialQuestion(issue) });
@@ -209,7 +212,11 @@ export function synthesisSelections<T extends ObservationSource>(
         ids.push(selectionId);
         choices.set(section, ids);
       }
-      return [{ ...observation, selectionId }];
+      if (!clauses || observation.kind === "tag") return [{ ...observation, selectionId }];
+      const { edition, qualifiers, key } = observationScope(source, observation, clauses);
+      const scopeGroup = scopeGroups.get(key) ?? `s${scopeGroups.size + 1}`;
+      scopeGroups.set(key, scopeGroup);
+      return [{ ...observation, selectionId, qualifiers, ...(edition ? { edition } : {}), ...(clauses === "v13" ? { scopeGroup } : {}) }];
     });
     return observations.length ? [{ ...source, observations }] : [];
   });
@@ -249,7 +256,98 @@ export function validateSynthesisSelections(
   };
 }
 
-export function validateObservationSynthesis(value: unknown, appid: number, sources: readonly ObservationSource[]) {
+export function validateSynthesisClauses(
+  value: unknown, appid: number, sources: readonly ObservationSource[],
+  selections: ReturnType<typeof synthesisSelections>,
+  version: "v12" | "v13" = "v13",
+) {
+  function entries(raw: unknown, tags = false) {
+    return list(raw).map((entry) => {
+      const observationIds = tags ? entry : object(entry).observationIds;
+      const observationRefs = [...new Set(list(observationIds))]
+        .map((id) => typeof id === "string" ? selections.observationsById.get(id)?.ref ?? {} : {});
+      const label = tags && typeof list(observationIds)[0] === "string"
+        ? selections.observationsById.get(list(observationIds)[0] as string)?.observation.text : undefined;
+      return { text: object(entry).text, label, observationRefs };
+    });
+  }
+  const root = object(value);
+  const prosCons = object(root.prosCons);
+  const checked = validateObservationSynthesis({
+    statements: entries(root.statements),
+    categories: Object.entries(object(root.categories)).map(([name, findings]) => ({ name, findings: entries(findings) })),
+    prosCons: { pros: entries(prosCons.pros), cons: entries(prosCons.cons) },
+    tags: entries(root.tags, true),
+  }, appid, sources, { clauses: version });
+  return {
+    ...checked,
+    editorialOmissions: [...selections.editorialOmissions, ...checked.editorialOmissions],
+    diagnostics: [...selections.diagnostics, ...checked.diagnostics],
+  };
+}
+
+// Legacy amendments can carry play scope in the observation's wording.
+// Match explicit play context, without inferring a build from article dates.
+function observationScope(source: ObservationSource, observation: MediaObservation, version: "v12" | "v13") {
+  const scopeInText = version === "v12"
+    ? /\b(?:on the (?:Nintendo )?Switch 2 port|reviewed (?:PC|PS5|Xbox Series X) (?:version|build)|at (?:PC )?launch|early access|day[- ]\d+ patch)\b/gi
+    : /\b(?:on the (?:Nintendo )?Switch 2 port|reviewed (?:PC|PS5|Xbox Series X) (?:version|build)|at (?:PC )?launch|early access|(?:PC |version |v)?1\.0(?!\.\d)|day[- ]\d+ patch)\b/gi;
+  const textScope = [...observation.text.matchAll(scopeInText)].map(([scope]) => scope);
+  const observationContext = [...observation.qualifiers, ...textScope].join(" ");
+  const context = [observationContext, source.editionContext?.build].filter(Boolean).join(" ");
+  const platformPattern = /\b(?:Switch 2|PC|PS5|PlayStation 5|Xbox Series [XS]|Switch)\b/i;
+  const platformMatch = platformPattern.exec(observationContext)?.[0] ?? platformPattern.exec(source.editionContext?.platform ?? "")?.[0];
+  const platform = platformMatch?.toLowerCase() === "pc" ? "PC" : platformMatch;
+  const qualifierByKey = new Map<string, string>();
+  for (const qualifier of [...observation.qualifiers, ...textScope]) {
+    qualifierByKey.set(scopeKey(qualifier), qualifier);
+  }
+  if (platform && ![...qualifierByKey.values()].some((qualifier) => contains(qualifier, platform))) {
+    qualifierByKey.set(scopeKey(platform), platform);
+  }
+  const build = source.editionContext?.build;
+  if (build && ![...qualifierByKey.values()].some((qualifier) => contains(qualifier, build) || contains(build, qualifier) && scopeKey(build) === scopeKey(qualifier))) {
+    qualifierByKey.set(scopeKey(build), build);
+  }
+  const buildLabels = [
+    [/\bearly access\b/i, "Early Access"],
+    [/\bspecial edition\b/i, "Special Edition"],
+    [/\banniversary edition\b/i, "Anniversary Edition"],
+    [/\bultimate edition\b/i, "Ultimate Edition"],
+    [/\b(?:launch|full release|1\.0)\b/i, version === "v13" && /\b(?:v)?1\.0\b/i.test(context)
+      ? [platform, "1.0"].filter(Boolean).join(" ") : platform ? `${platform} launch` : "Launch"],
+    [/\bpreview\b/i, "Preview"],
+  ] as const;
+  const editions = buildLabels.flatMap(([pattern, label]) => pattern.test(context) ? [label] : []);
+  const edition = platform?.toLowerCase() === "switch 2" ? "Switch 2"
+    : editions.length === 1 ? editions[0] : editions.length === 0 ? platform : undefined;
+  return { edition, qualifiers: [...qualifierByKey.values()], key: JSON.stringify([...qualifierByKey.keys()].sort()) };
+}
+
+function scopeKey(qualifier: string): string {
+  return qualifier.toLowerCase()
+    .replace(/^(?:on the |at |reviewed )/, "")
+    .replace(/^nintendo (?=switch)/, "")
+    .replace(/ (?:port|version|build)$/, "")
+    .replace(/day-(?=\d)/, "day ");
+}
+
+// Declaring a sequence, or turning a possible effect into a routine result,
+// changes the claim even when the source and the game both match.
+function strengthenedWording(claim: string, evidence: string): string | undefined {
+  const sequence = /\balternat(?:e|es|ed|ing) between\b/i.exec(claim);
+  if (sequence && !/\b(?:alternat(?:e|es|ed|ing)|take turns|in turn)\b/i.test(evidence)) return sequence[0];
+  for (const [, verb] of evidence.matchAll(/\b(?:can|could|may|might) ([a-z]{3,})\b/gi)) {
+    const result = new RegExp(`\\b${verb}(?:s|es)?\\b`, "i").exec(claim);
+    if (result && !/\b(?:can|could|may|might|sometimes|potentially|possible|occasionally)\b/i.test(claim)) return result[0];
+  }
+  return undefined;
+}
+
+export function validateObservationSynthesis(
+  value: unknown, appid: number, sources: readonly ObservationSource[],
+  { clauses }: { clauses?: "v12" | "v13" } = {},
+) {
   const sourceByIdentity = new Map(sources.map((source) => [source.sourceIdentity, source]));
   const editorialOmissions: EditorialOmission[] = [];
   const diagnostics: Array<{ section: string } & DisplayIssue> = [];
@@ -275,7 +373,7 @@ export function validateObservationSynthesis(value: unknown, appid: number, sour
       const { sourceIdentity, observationId } = object(rawRef);
       const source = typeof sourceIdentity === "string" ? sourceByIdentity.get(sourceIdentity) : undefined;
       const observation = source?.observations.find(({ id }) => id === observationId);
-      return source && observation?.appid === appid ? { sourceIdentity: source.sourceIdentity, sourceUrl: source.sourceUrl, observation } : null;
+      return source && observation?.appid === appid ? { source, observation } : null;
     });
     if (resolve.length === 0 || resolve.some((ref) => ref === null)) {
       omit(section, "missing or unknown observation reference", refs);
@@ -288,9 +386,36 @@ export function validateObservationSynthesis(value: unknown, appid: number, sour
     }
     const matchingText = kind === "tag" ? line(entry.label, 600) : line(entry.text, Infinity);
     const sourceTexts = [...new Set(support.map(({ observation }) => observation.text))];
-    const contested = entry.contested === true && category !== undefined;
+    const semantic = clauses !== undefined && kind !== "tag";
+    const contested = !semantic && entry.contested === true && category !== undefined;
     const displays = [...new Set(support.map(({ observation }) => displayText(observation)))];
-    if (contested) {
+    const scopes = semantic ? support.map(({ source, observation }) => observationScope(source, observation, clauses)) : [];
+    if (semantic) {
+      const scopeKeys = new Set(scopes.map(({ key }) => key));
+      if (scopeKeys.size !== 1) {
+        omit(section, "claim combines different evidence scopes", refs);
+        return [];
+      }
+      const outlet = MEDIA_OUTLETS.find(({ name }) => contains(matchingText, name));
+      if (!matchingText || outlet) {
+        omit(section, outlet ? "claim names an outlet" : "claim has no wording", refs, outlet?.name);
+        return [];
+      }
+      if (clauses === "v13") {
+        for (const evidence of sourceTexts) {
+          const trigger = strengthenedWording(matchingText, evidence);
+          if (trigger) {
+            omit(section, "claim adds unsupported sequence or certainty", refs, trigger);
+            return [];
+          }
+        }
+      }
+      const attribution = clauses === "v13" && /\b(?:reviewers?|(?:was|were|is|are) (?:described|reported))\b/i.exec(matchingText)?.[0];
+      if (attribution) {
+        omit(section, "claim describes source attribution instead of the game", refs, attribution);
+        return [];
+      }
+    } else if (contested) {
       const scopes = new Set(support.map(({ observation }) => JSON.stringify([...observation.qualifiers].sort())));
       if (sourceTexts.length < 2 || scopes.size !== 1 || matchingText !== sourceTexts.join(" / ")) {
         omit(section, "disagreement requires distinct observations with the same scope and wording joined by ' / '", refs);
@@ -300,13 +425,15 @@ export function validateObservationSynthesis(value: unknown, appid: number, sour
       omit(section, "claim wording or scope differs from its observations", refs);
       return [];
     }
-    const text = displays.join(" / ");
+    const qualifiers = scopes[0]?.qualifiers ?? [];
+    const text = semantic ? displayText({ ...support[0]!.observation, text: matchingText, qualifiers }) : displays.join(" / ");
     const issue = invalidDisplay(text, kind);
     if (issue) {
       omit(section, issue.reason, refs, issue.trigger);
       return [];
     }
-    return [{ text, sourceUrls: [...new Set(support.map(({ sourceUrl }) => sourceUrl))], ...(contested ? { contested } : {}), observationRefs: support.map(({ sourceIdentity, observation }) => ({ sourceIdentity, observationId: observation.id })) }];
+    const edition = scopes[0]?.edition;
+    return [{ text, sourceUrls: [...new Set(support.map(({ source }) => source.sourceUrl))], ...(contested ? { contested } : {}), ...(edition ? { edition } : {}), observationRefs: support.map(({ source, observation }) => ({ sourceIdentity: source.sourceIdentity, observationId: observation.id })) }];
   }
   const root = object(value);
   for (const raw of list(root.categories)) {
@@ -316,11 +443,22 @@ export function validateObservationSynthesis(value: unknown, appid: number, sour
       omit("categories", "unsupported evidence category", list(object(entry).observationRefs));
     }
   }
-  const statements = list(root.statements).slice(0, 60).flatMap((entry) => claim(entry, "statements", "finding"));
+  const seenText = new Set<string>();
+  const seenEvidence = new Set<string>();
+  function uniqueFinding(finding: ReturnType<typeof claim>[number]): boolean {
+    if (!clauses) return true;
+    const textKey = JSON.stringify([finding.edition, finding.text.toLowerCase().replace(/[.!?]+$/, "")]);
+    const evidenceKey = JSON.stringify(finding.observationRefs.map((ref) => JSON.stringify(ref)).sort());
+    if (seenText.has(textKey) || (clauses === "v12" && seenEvidence.has(evidenceKey))) return false;
+    seenText.add(textKey);
+    seenEvidence.add(evidenceKey);
+    return true;
+  }
+  const statements = list(root.statements).slice(0, 60).flatMap((entry) => claim(entry, "statements", "finding")).filter(uniqueFinding);
   if (statements.length === 0) omit("statements", "no supported statements", []);
   const categories = MEDIA_CATEGORY_NAMES.flatMap((name) => {
     const findings = list(root.categories).map(object).filter((entry) => entry.name === name)
-      .flatMap((entry) => list(entry.findings)).slice(0, 60).flatMap((entry) => claim(entry, name, "finding", name));
+      .flatMap((entry) => list(entry.findings)).slice(0, 60).flatMap((entry) => claim(entry, name, "finding", name)).filter(uniqueFinding);
     return findings.length > 0 ? [{ name, findings }] : [];
   });
   const prosCons = object(root.prosCons);

@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { extractionReviewIssues, parseArticleObservations, synthesisSelections, validateSynthesisSelections, validateObservationSynthesis } from "../src/lib/media-observations";
+import { extractionReviewIssues, parseArticleObservations, synthesisSelections, validateSynthesisClauses, validateSynthesisSelections, validateObservationSynthesis, type ObservationSource } from "../src/lib/media-observations";
 import { createMediaEvidenceSource, parseMediaOverview } from "../src/lib/media-overview";
 import { advanceMediaProcessing, authorizeMediaProcessing } from "../src/lib/media-processing";
 import type { OpenRouterTransport } from "../src/lib/media-openrouter";
@@ -44,6 +44,74 @@ test("each synthesis section offers only eligible IDs and resolves selections to
     observationRefs: [{ sourceIdentity: source.sourceIdentity, observationId: finding.id }],
     sourceUrls: [source.sourceUrl],
   });
+});
+
+test("v13 shares compatible PC evidence, keeps patch details separate, and retains distinct detail sharing a citation", () => {
+  function source(id: string, text: string, qualifiers: string[] = [], platform: string | null = null): ObservationSource {
+    return {
+      sourceIdentity: id,
+      sourceUrl: `https://${id}.test/review`,
+      observations: [{ ...finding, text, qualifiers }],
+      editionContext: { platform, build: null },
+    };
+  }
+  const sources = [
+    source("eurogamer", "Dialogue overlapped in the reviewed PC version."),
+    source("ign", "Conversations interrupted each other.", ["PC"], "PC"),
+    source("pcgamer", "Vehicles spawned inside each other.", ["Day 0 patch"], "PC"),
+    source("switch", "On the Switch 2 port, lighting is soft but street decorations remain visible.", [], "Switch"),
+  ];
+  const evidence = synthesisSelections(sources, { clauses: "v13" });
+  expect(evidence.evidence.map(({ observations }) => observations.map((item) => "scopeGroup" in item ? item.scopeGroup : null))).toEqual([["s1"], ["s1"], ["s2"], ["s3"]]);
+  const lead = { text: "Dialogue can overlap.", observationIds: ["o1", "o2"] };
+  const checked = validateSynthesisClauses({
+    statements: [
+      lead,
+      { text: "Bugs interrupt play.", observationIds: ["o1", "o2", "o3"] },
+      { text: "Lighting looks soft.", observationIds: ["o4"] },
+      { text: "The reviewer described soft lighting.", observationIds: ["o4"] },
+    ],
+    categories: { [category]: [
+      lead,
+      { text: "Vehicles can spawn inside each other.", observationIds: ["o3"] },
+      { text: "Street decorations remain visible.", observationIds: ["o4"] },
+    ] },
+  }, CYBERPUNK, sources, evidence);
+  expect(checked.overview.statements).toMatchObject([
+    { edition: "PC", sourceUrls: [sources[0]!.sourceUrl, sources[1]!.sourceUrl] },
+    { edition: "Switch 2", sourceUrls: [sources[3]!.sourceUrl] },
+  ]);
+  expect(checked.overview.statements[0]?.text).not.toContain("Day 0");
+  expect(checked.overview.categories[0]?.findings).toMatchObject([
+    { text: "Vehicles can spawn inside each other (Day 0 patch, PC)", sourceUrls: [sources[2]!.sourceUrl] },
+    { text: "Street decorations remain visible (On the Switch 2 port)", edition: "Switch 2" },
+  ]);
+  expect(checked.diagnostics).toMatchObject([
+    { reason: "claim combines different evidence scopes" },
+    { trigger: "reviewer" },
+  ]);
+  const citationSources = new Map(sources.map(({ sourceIdentity, sourceUrl }) =>
+    [sourceUrl, createMediaEvidenceSource({ outlet: sourceIdentity, url: sourceUrl })]));
+  expect(parseMediaOverview(checked.overview, CYBERPUNK, citationSources)?.categories[0]?.findings)
+    .toContainEqual({ text: "Street decorations remain visible (On the Switch 2 port)", edition: "Switch 2", sourceUrls: [sources[3]!.sourceUrl] });
+});
+
+test("v13 distinguishes explicit 1.0 observations from observations about both 1.0 and Early Access", () => {
+  const source: ObservationSource = {
+    sourceIdentity: "test",
+    sourceUrl: "https://example.test",
+    observations: [
+      { ...finding, text: "The opening moves slowly in both early access and 1.0.", qualifiers: [] },
+      { ...finding, id: "release", text: "PC 1.0 unlocks the next region earlier.", qualifiers: [] },
+    ],
+  };
+  const reply = { statements: [
+    { text: source.observations[0]!.text, observationIds: ["o1"] },
+    { text: source.observations[1]!.text, observationIds: ["o2"] },
+  ] };
+  const checkout = (version: "v12" | "v13") => validateSynthesisClauses(reply, CYBERPUNK, [source], synthesisSelections([source], { clauses: version }), version);
+  expect(checkout("v12").overview.statements.map(({ edition }) => edition)).toEqual(["Early Access", undefined]);
+  expect(checkout("v13").overview.statements.map(({ edition }) => edition)).toEqual([undefined, "PC 1.0"]);
 });
 
 test("keeps single-reviewer Hades II findings through selection, settlement and the Overview reader", () => {
@@ -220,8 +288,8 @@ for (const mode of ["mixed", "refused", "pending", "malformed"] as const) {
             content = mode === "malformed" ? "not JSON" : JSON.stringify({
               ...emptySynthesisSelection(sources),
               statements: [
-                ...(mode === "mixed" ? [[synthesisSelectionId(source!, finding.id)]] : []),
-                [tagId],
+                ...(mode === "mixed" ? [{ text: finding.text, observationIds: [synthesisSelectionId(source!, finding.id)] }] : []),
+                { text: patchTag.text, observationIds: [tagId] },
               ],
               tags: [[tagId]],
             });
@@ -268,3 +336,17 @@ for (const mode of ["mixed", "refused", "pending", "malformed"] as const) {
     }
   });
 }
+
+test("drops paraphrases that turn two locations into a sequence or a possible outcome into a certainty", () => {
+  const source = { sourceIdentity: "version", sourceUrl: "https://example.test/pc-review", observations: [
+    { ...finding, id: "locations", text: "Runs take place on the surface and in the underworld.", qualifiers: [] },
+    { ...finding, id: "ending", text: "Character quests can change the ending.", qualifiers: [] },
+  ] };
+  const result = validateSynthesisClauses({ statements: [
+    { text: "Runs alternate between the surface and the underworld.", observationIds: ["o1"] },
+    { text: "Completing a quest changes the ending.", observationIds: ["o2"] },
+    { text: "Quests can change how the story ends.", observationIds: ["o2"] },
+  ] }, CYBERPUNK, [source], synthesisSelections([source], { clauses: "v13" }));
+  expect(result.overview.statements.map(s => s.text)).toEqual(["Quests can change how the story ends."]);
+  expect(result.diagnostics).toHaveLength(2);
+});

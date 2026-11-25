@@ -651,7 +651,10 @@ async function verifyWaitingRunResumesAfterUpgrade(): Promise<void> {
           provider: "Anthropic",
           content: JSON.stringify({
             ...emptySynthesisSelection(evidence),
-            statements: [[synthesisSelectionId(source, "legacy-1")]],
+            statements: [{
+              text: "The combat supports flexible builds",
+              observationIds: [synthesisSelectionId(source, "legacy-1")],
+            }],
           }),
           usage: { promptTokens: 100, completionTokens: 20, cost: 0.00002 },
         };

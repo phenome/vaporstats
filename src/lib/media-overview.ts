@@ -16,6 +16,7 @@ export interface MediaFinding {
   text: string;
   sourceUrls: string[];
   contested?: boolean;
+  edition?: string;
 }
 
 export interface MediaOverview {
@@ -178,7 +179,8 @@ function parseFinding(value: unknown, sources: ReadonlyMap<string, MediaEvidence
     : [];
   if (!text || sourceUrls.length === 0) return null;
   if (sourceSupportTrigger(text)) return null;
-  return { text, sourceUrls, ...(object.contested === true ? { contested: true } : {}) };
+  const edition = typeof object.edition === "string" ? cleanLine(object.edition).slice(0, 120) : "";
+  return { text, sourceUrls, ...(object.contested === true ? { contested: true } : {}), ...(edition ? { edition } : {}) };
 }
 
 function parseFindings(value: unknown, sources: ReadonlyMap<string, MediaEvidenceSource>): MediaFinding[] {

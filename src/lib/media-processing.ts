@@ -4,7 +4,7 @@ import { MIN_USABLE_ARTICLE_CHARS, parseArticleDocument } from "./article-docume
 import type { AppDatabase } from "./db";
 import { writeTransaction } from "./db-transaction";
 import { isOmissionAmendment, mediaAmendment, mediaAmendmentIdentity } from "./media-amendments";
-import { parseArticleObservations, readArticleObservations, synthesisSelections, validateObservationSynthesis, validateSynthesisSelections, extractionReviewIssues, type EditorialOmission } from "./media-observations";
+import { parseArticleObservations, readArticleObservations, synthesisSelections, validateObservationSynthesis, validateSynthesisClauses, validateSynthesisSelections, extractionReviewIssues, type EditorialOmission } from "./media-observations";
 import { legacyObservationEvidence } from "./media-legacy-observations";
 import { boundedMediaError } from "./media-error";
 import { decodeVector, encodeVector, GEMINI_EMBEDDING_DIMENSIONS } from "./media-embedding-vector";
@@ -117,7 +117,9 @@ export const OPENROUTER_TEXT_MODEL = "anthropic/claude-haiku-5.5";
 const EXTRACTION_CONFIG_VERSION = "media-extraction-2026-11-25-v7";
 const OBSERVATION_TEXT_SYNTHESIS_VERSION = "media-synthesis-2026-11-25-v9";
 const ORIGINAL_SELECTION_VERSION = "media-synthesis-2026-11-25-v10";
-const SYNTHESIS_CONFIG_VERSION = "media-synthesis-2026-11-25-v11";
+const REVISED_SELECTION_VERSION = "media-synthesis-2026-11-25-v11";
+const FIRST_CLAUSE_VERSION = "media-synthesis-2026-11-25-v12";
+const SYNTHESIS_CONFIG_VERSION = "media-synthesis-2026-11-25-v13";
 const CLEANUP_VERSION = "media-cleanup-2026-11-25-v3";
 /** How many paid items each provider may take from the queue in one ingestion tick. */
 export const DEFAULT_PAID_SUBMISSIONS_PER_TICK = 60;
@@ -367,7 +369,7 @@ function usesObservationExtraction(version: string): boolean {
 }
 
 function usesObservationSynthesis(configVersion: string): boolean {
-  return configVersion === SYNTHESIS_CONFIG_VERSION || configVersion === ORIGINAL_SELECTION_VERSION || configVersion === OBSERVATION_TEXT_SYNTHESIS_VERSION;
+  return configVersion === SYNTHESIS_CONFIG_VERSION || configVersion === FIRST_CLAUSE_VERSION || configVersion === REVISED_SELECTION_VERSION || configVersion === ORIGINAL_SELECTION_VERSION || configVersion === OBSERVATION_TEXT_SYNTHESIS_VERSION;
 }
 
 function synthesisIdentityFor(appid: number, extractions: ExtractionRow[], model: string, configVersion: string, priorAmendments?: string[]): string {
@@ -434,15 +436,18 @@ function synthesisResponseSchema({ choices }: ReturnType<typeof synthesisSelecti
   function ids(allowedIds: string[]) {
     return { type: "array", items: { type: "string", enum: allowedIds } };
   }
+  function clause(allowedIds: string[]) {
+    return strictObject({ text: { type: "string" }, observationIds: ids(allowedIds) });
+  }
   function section(name: "statements" | "pros" | "cons" | "tags") {
     const allowedIds = choices.get(name);
-    return allowedIds ? { type: "array", items: ids(allowedIds) } : { type: "null" };
+    return allowedIds ? { type: "array", items: name === "tags" ? ids(allowedIds) : clause(allowedIds) } : { type: "null" };
   }
   const categories = Object.fromEntries(MEDIA_CATEGORY_NAMES.flatMap((name) => {
     const allowedIds = choices.get(name);
     return allowedIds ? [[name, {
       type: "array",
-      items: strictObject({ observationIds: ids(allowedIds), contested: { type: "boolean" } }),
+      items: clause(allowedIds),
     }]] : [];
   }));
   return strictObject({
@@ -495,15 +500,17 @@ function effectiveObservationSources(appid: number, extractions: ExtractionRow[]
       if (isOmissionAmendment(amendment)) return [];
       return readArticleObservations({ observations: [{ ...observation, text: cleanLine(amendment) }] }, appid);
     });
-    return [{ sourceIdentity, sourceUrl: source.original_url, outlet: source.outlet,
+    const editionContext = { platform: source.platform, build: source.build_context ?? (source.type === "preview" ? "preview" : null) };
+    return [{ sourceIdentity, sourceUrl: source.original_url, outlet: source.outlet, editionContext,
       pass: source.pass, contentHash: row.content_hash, context: metadataFor(source), observations, editorialOmissions }];
   });
 }
 
 function makeSynthesisRequest(appid: number, name: string, selections: ReturnType<typeof synthesisSelections<ReturnType<typeof effectiveObservationSources>[number]>>): OpenRouterChatRequest {
   const request = chatRequest(SYNTHESIS_MAX_OUTPUT_TOKENS, { role: "user", content: `Synthesize the current assessments for ${name || `game ${appid}`}: each outlet's initial assessment (pass "initial") and any later assessment by an outlet already represented (pass "later"). A later article from the same outlet is that outlet's own follow-up and adds no separate endorsement. A null publishedAt is an unknown date.
-Return JSON matching the response schema. Select observations using their selectionId values. Each inner array of IDs forms one entry. Choose game-first statements from finding observations. For each category, choose findings from that exact category. Choose pros, cons, and tags from observations of kind pro, con, and tag respectively. Use null for sections whose schema is null and empty arrays when selecting nothing from an available section.
-Group IDs in an entry only for identical wording and scope. For a contested finding, group distinct observations about the same facet and scope in display order. Set contested to true only for genuine disagreements. Keep neutral characteristics out of pros and cons.
+Return JSON matching the response schema. Write up to three lead clauses in statements using finding observations, then up to three additional clauses per topic under the exact finding categories. Put concrete edition-specific details under their categories, including when an observation also supports a different lead claim. Do not repeat claims. Pros and cons require observations of their respective kinds. Tags are groups of IDs with identical tag wording and scope. Use null for sections whose schema is null and empty arrays when selecting nothing from an available section.
+Each prose entry must be one specific, game-first clause. Say what happens in the game directly. For example, say "Dialogue can overlap during missions." Avoid "was described," "were reported," "reviewer," outlet names, source counts, and claims about consensus. Use readable paraphrases and cite the exact selectionId values that individually support the whole clause. Keep material platform, edition, build, patch, timing, and subjective limits.
+First look for distinct outlets supporting the same specific point within a scopeGroup. Multiple IDs in a prose entry MUST have the same scopeGroup. Where observations agree, write a shared clause about their specific common point and cite them together, even when their original wording differs. Keep additional patch-specific examples and other scopeGroups in their own clauses and citations. Give each differing assessment its own concrete clause and citations. Do not combine different examples into one claim or describe the existence of disagreement as a finding. Keep neutral characteristics out of pros and cons.
 ${JSON.stringify(selections.evidence.map(({ observations, editorialOmissions: _editorialOmissions, ...source }) => ({ ...source, extraction: { observations } })))}` });
   return {
     ...request,
@@ -920,7 +927,10 @@ async function persistOverview(db: AppDatabase, job: JobRow, output: unknown, no
   const parsed = parseJson(output);
   const invalidRoot = usesObservations && (typeof parsed !== "object" || parsed === null || Array.isArray(parsed));
   const originalSelection = job.config_version === ORIGINAL_SELECTION_VERSION;
-  const checked = originalSelection || job.config_version === SYNTHESIS_CONFIG_VERSION
+  const clauseVersion = job.config_version === SYNTHESIS_CONFIG_VERSION ? "v13" : job.config_version === FIRST_CLAUSE_VERSION ? "v12" : undefined;
+  const checked = clauseVersion
+    ? validateSynthesisClauses(parsed, job.appid, observationSources, synthesisSelections(observationSources, { clauses: clauseVersion }), clauseVersion)
+    : originalSelection || job.config_version === REVISED_SELECTION_VERSION
     ? validateSynthesisSelections(parsed, job.appid, observationSources, synthesisSelections(observationSources, { legacyV10: originalSelection }))
     : usesObservations ? validateObservationSynthesis(parsed, job.appid, observationSources) : null;
   const editorial = checked ? observationReviewOutput(checked, observationSources) : undefined;
@@ -1521,9 +1531,9 @@ async function takeSynthesisTurn(advance: QueueAdvance, job: JobRow): Promise<bo
   }
   const game = await first<{ name: string }>(db, "SELECT name FROM apps WHERE appid = ?", job.appid);
   const sources = effectiveObservationSources(job.appid, evidence.extractions, evidence.sources);
-  const selections = synthesisSelections(sources);
+  const selections = synthesisSelections(sources, { clauses: "v13" });
   if (!selections.choices.has("statements")) {
-    const checked = validateSynthesisSelections({}, job.appid, sources, selections);
+    const checked = validateSynthesisClauses({}, job.appid, sources, selections);
     await refuseItem(db, job, "invalid_output: no cited statements", advance.now, JSON.stringify(observationReviewOutput(checked, sources)));
     return true;
   }

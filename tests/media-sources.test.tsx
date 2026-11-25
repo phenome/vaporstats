@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { Database } from "bun:sqlite";
+import { parseHTML } from "linkedom";
 import React from "react";
 import { renderToString } from "react-dom/server";
 import type { AppDatabase } from "../src/lib/db";
@@ -253,6 +254,92 @@ describe("game media sources", () => {
     }
   });
 
+  test("renders the edition chapters and every article target in the game response", async () => {
+    const previous = process.env.MEDIA_OVERVIEW_PUBLIC;
+    process.env.MEDIA_OVERVIEW_PUBLIC = "true";
+    const { db, native } = createFixture();
+    try {
+      await seedGame(db, native);
+      const port = "https://www.ign.com/articles/cyberpunk-2077-nintendo-switch-2-review-update";
+      const eurogamer = "https://www.eurogamer.net/cyberpunk-2077-review";
+      const insertSource = native.prepare(
+        "INSERT INTO media_sources (appid, pass, original_url, title, outlet, published_at, retrieved_at, type) VALUES (?, 'initial', ?, ?, ?, ?, '2026-09-10', 'review')",
+      );
+      insertSource.run(source.appid, eurogamer, "PC launch review", "Eurogamer", "2024-01-04");
+      insertSource.run(source.appid, port, "Switch 2 review", "IGN", "2025-06-12");
+      native.prepare(
+        "INSERT INTO media_game_overviews (appid, input_identity, model, config_version, output_json) VALUES (?, 'editions', 'model', 'config', ?)",
+      ).run(source.appid, JSON.stringify({
+        statements: [{ text: "The city is densely detailed.", sourceUrls: [source.originalUrl], edition: "PC at launch" }],
+        categories: [{
+          name: "Visuals & audio",
+          findings: [
+            { text: "The city is densely detailed!", sourceUrls: [eurogamer], edition: "PC at launch" },
+            { text: "Neon colors stand out at night.", sourceUrls: [source.originalUrl], edition: "PC at launch" },
+            { text: "The city is densely detailed.", sourceUrls: [port], edition: "Switch 2 port" },
+            { text: "The soundscape changes by neighborhood.", sourceUrls: [eurogamer] },
+          ],
+        }],
+      }));
+
+      const response = await handleGameHttpRequest(
+        new Request("https://vaporstats.test/games/1091500-cyberpunk-2077"),
+        db,
+      );
+      expect(response.status).toBe(200);
+      const { document } = parseHTML(await response.text());
+      const overview = document.querySelector("#media-overview")!;
+      const chapters = [...overview.querySelectorAll("section")];
+      expect(chapters.map((chapter) => chapter.querySelector("h3")?.textContent)).toEqual(["PC at launch", "Switch 2 port"]);
+      expect(chapters.map((chapter) => chapter.querySelector("time")?.getAttribute("dateTime"))).toEqual(["2024-01", "2025-06"]);
+      expect(chapters[0]?.textContent).toContain("Neon colors stand out at night.");
+      expect(chapters[0]?.textContent).not.toContain("The city is densely detailed");
+      expect(chapters[1]?.textContent).toContain("The city is densely detailed.");
+      expect(overview.textContent).toContain("The soundscape changes by neighborhood.");
+      const lead = [...overview.querySelectorAll("p")].find((p) => p.textContent?.startsWith("The city is densely detailed."));
+      expect([...lead!.querySelectorAll("a")].map((a) => a.getAttribute("href"))).toEqual(["#media-source-1", "#media-source-2"]);
+
+      const sources = document.querySelector("#media-sources")!;
+      expect(sources.textContent).toContain("3 articles · 2 outlets");
+      const group = sources.querySelector("details")!;
+      expect(group.hasAttribute("open")).toBe(false);
+      expect(group.querySelector("summary strong")?.textContent).toBe("IGN▸");
+      expect(group.querySelector("summary")?.textContent).toContain("2 articles");
+      expect(group.textContent).toContain("Switch 2 review");
+      expect(sources.querySelector("#media-source-2")?.closest("details")).toBeNull();
+      expect([...overview.querySelectorAll('a[href^="#media-source-"]')].every((citation) => {
+        const target = sources.querySelector(citation.getAttribute("href")!);
+        return target?.getAttribute("tabindex") === "-1" && target.querySelector("a") !== null;
+      })).toBe(true);
+      expect(overview.querySelector('a[href="#media-source-1"] sub')?.textContent).toBe("1");
+      expect(overview.querySelector('a[href="#media-source-3"] sub')?.textContent).toBe("2");
+      expect(group.querySelector("#media-source-1 sub")?.textContent).toBe("1");
+      expect(group.querySelector("#media-source-3 sub")?.textContent).toBe("2");
+    } finally {
+      native.close(true);
+      if (previous === undefined) delete process.env.MEDIA_OVERVIEW_PUBLIC;
+      else process.env.MEDIA_OVERVIEW_PUBLIC = previous;
+    }
+  });
+
+  test("renders one known edition as topics without an edition chapter", () => {
+    const finding = { text: "The city looks distinct at night.", sourceUrls: [source.originalUrl], edition: "PC at launch" };
+    const html = renderToString(React.createElement(MediaOverviewSection, {
+      overview: {
+        appid: source.appid,
+        statements: [{ ...finding, text: "The city rewards exploration." }],
+        categories: [{ name: "Visuals & audio", findings: [finding] }],
+        prosCons: null,
+        tags: [],
+      },
+      sources: [source],
+    }));
+    const { document } = parseHTML(html);
+    expect(document.querySelector("h3")?.textContent).toBe("Visuals & audio");
+    expect(document.querySelector("#media-overview section")).toBeNull();
+    expect(document.querySelector("#media-overview")?.textContent).toContain(finding.text);
+  });
+
   test("empty persisted coverage is omitted from the rendered page", () => {
     const html = renderToString(React.createElement(MediaSources, { sources: [] }));
     expect(html).toBe("");
@@ -277,7 +364,7 @@ describe("game media sources", () => {
     expect(html).toContain('target="_blank"');
     expect(html).toContain('rel="noopener noreferrer"');
     expect(html).toContain('aria-label="Read Cyberpunk 2077 Review on IGN (opens in a new tab)"');
-    expect(html).toContain("Read ↗");
+    expect(html).toContain('aria-hidden="true">↗');
     expect(html).not.toContain("By:");
     expect(html).not.toContain("Published:");
     expect(html).not.toContain("Updated:");

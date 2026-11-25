@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import React from "react";
 import { renderToString } from "react-dom/server";
+import { parseHTML } from "linkedom";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { createQueryClient } from "../src/lib/query-client";
 import type { GameDetail } from "../src/lib/catalog";
@@ -8,7 +9,6 @@ import { GamePageView } from "../src/components/game-page";
 import { ChildAppPageView } from "../src/components/child-app-page";
 import { MediaMatchesSection } from "../src/components/media-matches";
 import type { MediaGameMatch } from "../src/lib/media-similarity";
-
 
 const matches: MediaGameMatch[] = [
   {
@@ -22,6 +22,10 @@ const matches: MediaGameMatch[] = [
     matchedGame: { appid: 30, name: "Matched Worlds", slug: "matched-worlds" },
   },
 ];
+
+function matchInDimension(match: MediaGameMatch, dimension: MediaGameMatch["dimension"]): MediaGameMatch {
+  return { ...match, dimension, similarity: 0.42 };
+}
 
 const game: GameDetail = {
   appid: 10,
@@ -79,8 +83,10 @@ describe("media matches section", () => {
   test("renders independent dimensions and canonical game links without pair prose", () => {
     const html = renderToString(React.createElement(MediaMatchesSection, { matches, paths }));
 
+    expect(html).toContain("Similar Games");
     expect(html).toContain("Gameplay &amp; systems");
     expect(html).toContain("Story &amp; world");
+    expect(html).toContain('href="/methodology"');
     expect(html).toContain('href="/games/10-parent/20-matched-systems"');
     expect(html).toContain('href="/games/30-matched-worlds"');
     expect(html).not.toContain("Shared trait");
@@ -99,6 +105,58 @@ describe("media matches section", () => {
     );
     expect(missingPathHtml).toContain("Matched Systems");
     expect(missingPathHtml).not.toContain('href="/games/20-matched-systems"');
+  });
+
+  test("combines dimensions when they have the same app IDs in the same order", () => {
+    const gameplay = [matches[0]!, matchInDimension(matches[1]!, "gameplay")];
+    const story = gameplay.map((match) => matchInDimension(match, "story_world"));
+    const { document } = parseHTML(renderToString(
+      React.createElement(MediaMatchesSection, { matches: [...story, ...gameplay], paths }),
+    ));
+
+    expect(Array.from(document.querySelectorAll("h3"), (heading) => heading.textContent))
+      .toEqual(["Gameplay & systems and Story & world"]);
+    expect(Array.from(document.querySelectorAll("li a"), (link) => link.getAttribute("href")))
+      .toEqual([paths[20], paths[30]]);
+  });
+
+  test("renders separate ordered lists when the same apps are ranked differently", () => {
+    const gameplay = [matches[0]!, matchInDimension(matches[1]!, "gameplay")];
+    const story = [matches[1]!, matchInDimension(matches[0]!, "story_world")];
+    const { document } = parseHTML(renderToString(
+      React.createElement(MediaMatchesSection, { matches: [...story, ...gameplay], paths }),
+    ));
+
+    expect(Array.from(document.querySelectorAll("h3"), (heading) => heading.textContent))
+      .toEqual(["Gameplay & systems", "Story & world"]);
+    expect(Array.from(document.querySelectorAll("ul"), (list) =>
+      Array.from(list.querySelectorAll("a"), (link) => link.getAttribute("href"))))
+      .toEqual([[paths[20], paths[30]], [paths[30], paths[20]]]);
+  });
+
+  test("keeps separate lists when one dimension has additional results", () => {
+    const gameplay = [matches[0]!, matchInDimension(matches[1]!, "gameplay")];
+    const story = [matchInDimension(matches[0]!, "story_world")];
+    const { document } = parseHTML(renderToString(
+      React.createElement(MediaMatchesSection, { matches: [...gameplay, ...story], paths }),
+    ));
+
+    expect(Array.from(document.querySelectorAll("ul"), (list) => list.children.length)).toEqual([2, 1]);
+  });
+
+  test("renders decorative Steam artwork over a local fallback even without a game link", () => {
+    const { document } = parseHTML(renderToString(
+      React.createElement(MediaMatchesSection, { matches: [matches[0]!] }),
+    ));
+    const artwork = document.querySelector("li img");
+
+    expect(artwork?.getAttribute("src")).toBe(
+      "https://shared.fastly.steamstatic.com/store_item_assets/steam/apps/20/capsule_184x69.jpg",
+    );
+    expect(artwork?.getAttribute("alt")).toBe("");
+    expect(artwork?.parentElement?.getAttribute("aria-hidden")).toBe("true");
+    expect(artwork?.parentElement?.textContent).toBe("M");
+    expect(document.querySelector("li a")).toBeNull();
   });
 
   test("omits the section when no persisted matches exist", () => {
@@ -176,7 +234,7 @@ describe("media matches section", () => {
 
     expect(html).toContain("Child evidence statement.");
     expect(html).toContain("Child Review");
-    expect(html).toContain("Media matches");
+    expect(html).toContain("Similar Games");
     expect(html).toMatch(/aria-pressed="true"[^>]*>6m<\/button>/);
     expect(html).not.toMatch(/aria-pressed="true"[^>]*>All<\/button>/);
   });

@@ -22,7 +22,7 @@ export function MediaMethodologyView(): React.JSX.Element {
         <div className="font-mono text-xs uppercase tracking-widest text-zinc-500">VaporStats Methodology</div>
         <h1 className="text-2xl font-bold tracking-tight text-zinc-100 sm:text-3xl">How media coverage works</h1>
         <p className="text-sm text-zinc-400">
-          How game pages summarize published coverage and how media matches are found.
+          How game pages summarize published coverage and how similar games are found.
         </p>
       </header>
 
@@ -51,17 +51,13 @@ export function MediaMethodologyView(): React.JSX.Element {
 
       <Question id="where-statements-come-from" title="Where does each statement come from?">
         <p>
-          Every statement in the Overview, categories, and pros and cons has numbered notes. Each number links to an
-          entry under Sources, which names the outlet and article title, the author and dates when they are known,
-          and links to the original article. A statement cites the articles that support it.
+          Each numbered note links to an article that supports the claim beside it. The main number identifies the
+          outlet. When an outlet has several articles, a subscript identifies the article and the link opens its row
+          in Sources, where you can read the original article.
         </p>
         <p>
-          Statements supported by more outlets are listed first. A statement marked Contested groups opposing
-          judgments about the same aspect of the game, and its notes cite articles on each side.
-        </p>
-        <p>
-          Sources also show each article's type, such as a review or a preview, and whether its writer played the
-          game when the article states it.
+          A shared observation can cite several articles. When assessments differ, the brief describes each view
+          with its own citations. Coverage of different editions or builds keeps its context.
         </p>
       </Question>
 
@@ -74,9 +70,9 @@ export function MediaMethodologyView(): React.JSX.Element {
         <p>The page shows the current result. It does not keep earlier versions of a summary.</p>
       </Question>
 
-      <Question id="media-matches" title="How are media matches found?">
+      <Question id="media-matches" title="How are similar games found?">
         <p>
-          Media matches list other games whose coverage describes similar characteristics. They are grouped in two
+          Similar Games lists other games whose coverage describes similar characteristics. They are grouped in two
           independent dimensions:
         </p>
         <ul className="list-inside list-disc space-y-1">

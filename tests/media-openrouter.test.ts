@@ -122,8 +122,13 @@ describe("text generation through OpenRouter", () => {
             required: ["statements", "categories", "prosCons", "tags"],
             properties: {
               statements: { type: "array", items: {
-                type: "array",
-                items: { type: "string", enum: ["o1"] },
+                type: "object",
+                additionalProperties: false,
+                required: ["text", "observationIds"],
+                properties: {
+                  text: { type: "string" },
+                  observationIds: { type: "array", items: { type: "string", enum: ["o1"] } },
+                },
               } },
               categories: {
                 type: "object",
@@ -132,10 +137,10 @@ describe("text generation through OpenRouter", () => {
                 properties: {
                   "Gameplay & systems": { type: "array", items: {
                     additionalProperties: false,
-                    required: ["observationIds", "contested"],
+                    required: ["text", "observationIds"],
                     properties: {
                       observationIds: { type: "array", items: { type: "string", enum: ["o1"] } },
-                      contested: { type: "boolean" },
+                      text: { type: "string" },
                     },
                   } },
                 },
@@ -149,7 +154,7 @@ describe("text generation through OpenRouter", () => {
     });
     expect(database.native.query("SELECT stage, config_version FROM media_processing_jobs WHERE stage IN ('extraction', 'synthesis') ORDER BY id").all()).toEqual([
       { stage: "extraction", config_version: "media-extraction-2026-11-25-v7" },
-      { stage: "synthesis", config_version: "media-synthesis-2026-11-25-v11" },
+      { stage: "synthesis", config_version: "media-synthesis-2026-11-25-v13" },
     ]);
     // Embeddings stay on Gemini Batch; no text is submitted to Gemini.
     expect(providers.gemini.submitted.map((key) => key.split(":")[0])).toEqual(["embedding"]);

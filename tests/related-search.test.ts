@@ -376,7 +376,7 @@ describe("Related Apps and Search", () => {
     expect(body).toContain("Subordinate Related Entity");
     expect(body).toContain("Major Expansion");
     expect(body).toContain("/games/1091500-cyberpunk-2077");
-    expect(body).not.toContain("Media matches");
+    expect(body).not.toContain('id="media-matches"');
     expect(body).toMatch(/aria-pressed="true"[^>]*>6m<\/button>/);
 
     const detailRes = await handleGameDetailRequest(
@@ -452,7 +452,7 @@ describe("Related Apps and Search", () => {
         },
       }),
     );
-    expect(childPageHtml).toContain("Media matches");
+    expect(childPageHtml).toContain("Similar Games");
     expect(childPageHtml).toContain("Gameplay &amp; systems");
     expect(childPageHtml).toContain("Story &amp; world");
     expect(childPageHtml).toContain('href="/games/730-counter-strike-2"');
@@ -467,7 +467,7 @@ describe("Related Apps and Search", () => {
         mediaMatchPaths: {},
       }),
     );
-    expect(childPageWithoutMatches).not.toContain("Media matches");
+    expect(childPageWithoutMatches).not.toContain('id="media-matches"');
     console.log("canonical child route");
   });
 
