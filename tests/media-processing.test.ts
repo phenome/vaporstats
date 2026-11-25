@@ -732,7 +732,11 @@ describe("bounded Gemini media processing", () => {
     const laterRunId = insertCompletedRun(value.native, "initial:later-authorization:test", [APPIDS[0]]);
     await authorizeMediaProcessing(value.db, laterRunId);
     transport.polls.set("batches/test-1", { state: "succeeded", output: legacyExtractionOutput(), usage: { inputTokens: 100, outputTokens: 20 } });
-    transport.nextPolls.push({ state: "succeeded", output: overviewOutput(URLS[APPIDS[0]]), usage: { inputTokens: 100, outputTokens: 20 } });
+    transport.nextPolls.push({ state: "succeeded", output: (request: Parameters<ChatOutput>[0]) => {
+      const reply = overviewOutput(URLS[APPIDS[0]])(request) as { statements: Array<{ text: string }> };
+      reply.statements[0]!.text = "Combat supports flexible builds.";
+      return reply;
+    }, usage: { inputTokens: 100, outputTokens: 20 } });
 
     const result = await advanceMediaProcessing(value.db, { runId: laterRunId, transport, openRouter: transport.openRouter, articleFetch: async () => articleHtml(APPIDS[0]) });
     expect(result.status).toBe("completed");

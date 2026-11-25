@@ -48,3 +48,16 @@ These outcomes distinguish discovery from usable evidence: a retained source row
 | Item and tick isolation | `tests/media-tick-isolation.test.ts`, `tests/media-interruptions.test.ts` |
 
 All 1,065 repository tests passed. The migration verification originally mocked an obsolete provider response. With the mock returning a clause and its observation IDs, the retained waiting-run upgrade check passed, along with type checking, the production build and output validation.
+
+## Private rerun with refreshed articles
+
+On a disposable copy, the current cleaner reached both the GamesRadar+ BG3 release review and the Eurogamer Hades II follow-up. The first Haiku extractions attached unsupported qualifiers to every observation and both were refused. Extraction v8 instructs the model to return an empty qualifier list when no qualification is evidenced. GamesRadar+ then produced eight accepted observations. Eurogamer produced sixteen accepted observations and one omission. The private run deactivated Eurogamer’s retained legacy extraction to allow reprocessing of the same article. Replaying the accepted responses through the final quote-based scope classifier yielded the same synthesis qualifiers and edition labels for all 24 accepted observations.
+
+| Private candidate | Rendering and source coverage |
+|---|---|
+| BG3 Overview 28 | Ten inline article citations, six to GamesRadar+ and four to IGN. GamesRadar+ also supported one related tag. Settlement omitted a clause introducing an unsupported press-build qualification. |
+| Hades II Overview 29 | Fifteen inline article citations, six to the refreshed Eurogamer follow-up. The new review also supported one related tag. Eurogamer Early Access and IGN supplied the other displayed findings. PC Gamer's two eligible observations reached the model and were unselected. |
+
+All 25 inline citations resolved to the corresponding article rows. Neither private candidate contained a remark with two independent article citations. The six paid sends cost $0.012469, including the two refusals. Two replacement Hades II embedding jobs were queued and neither was submitted.
+
+The Cyberpunk reader dropped the shared patch caption. Exact editorial corrections for the saved legacy brief keep the original observations and citations and remove redundant PC context from ordinary assessments. The technical bug report retains its day-one build, the port comparison retains Switch 2, and the Joy-Con aiming trait remains a catalog link under Related tags.

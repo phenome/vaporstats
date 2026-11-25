@@ -1,10 +1,11 @@
 import { expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { extractionReviewIssues, parseArticleObservations, synthesisSelections, validateSynthesisClauses, validateSynthesisSelections, validateObservationSynthesis, type ObservationSource } from "../src/lib/media-observations";
 import { createMediaEvidenceSource, parseMediaOverview } from "../src/lib/media-overview";
-import { advanceMediaProcessing, authorizeMediaProcessing } from "../src/lib/media-processing";
+import { advanceMediaProcessing, authorizeMediaProcessing, OPENROUTER_TEXT_MODEL } from "../src/lib/media-processing";
 import type { OpenRouterTransport } from "../src/lib/media-openrouter";
 import { openTestDatabase } from "./support/db";
-import { CYBERPUNK, emptySynthesisSelection, insertCompletedRun, insertSources, seedApps, synthesisEvidence, synthesisSelectionId } from "./support/media";
+import { CYBERPUNK, emptySynthesisSelection, insertCompletedRun, insertSources, seedApps, stableJson, synthesisEvidence, synthesisSelectionId } from "./support/media";
 
 const category = "Gameplay & systems";
 const quote = "At PC launch, flexible builds made its combat approachable and I finished the campaign solo.";
@@ -285,6 +286,11 @@ for (const mode of ["mixed", "refused", "pending", "malformed"] as const) {
             const [source] = sources;
             observationRefs = [{ sourceIdentity: source!.sourceIdentity, observationId: finding.id }];
             const tagId = synthesisSelectionId(source!, patchTag.id);
+            expect(source!.extraction.observations.find(({ id }) => id === finding.id)).toMatchObject({
+              qualifiers: [],
+              versionEvidence: { observed: ["PC launch"], distinctions: [], technical: false },
+            });
+            expect(request.messages[0]?.content).toContain("Treat the source platform, review date and build as review context.");
             content = mode === "malformed" ? "not JSON" : JSON.stringify({
               ...emptySynthesisSelection(sources),
               statements: [
@@ -316,7 +322,7 @@ for (const mode of ["mixed", "refused", "pending", "malformed"] as const) {
       ]));
       if (mode === "mixed") {
         expect(JSON.parse(database.native.query<{ output_json: string }, []>("SELECT output_json FROM media_game_overviews WHERE active = 1").get()!.output_json)).toMatchObject({
-          statements: [{ text: "Flexible builds make combat approachable (At PC launch)", observationRefs }],
+          statements: [{ text: "Flexible builds make combat approachable.", observationRefs }],
           tags: [{ label: "Six skill tiers (Early Access)", slug: "six-skill-tiers-early-access" }],
         });
         expect(database.native.query("SELECT tag_slug FROM media_tag_memberships").all()).toEqual([{ tag_slug: "six-skill-tiers-early-access" }]);
@@ -349,4 +355,97 @@ test("drops paraphrases that turn two locations into a sequence or a possible ou
   ] }, CYBERPUNK, [source], synthesisSelections([source], { clauses: "v13" }));
   expect(result.overview.statements.map(s => s.text)).toEqual(["Quests can change how the story ends."]);
   expect(result.diagnostics).toHaveLength(2);
+});
+
+test("v14 combines general cross-platform evidence and keeps explicit version details and technical limits", () => {
+  function source(id: string, platform: string, build: string | null, text: string, quote: string): ObservationSource {
+    const observations = parseArticleObservations({ observations: [
+      { ...finding, text, quote, qualifiers: [
+        ...quote.match(/Switch 2 port|Early Access/g) ?? [],
+      ] },
+    ] }, CYBERPUNK, quote, [platform, build], false, true);
+    expect(observations).toHaveLength(1);
+    return { sourceIdentity: id, sourceUrl: `https://${id}.test/review`, editionContext: { platform, build }, observations };
+  }
+  const sources = [
+    source("a", "PC", "PC 1.0", "Build choices reward experimentation.", "Build choices reward experimentation."),
+    source("b", "Switch 2", null, "Build choices reward experimentation.", "Build choices reward experimentation."),
+    source("c", "Switch 2", null, "Docked output reaches 1080p.", "On the Switch 2 port, docked output reaches 1080p."),
+    source("d", "PC", "50GB Day 0 patch", "Animation glitches interrupted scenes.", "Animation glitches interrupted scenes."),
+    source("e", "PC", "1.0", "The next area unlocks sooner.", "Version 1.0 unlocks the next area earlier than Early Access."),
+    source("f", "PC", "Technical Test", "The dodge has a cooldown.", "The dodge has a cooldown."),
+  ];
+  const selections = synthesisSelections(sources, { clauses: "v14" });
+  const [pc, port, docked, glitches, release, preview] = selections.evidence.flatMap(({ observations }) => observations);
+  expect(pc).toMatchObject({ qualifiers: [], scopeGroup: "s1" });
+  expect(port).toMatchObject({ qualifiers: [], scopeGroup: "s1" });
+  expect(docked).toMatchObject({ qualifiers: ["Switch 2 port"], edition: "Switch 2 port" });
+  expect(glitches).toMatchObject({ qualifiers: ["50GB Day 0 patch", "PC"] });
+  expect(glitches).not.toHaveProperty("edition");
+  expect(release).toMatchObject({ qualifiers: ["Version 1.0", "Early Access"] });
+  expect(release).not.toHaveProperty("edition");
+  expect(preview).toMatchObject({ qualifiers: ["Technical Test"] });
+  const result = validateSynthesisClauses({ statements: [
+    { text: "Build choices reward experimentation.", observationIds: ["o1", "o2"] },
+    { text: "On Switch 2, build choices reward experimentation.", observationIds: ["o2"] },
+    { text: "Docked output reaches 1080p on Switch 2.", observationIds: ["o3"] },
+    { text: "Animation glitches interrupted scenes.", observationIds: ["o4"] },
+    { text: "Version 1.0 unlocks the next area earlier than Early Access.", observationIds: ["o5"] },
+    { text: "The dodge has a cooldown.", observationIds: ["o6"] },
+  ] }, CYBERPUNK, sources, selections, "v14");
+  expect(result.overview.statements).toMatchObject([
+    { text: "Build choices reward experimentation.", sourceUrls: [sources[0]!.sourceUrl, sources[1]!.sourceUrl] },
+    { edition: "Switch 2 port", sourceUrls: [sources[2]!.sourceUrl] },
+    { text: "Animation glitches interrupted scenes (50GB Day 0 patch, PC)" },
+    { text: "Version 1.0 unlocks the next area earlier than Early Access." },
+    { text: "The dodge has a cooldown (Technical Test)" },
+  ]);
+  expect(result.diagnostics).toEqual([{ reason: "claim introduces a version distinction absent from its evidence", section: "statements", trigger: "Switch 2" }]);
+});
+
+
+test("a waiting v13 synthesis keeps its request identity, prompt and settlement", async () => {
+  const database = openTestDatabase("vaporstats-v13-synthesis-");
+  try {
+    seedApps(database.native, [CYBERPUNK]);
+    insertSources(database.native, CYBERPUNK, "initial", 1);
+    const runId = insertCompletedRun(database.native, "initial:observations:v13", [CYBERPUNK]);
+    await authorizeMediaProcessing(database.db, runId);
+    const promptEvidence: unknown[] = [];
+    const openRouter: OpenRouterTransport = {
+      currentKey: async () => ({ limit: null, limit_remaining: null }),
+      async complete(request) {
+        const extraction = request.response_format.type === "json_object";
+        const sources = extraction ? [] : synthesisEvidence(request);
+        if (!extraction) promptEvidence.push(sources[0]?.extraction.observations[0]);
+        const content = extraction ? { observations: [finding] } : {
+          ...emptySynthesisSelection(sources),
+          statements: [{ text: finding.text, observationIds: ["o1"] }],
+        };
+        return { generationId: "v13-fixture", model: request.model, provider: null, content: JSON.stringify(content),
+          finishReason: "stop", nativeFinishReason: null, usage: { promptTokens: 100, completionTokens: 40, reasoningTokens: 0, cost: 0.00015 } };
+      },
+    };
+    const options = { runId, openRouter, articleFetch: async () => `<article><p>${article}</p></article>` };
+    await advanceMediaProcessing(database.db, { ...options, submissionsPerTick: 1, now: new Date("2026-11-25T03:00:00Z") });
+    const configVersion = "media-synthesis-2026-11-25-v13";
+    const extractions = database.native.query("SELECT source_id AS sourceId, input_identity AS inputIdentity FROM media_article_extractions").all();
+    const identity = createHash("sha256").update(stableJson({ stage: "synthesis", appid: CYBERPUNK, model: OPENROUTER_TEXT_MODEL, configVersion, extractions })).digest("hex");
+    const key = `synthesis:${CYBERPUNK}:${identity}`;
+    expect(database.native.prepare("UPDATE media_processing_jobs SET config_version = ?, input_identity = ?, request_key = ? WHERE stage = 'synthesis' AND status = 'queued'")
+      .run(configVersion, identity, key).changes).toBe(1);
+
+    await advanceMediaProcessing(database.db, { ...options, now: new Date("2026-11-25T04:00:00Z") });
+    expect(promptEvidence).toHaveLength(1);
+    expect(promptEvidence[0]).toMatchObject({ qualifiers: ["At PC launch"], edition: "PC launch" });
+    expect(promptEvidence[0]).not.toHaveProperty("versionEvidence");
+    expect(database.native.query("SELECT config_version, input_identity, request_key, status FROM media_processing_jobs WHERE stage = 'synthesis'").all())
+      .toEqual([{ config_version: configVersion, input_identity: identity, request_key: key, status: "succeeded" }]);
+    const overview = database.native.query<{ output_json: string }, []>("SELECT output_json FROM media_game_overviews").get()!;
+    expect(JSON.parse(overview.output_json).statements).toMatchObject([
+      { text: "Flexible builds make combat approachable (At PC launch)", edition: "PC launch" },
+    ]);
+  } finally {
+    database.cleanup();
+  }
 });

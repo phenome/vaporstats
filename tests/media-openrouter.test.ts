@@ -26,6 +26,8 @@ import {
   openRouterKeyLimit,
   oversizedArticleHtml,
   processingArticleHtml,
+  overviewOutputForUrls,
+  type OpenRouterRequestRecord,
   runMediaTick,
   seedApps,
   stableJson,
@@ -153,8 +155,8 @@ describe("text generation through OpenRouter", () => {
       },
     });
     expect(database.native.query("SELECT stage, config_version FROM media_processing_jobs WHERE stage IN ('extraction', 'synthesis') ORDER BY id").all()).toEqual([
-      { stage: "extraction", config_version: "media-extraction-2026-11-25-v7" },
-      { stage: "synthesis", config_version: "media-synthesis-2026-11-25-v13" },
+      { stage: "extraction", config_version: "media-extraction-2026-11-25-v8" },
+      { stage: "synthesis", config_version: "media-synthesis-2026-11-25-v14" },
     ]);
     // Embeddings stay on Gemini Batch; no text is submitted to Gemini.
     expect(providers.gemini.submitted.map((key) => key.split(":")[0])).toEqual(["embedding"]);
@@ -1075,6 +1077,12 @@ describe("cutover from Gemini text generation", () => {
     const providers = apis();
     providers.gemini.batch("batches/pre-1", "extraction");
     providers.gemini.batch("batches/pre-2", "extraction");
+    providers.openRouter.output("synthesis", (request: OpenRouterRequestRecord) => {
+      const reply = overviewOutputForUrls(request.urls)(request) as { statements: Array<{ text: string }> };
+      reply.statements[0]!.text = "Combat supports flexible builds.";
+      return reply;
+    });
+
 
     const drained = await tick(database, providers, "2026-11-18T03:00:00.000Z");
 

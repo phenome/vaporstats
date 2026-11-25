@@ -3,6 +3,7 @@ import { LEGACY_V10_SOURCE_SUPPORT_LANGUAGE, MEDIA_CATEGORY_NAMES, normalizeMedi
 
 const kinds = ["finding", "pro", "con", "tag", "gameplay", "storyWorld"] as const;
 type ObservationKind = (typeof kinds)[number];
+type ClauseVersion = "v12" | "v13" | "v14";
 const categoryNames = new Set<string>(MEDIA_CATEGORY_NAMES);
 
 export interface MediaObservation {
@@ -12,6 +13,7 @@ export interface MediaObservation {
   category: string;
   text: string;
   qualifiers: string[];
+  versionEvidence?: VersionEvidence;
 }
 
 export interface ObservationSource {
@@ -103,8 +105,16 @@ function articleObservations(value: unknown, appid: number, check: (item: MediaO
   return result.filter(({ id }) => !duplicate.has(id));
 }
 
-export function readArticleObservations(value: unknown, appid: number): MediaObservation[] {
-  return articleObservations(value, appid, () => true);
+export function readArticleObservations(value: unknown, appid: number, includeVersionEvidence = false): MediaObservation[] {
+  return articleObservations(value, appid, (item, entry) => {
+    if (includeVersionEvidence) {
+      const { observed, distinctions, technical } = object(object(entry).versionEvidence);
+      if (Array.isArray(observed) && Array.isArray(distinctions) && typeof technical === "boolean") {
+        item.versionEvidence = { observed: markerLabels(observed), distinctions: markerLabels(distinctions), technical };
+      }
+    }
+    return true;
+  });
 }
 
 function rejectedArticleEvidence(
@@ -142,12 +152,15 @@ export function parseArticleObservations(
   article: string,
   context: readonly (string | null)[] = [],
   pending = false,
+  includeVersionEvidence = false,
 ): MediaObservation[] {
   const body = line(article, Number.MAX_SAFE_INTEGER);
   return articleObservations(value, appid, (item, raw) => {
     const source = object(raw);
     const needsReview = source.reviewQuestion !== undefined && source.reviewQuestion !== null && source.reviewQuestion !== "";
-    return needsReview === pending && rejectedArticleEvidence(item, source, body, context, pending) === null;
+    if (needsReview !== pending || rejectedArticleEvidence(item, source, body, context, pending) !== null) return false;
+    if (includeVersionEvidence) item.versionEvidence = classifyVersionEvidence(line(source.quote, 480));
+    return true;
   });
 }
 
@@ -178,7 +191,7 @@ type EditorialSection = "statements" | "pros" | "cons" | "tags" | (typeof MEDIA_
 /** One catalog defines the model's choices and the aliases accepted at settlement. */
 export function synthesisSelections<T extends ObservationSource>(
   sources: readonly T[],
-  { legacyV10 = false, clauses }: { legacyV10?: boolean; clauses?: "v12" | "v13" } = {},
+  { legacyV10 = false, clauses }: { legacyV10?: boolean; clauses?: ClauseVersion } = {},
 ) {
   const observationsById = new Map<string, { observation: MediaObservation; ref: ObservationReference }>();
   const choices = new Map<EditorialSection, string[]>();
@@ -216,7 +229,7 @@ export function synthesisSelections<T extends ObservationSource>(
       const { edition, qualifiers, key } = observationScope(source, observation, clauses);
       const scopeGroup = scopeGroups.get(key) ?? `s${scopeGroups.size + 1}`;
       scopeGroups.set(key, scopeGroup);
-      return [{ ...observation, selectionId, qualifiers, ...(edition ? { edition } : {}), ...(clauses === "v13" ? { scopeGroup } : {}) }];
+      return [{ ...observation, selectionId, qualifiers, ...(edition ? { edition } : {}), ...(clauses !== "v12" ? { scopeGroup } : {}) }];
     });
     return observations.length ? [{ ...source, observations }] : [];
   });
@@ -259,7 +272,7 @@ export function validateSynthesisSelections(
 export function validateSynthesisClauses(
   value: unknown, appid: number, sources: readonly ObservationSource[],
   selections: ReturnType<typeof synthesisSelections>,
-  version: "v12" | "v13" = "v13",
+  version: ClauseVersion = "v13",
 ) {
   function entries(raw: unknown, tags = false) {
     return list(raw).map((entry) => {
@@ -288,7 +301,8 @@ export function validateSynthesisClauses(
 
 // Legacy amendments can carry play scope in the observation's wording.
 // Match explicit play context, without inferring a build from article dates.
-function observationScope(source: ObservationSource, observation: MediaObservation, version: "v12" | "v13") {
+function observationScope(source: ObservationSource, observation: MediaObservation, version: ClauseVersion) {
+  if (version === "v14") return sourceGroundedScope(source, observation);
   const scopeInText = version === "v12"
     ? /\b(?:on the (?:Nintendo )?Switch 2 port|reviewed (?:PC|PS5|Xbox Series X) (?:version|build)|at (?:PC )?launch|early access|day[- ]\d+ patch)\b/gi
     : /\b(?:on the (?:Nintendo )?Switch 2 port|reviewed (?:PC|PS5|Xbox Series X) (?:version|build)|at (?:PC )?launch|early access|(?:PC |version |v)?1\.0(?!\.\d)|day[- ]\d+ patch)\b/gi;
@@ -324,6 +338,68 @@ function observationScope(source: ObservationSource, observation: MediaObservati
   return { edition, qualifiers: [...qualifierByKey.values()], key: JSON.stringify([...qualifierByKey.keys()].sort()) };
 }
 
+const VERSION_MARKER = /\b(?:early access|technical test|(?:press|preview|review|pre[- ]release) build|preview|full release|PC launch|at launch|launch build|(?:version |v)\d+\.\d+(?:\.\d+)*|1\.0(?!\.\d)|(?:\d+\s?GB )?day[- ]\d+ patch|patch \d+(?:\.\d+)*|(?:special|anniversary|ultimate|definitive) edition|(?:Nintendo )?Switch 2(?: port)?|(?:Nintendo )?Switch(?: port)?|PlayStation [45]|PS[45]|Xbox Series [XS]|PC)\b/gi;
+const HISTORICAL_BUILD = /^(?:early access|technical test|preview|(?:press|preview|review|pre[- ]release) build)$/i;
+const VERSION_CHANGE = /\b(?:both|only|unlike|compared (?:with|to)|versus|than|no longer|newly|now|previously|introduced|added|removed|replaced|fixed|changed|limited to|exclusive to)\b/i;
+const TECHNICAL_FAILURE = /\b(?:glitches?|bugs?|crash(?:es|ed|ing)?|stutter(?:s|ed|ing)?|pop[- ]in|textures? (?:could |can )?load late|dialogue (?:could |can )?overlap|vehicles? (?:could |can )?spawn inside)\b/i;
+
+function versionMarkers(text: string): Map<string, string> {
+  return new Map([...text.matchAll(VERSION_MARKER)].map(([label]) => {
+    const key = scopeKey(label).replace(/^playstation /, "ps").replace(/^(?:version |v)(?=\d)/, "").replace(/^\d+\s?gb /, "");
+    return [key, label];
+  }));
+}
+
+interface VersionEvidence {
+  observed: string[];
+  distinctions: string[];
+  technical: boolean;
+}
+
+function markerLabels(values: unknown[]): string[] {
+  return [...versionMarkers(values.map((value) => line(value, 120)).join(" ")).values()];
+}
+
+const PORT_FEATURE = /\b(?:FPS|frame[ -]?rate|frame pacing|resolution|\d{3,4}p|docked|handheld|Joy[- ]Con|DLSS|ray tracing|mouse controls?|performance mode)\b/i;
+
+function classifyVersionEvidence(excerpt: string): VersionEvidence {
+  const distinctions = excerpt.split(/(?<=[.!?])\s+/).flatMap((sentence) =>
+    VERSION_CHANGE.test(sentence) || PORT_FEATURE.test(sentence) ? [...versionMarkers(sentence).values()] : []);
+  return {
+    observed: [...versionMarkers(excerpt).values()],
+    distinctions: markerLabels(distinctions),
+    technical: PORT_FEATURE.test(excerpt) || TECHNICAL_FAILURE.test(excerpt),
+  };
+}
+
+// Use the facts derived from the validated quote at extraction. Older
+// extractions can only attest to what their accepted wording says.
+function sourceGroundedScope(source: ObservationSource, observation: MediaObservation) {
+  const { observed, distinctions: labels, technical } = observation.versionEvidence ?? classifyVersionEvidence(observation.text);
+  const distinctions = versionMarkers(labels.join(" "));
+  const context = versionMarkers([...observed, ...observation.qualifiers, source.editionContext?.build ?? ""].join(" "));
+  const required = new Map(distinctions);
+  for (const [key, label] of context) {
+    if ((HISTORICAL_BUILD.test(key) || technical) && !required.has(key)) required.set(key, label);
+  }
+  if (technical) {
+    for (const [key, label] of versionMarkers(source.editionContext?.platform ?? "")) {
+      if (!required.has(key)) required.set(key, label);
+    }
+  }
+  const otherQualifiers = observation.qualifiers.filter((qualifier) =>
+    qualifier.replace(VERSION_MARKER, "").replace(/\b(?:at|in|on|with|the|reviewed|version|build|port|platform|release|and)\b|[(),]/gi, "").trim() !== "");
+  const qualifiers = [...otherQualifiers, ...required.values()];
+  const nonPlatformDistinctions = [...distinctions].filter(([key]) => !/^(?:pc|ps[45]|xbox series [xs]|switch(?: 2)?)$/.test(key));
+  const edition = nonPlatformDistinctions.length === 1 ? nonPlatformDistinctions[0]![1]
+    : nonPlatformDistinctions.length === 0 && distinctions.size === 1 ? [...distinctions.values()][0] : undefined;
+  return {
+    edition,
+    qualifiers,
+    key: JSON.stringify([[...distinctions.keys()].sort(), [...required.keys(), ...otherQualifiers.map(scopeKey)].sort()]),
+  };
+}
+
 function scopeKey(qualifier: string): string {
   return qualifier.toLowerCase()
     .replace(/^(?:on the |at |reviewed )/, "")
@@ -346,7 +422,7 @@ function strengthenedWording(claim: string, evidence: string): string | undefine
 
 export function validateObservationSynthesis(
   value: unknown, appid: number, sources: readonly ObservationSource[],
-  { clauses }: { clauses?: "v12" | "v13" } = {},
+  { clauses }: { clauses?: ClauseVersion } = {},
 ) {
   const sourceByIdentity = new Map(sources.map((source) => [source.sourceIdentity, source]));
   const editorialOmissions: EditorialOmission[] = [];
@@ -401,7 +477,7 @@ export function validateObservationSynthesis(
         omit(section, outlet ? "claim names an outlet" : "claim has no wording", refs, outlet?.name);
         return [];
       }
-      if (clauses === "v13") {
+      if (clauses !== "v12") {
         for (const evidence of sourceTexts) {
           const trigger = strengthenedWording(matchingText, evidence);
           if (trigger) {
@@ -410,7 +486,7 @@ export function validateObservationSynthesis(
           }
         }
       }
-      const attribution = clauses === "v13" && /\b(?:reviewers?|(?:was|were|is|are) (?:described|reported))\b/i.exec(matchingText)?.[0];
+      const attribution = clauses !== "v12" && /\b(?:reviewers?|(?:was|were|is|are) (?:described|reported))\b/i.exec(matchingText)?.[0];
       if (attribution) {
         omit(section, "claim describes source attribution instead of the game", refs, attribution);
         return [];
@@ -426,6 +502,14 @@ export function validateObservationSynthesis(
       return [];
     }
     const qualifiers = scopes[0]?.qualifiers ?? [];
+    if (clauses === "v14" && semantic) {
+      const supported = new Set(versionMarkers(qualifiers.join(" ")).keys());
+      const unsupported = [...versionMarkers(matchingText)].find(([key]) => !supported.has(key));
+      if (unsupported) {
+        omit(section, "claim introduces a version distinction absent from its evidence", refs, unsupported[1]);
+        return [];
+      }
+    }
     const text = semantic ? displayText({ ...support[0]!.observation, text: matchingText, qualifiers }) : displays.join(" / ");
     const issue = invalidDisplay(text, kind);
     if (issue) {

@@ -592,6 +592,10 @@ export async function hasPendingExtractions(db: AppDatabase, appid: number): Pro
   return (await first<{ pending: number }>(db, `SELECT 1 AS pending FROM media_processing_jobs WHERE appid = ? AND stage = 'extraction' AND (status = 'submitted' OR ${WAITING}) LIMIT 1`, appid)) !== null;
 }
 
+export async function hasUnresolvedSynthesis(db: AppDatabase, appid: number, inputIdentity: string): Promise<boolean> {
+  return (await first<{ pending: number }>(db, `SELECT 1 AS pending FROM media_processing_jobs WHERE appid = ? AND stage = 'synthesis' AND input_identity = ? AND ${UNRESOLVED} LIMIT 1`, appid, inputIdentity)) !== null;
+}
+
 /**
  * Whether `appid`'s active Overview is about to be replaced: an Overview
  * rebuild is queued, waiting or submitted, or extraction work that will

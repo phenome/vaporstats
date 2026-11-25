@@ -72,6 +72,7 @@ import {
   hasDefiniteEditorialRefusal,
   hasOpenExtraction,
   hasPendingExtractions,
+  hasUnresolvedSynthesis,
   hasRequestKey,
   hasSubmittedOrSucceededExtraction,
   hasUnresolvedPaidWork,
@@ -114,12 +115,13 @@ export type { MediaProcessingOutputCounts } from "./media-paid-ledger";
 
 /** The model that generates extractions and Overviews, through OpenRouter chat completions. */
 export const OPENROUTER_TEXT_MODEL = "anthropic/claude-haiku-5.5";
-const EXTRACTION_CONFIG_VERSION = "media-extraction-2026-11-25-v7";
+const EXTRACTION_CONFIG_VERSION = "media-extraction-2026-11-25-v8";
 const OBSERVATION_TEXT_SYNTHESIS_VERSION = "media-synthesis-2026-11-25-v9";
 const ORIGINAL_SELECTION_VERSION = "media-synthesis-2026-11-25-v10";
 const REVISED_SELECTION_VERSION = "media-synthesis-2026-11-25-v11";
 const FIRST_CLAUSE_VERSION = "media-synthesis-2026-11-25-v12";
-const SYNTHESIS_CONFIG_VERSION = "media-synthesis-2026-11-25-v13";
+const REVIEW_SCOPE_CLAUSE_VERSION = "media-synthesis-2026-11-25-v13";
+const SYNTHESIS_CONFIG_VERSION = "media-synthesis-2026-11-25-v14";
 const CLEANUP_VERSION = "media-cleanup-2026-11-25-v3";
 /** How many paid items each provider may take from the queue in one ingestion tick. */
 export const DEFAULT_PAID_SUBMISSIONS_PER_TICK = 60;
@@ -365,11 +367,11 @@ function synthesisIsCurrent(job: JobRow, extractions: ExtractionRow[]): boolean 
 }
 
 function usesObservationExtraction(version: string): boolean {
-  return version === EXTRACTION_CONFIG_VERSION || version === "media-extraction-2026-11-25-v5" || version === "media-extraction-2026-11-25-v6";
+  return version === EXTRACTION_CONFIG_VERSION || version === "media-extraction-2026-11-25-v5" || version === "media-extraction-2026-11-25-v6" || version === "media-extraction-2026-11-25-v7";
 }
 
 function usesObservationSynthesis(configVersion: string): boolean {
-  return configVersion === SYNTHESIS_CONFIG_VERSION || configVersion === FIRST_CLAUSE_VERSION || configVersion === REVISED_SELECTION_VERSION || configVersion === ORIGINAL_SELECTION_VERSION || configVersion === OBSERVATION_TEXT_SYNTHESIS_VERSION;
+  return configVersion === SYNTHESIS_CONFIG_VERSION || configVersion === REVIEW_SCOPE_CLAUSE_VERSION || configVersion === FIRST_CLAUSE_VERSION || configVersion === REVISED_SELECTION_VERSION || configVersion === ORIGINAL_SELECTION_VERSION || configVersion === OBSERVATION_TEXT_SYNTHESIS_VERSION;
 }
 
 function synthesisIdentityFor(appid: number, extractions: ExtractionRow[], model: string, configVersion: string, priorAmendments?: string[]): string {
@@ -416,7 +418,7 @@ function makeExtractionRequest(source: SourceRow, content: string): OpenRouterCh
     { role: "system", content: `Analyze the article about Steam app ${source.appid}. Return JSON only.
 Return {observations, originatingAssessment}. Each observation has id (unique short stable identifier), appid (the target Steam app ID as a JSON integer), kind ("finding", "pro", "con", "tag", "gameplay", or "storyWorld"), category (one of the categories below for findings, "" otherwise), text (one independently checkable assertion), quote (verbatim supporting excerpt, 12–480 characters), and qualifiers (array, empty only when scope does not materially change the claim). Omit originatingAssessment if unknown.
 ${CATEGORY_GUIDANCE}
-Ground every observation in substantive reporting about the target game. Omit factboxes, page metadata, incidental comparisons, and other games or editions. Preserve platform, edition, build, patch, preview, announced, and release-state limits as qualifiers when material to the observation. Copy them from its excerpt or explicit platform/build context. Include them in qualifiers even when the text contains them. Publication dates do not establish the build played. If interpretation is uncertain, include a short reviewQuestion on the candidate observation identifying the unresolved issue; the candidate is held for editorial review.
+Ground every observation in substantive reporting about the target game. Omit factboxes, page metadata, incidental comparisons, and other games or editions. When a platform, edition, build, patch, preview, announcement, or release state changes the meaning of a specific observation, copy the exact phrase into qualifiers from that observation's own quote or from its non-null platform or buildContext metadata. Each qualifier must appear verbatim as a contiguous phrase in one of those places. Include a material qualifier even when the observation text already contains it. Use [] for general observations. Omit placeholders such as "platform and build not stated", labels such as "reviewer assessment", and a platform that merely identifies where the reviewer played. Publication dates do not establish the build played. If interpretation is uncertain, include a short reviewQuestion on the candidate observation identifying the unresolved issue; the candidate is held for editorial review.
 Tags must be concise factual characteristics with explicit evidence. Omit quality judgments, popularity, ratings, scores, performance and technical complaints. Playing solo does not establish a single-player mode. A past build does not establish a general characteristic. A concrete announced feature must remain announced. Use pro and con only for supported assessments. For similarity, separately record directly described mechanics or progression as gameplay observations and directly described settings, characters or narrative premises as storyWorld observations. When the same excerpt also supports a category finding, give the similarity observation its own id and the same supported scope. Exclude praise alone, ratings, popularity, technical complaints and hardware mappings from similarity. Omit any dimension the article does not describe.` },
     { role: "user", content: `Article metadata: ${JSON.stringify({
       type: source.type,
@@ -467,9 +469,9 @@ function observationReviewOutput(
   return { editorialOmissions: [...unique.values()], observationOmissions: checked.diagnostics };
 }
 
-function readPendingObservations(row: ExtractionRow, appid: number) {
+function readPendingObservations(row: ExtractionRow, appid: number, includeVersionEvidence = false) {
   const stored = jsonObject(parseJson(row.output_json));
-  return readArticleObservations({ observations: stored.pendingObservations }, appid);
+  return readArticleObservations({ observations: stored.pendingObservations }, appid, includeVersionEvidence);
 }
 
 function storedExtractionQuestions(row: ExtractionRow): EditorialOmission[] {
@@ -478,16 +480,16 @@ function storedExtractionQuestions(row: ExtractionRow): EditorialOmission[] {
     issue?.sourceIdentity === row.input_identity && typeof issue.observationId === "string" && typeof issue.question === "string") : [];
 }
 
-function effectiveObservationSources(appid: number, extractions: ExtractionRow[], sources: SourceRow[]) {
+function effectiveObservationSources(appid: number, extractions: ExtractionRow[], sources: SourceRow[], includeVersionEvidence = false) {
   const sourceById = new Map(sources.map((source) => [source.id, source]));
   return extractions.flatMap((row) => {
     const source = sourceById.get(row.source_id);
     if (!source || source.appid !== appid) return [];
     const sourceIdentity = row.input_identity;
-    const current = readArticleObservations(row.output_json, appid);
+    const current = readArticleObservations(row.output_json, appid, includeVersionEvidence);
     const legacy = current.length || usesObservationExtraction(row.config_version)
       ? undefined : legacyObservationEvidence(row.output_json, appid, source.build_context, sourceIdentity);
-    const pending = readPendingObservations(row, appid);
+    const pending = readPendingObservations(row, appid, includeVersionEvidence);
     const editorialOmissions = storedExtractionQuestions(row).filter(({ observationId }) => {
       const amendment = mediaAmendment(sourceIdentity, observationId);
       return !isOmissionAmendment(amendment) && (amendment === undefined || !pending.some(({ id }) => id === observationId));
@@ -498,7 +500,7 @@ function effectiveObservationSources(appid: number, extractions: ExtractionRow[]
       const amendment = mediaAmendment(sourceIdentity, observation.id);
       if (amendment === undefined) return [observation];
       if (isOmissionAmendment(amendment)) return [];
-      return readArticleObservations({ observations: [{ ...observation, text: cleanLine(amendment) }] }, appid);
+      return readArticleObservations({ observations: [{ ...observation, text: cleanLine(amendment) }] }, appid, includeVersionEvidence);
     });
     const editionContext = { platform: source.platform, build: source.build_context ?? (source.type === "preview" ? "preview" : null) };
     return [{ sourceIdentity, sourceUrl: source.original_url, outlet: source.outlet, editionContext,
@@ -506,12 +508,13 @@ function effectiveObservationSources(appid: number, extractions: ExtractionRow[]
   });
 }
 
-function makeSynthesisRequest(appid: number, name: string, selections: ReturnType<typeof synthesisSelections<ReturnType<typeof effectiveObservationSources>[number]>>): OpenRouterChatRequest {
+function makeSynthesisRequest(appid: number, name: string, sourceGrounded: boolean, selections: ReturnType<typeof synthesisSelections<ReturnType<typeof effectiveObservationSources>[number]>>): OpenRouterChatRequest {
   const request = chatRequest(SYNTHESIS_MAX_OUTPUT_TOKENS, { role: "user", content: `Synthesize the current assessments for ${name || `game ${appid}`}: each outlet's initial assessment (pass "initial") and any later assessment by an outlet already represented (pass "later"). A later article from the same outlet is that outlet's own follow-up and adds no separate endorsement. A null publishedAt is an unknown date.
 Return JSON matching the response schema. Write up to three lead clauses in statements using finding observations, then up to three additional clauses per topic under the exact finding categories. Put concrete edition-specific details under their categories, including when an observation also supports a different lead claim. Do not repeat claims. Pros and cons require observations of their respective kinds. Tags are groups of IDs with identical tag wording and scope. Use null for sections whose schema is null and empty arrays when selecting nothing from an available section.
 Each prose entry must be one specific, game-first clause. Say what happens in the game directly. For example, say "Dialogue can overlap during missions." Avoid "was described," "were reported," "reviewer," outlet names, source counts, and claims about consensus. Use readable paraphrases and cite the exact selectionId values that individually support the whole clause. Keep material platform, edition, build, patch, timing, and subjective limits.
 First look for distinct outlets supporting the same specific point within a scopeGroup. Multiple IDs in a prose entry MUST have the same scopeGroup. Where observations agree, write a shared clause about their specific common point and cite them together, even when their original wording differs. Keep additional patch-specific examples and other scopeGroups in their own clauses and citations. Give each differing assessment its own concrete clause and citations. Do not combine different examples into one claim or describe the existence of disagreement as a finding. Keep neutral characteristics out of pros and cons.
-${JSON.stringify(selections.evidence.map(({ observations, editorialOmissions: _editorialOmissions, ...source }) => ({ ...source, extraction: { observations } })))}` });
+${sourceGrounded ? `Treat the source platform, review date and build as review context. Give ordinary gameplay, story, world and qualitative assessments directly when the excerpt supports them without that context. A review of a PC release or console port does not establish that every detail differs by version. Use an explicit version distinction only for a concrete change, comparison, restriction or platform-specific behavior indicated by the observation's edition and required qualifiers. These come from the verified excerpt, or the accepted wording for legacy observations. Keep historical and technical limits listed in the observation's qualifiers, including patch-dependent bugs and preview-only evidence. Preserve both sides of an explicit version comparison in the claim text. Use the supplied scopeGroup when combining IDs.
+` : ""}${JSON.stringify(selections.evidence.map(({ observations, editorialOmissions: _editorialOmissions, ...source }) => ({ ...source, extraction: { observations } })))}` });
   return {
     ...request,
     provider: { require_parameters: true },
@@ -842,8 +845,9 @@ async function persistExtraction(db: AppDatabase, job: JobRow, output: unknown, 
   }
   const parsed = parseExtraction(output);
   const context = [source.platform, source.build_context, source.type === "preview" ? "preview" : null];
-  const observations = article === undefined ? [] : parseArticleObservations(output, source.appid, article, context);
-  const pendingObservations = article === undefined ? [] : parseArticleObservations(output, source.appid, article, context, true);
+  const includeVersionEvidence = job.config_version === EXTRACTION_CONFIG_VERSION;
+  const observations = article === undefined ? [] : parseArticleObservations(output, source.appid, article, context, false, includeVersionEvidence);
+  const pendingObservations = article === undefined ? [] : parseArticleObservations(output, source.appid, article, context, true, includeVersionEvidence);
   const hasLegacyOutput = article === undefined && (parsed.contributions.length > 0 || parsed.traits.length > 0 || parsed.categories || parsed.similarityInputs);
   const editorialOmissions = article === undefined ? [] : extractionReviewIssues(output, source.appid, job.input_identity, observations, article, context);
   if (observations.length === 0 && pendingObservations.length === 0 && !hasLegacyOutput) {
@@ -922,12 +926,12 @@ async function persistOverview(db: AppDatabase, job: JobRow, output: unknown, no
   if (!synthesisIsCurrent(job, evidence.extractions)) {
     return { status: "stale" };
   }
-  const observationSources = effectiveObservationSources(job.appid, evidence.extractions, evidence.sources);
+  const observationSources = effectiveObservationSources(job.appid, evidence.extractions, evidence.sources, job.config_version === SYNTHESIS_CONFIG_VERSION);
   const usesObservations = usesObservationSynthesis(job.config_version);
   const parsed = parseJson(output);
   const invalidRoot = usesObservations && (typeof parsed !== "object" || parsed === null || Array.isArray(parsed));
   const originalSelection = job.config_version === ORIGINAL_SELECTION_VERSION;
-  const clauseVersion = job.config_version === SYNTHESIS_CONFIG_VERSION ? "v13" : job.config_version === FIRST_CLAUSE_VERSION ? "v12" : undefined;
+  const clauseVersion = job.config_version === SYNTHESIS_CONFIG_VERSION ? "v14" : job.config_version === REVIEW_SCOPE_CLAUSE_VERSION ? "v13" : job.config_version === FIRST_CLAUSE_VERSION ? "v12" : undefined;
   const checked = clauseVersion
     ? validateSynthesisClauses(parsed, job.appid, observationSources, synthesisSelections(observationSources, { clauses: clauseVersion }), clauseVersion)
     : originalSelection || job.config_version === REVISED_SELECTION_VERSION
@@ -1037,6 +1041,9 @@ async function queuedIdentity(db: AppDatabase, job: JobRow): Promise<Pick<JobRow
     return { provider: "openrouter", model: OPENROUTER_TEXT_MODEL, config_version: EXTRACTION_CONFIG_VERSION, max_output_tokens: EXTRACTION_MAX_OUTPUT_TOKENS, input_identity: job.input_identity };
   }
   if (job.stage === "synthesis") {
+    if (job.provider === "openrouter" && job.config_version === REVIEW_SCOPE_CLAUSE_VERSION) {
+      return { provider: job.provider, model: job.model, config_version: job.config_version, max_output_tokens: job.max_output_tokens, input_identity: job.input_identity };
+    }
     const { extractions } = await currentGameEvidence(db, job.appid);
     const identity = extractions.length > 0 && synthesisIsCurrent(job, extractions) ? synthesisIdentity(job.appid, extractions) : job.input_identity;
     return { provider: "openrouter", model: OPENROUTER_TEXT_MODEL, config_version: SYNTHESIS_CONFIG_VERSION, max_output_tokens: SYNTHESIS_MAX_OUTPUT_TOKENS, input_identity: identity };
@@ -1354,6 +1361,10 @@ async function enqueueOverviewWork(advance: QueueAdvance, runId: number, entitie
         automatic ? (Array.isArray(previousAmendments) ? previousAmendments : []) : undefined);
       if (currentIdentity === activeOverview.input_identity) continue;
     }
+    // Finish existing v13 work against these observations before considering
+    // a v14 request for them.
+    const priorIdentity = synthesisIdentityFor(appid, evidence.extractions, OPENROUTER_TEXT_MODEL, REVIEW_SCOPE_CLAUSE_VERSION);
+    if (await hasUnresolvedSynthesis(db, appid, priorIdentity)) continue;
     const identity = synthesisIdentity(appid, evidence.extractions);
     const old = await first<{ id: number; output_json: string }>(db, "SELECT id, output_json FROM media_game_overviews WHERE appid = ? AND input_identity = ? ORDER BY id DESC LIMIT 1", appid, identity);
     if (old) {
@@ -1530,14 +1541,16 @@ async function takeSynthesisTurn(advance: QueueAdvance, job: JobRow): Promise<bo
     return false;
   }
   const game = await first<{ name: string }>(db, "SELECT name FROM apps WHERE appid = ?", job.appid);
-  const sources = effectiveObservationSources(job.appid, evidence.extractions, evidence.sources);
-  const selections = synthesisSelections(sources, { clauses: "v13" });
+  const sourceGrounded = job.config_version === SYNTHESIS_CONFIG_VERSION;
+  const version = sourceGrounded ? "v14" : "v13";
+  const sources = effectiveObservationSources(job.appid, evidence.extractions, evidence.sources, sourceGrounded);
+  const selections = synthesisSelections(sources, { clauses: version });
   if (!selections.choices.has("statements")) {
-    const checked = validateSynthesisClauses({}, job.appid, sources, selections);
+    const checked = validateSynthesisClauses({}, job.appid, sources, selections, version);
     await refuseItem(db, job, "invalid_output: no cited statements", advance.now, JSON.stringify(observationReviewOutput(checked, sources)));
     return true;
   }
-  await sendTextItem(advance, job, makeSynthesisRequest(job.appid, game?.name ?? "", selections));
+  await sendTextItem(advance, job, makeSynthesisRequest(job.appid, game?.name ?? "", sourceGrounded, selections));
   return true;
 }
 
@@ -1564,7 +1577,7 @@ async function takeEmbeddingTurn(advance: QueueAdvance, job: JobRow): Promise<bo
 async function takeTurn(advance: QueueAdvance, job: JobRow): Promise<boolean> {
   // Items already waiting at deploy time must record the contract actually sent.
   // Submitted legacy work still settles under the version recorded at submission.
-  if (job.provider === "openrouter" && job.config_version !==
+  if (job.provider === "openrouter" && job.config_version !== REVIEW_SCOPE_CLAUSE_VERSION && job.config_version !==
       (job.stage === "extraction" ? EXTRACTION_CONFIG_VERSION : SYNTHESIS_CONFIG_VERSION)) {
     const { db } = advance;
     const next = await queuedIdentity(db, job);
