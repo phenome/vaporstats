@@ -171,10 +171,12 @@ export function parseArticleObservations(
   pending = false,
   includeVersionEvidence = false,
   includeTechnicalTiming = false,
+  requiredScope?: string,
 ): MediaObservation[] {
   const body = line(article, Number.MAX_SAFE_INTEGER);
   return articleObservations(value, appid, (item, raw) => {
     const source = object(raw);
+    if (requiredScope && !item.qualifiers.includes(requiredScope)) item.qualifiers.push(requiredScope);
     const needsReview = source.reviewQuestion !== undefined && source.reviewQuestion !== null && source.reviewQuestion !== "";
     if (needsReview !== pending || rejectedArticleEvidence(item, source, body, context, pending, includeTechnicalTiming) !== null) return false;
     const quote = line(source.quote, 480);
@@ -666,7 +668,7 @@ function authoredTagScope(source: ObservationSource, observation: MediaObservati
 }
 
 function withoutHistoricalTagContext(qualifier: string): string {
-  if (!HISTORICAL_TAG_BUILD.test(qualifier)) return qualifier;
+  if (/^(?:non-)?hands-on preview$/.test(qualifier) || !HISTORICAL_TAG_BUILD.test(qualifier)) return qualifier;
   return qualifier.replace(new RegExp(HISTORICAL_TAG_BUILD.source, "gi"), "")
     .replace(/^(?:(?:on|in|for|during|the|and)\s+)+|\s+(?:(?:on|in|for|during|the|and)\s*)+$/gi, "")
     .replace(/^[\s(),/–-]+|[\s(),/–-]+$/g, "").replace(/\s+/g, " ");

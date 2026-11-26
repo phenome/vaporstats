@@ -1,0 +1,1 @@
+ALTER TABLE `apps` ADD `storefront_release_date_text` text;

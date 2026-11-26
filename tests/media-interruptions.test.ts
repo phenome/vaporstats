@@ -4,6 +4,7 @@ import {
   BALDURS_GATE,
   CYBERPUNK,
   controlledTavilyApi,
+  discoveryArticleHtml,
   experimentWorld,
   HADES_II,
   PROCESSING_FETCH_RESENT_AFTER_RESTART,
@@ -81,6 +82,33 @@ interface Registered {
 }
 
 const SCENARIOS: Registered[] = [
+  {
+    scenario: {
+      name: "watched preview occurrence",
+      seed(native) {
+        native.exec(`INSERT INTO apps (appid, name, slug, release_status) VALUES (2161710, 'NO LAW', 'no-law', 'upcoming');
+          INSERT INTO media_watches (appid, watched_at) VALUES (2161710, '2026-11-19T10:00:00.000Z');
+          INSERT INTO media_enrollments (appid, reason, enrolled_at) VALUES (2161710, 'watchlist', '2026-11-19T10:00:00.000Z')`);
+      },
+      world() {
+        const world = experimentWorld();
+        const tavily = controlledTavilyApi({ 2161710: "NO LAW" });
+        tavily.results = ({ domain }) => [1, 2].map((n) => ({ url: `https://${domain}/articles/2161710-preview-${n}` }));
+        return {
+          ...world, tavily,
+          outlet: (url) => new Response(discoveryArticleHtml(2161710, "NO LAW Preview", {
+            body: `NO LAW coverage from ${new URL(url).hostname} describes a playable campaign with detailed systems and a series of missions on a cargo ship. `.repeat(5) +
+              `Builds reward experimentation. This report is edition ${new URL(url).pathname.at(-1)} of the coverage.`,
+            author: `${new URL(url).hostname} journalist`,
+          })),
+        };
+      },
+      ticks: FIRST_DAY,
+      days: 1,
+    },
+    invariants: { restarts: ["search", "outlet_fetch"], dayStops: true, combined: 2 },
+    baseline: { search: 6, outlet_fetch: 12, openrouter: 7, gemini_submit: 1 },
+  },
   {
     // The catalog learns about a release on the day its first pass is due.
     // Each search returns no articles. Restarting between outlets must

@@ -27,6 +27,9 @@ function ArticleRow({
       >
         {source.title} <span aria-hidden="true">↗</span>
       </a>
+      <span className="text-[11px] text-zinc-400">
+        {source.type === "review" ? "Review" : source.type === "announcement" ? "Announcement" : source.handsOn ? "Hands-on preview" : "Preview"}
+      </span>
       {source.publishedAt && (
         <time dateTime={source.publishedAt} className="font-mono text-[11px] text-zinc-400">
           {source.publishedAt.slice(0, 10)}

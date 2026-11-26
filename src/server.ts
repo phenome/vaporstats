@@ -4,11 +4,12 @@ import { createHash, timingSafeEqual } from "node:crypto";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import serverEntry from "@tanstack/react-start/server-entry";
 import { startIngestionScheduler } from "../workers/ingestion";
-import { MEDIA_GAME_CHOICES } from "./lib/media-discovery";
+import { MEDIA_GAME_CHOICES, nextMediaAssessment } from "./lib/media-discovery";
 import { MEDIA_OUTLETS, OUTLET_HTTP_STOPS, OUTLET_STOP_REASONS } from "./lib/media-outlet-access";
 import type { MediaProcessingSummary } from "./lib/media-processing";
 import { CACHE_POLICIES } from "./lib/cache";
 import { PAID_PROVIDERS, PROCESSING_STOP_REASONS, PROVIDER_PAUSE_REASONS } from "./lib/media-paid-providers";
+import { changeMediaWatch, mediaGameIdentifier, mediaWatchSchedule } from "./lib/media-watchlist";
 import { getDb } from "./lib/db";
 import { ensureReceptionPublicationReady } from "./lib/reception-publication";
 export const API_RATE_LIMIT_MAX_REQUESTS = 30;
@@ -308,7 +309,7 @@ async function handleInternalMediaRequest(request: Request, peerAddress?: string
   let body: unknown;
   try {
     const text = await request.text();
-    if (text.length > 4096) return internalMediaResponse(413, { error: "Request body too large" });
+    if (new TextEncoder().encode(text).length > 4096) return internalMediaResponse(413, { error: "Request body too large" });
     body = JSON.parse(text);
   } catch {
     return internalMediaResponse(400, { error: "Invalid JSON" });
@@ -317,6 +318,19 @@ async function handleInternalMediaRequest(request: Request, peerAddress?: string
     return internalMediaResponse(400, { error: "Invalid request" });
   }
   const keys = Object.keys(body);
+  if (keys.length === 2 && keys.includes("action") && keys.includes("game")) {
+    const { action, game } = body as { action: unknown; game: unknown };
+    if ((action !== "watch" && action !== "unwatch") || !mediaGameIdentifier(game)) {
+      return internalMediaResponse(400, { error: "Invalid request" });
+    }
+    const db = await getDb();
+    const now = new Date();
+    const result = await changeMediaWatch(db, action, game, now);
+    if ("error" in result.body) return internalMediaResponse(result.status, result.body);
+    const assessment = await nextMediaAssessment(db, result.body.appid, now);
+    const entities = await mediaWatchSchedule(db, result.body.appid, now, assessment);
+    return internalMediaResponse(result.status, { ...result.body, entities });
+  }
   if (keys.length !== 2 || !keys.includes("pass") || !keys.includes("game")) {
     return internalMediaResponse(400, { error: "Invalid request" });
   }

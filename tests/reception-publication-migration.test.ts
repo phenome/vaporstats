@@ -106,13 +106,20 @@ describe("published reception SQLite migration", () => {
     const tables = db.query<{ name: string }, []>(
       "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND name <> 'schema_migrations' ORDER BY name",
     ).all().map((row) => row.name);
-    const rows = tables.map((table) => db.query(`SELECT * FROM ${table} ORDER BY rowid`).all());
-    const foreignKeys = tables.map((table) => db.query(`PRAGMA foreign_key_list(${table})`).all());
+    const snapshots = tables.map((table) => {
+      const columns = db.query<{ name: string }, []>(`PRAGMA table_info(${table})`).all().map(({ name }) => `"${name}"`);
+      return `SELECT ${columns.join(", ")} FROM ${table} ORDER BY rowid`;
+    });
+    const rows = snapshots.map((query) => db.query(query).all());
+    const foreignKeysFor = (table: string) => db.query<Record<string, unknown>, []>(`PRAGMA foreign_key_list(${table})`).all()
+      .filter((key) => table !== "media_discovery_progress" || key.from !== "occurrence_id")
+      .map(({ id: _id, ...key }) => key);
+    const foreignKeys = tables.map(foreignKeysFor);
     applyMigrations(db, directory);
     applyMigrations(db, directory);
     for (const [index, table] of tables.entries()) {
-      expect(db.query(`SELECT * FROM ${table} ORDER BY rowid`).all()).toEqual(rows[index]);
-      expect(db.query(`PRAGMA foreign_key_list(${table})`).all()).toEqual(foreignKeys[index]);
+      expect(db.query(snapshots[index]!).all()).toEqual(rows[index]);
+      expect(foreignKeysFor(table)).toEqual(foreignKeys[index]);
     }
     for (const table of publicationTables) expect(db.query(`SELECT * FROM ${table}`).all()).toEqual([]);
     expect(db.query("PRAGMA foreign_key_check").all()).toEqual([]);

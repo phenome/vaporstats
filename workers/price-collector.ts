@@ -97,6 +97,7 @@ function toCatalogApp(details: SteamStoreAppData): Parameters<typeof upsertApp>[
     is_playable: isPlayable,
     parent_appid: parentAppId,
     release_date: normalizeSteamReleaseDate(details.release_date?.date),
+    storefront_release_date_text: details.release_date?.date ?? null,
     release_status:
       details.release_date?.coming_soon === true
         ? "upcoming"

@@ -304,6 +304,7 @@ export async function upsertApp(
     is_playable?: boolean;
     parent_appid?: number | null;
     release_date?: string | null;
+    storefront_release_date_text?: string | null;
     steam_release_date?: string | null;
     original_release_date?: string | null;
     original_steam_release_date?: string | null;
@@ -381,12 +382,12 @@ export async function upsertApp(
     .prepare(
       `INSERT INTO apps (
         appid, name, slug, type, is_eligible, is_playable,
-        parent_appid, release_date, steam_release_date, original_release_date,
+        parent_appid, release_date, storefront_release_date_text, steam_release_date, original_release_date,
         original_steam_release_date, release_from_early_access_date,
         release_date_source, is_early_access, has_left_early_access,
         release_status, description, header_image, header_lqip, icon_hash, icon_lqip, developer, publisher,
         metacritic_score, metacritic_url, metacritic_observed_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
       ON CONFLICT(appid) DO UPDATE SET
         name = excluded.name,
         slug = excluded.slug,
@@ -395,6 +396,10 @@ export async function upsertApp(
         is_playable = excluded.is_playable,
         parent_appid = excluded.parent_appid,
         release_date = excluded.release_date,
+        storefront_release_date_text = CASE
+          WHEN ? THEN excluded.storefront_release_date_text
+          ELSE apps.storefront_release_date_text
+        END,
         steam_release_date = excluded.steam_release_date,
         original_release_date = excluded.original_release_date,
         original_steam_release_date = excluded.original_steam_release_date,
@@ -431,6 +436,7 @@ export async function upsertApp(
       isPlayable,
       parentAppId,
       releaseDate,
+      app.storefront_release_date_text ?? null,
       steamReleaseDate,
       originalReleaseDate,
       originalSteamReleaseDate,
@@ -448,7 +454,8 @@ export async function upsertApp(
       publisher,
       metacriticScore,
       metacriticUrl,
-      metacriticObservedAt
+      metacriticObservedAt,
+      app.storefront_release_date_text !== undefined ? 1 : 0
     );
 
   await stmt.run();
