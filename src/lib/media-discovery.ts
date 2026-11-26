@@ -776,6 +776,8 @@ function parseSource(html: string, finalUrl: string, target: MediaTarget, target
   const platformMeta = meta(document, "game:platform", "article:platform");
   const buildMeta = meta(document, "game:build", "article:build");
   const affiliationMeta = meta(document, "author_affiliation", "article:author_affiliation");
+  const gamesRadarReview = outlet === "GamesRadar+" &&
+    (meta(document, "mrf:tags")?.split(";").includes("articleType:Reviews") ?? false);
   type ReadableResult = { title?: string; byline?: string; textContent?: string };
   let readable: ReadableResult | null = null;
   try {
@@ -829,7 +831,7 @@ function parseSource(html: string, finalUrl: string, target: MediaTarget, target
   const affiliation = cleanText(affiliationMeta);
   const developerAuthorship = /developer|official|cd projekt|larian studios|supergiant|valve/i;
   if (developerAuthorship.test(byline ?? "") || developerAuthorship.test(affiliation ?? "")) return null;
-  const isReview = /\breview\b/i.test(title) || /\bour review\b/i.test(fullArticleText.slice(0, 3_000));
+  const isReview = gamesRadarReview || /\breview\b/i.test(title) || /\bour review\b/i.test(fullArticleText.slice(0, 3_000));
   const explicitHandsOn = pass === "preview"
     ? !/\b(?:not (?:an? )?hands?[- ]on|non[- ]hands?[- ]on|no hands?[- ]on)\b/i.test(title) && (/\bhands?[- ]on\b/i.test(title) || /\b(?:we (?:played|went hands?[- ]on)|i played|after playing|played for)\b/i.test(fullArticleText.slice(0, 4_000)))
     : /\b(hands?[- ]on|we played|after playing|played for|impressions?)\b/i.test(`${title} ${fullArticleText.slice(0, 4_000)}`);

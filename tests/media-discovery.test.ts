@@ -104,6 +104,28 @@ describe("bounded media discovery", () => {
     expect(result.stopReasons).toEqual(expect.arrayContaining(["Eurogamer:no_qualifying_article", "GameSpot:no_qualifying_article", "PC Gamer:no_qualifying_article", "Kotaku:no_qualifying_article"]));
     cleanup();
   });
+  test.each([
+    { outlet: "GamesRadar+", domain: "gamesradar.com", articleType: "Reviews", headline: "After 65 hours playing Hades 2, I'm finally convinced", accepted: true },
+    { outlet: "GamesRadar+", domain: "gamesradar.com", articleType: "News", headline: "After 65 hours playing Hades 2, I'm finally convinced", accepted: false },
+    { outlet: "GamesRadar+", domain: "gamesradar.com", articleType: "Reviews", headline: "Hades 2 Roundup", accepted: false },
+    { outlet: "PC Gamer", domain: "pcgamer.com", articleType: "Reviews", headline: "After 65 hours playing Hades 2, I'm finally convinced", accepted: false },
+  ])("uses GamesRadar+ review metadata with existing exclusions ($outlet, $articleType, $headline)", async ({ outlet, domain, articleType, headline, accepted }) => {
+    const { db, cleanup } = fixture();
+    try {
+      const url = `https://${domain}/articles/${HADES_II}-${domain.replaceAll(".", "-")}`;
+      const body = html(HADES_II, headline, { date: "2025-09-24T15:00:00Z" }).replace(
+        "</head>",
+        `<meta property="mrf:tags" content="region:GB;articleType:${articleType};channel:Gaming software;unindexedFreeform:review"></head>`,
+      );
+      const { fetchFn } = discoveryFetch({ variants: { [url]: { body } } });
+      const authorization = await authorizeMediaRun(db, { pass: "initial", games: [HADES_II] });
+      await runAuthorizedMediaDiscovery(db, { runId: authorization.runId, tavilyApiKey: "test-key", fetch: fetchFn, now: new Date("2026-09-10T00:00:00.000Z") });
+      const sources = (await getMediaSources(db, HADES_II)).filter((source) => source.outlet === outlet);
+      expect(sources).toEqual(accepted ? [expect.objectContaining({ type: "review", title: headline, originalUrl: url })] : []);
+    } finally {
+      cleanup();
+    }
+  });
   test("discovers eligible child coverage as its own entity without accepting unrelated articles", async () => {
     const { native, db, cleanup } = fixture();
     const childAppid = 2138330;
