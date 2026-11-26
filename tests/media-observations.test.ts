@@ -1096,6 +1096,7 @@ test("preview scope follows cited spans and preserves material qualifiers", () =
     observations: [
       { ...finding, id: "stealth", text: "You slip through empty streets.", qualifiers: ["non-hands-on preview"] },
       { ...finding, id: "routes", text: "You choose a route in the test district.", qualifiers: ["non-hands-on preview", "test district only"] },
+      { ...finding, id: "aim", text: "Mouse aiming on Switch 2 in handheld mode.", qualifiers: ["upcoming", "Switch 2", "handheld mode"] },
       { ...finding, id: "prototype", text: "The map filter was exclusive to the preview build.", qualifiers: ["non-hands-on preview", "preview build only"] },
       { ...finding, id: "plans", text: "The town will have a ferry.", qualifiers: ["announcement", "non-hands-on preview"] },
     ],
@@ -1114,6 +1115,8 @@ test("preview scope follows cited spans and preserves material qualifiers", () =
     tags: [
       { label: "Route selection (during a non-hands-on preview, upcoming)", observationIds: [id(demo, "routes")] },
       { label: "Route selection (hands-on preview)", observationIds: [id(playable, "routes")] },
+      { label: "Mouse aiming (upcoming, Switch 2, handheld mode)", observationIds: [id(demo, "aim")] },
+      { label: "Mouse, aiming", observationIds: [id(demo, "aim")] },
       { label: "Map filters", observationIds: [id(demo, "prototype")] },
     ],
     statements: [
@@ -1131,6 +1134,7 @@ test("preview scope follows cited spans and preserves material qualifiers", () =
   expect(overview.tags).toEqual([
     { label: "Route selection (test district only)", sourceUrls: [demo.sourceUrl], observationRefs: [{ sourceIdentity: "demo", observationId: "routes" }] },
     { label: "Route selection", sourceUrls: [playable.sourceUrl], observationRefs: [{ sourceIdentity: "playable", observationId: "routes" }] },
+    { label: "Mouse aiming (Switch 2, handheld mode)", edition: "Switch 2", sourceUrls: [demo.sourceUrl], observationRefs: [{ sourceIdentity: "demo", observationId: "aim" }] },
   ]);
   expect(overview.statements.map(({ text }) => text)).toEqual([
     "A hands-off demo showed how you slip through empty streets",

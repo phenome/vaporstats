@@ -261,8 +261,10 @@ function discoveryTagText(observation: MediaObservation): string {
 function isDiscoveryLabel(value: unknown, version?: ClauseVersion): value is string {
   if (typeof value !== "string" || !normalizeMediaTag(value)) return false;
   const label = value.normalize("NFKC").trim();
+  const phrase = version === "v27" ? label.replace(/ \([^()]+\)$/, "") : label;
   return label.split(/\s+/).length <= 8
-    && !/[!?;,:{}<>`\p{Cc}]|\.\s|\.$/u.test(label)
+    && !phrase.includes(",")
+    && !/[!?;:{}<>`\p{Cc}]|\.\s|\.$/u.test(label)
     && !/[()]/.test(label.replace(/\([^()]+\)/g, ""))
     && !/\b\d+(?:\.\d+)?\s*fps\b/i.test(label)
     && !/^(?:the game|the player|players? (?:can|choose|have|use)|you |there (?:is|are)|(?:supports|features|offers|uses|has) )/i.test(label)
