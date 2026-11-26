@@ -262,7 +262,11 @@ export async function mediaWatchSchedule(db: AppDatabase, root: number, now: Dat
     const next = assessmentSchedule(entity);
     if (!entity.eligible || entity.unwatched_at || entity.release_status === "released" || await previewCeilingReached(db, entity.appid)) return next;
     const previous = await latestOccurrence(db, entity.appid);
-    let dueOn = previous && !previous.ended_at ? nextDaily : [nextPreviewDay(entity, nextDaily, previous), nextDaily].sort()[1]!;
+    let dueOn = nextDaily;
+    if (!previous || previous.ended_at) {
+      // Cadence can tighten between today's checkpoint and the projected search.
+      while (dueOn < nextPreviewDay(entity, dueOn, previous)) dueOn = shiftMediaDay(dueOn, 1);
+    }
     if (deferred?.value === dueOn.slice(0, 7)) dueOn = `${shiftMediaDay(`${deferred.value}-01`, 32).slice(0, 7)}-01`;
     return { ...next, next: { pass: "preview", dueAt: `${dueOn}T06:00:00.000Z` } };
   }));

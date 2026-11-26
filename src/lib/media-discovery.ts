@@ -504,8 +504,11 @@ async function duePasses(db: AppDatabase, targets: readonly MediaTarget[], asOf:
     const own = progress.get(target.appid)!;
     const coverage = covered.get(target.appid);
     const watched = coverage?.root_appid === rootAppid(target) ? coverage : null;
-    const experiment = enrollment.reason === "experiment" && !watched;
     const release = releases.get(target.appid);
+    const experiment = enrollment.reason === "experiment" && (!watched || target.parentAppid === null ||
+      own.initial.some((row) => row.query_attempted_at !== null && row.query_attempted_at < watched.covered_at) ||
+      childWithinAssessmentWindow(release?.app, release?.releasedOn ?? watched.observed_released_on, rootCutoffs.get(target.parentAppid) ?? null,
+        true, watched.covered_at.slice(0, 10)));
     if (watched && (watched.covered_at > asOf || release?.app.release_status !== "released")) continue;
     const releasedOn = watched?.observed_released_on ?? release?.releasedOn ?? null;
     const initialFinishedAt = passFinishedAt(own.initial, ASSESSMENT_OUTLETS);
@@ -1205,8 +1208,7 @@ export async function runAuthorizedMediaDiscovery(db: AppDatabase, options: Medi
         // Each query admits at most one article per entity, across resumes: an
         // entity this query already admitted an article for, before an Outlet
         // day stop held it, admits no other.
-        const admitted = await admittedEntities(db, pass, outlet.name, candidates.slice(0, index));
-        if (occurrenceId !== null && admitted.has(appid)) candidates = [];
+        const admitted = occurrenceId === null ? await admittedEntities(db, pass, outlet.name, candidates.slice(0, index)) : new Set<number>();
         for (; index < candidates.length; index += 1) {
           if (occurrenceId !== null && !await previewOpen(db, occurrenceId)) break;
           const candidateUrl = candidates[index]!.url;
@@ -1256,8 +1258,14 @@ export async function runAuthorizedMediaDiscovery(db: AppDatabase, options: Medi
                 if (!await previewOpen(db, occurrenceId)) return false;
                 if (previewSource) previewSource.discoveryUrl = candidateUrl;
                 const accepted = previewSource && await admitSource(db, pass, previewSource, rootAppid(target));
-                if (!accepted) await db.prepare("INSERT OR IGNORE INTO media_preview_rejections (appid, url) VALUES (?, ?)").bind(appid, candidateUrl).run();
-                await db.prepare("UPDATE media_discovery_progress SET candidate_index = ? WHERE id = ?").bind(index + 1, progressId).run();
+                if (accepted) {
+                  // The admission and its occurrence/outlet completion must survive a restart together.
+                  await db.prepare("UPDATE media_discovery_progress SET candidate_index = ?, status = 'completed', completed_at = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?")
+                    .bind(index + 1, clock().toISOString(), progressId).run();
+                } else {
+                  await db.prepare("INSERT OR IGNORE INTO media_preview_rejections (appid, url) VALUES (?, ?)").bind(appid, candidateUrl).run();
+                  await db.prepare("UPDATE media_discovery_progress SET candidate_index = ? WHERE id = ?").bind(index + 1, progressId).run();
+                }
                 return accepted;
               });
               if (accepted) {

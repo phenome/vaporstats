@@ -3,8 +3,8 @@ import type { TestDatabase } from "./support/db";
 import { openTestDatabase } from "./support/db";
 import { fetchSteamAppDetails } from "../workers/catalog-seed";
 import { upsertApp } from "../src/lib/catalog";
-import { getMediaSources, MEDIA_OUTLETS } from "../src/lib/media-discovery";
-import { changeMediaWatch, expectedMediaReleaseDate, previewInterval, PREVIEW_DEFERRAL_KEY, shiftMediaDay } from "../src/lib/media-watchlist";
+import { getMediaSources, MEDIA_OUTLETS, nextMediaAssessment } from "../src/lib/media-discovery";
+import { changeMediaWatch, expectedMediaReleaseDate, mediaWatchSchedule, previewInterval, PREVIEW_DEFERRAL_KEY, shiftMediaDay } from "../src/lib/media-watchlist";
 import { handleGameDetailRequest, type GameDetailResponseData } from "../src/routes/api.games.$appid.detail";
 import { controlledGeminiApi, controlledOpenRouterApi, controlledTavilyApi, discoveryArticleHtml, mediaObservation, runMediaTick, overviewOutputForUrls, type MediaTickOptions } from "./support/media";
 
@@ -116,6 +116,26 @@ test("Steam catalog ingestion retains approximate text without changing Main Rel
   expect(database.native.query("SELECT release_date, release_status, storefront_release_date_text FROM apps").get()).toEqual({
     release_date: null, release_status: "upcoming", storefront_release_date_text: "Spring 2027",
   });
+});
+
+test.each([
+  { boundary: "one month", release: "2027-03-01", first: "2027-01-27", next: "2027-02-02" },
+  { boundary: "one year", release: "2028-02-01", first: "2027-01-25", next: "2027-02-02" },
+])("preview projection agrees with daily ticks across $boundary before release", async ({ release, first, next }) => {
+  const database = fixture();
+  admit(database, ROOT, { date: release });
+  await watch(database, ROOT, first);
+  const api = world();
+  api.noArticles();
+  await api.tick(database, first);
+  const [entity] = await mediaWatchSchedule(database.db, ROOT, new Date(`${first}T06:15:00Z`), new Map());
+
+  for (let day = shiftMediaDay(first, 1); day <= next; day = shiftMediaDay(day, 1)) {
+    await api.tick(database, day);
+  }
+  const searchDays = [...new Set(queries(database).map(({ day }) => day))];
+  expect(searchDays).toEqual([first, next]);
+  expect(entity?.next).toEqual({ pass: "preview", dueAt: `${searchDays[1]}T06:00:00.000Z` });
 });
 
 test("disabled watches persist, release changes move preview cadence, and rewatch resumes at the next run", async () => {
@@ -342,6 +362,52 @@ test("an unwatch during a due occurrence stops its remaining queries and keeps a
   ]);
 });
 
+test("a resumed preview skips the prior occurrence's article and admits one new article for the outlet", async () => {
+  const database = fixture();
+  admit(database, ROOT);
+  await watch(database);
+  const api = world();
+  const { name, domain } = MEDIA_OUTLETS[0]!;
+  const articleA = `https://${domain}/articles/a`;
+  const articleB = `https://${domain}/articles/b`;
+  const articleC = `https://${domain}/articles/c`;
+  const sources = () => database.native.query("SELECT original_url FROM media_sources WHERE pass = 'preview' ORDER BY id").all();
+  api.tavily.results = (request) => request.domain === domain ? [{ url: articleA }] : [];
+  const outlet = () => new Response(discoveryArticleHtml(ROOT, "NO LAW Hands-on Preview", {
+    date: "2027-01-25",
+    body: `NO LAW features a cargo ship mission where you pick your equipment before leaving port. ${api.quote} `.repeat(3),
+  }));
+  await api.tick(database, "2027-01-25", { outlet });
+  expect(sources()).toEqual([{ original_url: articleA }]);
+
+  const addAttempt = database.native.prepare(`INSERT INTO media_discovery_attempts
+    (appid, outlet, pass, day, kind, status_code, succeeded, attempted_at)
+    VALUES (?, ?, 'initial', '2027-02-24', 'fetch', 200, 1, '2027-02-24T05:00:00Z')`);
+  // The second search takes the last daily attempt, so A is skipped and B awaits the next day's allowance.
+  for (let i = 0; i < 29; i += 1) addAttempt.run(ROOT, name);
+  api.tavily.results = (request) => request.domain === domain
+    ? [articleA, articleB, articleC].map((url) => ({ url }))
+    : [];
+  await api.tick(database, "2027-02-24", { outlet });
+  const progress = () => database.native.query(`SELECT progress.candidate_index, progress.status
+    FROM media_discovery_progress AS progress JOIN media_preview_occurrences AS occurrence ON occurrence.id = progress.occurrence_id
+    WHERE occurrence.scheduled_on = '2027-02-24' AND progress.outlet = ?`).get(name);
+  expect(progress()).toEqual({ candidate_index: 1, status: "stopped" });
+  expect(sources()).toEqual([{ original_url: articleA }]);
+
+  const searchCount = queries(database).filter(({ outlet }) => outlet === name).length;
+  database.reopen();
+  api.fetched.length = 0;
+  await api.tick(database, "2027-02-25", { outlet });
+  await api.tick(database, "2027-02-25", { outlet }, "06:15");
+  expect(sources()).toEqual([{ original_url: articleA }, { original_url: articleB }]);
+  expect(progress()).toEqual({ candidate_index: 2, status: "completed" });
+  expect(queries(database).filter(({ outlet }) => outlet === name)).toHaveLength(searchCount);
+  expect(api.fetched).toContain(articleB);
+  expect(api.fetched).not.toContain(articleA);
+  expect(api.fetched).not.toContain(articleC);
+});
+
 test("a catalog entity that becomes ineligible skips the pending occurrence", async () => {
   const database = fixture();
   admit(database, ROOT);
@@ -437,4 +503,28 @@ test("a watch preserves an existing enrollment and preview metadata respects the
     if (original === undefined) delete process.env.MEDIA_OVERVIEW_PUBLIC;
     else process.env.MEDIA_OVERVIEW_PUBLIC = original;
   }
+});
+
+test("watching and unwatching an undated experiment root preserves its due assessments", async () => {
+  const database = fixture();
+  admit(database, ROOT, { status: "released" });
+  const enrolledAt = "2027-01-20T05:00:00.000Z";
+  database.native.prepare("INSERT INTO media_enrollments (appid, reason, enrolled_at) VALUES (?, 'experiment', ?)").run(ROOT, enrolledAt);
+  const next = async (day: string) => (await nextMediaAssessment(database.db, ROOT, new Date(`${day}T05:30:00Z`))).get(ROOT);
+  const initial = { pass: "initial", dueAt: enrolledAt } as const;
+  expect(await next("2027-01-25")).toEqual(initial);
+  await watch(database);
+  expect(await next("2027-01-25")).toEqual(initial);
+
+  const api = world();
+  await api.tick(database, "2027-01-25");
+  const later = { pass: "later", dueAt: "2027-01-25T06:00:00.000Z" } as const;
+  expect(await next("2027-01-26")).toEqual(later);
+  await watch(database, ROOT, "2027-01-26", "unwatch");
+  expect(await next("2027-01-26")).toEqual(later);
+  await api.tick(database, "2027-01-26");
+  expect(queries(database).map(({ pass, day }) => [pass, day])).toEqual([
+    ...MEDIA_OUTLETS.map(() => ["initial", "2027-01-25"]),
+    ...MEDIA_OUTLETS.map(() => ["later", "2027-01-26"]),
+  ]);
 });
