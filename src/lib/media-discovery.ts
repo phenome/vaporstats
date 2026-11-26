@@ -570,13 +570,14 @@ async function pendingPreviews(db: AppDatabase, targetAppids: number[], day: str
      ORDER BY occurrence.due_at, occurrence.appid`, day, JSON.stringify(targetAppids));
 }
 
-async function previewOpen(db: AppDatabase, id: number): Promise<boolean> {
+async function previewOpen(db: AppDatabase, id: number, allowCompleted = false): Promise<boolean> {
   return await first(db, `SELECT occurrence.id FROM media_preview_occurrences AS occurrence
     JOIN media_watch_coverage AS coverage ON coverage.appid = occurrence.appid
     JOIN media_watches AS watch ON watch.appid = coverage.root_appid
     JOIN apps AS app ON app.appid = occurrence.appid
-    WHERE occurrence.id = ? AND occurrence.ended_at IS NULL AND watch.unwatched_at IS NULL
-      AND app.release_status <> 'released' AND app.is_eligible = 1 AND ${ELIGIBLE_MEDIA_ENTITY_SQL}`, id) !== null;
+    WHERE occurrence.id = ? AND (occurrence.ended_at IS NULL OR (? AND occurrence.end_reason = 'completed'))
+      AND watch.unwatched_at IS NULL AND (occurrence.ended_at IS NULL OR watch.watched_at <= occurrence.ended_at)
+      AND app.release_status <> 'released' AND app.is_eligible = 1 AND ${ELIGIBLE_MEDIA_ENTITY_SQL}`, id, Number(allowCompleted)) !== null;
 }
 
 function needsSearch(progress: ProgressRow | undefined): boolean {
@@ -754,6 +755,14 @@ function meta(document: Document, ...names: string[]): string | null {
   return null;
 }
 
+function hasRoundupOrComparisonFraming(lead: string, body: string): boolean {
+  const roundupLabel = /\b(?:in (?:this|our)|this is (?:a|our)|welcome to (?:this|our))\s+(?:\w+\s+){0,3}(?:round[- ]?up|listicle|ranking|list\s+of)\b/;
+  const roundupIntro = /(?:\b(?:headlines?|leads?|opens?|anchors?) (?:this|our|the) round[- ]?up of|^(?:a|our) round[- ]?up of|^(?:here (?:are|is)|we (?:rounded up|ranked|picked|preview))\s+.{0,60}\b(?:games like|best games|top\s+\d+|several games|multiple games)\b)/;
+  const comparisonIntro = /^(?:(?:a|our) (?:direct comparison|comparison (?:of|between))|we compare .{1,80} (?:against|and|with) )\b/;
+  const comparisonLabel = /\b(?:this is a|in this|in our)\s+(?:direct comparison|comparison\s+(?:of|between)|(?:side[- ]by[- ]side|head[- ]to[- ]head) comparison)\b/;
+  return roundupLabel.test(lead) || roundupIntro.test(lead) || comparisonIntro.test(lead) || comparisonLabel.test(body);
+}
+
 function parseSource(html: string, finalUrl: string, target: MediaTarget, targets: readonly MediaTarget[], outlet: MediaOutlet, retrievedAt: string, pass: MediaPass): MediaSource | null {
   const document = parseArticleDocument(html);
   if (!document) return null;
@@ -815,9 +824,7 @@ function parseSource(html: string, finalUrl: string, target: MediaTarget, target
   const coTitledPreview = pass === "preview" && /(?:\band|&)\s+.+?\s+(?:previews?|announcements?)\b/.test(titleLower);
   const reviewRelatedNews = /\breviews?\s*(?:[:\-–—]\s*|\s+)(?:embargo(?:es)?|details?|reactions?|coverage|codes?|copies|policies?|discourse)\b|\b(?:embargo(?:es)?|details?|reactions?|coverage|codes?|copies|policies?|discourse)\s*(?:[:\-–—]\s*|\s+)(?:about|around|for|on|of|to)?\s*reviews?\b/.test(titleLower);
   if (reviewScoreNews || coTitledReview || coTitledPreview || reviewRelatedNews || /\b(round[- ]?up|best games?|games like|versus|\bvs\.?\b|comparison|ranking|ranked|top\s+\d+|lists?(?:icle)?|highest|metacritic|surpasses?|outperforms?|outscores?|beats?|review\s+drama|drama)\b/.test(titleLower)) return null;
-  const bodyList = /\b(round[- ]?up|games like|top\s+\d+|listicle|ranking|ranked among|(?:a|the)\s+list\s+of|multi[- ]game|multiple games?|several games?|lists?)\b/.test(bodyLower);
-  const substantiveBodyComparison = /\b(side[- ]by[- ]side|head[- ]to[- ]head|direct comparison|comparison\s+(?:of|between)|versus|vs\.?)\b/.test(bodyLower);
-  if (bodyList || substantiveBodyComparison) return null;
+  if (hasRoundupOrComparisonFraming(articleLeadLower, bodyLower)) return null;
   const byline = cleanText(authorMeta ?? readable?.byline ?? document.querySelector("[rel='author'],.byline,[class*='author']")?.textContent);
   const affiliation = cleanText(affiliationMeta);
   const developerAuthorship = /developer|official|cd projekt|larian studios|supergiant|valve/i;
@@ -936,11 +943,12 @@ async function skipThrowingCandidate(
 
 /** The recorded outcome of a fetch attempt a restart interrupted. */
 const INTERRUPTED_FETCH = "interrupted_by_restart";
+const PREVIEW_REPLAY_ORIGIN = "preview_candidate_replay";
 
 async function loadRun(db: AppDatabase, runId?: number): Promise<RunRow> {
   const run = runId
     ? await first<RunRow>(db, `SELECT ${RUN_COLUMNS} FROM media_discovery_runs WHERE id = ?`, runId)
-    : await first<RunRow>(db, `SELECT ${RUN_COLUMNS} FROM media_discovery_runs WHERE pass = 'initial' AND status IN ('queued', 'running') ORDER BY id DESC LIMIT 1`);
+    : await first<RunRow>(db, `SELECT ${RUN_COLUMNS} FROM media_discovery_runs WHERE pass = 'initial' AND origin <> ? AND status IN ('queued', 'running') ORDER BY id DESC LIMIT 1`, PREVIEW_REPLAY_ORIGIN);
   if (!run) throw new Error("Media discovery run not found");
   parsePass(run.pass);
   return run;
@@ -1042,6 +1050,7 @@ export async function runAuthorizedMediaDiscovery(db: AppDatabase, options: Medi
     options = { ...options, runId: authorization.runId };
   }
   const run = await loadRun(db, options.runId);
+  if (run.origin === PREVIEW_REPLAY_ORIGIN) throw new Error("Use the scoped preview replay for this run");
   const pass = run.pass;
   // A scheduled discovery run serves every pass due when the daily media run
   // started it; an authorized run serves its own pass.
@@ -1430,6 +1439,97 @@ export async function getMediaSources(
 
 const activeMediaDiscovery = new Map<number, Promise<MediaRunSummary>>();
 let mediaDiscoveryQueue: Promise<unknown> = Promise.resolve();
+
+/** Recheck one fetched and rejected result from a completed outlet query.
+ * The replay has its own durable identity and the original query stays intact.
+ * Only a stop before contact permits another invocation to attempt the fetch.
+ */
+export function replayRejectedPreviewCandidate(
+  db: AppDatabase,
+  options: { progressId: number; url: string; fetch?: MediaFetch; now?: MediaDiscoveryOptions["now"] },
+): Promise<{ admitted: boolean; reason: string | null }> {
+  const next = mediaDiscoveryQueue.catch(() => undefined).then(() => replayPreview(db, options));
+  mediaDiscoveryQueue = next;
+  return next;
+}
+
+async function replayPreview(
+  db: AppDatabase,
+  { progressId, url, fetch: fetchFn = fetch, now }: Parameters<typeof replayRejectedPreviewCandidate>[1],
+): Promise<{ admitted: boolean; reason: string | null }> {
+  const progress = await first<ProgressRow>(db, `SELECT ${PROGRESS_COLUMNS} FROM media_discovery_progress WHERE id = ? AND pass = 'preview'`, progressId);
+  const occurrenceId = progress?.occurrence_id;
+  const outlet = MEDIA_OUTLETS.find(({ name }) => name === progress?.outlet);
+  if (!progress || occurrenceId == null || !outlet || !hostInOutlet(url, outlet) ||
+      progress.status !== "completed" || !progress.query_attempted_at) {
+    return { admitted: false, reason: "not_a_rejected_candidate" };
+  }
+  const { appid, candidate_index } = progress;
+  const considered = json<Candidate[]>(progress.candidate_urls, []).slice(0, candidate_index);
+  if (!considered.some((candidate) => candidate.url === url) || !await first(db,
+    `SELECT 1 FROM media_preview_rejections WHERE appid = ? AND url = ? AND EXISTS (
+       SELECT 1 FROM media_discovery_attempts WHERE appid = ? AND outlet = ? AND pass = 'preview'
+       AND kind = 'fetch' AND succeeded = 1 AND (url = ? OR (
+         rtrim(url, '/') = rtrim(?, '/') AND EXISTS (
+           SELECT 1 FROM media_discovery_attempts AS redirect
+           WHERE redirect.appid = media_discovery_attempts.appid AND redirect.outlet = media_discovery_attempts.outlet
+             AND redirect.pass = 'preview' AND redirect.kind = 'redirect' AND redirect.url = ?
+             AND redirect.id < media_discovery_attempts.id
+         )
+       ))
+     )`, appid, url, appid, outlet.name, url, url, url)) return { admitted: false, reason: "not_a_rejected_candidate" };
+
+  const originalRun = await loadRun(db, progress.run_id);
+  const selectedGames = json<number[]>(originalRun.selected_games, []);
+  const targets = await loadMediaTargets(db, selectedGames);
+  const target = targets.find((candidate) => candidate.appid === appid);
+  const admissionStop = async () => {
+    if (!target || !await previewOpen(db, occurrenceId, true)) return "preview_closed";
+    const ceiling = await articleCeiling(db, appid, "preview");
+    if (ceiling) return ceiling;
+    if (await first(db, "SELECT 1 FROM media_sources WHERE appid = ? AND (original_url = ? OR discovery_url = ?)", appid, url, url)
+        || (await admittedEntities(db, "preview", outlet.name, considered)).has(appid)) return "already_admitted";
+    return null;
+  };
+  const stop = await admissionStop();
+  if (stop || !target) return { admitted: false, reason: stop };
+  const clock = () => isoNow(now);
+  const identity = JSON.stringify([PREVIEW_REPLAY_ORIGIN, appid, outlet.name, url]);
+  const run = await first<{ id: number }>(db, `INSERT INTO media_discovery_runs
+      (pass, identity_key, selected_games, status, origin, started_at)
+      VALUES ('initial', ?, ?, 'running', ?, ?)
+      ON CONFLICT(identity_key) DO UPDATE SET status = 'running', stop_reason = NULL, finished_at = NULL
+        WHERE status = 'stopped' AND stop_reason IN (?, ?) AND attempt_count = 0
+      RETURNING id`, identity, JSON.stringify([rootAppid(target)]), PREVIEW_REPLAY_ORIGIN, clock().toISOString(),
+    OUTLET_STOP_REASONS.DAILY_ATTEMPT_CAP, OUTLET_HTTP_STOPS[429]);
+  if (!run) return { admitted: false, reason: "already_replayed" };
+  let reason: string | null = null;
+  let admitted = false;
+  try {
+    const fetched = await fetchOutletArticle(db, { url, runId: run.id, pass: "preview", appid, outlet: outlet.name, clock, fetch: fetchFn });
+    if (fetched && "stop" in fetched) {
+      reason = fetched.stop;
+    } else {
+      const source = fetched && parseSource(fetched.html, fetched.finalUrl, target, targets, outlet.name, clock().toISOString(), "preview");
+      if (source) {
+        source.discoveryUrl = url;
+        reason = await transaction(db, async () => {
+          const stop = await admissionStop();
+          if (stop) return stop;
+          admitted = await admitSource(db, "preview", source, rootAppid(target));
+          return admitted ? null : "already_admitted";
+        });
+      } else {
+        reason = fetched ? "no_qualifying_article" : "fetch_failed";
+      }
+    }
+  } catch {
+    reason = CANDIDATE_ERROR;
+  }
+  await db.prepare("UPDATE media_discovery_runs SET status = ?, stop_reason = ?, article_count = ?, finished_at = ? WHERE id = ?")
+    .bind(reason ? "stopped" : "completed", reason, Number(admitted), clock().toISOString(), run.id).run();
+  return { admitted, reason };
+}
 
 function enqueueMediaDiscovery(db: AppDatabase, runId: number, options: MediaDiscoveryOptions): Promise<MediaRunSummary> {
   const active = activeMediaDiscovery.get(runId);
