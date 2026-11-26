@@ -3,7 +3,7 @@ import { LEGACY_V10_SOURCE_SUPPORT_LANGUAGE, MEDIA_CATEGORY_NAMES, normalizeMedi
 
 const kinds = ["finding", "pro", "con", "tag", "gameplay", "storyWorld"] as const;
 type ObservationKind = (typeof kinds)[number];
-type ClauseVersion = "v12" | "v13" | "v14";
+export type ClauseVersion = "v12" | "v13" | "v14" | "v15" | "v16";
 const categoryNames = new Set<string>(MEDIA_CATEGORY_NAMES);
 
 export interface MediaObservation {
@@ -21,6 +21,7 @@ export interface ObservationSource {
   sourceUrl: string;
   observations: MediaObservation[];
   editionContext?: { platform: string | null; build: string | null };
+  legacySimilarityInputs?: true;
 }
 
 export interface ObservationReference {
@@ -186,6 +187,16 @@ function editorialQuestion({ reason, trigger }: DisplayIssue): string {
   return `What wording and scope does this observation support? ${reason}${matched}.`;
 }
 
+function isComposedLead(version?: ClauseVersion): boolean {
+  return version === "v15" || version === "v16";
+}
+
+function canSupportLead(source: ObservationSource, observation: MediaObservation, version?: ClauseVersion): boolean {
+  return observation.kind === "finding"
+    || (isComposedLead(version) && !source.legacySimilarityInputs
+      && (observation.kind === "gameplay" || observation.kind === "storyWorld"));
+}
+
 type EditorialSection = "statements" | "pros" | "cons" | "tags" | (typeof MEDIA_CATEGORY_NAMES)[number];
 
 /** One catalog defines the model's choices and the aliases accepted at settlement. */
@@ -200,10 +211,11 @@ export function synthesisSelections<T extends ObservationSource>(
   const scopeGroups = new Map<string, string>();
   const evidence = [...sources].sort((a, b) => a.sourceIdentity.localeCompare(b.sourceIdentity)).flatMap((source) => {
     const observations = source.observations.flatMap((observation) => {
-      if (observation.kind === "gameplay" || observation.kind === "storyWorld") return [];
+      const similarity = observation.kind === "gameplay" || observation.kind === "storyWorld";
+      if (similarity && !canSupportLead(source, observation, clauses)) return [];
       const sections: EditorialSection[] = observation.kind === "finding"
         ? ["statements", observation.category as (typeof MEDIA_CATEGORY_NAMES)[number]]
-        : [observation.kind === "pro" ? "pros" : observation.kind === "con" ? "cons" : "tags"];
+        : [similarity ? "statements" : observation.kind === "pro" ? "pros" : observation.kind === "con" ? "cons" : "tags"];
       const ref = { sourceIdentity: source.sourceIdentity, observationId: observation.id };
       const text = displayText(observation);
       const issue = invalidDisplay(text, observation.kind);
@@ -229,7 +241,8 @@ export function synthesisSelections<T extends ObservationSource>(
       const { edition, qualifiers, key } = observationScope(source, observation, clauses);
       const scopeGroup = scopeGroups.get(key) ?? `s${scopeGroups.size + 1}`;
       scopeGroups.set(key, scopeGroup);
-      return [{ ...observation, selectionId, qualifiers, ...(edition ? { edition } : {}), ...(clauses !== "v12" ? { scopeGroup } : {}) }];
+      const promptText = clauses === "v16" ? removeIncidentalReviewWording(observation, qualifiers) : observation.text;
+      return [{ ...observation, text: promptText, selectionId, qualifiers, ...(edition ? { edition } : {}), ...(clauses !== "v12" ? { scopeGroup } : {}) }];
     });
     return observations.length ? [{ ...source, observations }] : [];
   });
@@ -302,7 +315,7 @@ export function validateSynthesisClauses(
 // Legacy amendments can carry play scope in the observation's wording.
 // Match explicit play context, without inferring a build from article dates.
 function observationScope(source: ObservationSource, observation: MediaObservation, version: ClauseVersion) {
-  if (version === "v14") return sourceGroundedScope(source, observation);
+  if (version === "v14" || isComposedLead(version)) return sourceGroundedScope(source, observation);
   const scopeInText = version === "v12"
     ? /\b(?:on the (?:Nintendo )?Switch 2 port|reviewed (?:PC|PS5|Xbox Series X) (?:version|build)|at (?:PC )?launch|early access|day[- ]\d+ patch)\b/gi
     : /\b(?:on the (?:Nintendo )?Switch 2 port|reviewed (?:PC|PS5|Xbox Series X) (?:version|build)|at (?:PC )?launch|early access|(?:PC |version |v)?1\.0(?!\.\d)|day[- ]\d+ patch)\b/gi;
@@ -348,6 +361,21 @@ function versionMarkers(text: string): Map<string, string> {
     const key = scopeKey(label).replace(/^playstation /, "ps").replace(/^(?:version |v)(?=\d)/, "").replace(/^\d+\s?gb /, "");
     return [key, label];
   }));
+}
+
+// Scope is decided before projecting wording for the model. Keep the source
+// observation intact for settlement and evidence lookup.
+function removeIncidentalReviewWording(observation: MediaObservation, qualifiers: readonly string[]): string {
+  const { text, category } = observation;
+  if (VERSION_CHANGE.test(text) || PORT_FEATURE.test(text)) return text;
+  const required = versionMarkers(qualifiers.join(" "));
+  if (required.has("pc")) return text;
+  const withoutReviewContext = text
+    .replace(/^In the reviewed PC version, (.)/i, (_, initial: string) => initial.toUpperCase())
+    .replace(/ in the reviewed PC version\b/gi, "")
+    .replace(/, based on the 1\.0 version played on PC(?=[.!?]?$)/i, (context) => required.has("1.0") ? context : "");
+  if (category === "Technical experience & accessibility" || required.size > 0 || TECHNICAL_FAILURE.test(text)) return withoutReviewContext;
+  return withoutReviewContext.replace(/ \(\d+\s?GB Day[- ]\d+ patch, PC\)(?=[.!?]?$)/i, "");
 }
 
 interface VersionEvidence {
@@ -456,7 +484,9 @@ export function validateObservationSynthesis(
       return [];
     }
     const support = resolve.filter((ref) => ref !== null);
-    if (support.some(({ observation }) => observation.kind !== kind || (category !== undefined && category !== observation.category))) {
+    if (support.some(({ source, observation }) => section === "statements"
+      ? !canSupportLead(source, observation, clauses)
+      : observation.kind !== kind || (category !== undefined && category !== observation.category))) {
       omit(section, "referenced observation has a different evidence category", refs);
       return [];
     }
@@ -502,7 +532,7 @@ export function validateObservationSynthesis(
       return [];
     }
     const qualifiers = scopes[0]?.qualifiers ?? [];
-    if (clauses === "v14" && semantic) {
+    if ((clauses === "v14" || isComposedLead(clauses)) && semantic) {
       const supported = new Set(versionMarkers(qualifiers.join(" ")).keys());
       const unsupported = [...versionMarkers(matchingText)].find(([key]) => !supported.has(key));
       if (unsupported) {
@@ -510,7 +540,10 @@ export function validateObservationSynthesis(
         return [];
       }
     }
-    const text = semantic ? displayText({ ...support[0]!.observation, text: matchingText, qualifiers }) : displays.join(" / ");
+    const punctuation = isComposedLead(clauses) && section === "statements" ? /[,;:.!?]$/.exec(matchingText)?.[0] ?? "" : "";
+    const text = semantic
+      ? displayText({ ...support[0]!.observation, text: punctuation ? matchingText.slice(0, -1) : matchingText, qualifiers }) + punctuation
+      : displays.join(" / ");
     const issue = invalidDisplay(text, kind);
     if (issue) {
       omit(section, issue.reason, refs, issue.trigger);

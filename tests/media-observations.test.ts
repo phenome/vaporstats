@@ -1,8 +1,9 @@
 import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { extractionReviewIssues, parseArticleObservations, synthesisSelections, validateSynthesisClauses, validateSynthesisSelections, validateObservationSynthesis, type ObservationSource } from "../src/lib/media-observations";
-import { createMediaEvidenceSource, parseMediaOverview } from "../src/lib/media-overview";
+import { createMediaEvidenceSource, getMediaOverview, parseMediaOverview, PREMISE_FIRST_SYNTHESIS_VERSION, SHORT_PREMISE_SYNTHESIS_VERSION } from "../src/lib/media-overview";
 import { advanceMediaProcessing, authorizeMediaProcessing, OPENROUTER_TEXT_MODEL } from "../src/lib/media-processing";
+import { MEDIA_OUTLETS } from "../src/lib/media-outlet-access";
 import type { OpenRouterTransport } from "../src/lib/media-openrouter";
 import { openTestDatabase } from "./support/db";
 import { CYBERPUNK, emptySynthesisSelection, insertCompletedRun, insertSources, seedApps, stableJson, synthesisEvidence, synthesisSelectionId } from "./support/media";
@@ -404,7 +405,7 @@ test("v14 combines general cross-platform evidence and keeps explicit version de
 });
 
 
-test("a waiting v13 synthesis keeps its request identity, prompt and settlement", async () => {
+test.each(["v13", "v14", "v15", "v16"])("a waiting %s synthesis keeps its request identity, prompt and settlement", async (version) => {
   const database = openTestDatabase("vaporstats-v13-synthesis-");
   try {
     seedApps(database.native, [CYBERPUNK]);
@@ -417,7 +418,10 @@ test("a waiting v13 synthesis keeps its request identity, prompt and settlement"
       async complete(request) {
         const extraction = request.response_format.type === "json_object";
         const sources = extraction ? [] : synthesisEvidence(request);
-        if (!extraction) promptEvidence.push(sources[0]?.extraction.observations[0]);
+        if (!extraction) {
+          expect(request.messages[0]!.content).not.toContain("first draft two or three sentences");
+          promptEvidence.push(sources[0]?.extraction.observations[0]);
+        }
         const content = extraction ? { observations: [finding] } : {
           ...emptySynthesisSelection(sources),
           statements: [{ text: finding.text, observationIds: ["o1"] }],
@@ -428,7 +432,8 @@ test("a waiting v13 synthesis keeps its request identity, prompt and settlement"
     };
     const options = { runId, openRouter, articleFetch: async () => `<article><p>${article}</p></article>` };
     await advanceMediaProcessing(database.db, { ...options, submissionsPerTick: 1, now: new Date("2026-11-25T03:00:00Z") });
-    const configVersion = "media-synthesis-2026-11-25-v13";
+    const date = version === "v15" || version === "v16" ? "2026-11-26" : "2026-11-25";
+    const configVersion = `media-synthesis-${date}-${version}`;
     const extractions = database.native.query("SELECT source_id AS sourceId, input_identity AS inputIdentity FROM media_article_extractions").all();
     const identity = createHash("sha256").update(stableJson({ stage: "synthesis", appid: CYBERPUNK, model: OPENROUTER_TEXT_MODEL, configVersion, extractions })).digest("hex");
     const key = `synthesis:${CYBERPUNK}:${identity}`;
@@ -437,15 +442,133 @@ test("a waiting v13 synthesis keeps its request identity, prompt and settlement"
 
     await advanceMediaProcessing(database.db, { ...options, now: new Date("2026-11-25T04:00:00Z") });
     expect(promptEvidence).toHaveLength(1);
-    expect(promptEvidence[0]).toMatchObject({ qualifiers: ["At PC launch"], edition: "PC launch" });
-    expect(promptEvidence[0]).not.toHaveProperty("versionEvidence");
+    if (version === "v13") {
+      expect(promptEvidence[0]).toMatchObject({ qualifiers: ["At PC launch"], edition: "PC launch" });
+      expect(promptEvidence[0]).not.toHaveProperty("versionEvidence");
+    } else {
+      expect(promptEvidence[0]).toMatchObject({ qualifiers: [], versionEvidence: { technical: false } });
+    }
     expect(database.native.query("SELECT config_version, input_identity, request_key, status FROM media_processing_jobs WHERE stage = 'synthesis'").all())
       .toEqual([{ config_version: configVersion, input_identity: identity, request_key: key, status: "succeeded" }]);
     const overview = database.native.query<{ output_json: string }, []>("SELECT output_json FROM media_game_overviews").get()!;
     expect(JSON.parse(overview.output_json).statements).toMatchObject([
-      { text: "Flexible builds make combat approachable (At PC launch)", edition: "PC launch" },
+      version === "v13"
+        ? { text: "Flexible builds make combat approachable (At PC launch)", edition: "PC launch" }
+        : { text: finding.text },
     ]);
   } finally {
     database.cleanup();
   }
+});
+
+
+test("a new synthesis queues typed premise and play evidence for the lead, then serves citation spans in composed order", async () => {
+  const database = openTestDatabase("vaporstats-v16-synthesis-");
+  try {
+    seedApps(database.native, [CYBERPUNK]);
+    insertSources(database.native, CYBERPUNK, "initial", 1, MEDIA_OUTLETS[0]);
+    insertSources(database.native, CYBERPUNK, "initial", 1, MEDIA_OUTLETS[1]);
+    const runId = insertCompletedRun(database.native, "initial:observations:v16", [CYBERPUNK]);
+    await authorizeMediaProcessing(database.db, runId);
+    const premise = { ...setting, id: "premise", kind: "storyWorld", category: "" };
+    const playQuote = "Players experiment with different skill builds in combat.";
+    const play = { ...finding, id: "play", kind: "gameplay", category: "", text: playQuote, quote: playQuote, qualifiers: [] };
+    const lead = [
+      "In Cyberpunk 2077, corporate power shapes Night City,",
+      "where you can experiment with different skill builds in combat.",
+    ];
+    const openRouter: OpenRouterTransport = {
+      currentKey: async () => ({ limit: null, limit_remaining: null }),
+      async complete(request) {
+        const prompt = request.messages[0]!.content;
+        let content: unknown;
+        if (request.response_format.type === "json_object") {
+          const first = request.messages[1]!.content.includes(settingQuote);
+          content = { observations: first ? [premise, play] : [
+            { ...play, kind: "finding", category },
+            { ...premise, id: "invented", quote: "This supporting passage is absent from the article." },
+          ] };
+        } else {
+          expect(prompt).toContain("first draft two or three sentences");
+          expect(prompt).toContain("Open with the game's name and its premise");
+          expect(prompt).toContain("only when it materially affects the experience");
+          expect(prompt).toContain("Include every independent article that supports the exact shared claim and scope");
+          expect(prompt).toContain("When release evidence fully supports the claim, use the release group alone and leave out preview IDs");
+          const sources = synthesisEvidence(request);
+          const story = sources.find(({ extraction }) => extraction.observations.some(({ id }) => id === "premise"))!;
+          const premiseId = synthesisSelectionId(story, "premise");
+          const playIds = sources.map((source) => synthesisSelectionId(source, "play"));
+          expect(sources.flatMap(({ extraction }) => extraction.observations.map(({ id }) => id))).not.toContain("invented");
+          content = {
+            ...emptySynthesisSelection(sources),
+            statements: [
+              { text: lead[0], observationIds: [premiseId] },
+              { text: lead[1], observationIds: playIds },
+            ],
+            categories: {
+              [category]: [{ text: "Gameplay premise", observationIds: [premiseId] }],
+            },
+          };
+        }
+        return { generationId: "v16-fixture", model: request.model, provider: null, content: JSON.stringify(content),
+          finishReason: "stop", nativeFinishReason: null, usage: { promptTokens: 100, completionTokens: 40, reasoningTokens: 0, cost: 0.00015 } };
+      },
+    };
+    await advanceMediaProcessing(database.db, {
+      runId, openRouter,
+      articleFetch: async (url) => `<article><p>${String(url).includes(MEDIA_OUTLETS[0].domain) ? article : quote} ${playQuote}</p></article>`,
+      now: new Date("2026-11-26T03:00:00Z"),
+    });
+    const saved = database.native.query<{ config_version: string; output_json: string }, []>("SELECT config_version, output_json FROM media_game_overviews").get()!;
+    expect(saved.config_version).toBe(SHORT_PREMISE_SYNTHESIS_VERSION);
+    expect(JSON.parse(saved.output_json).statements.map(({ observationRefs }: { observationRefs: Array<{ observationId: string }> }) =>
+      observationRefs.map(({ observationId }) => observationId))).toEqual([["premise"], ["play", "play"]]);
+    const overview = await getMediaOverview(database.db, CYBERPUNK, { includeUnpublished: true });
+    expect(overview?.composedLead).toBe(true);
+    expect(overview?.statements.map(({ text }) => text)).toEqual(lead);
+    expect(overview?.statements.map(({ sourceUrls }) => sourceUrls.length)).toEqual([1, 2]);
+    expect(overview?.categories).toEqual([]);
+    database.native.prepare("UPDATE media_game_overviews SET config_version = ?").run(PREMISE_FIRST_SYNTHESIS_VERSION);
+    expect((await getMediaOverview(database.db, CYBERPUNK, { includeUnpublished: true }))?.statements.map(({ text }) => text))
+      .toEqual(lead);
+    database.native.prepare("UPDATE media_game_overviews SET config_version = ?").run("media-synthesis-2026-11-25-v14");
+    const legacyOverview = await getMediaOverview(database.db, CYBERPUNK, { includeUnpublished: true });
+    expect(legacyOverview?.composedLead).toBeUndefined();
+    expect(legacyOverview?.statements.map(({ text }) => text)).toEqual([...lead].reverse());
+  } finally {
+    database.cleanup();
+  }
+});
+
+
+test("v16 projects known incidental review wording without changing references or material scopes", () => {
+  const source: ObservationSource = {
+    sourceIdentity: "retained-extraction",
+    sourceUrl: "https://example.test/review",
+    editionContext: { platform: "PC", build: null },
+    observations: [
+      { ...finding, id: "context-prefix", text: "In the reviewed PC version, the city has multiple districts.", qualifiers: [] },
+      { ...finding, id: "context-suffix", text: "Side quests can affect the ending (50GB Day 0 patch, PC).", qualifiers: [] },
+      { ...finding, id: "comparison", text: "In the reviewed PC version, the game ran faster than on Switch 2.", qualifiers: [] },
+      { ...finding, id: "qualified", text: "Vehicles can spawn inside one another in the reviewed PC version.", qualifiers: [] },
+      { ...finding, id: "history", kind: "gameplay", category: "", text: "Side quests can affect the ending.", qualifiers: ["Early Access"] },
+    ],
+  };
+  const v15 = synthesisSelections([source], { clauses: "v15" });
+  const v16 = synthesisSelections([source], { clauses: "v16" });
+  expect(v16.evidence[0]?.observations.map(({ text }) => text)).toEqual([
+    "The city has multiple districts.",
+    "Side quests can affect the ending.",
+    ...source.observations.slice(2).map(({ text }) => text),
+  ]);
+  expect(v15.evidence[0]?.observations.map(({ text }) => text)).toEqual(source.observations.map(({ text }) => text));
+  expect(v16.observationsById).toEqual(v15.observationsById);
+  const checked = validateSynthesisClauses({ statements: [
+    { text: "Side quests can affect the ending.", observationIds: ["o2", "o5"] },
+    { text: "Side quests can affect the ending.", observationIds: ["o2"] },
+  ] }, CYBERPUNK, [source], v16, "v16");
+  expect(checked.diagnostics).toEqual([{ section: "statements", reason: "claim combines different evidence scopes" }]);
+  expect(checked.overview.statements[0]?.observationRefs).toEqual([
+    { sourceIdentity: source.sourceIdentity, observationId: "context-suffix" },
+  ]);
 });

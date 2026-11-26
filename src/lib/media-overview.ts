@@ -10,6 +10,10 @@ export const MEDIA_CATEGORY_NAMES = [
   "Technical experience & accessibility",
 ] as const;
 
+export const PREMISE_FIRST_SYNTHESIS_VERSION = "media-synthesis-2026-11-26-v15";
+export const RELEASE_GROUNDED_SYNTHESIS_VERSION = "media-synthesis-2026-11-26-v16";
+export const SHORT_PREMISE_SYNTHESIS_VERSION = "media-synthesis-2026-11-26-v17";
+
 export type MediaCategoryName = (typeof MEDIA_CATEGORY_NAMES)[number];
 
 export interface MediaFinding {
@@ -22,6 +26,7 @@ export interface MediaFinding {
 export interface MediaOverview {
   appid: number;
   statements: MediaFinding[];
+  composedLead?: true;
   categories: Array<{ name: MediaCategoryName; findings: MediaFinding[] }>;
   prosCons: { pros: MediaFinding[]; cons: MediaFinding[] } | null;
   tags: Array<{ label: string; slug: string }>;
@@ -183,17 +188,13 @@ function parseFinding(value: unknown, sources: ReadonlyMap<string, MediaEvidence
   return { text, sourceUrls, ...(object.contested === true ? { contested: true } : {}), ...(edition ? { edition } : {}) };
 }
 
-function parseFindings(value: unknown, sources: ReadonlyMap<string, MediaEvidenceSource>): MediaFinding[] {
+function parseFindings(value: unknown, sources: ReadonlyMap<string, MediaEvidenceSource>, preserveOrder = false): MediaFinding[] {
   if (!Array.isArray(value)) return [];
-  return value
-    .map((item, index) => ({ finding: parseFinding(item, sources), index }))
-    .filter((item): item is { finding: MediaFinding; index: number } => item.finding !== null)
-    .sort((left, right) =>
-      distinctOutletSupport(right.finding.sourceUrls, sources)
-      - distinctOutletSupport(left.finding.sourceUrls, sources)
-      || left.index - right.index
-    )
-    .map(({ finding }) => finding);
+  const findings = value.map((item) => parseFinding(item, sources)).filter((finding) => finding !== null);
+  if (!preserveOrder) {
+    findings.sort((left, right) => distinctOutletSupport(right.sourceUrls, sources) - distinctOutletSupport(left.sourceUrls, sources));
+  }
+  return findings;
 }
 export interface MediaTagEvidence {
   tag: { label: string; slug: string };
@@ -236,8 +237,9 @@ export function parseMediaOverview(
   value: unknown,
   appid: number,
   sources: ReadonlyMap<string, MediaEvidenceSource>,
+  configVersion?: string,
 ): MediaOverview | null {
-  const result = validateMediaOverview(value, appid, sources);
+  const result = validateMediaOverview(value, appid, sources, configVersion);
   return "overview" in result ? result.overview : null;
 }
 
@@ -249,6 +251,7 @@ export function validateMediaOverview(
   value: unknown,
   appid: number,
   sources: ReadonlyMap<string, MediaEvidenceSource>,
+  configVersion?: string,
 ): MediaOverviewValidation {
   const parsed = parseJson(value);
   if (parsed === MALFORMED_JSON) return { error: "malformed JSON" };
@@ -259,7 +262,8 @@ export function validateMediaOverview(
     : Array.isArray(jsonObject(parsed.overview).statements)
       ? jsonObject(parsed.overview).statements as unknown[]
       : [];
-  const statements = parseFindings(rawStatements, sources);
+  const composedLead = configVersion === PREMISE_FIRST_SYNTHESIS_VERSION || configVersion === RELEASE_GROUNDED_SYNTHESIS_VERSION || configVersion === SHORT_PREMISE_SYNTHESIS_VERSION;
+  const statements = parseFindings(rawStatements, sources, composedLead);
   if (statements.length === 0) return { error: "no cited statements" };
 
   const categories: MediaOverview["categories"] = [];
@@ -278,6 +282,7 @@ export function validateMediaOverview(
     overview: {
       appid,
       statements,
+      ...(composedLead ? { composedLead: true } : {}),
       categories,
       prosCons: pros.length > 0 || cons.length > 0 ? { pros, cons } : null,
       tags,
@@ -292,9 +297,9 @@ export async function getMediaOverview(
 ): Promise<MediaOverview | null> {
   if (!Number.isInteger(appid) || appid <= 0) return null;
   if (!options.includeUnpublished && !isMediaOverviewPublic()) return null;
-  const row = await first<{ output_json: string }>(
+  const row = await first<{ output_json: string; config_version: string }>(
     db,
-    `SELECT overview.output_json
+    `SELECT overview.output_json, overview.config_version
      FROM media_game_overviews AS overview
      JOIN apps AS app
        ON app.appid = overview.appid
@@ -341,5 +346,5 @@ export async function getMediaOverview(
       }),
     ];
   }));
-  return parseMediaOverview(row.output_json, appid, sources);
+  return parseMediaOverview(row.output_json, appid, sources, row.config_version);
 }

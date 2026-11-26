@@ -129,7 +129,7 @@ describe("text generation through OpenRouter", () => {
                 required: ["text", "observationIds"],
                 properties: {
                   text: { type: "string" },
-                  observationIds: { type: "array", items: { type: "string", enum: ["o1"] } },
+                  observationIds: { type: "array", items: { type: "string", enum: ["o1", "o3"] } },
                 },
               } },
               categories: {
@@ -156,7 +156,7 @@ describe("text generation through OpenRouter", () => {
     });
     expect(database.native.query("SELECT stage, config_version FROM media_processing_jobs WHERE stage IN ('extraction', 'synthesis') ORDER BY id").all()).toEqual([
       { stage: "extraction", config_version: "media-extraction-2026-11-25-v8" },
-      { stage: "synthesis", config_version: "media-synthesis-2026-11-25-v14" },
+      { stage: "synthesis", config_version: "media-synthesis-2026-11-26-v17" },
     ]);
     // Embeddings stay on Gemini Batch; no text is submitted to Gemini.
     expect(providers.gemini.submitted.map((key) => key.split(":")[0])).toEqual(["embedding"]);

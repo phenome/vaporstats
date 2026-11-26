@@ -329,6 +329,32 @@ describe("game media sources", () => {
     }
   });
 
+  test("renders a composed lead with its original punctuation and each span's own citations", () => {
+    const second = { ...source, originalUrl: "https://www.pcgamer.com/cyberpunk-2077-review/", outlet: "PC Gamer" as const };
+    const html = renderToString(React.createElement(MediaOverviewSection, {
+      overview: {
+        appid: source.appid,
+        composedLead: true,
+        statements: [
+          { text: "Cyberpunk 2077 takes you to Night City,", sourceUrls: [source.originalUrl] },
+          { text: "where side jobs can change how the story ends.", sourceUrls: [source.originalUrl, second.originalUrl] },
+        ],
+        categories: [],
+        prosCons: null,
+        tags: [],
+      },
+      sources: [source, second],
+    }));
+    const { document } = parseHTML(html);
+    const spans = document.querySelectorAll("#media-overview p > span");
+    expect(spans).toHaveLength(2);
+    expect(spans[0]?.firstChild?.textContent).toBe("Cyberpunk 2077 takes you to Night City,");
+    expect(spans[0]?.lastChild?.nodeName).toBe("A");
+    expect(spans[1]?.textContent).toContain("where side jobs can change how the story ends.");
+    expect([...spans].map((span) => [...span.querySelectorAll("a")].map((link) => link.getAttribute("href"))))
+      .toEqual([["#media-source-1"], ["#media-source-1", "#media-source-2"]]);
+  });
+
   test("renders one known edition as topics without an edition chapter", () => {
     const finding = { text: "The city looks distinct at night.", sourceUrls: [source.originalUrl], edition: "PC at launch" };
     const html = renderToString(React.createElement(MediaOverviewSection, {

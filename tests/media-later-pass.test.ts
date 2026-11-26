@@ -401,10 +401,10 @@ describe("later articles in processing and results", () => {
     process.env.MEDIA_OVERVIEW_PUBLIC = "true";
     const { sources, mediaOverview } = await detail(database, CYBERPUNK);
     expect(sources.map(({ originalUrl }) => originalUrl)).toEqual(expect.arrayContaining([ignInitial, ignLater]));
-    // Two IGN articles are one outlet's support; IGN and Eurogamer are two.
+    // Follow-ups retain their own citations. A composed paragraph keeps the model's reading order.
     expect(mediaOverview?.statements.map(({ text, sourceUrls }) => ({ text, sourceUrls }))).toEqual([
-      { text: "Combat supports both stealth and gunplay builds.", sourceUrls: [ignInitial, eurogamerInitial] },
-      { text: "Night City rewards exploring its districts on foot.", sourceUrls: [ignInitial, ignLater] },
+      { text: story, sourceUrls: [ignInitial, ignLater] },
+      { text: combat, sourceUrls: [ignInitial, eurogamerInitial] },
     ]);
     expect(mediaOverview?.tags.map(({ slug }) => slug)).toEqual(["reworked-skill-trees"]);
     const catalog = await handleCatalogRequest(new Request("https://vaporstats.test/api/catalog?media_tag=Reworked%20skill%20trees"), database.db);

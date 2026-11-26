@@ -165,6 +165,7 @@ Optional quests could influence the ending in the reviewed PC version.
   - Observation: legacy\-2
 
 <!-- media-amendment d7876f75b4dadbb26bd474aacc9acb81c04c93ec17b69c6b648f288c3261ce0d -->
+V is a mercenary in Night City who ends up sharing their head with Johnny Silverhand, a long-dead rocker.
 <!-- /media-amendment -->
 
 <!-- media-follow-up 6042b19065e86930416d0465061e1d337ff325549fd6016a9dd512ca966a67b3 -->
@@ -175,6 +176,7 @@ Optional quests could influence the ending in the reviewed PC version.
   - Observation: legacy\-3
 
 <!-- media-amendment 1a5341101ae1c08046453de1f8e876167274352aeccef03157b6af39ff22cce8 -->
+Night City is a dense open world with finely detailed streets.
 <!-- /media-amendment -->
 
 <!-- media-follow-up adfcd4f461ae7efe4ad41668d5512e32e425940e6305f6d806e2730ac7c8aed9 -->
@@ -1353,4 +1355,24 @@ Completing optional character stories can change how the main story ends (50GB D
   - Observation: legacy\-6
 
 <!-- media-amendment a70893a3f59253bd7048a7fb7ef90c4033053aec07d6c21bfbaddfd3b4d885ed -->
+<!-- /media-amendment -->
+
+- **Baldur’s Gate 3** — What does it mean for companion journeys to be interwoven with the player's story?
+  - Source: [GamesRadar+ release review](https://www.gamesradar.com/baldurs-gate-3-review/)
+  - Source version: b4b1de5be9a5866b05946bb7301241cf86258eca84de776f752de8c78ba1085b
+  - Observation: bg3-companion-stories
+  - Decision: The review describes the traveling party on the Sword Coast and gives concrete examples of how companions’ personal quests become part of the campaign.
+
+<!-- media-amendment 3bfdab7f4d7f577c78708ef7005647872661b68f87895cb975f183bbc64ad54a -->
+In this Dungeons & Dragons campaign on the Sword Coast, the traveling party’s personal quests become part of the player’s story, including Shadowheart’s questions about her faith and Wyll’s relationship with his family.
+<!-- /media-amendment -->
+
+- **Hades II** — How does Chronos figure in the playable character’s goal?
+  - Source: [Eurogamer release review](https://www.eurogamer.net/hades-2-review)
+  - Source version: f5097d6724c27d12cd30a5671d88eb2596364d781d9249abd953f81083164dab
+  - Observation: hades2-chronos-big-bad
+  - Decision: The review identifies both the playable character and her objective in its account of the descent.
+
+<!-- media-amendment f5c522b99b7885c0c66cf5b6c618a6d0ea6561fe2984dfd7ef9a50406b4fdc3f -->
+Melinoë fights her way down through the underworld to confront Chronos, the Titan of Time.
 <!-- /media-amendment -->

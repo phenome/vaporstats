@@ -34,8 +34,9 @@ export function MediaMethodologyView(): React.JSX.Element {
         <p>
           A language model reads each article and records what it says about the game, keeping every observation tied
           to the article it came from. A second automated step combines those observations into the Overview, the
-          descriptive categories, the pros and cons, and the Media Discovery Tags. Nobody edits individual
-          summaries by hand.
+          descriptive categories, the pros and cons, and the Media Discovery Tags.
+          The opening introduces the game’s premise and how it plays, using the details the articles supply.
+          Each part of the paragraph links to the articles that support it.
         </p>
         <p>
           The Overview describes what the coverage says. It is not a VaporStats review, and it is separate from the

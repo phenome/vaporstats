@@ -38,13 +38,15 @@ function CitedFindings({
   appid,
   findings,
   references,
+  composedLead = false,
 }: {
   appid: number;
   findings: MediaFinding[];
   references: SourceReferences;
+  composedLead?: boolean;
 }) {
   return findings.map((finding, index) => {
-    const wording = presentMediaFindingText(finding.text, appid);
+    const wording = composedLead ? finding.text : presentMediaFindingText(finding.text, appid);
     return (
       <span key={`${finding.text}-${index}`}>
         {index > 0 && " "}
@@ -58,7 +60,7 @@ function CitedFindings({
         )}
         {wording}
         <CitationNotes sourceUrls={finding.sourceUrls} references={references} />
-        {/[.!?]$/.test(wording) ? "" : "."}
+        {(composedLead ? /[,;:.!?]$/ : /[.!?]$/).test(wording) ? "" : "."}
       </span>
     );
   });
@@ -144,7 +146,7 @@ export function MediaOverviewSection({
   const references = new Map(getMediaSourceReferences(sources).flatMap(({ articles }) =>
     articles.map((article) => [article.source.originalUrl, article] as const),
   ));
-  const { statements, categories } = mergeRepeatedLeadFindings(overview);
+  const { statements, categories } = overview.composedLead ? overview : mergeRepeatedLeadFindings(overview);
   const chapters = getEditionChapters(categories, references);
   const generalTopics = chapters.length === 0 ? categories : categories.map((category) => ({
     ...category,
@@ -165,7 +167,7 @@ export function MediaOverviewSection({
         </AppLink>
       </div>
       <p className="max-w-[68ch] text-base leading-relaxed text-zinc-100">
-        <CitedFindings appid={overview.appid} findings={statements} references={references} />
+        <CitedFindings appid={overview.appid} findings={statements} references={references} composedLead={overview.composedLead} />
       </p>
       <Topics appid={overview.appid} categories={generalTopics} references={references} />
       {chapters.map(({ edition, date, categories: topics }) => (
