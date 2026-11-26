@@ -14,9 +14,10 @@ export function isMediaOverviewPublic(): boolean {
   return typeof process !== "undefined" && process.env?.MEDIA_OVERVIEW_PUBLIC === "true";
 }
 
-// The first publication covers these experiment roots even when other entities have stored output.
+// Publication is an editorial decision independent of experiment enrollment or watch state.
+const publishedRootAppids = [...MEDIA_EXPERIMENT_GAMES.map(({ appid }) => appid), 2161710]; // NO LAW
 export const PUBLIC_MEDIA_ROOT_SQL = `(
-  app.appid IN (${MEDIA_EXPERIMENT_GAMES.map(({ appid }) => appid).join(", ")})
+  app.appid IN (${publishedRootAppids.join(", ")})
   AND app.type = 'game'
   AND app.is_playable = 1
   AND app.parent_appid IS NULL

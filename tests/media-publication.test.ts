@@ -14,7 +14,8 @@ const BALDURS_GATE = 1086940;
 const HADES_II = 1145350;
 const PHANTOM_LIBERTY = 2138330;
 const OTHER_GAME = 99001;
-const PUBLIC_ROOTS = [CYBERPUNK, BALDURS_GATE, HADES_II];
+const NO_LAW = 2161710;
+const PUBLIC_ROOTS = [CYBERPUNK, BALDURS_GATE, HADES_II, NO_LAW];
 const PRIVATE_ENTITIES = [PHANTOM_LIBERTY, OTHER_GAME];
 
 function seedCoverage(native: Database) {
@@ -22,6 +23,7 @@ function seedCoverage(native: Database) {
     (${CYBERPUNK}, 'Cyberpunk 2077', 'cyberpunk-2077', 'game', 1, 1, NULL),
     (${BALDURS_GATE}, 'Baldur''s Gate 3', 'baldurs-gate-3', 'game', 1, 1, NULL),
     (${HADES_II}, 'Hades II', 'hades-ii', 'game', 1, 1, NULL),
+    (${NO_LAW}, 'NO LAW', 'no-law', 'game', 1, 1, NULL),
     (${PHANTOM_LIBERTY}, 'Phantom Liberty', 'phantom-liberty', 'expansion', 1, 0, ${CYBERPUNK}),
     (${OTHER_GAME}, 'Another Game', 'another-game', 'game', 1, 1, NULL)`);
 
@@ -45,9 +47,9 @@ function seedCoverage(native: Database) {
       })],
     );
     const values = Array<number>(GEMINI_EMBEDDING_DIMENSIONS).fill(0);
-    // Unpublished candidates rank ahead of the other two roots for Cyberpunk.
+    // Unpublished candidates rank ahead of the other public roots for Cyberpunk.
     values[0] = 1;
-    values[1] = appid === BALDURS_GATE || appid === HADES_II ? 1 : 0;
+    values[1] = appid === BALDURS_GATE || appid === HADES_II || appid === NO_LAW ? 1 : 0;
     for (const dimension of ["gameplay", "story_world"]) {
       native.run(
         `INSERT INTO media_game_embeddings
@@ -60,7 +62,7 @@ function seedCoverage(native: Database) {
   }
 }
 
-test("publishes generated media and matches for the three roots through public readers, API and SSR", async () => {
+test("publishes generated media and matches for the approved roots through public readers, API and SSR", async () => {
   const { db, native } = openMemoryDatabase();
   const previous = process.env.MEDIA_OVERVIEW_PUBLIC;
   try {

@@ -344,7 +344,9 @@ test("non-hands-on coverage enters extraction and the Internal website API keeps
       expect.arrayContaining([expect.stringMatching(/Mission loadouts.*announcement/i), expect.stringMatching(/Mission loadouts.*non-hands-on preview/i)]),
     );
     const publicResponse = await handleGameDetailRequest(request, database.db, ROOT);
-    expect((await publicResponse.json()).data.sources).toEqual([]);
+    const published = (await publicResponse.json()).data;
+    expect(published.sources).toEqual(data.sources);
+    expect(published.mediaOverview).toEqual(data.mediaOverview);
     expect(api.openRouter.requests).toHaveLength(priorCalls);
   } finally {
     if (previousPublic === undefined) delete process.env.MEDIA_OVERVIEW_PUBLIC;
