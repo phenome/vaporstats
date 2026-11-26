@@ -1,0 +1,1 @@
+ALTER TABLE `media_discovery_progress` ADD `pass_due_at` text;

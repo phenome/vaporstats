@@ -17,5 +17,5 @@ When the expanded hero reaches the sticky boundary, `useHeroGeometry` captures t
 To prevent layout shifts and blank image flashes across both states:
 
 1. **Dual LQIP storage:** SQLite stores precomputed inline base64 placeholders for both the full landscape header image (`apps.header_lqip`) and the compact square icon (`apps.icon_lqip`). Placeholders are generated with Bun 1.4 native image processing (`Bun.Image`).
-2. **Transitional square LQIP:** Until ingestion backfills the Steam Community icon hash (`apps.icon_hash`), derive the square placeholder by resizing the stored header image to 32×32 without cropping, preserving the full image content in the reduced bitmap. When the missing icon is rendered, the generated placeholder may be lazily backfilled into the database.
+2. **Transitional square LQIP:** Until ingestion backfills the Steam Community icon hash (`apps.icon_hash`), derive the square placeholder by resizing the stored header image to 32×32 without cropping, preserving the full image content in the reduced bitmap. Game-detail reads use stored placeholders when available and fall back to the existing artwork when a placeholder is missing. This keeps page reads free of database writes.
 3. **Asset upgrade:** Once `icon_hash` is ingested, the artwork shell uses Steam's official 1:1 Community icon for the compact visual state.

@@ -147,6 +147,7 @@ describe("when the later pass is due", () => {
     // Hades II is enrolled as a newly released game, released on 2026-09-01;
     // its Main Released date is 90 days old on 2026-11-30.
     database.native.prepare("UPDATE apps SET release_status = 'released', original_release_date = '2026-09-01' WHERE appid = ?").run(HADES_II);
+    database.native.prepare("INSERT INTO checkpoints (key, value) VALUES ('media:enrollment-start-date', '2026-09-01')").run();
     database.native.prepare("INSERT INTO media_enrollments (appid, reason, enrolled_at) VALUES (?, 'new_release', '2026-11-19T06:00:00.000Z')").run(HADES_II);
     const { tavily, tick } = world();
     const laterQueries = (name: string) => queries(tavily).filter((query) => query.startsWith(`${name} review revisited@`));

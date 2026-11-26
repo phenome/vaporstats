@@ -2,12 +2,13 @@ import { Readability } from "@mozilla/readability";
 import { MIN_USABLE_ARTICLE_CHARS, parseArticleDocument } from "./article-document";
 import type { AppDatabase } from "./db";
 import { writeTransaction } from "./db-transaction";
+import { ENROLLMENT_START_DATE_KEY, isNewReleaseDate } from "./media-enrollment";
 import { boundedMediaError } from "./media-error";
 import { mainReleasedDate, type MainReleasedFields } from "./lifecycle-history";
 import { fetchOutletArticle, finishOutletAttempt, hostInOutlet, MEDIA_OUTLETS, OUTLET_HTTP_STOPS, OUTLET_STOP_REASONS, reserveOutletAttempt, type MediaOutlet } from "./media-outlet-access";
 import { MEDIA_EXPERIMENT_GAMES, PUBLIC_MEDIA_ROOT_SQL } from "./media-publication";
 import { parsePreciseReleaseDate } from "./releases";
-import { ELIGIBLE_MEDIA_ENTITY_SQL } from "./media-similarity";
+import { ELIGIBLE_MEDIA_ENTITY_SQL, ELIGIBLE_MEDIA_ROOT_SQL } from "./media-similarity";
 import { createTavilyTransport } from "./media-tavily";
 
 export { MEDIA_GAME_CHOICES, type MediaGameChoice } from "./media-publication";
@@ -119,6 +120,7 @@ type ProgressRow = {
   outlet: MediaOutlet;
   status: string;
   query_attempted_at: string | null;
+  pass_due_at: string | null;
   candidate_urls: string;
   candidate_index: number;
   stop_reason: string | null;
@@ -127,7 +129,7 @@ type ProgressRow = {
 };
 
 const RUN_COLUMNS = "id, pass, identity_key, selected_games, status, resumed, query_count, article_count, attempt_count, provider_request_ids, usage, stop_reason, summary, origin, started_at";
-const PROGRESS_COLUMNS = "id, run_id, appid, pass, outlet, status, query_attempted_at, candidate_urls, candidate_index, stop_reason, stopped_at, completed_at";
+const PROGRESS_COLUMNS = "id, run_id, appid, pass, outlet, status, query_attempted_at, pass_due_at, candidate_urls, candidate_index, stop_reason, stopped_at, completed_at";
 
 type TavilyResult = { url?: unknown; published_date?: unknown };
 
@@ -172,30 +174,10 @@ async function loadMediaTargets(db: AppDatabase, roots: readonly number[]): Prom
     db,
     `SELECT app.appid, app.name, app.parent_appid
      FROM apps AS app
-     WHERE app.appid IN (SELECT value FROM json_each(?))
-       AND app.type = 'game'
-       AND app.is_playable = 1
+     WHERE COALESCE(app.parent_appid, app.appid) IN (SELECT value FROM json_each(?))
        AND app.is_eligible = 1
-       AND app.parent_appid IS NULL
-     UNION ALL
-     SELECT child.appid, child.name, child.parent_appid
-     FROM apps AS child
-     JOIN apps AS parent ON parent.appid = child.parent_appid
-     WHERE child.parent_appid IN (SELECT value FROM json_each(?))
-       AND child.type IN ('dlc', 'expansion')
-       AND child.is_eligible = 1
-       AND parent.type = 'game'
-       AND parent.is_playable = 1
-       AND parent.is_eligible = 1
-       AND parent.parent_appid IS NULL
-       AND NOT EXISTS (
-         SELECT 1
-         FROM app_relationships AS relationship
-         WHERE relationship.child_appid = child.appid
-           AND relationship.relationship_type IN ('server', 'tool', 'demo', 'test', 'soundtrack')
-       )
+       AND ${ELIGIBLE_MEDIA_ENTITY_SQL}
      ORDER BY appid`,
-    rootsJson,
     rootsJson,
   );
   return targetRows.map((row) => {
@@ -307,6 +289,38 @@ async function prepareProgressForAuthorization(
  */
 const DAY_SCOPED_STOPS = [OUTLET_STOP_REASONS.DAILY_ATTEMPT_CAP, "search_http_429", OUTLET_HTTP_STOPS[429], "tavily_search_http_429"] as const;
 const DAY_SCOPED_STOPS_SQL = DAY_SCOPED_STOPS.map((reason) => `'${reason}'`).join(", ");
+const ENTITY_INELIGIBLE = "entity_ineligible";
+
+/** Preserve finished queries and stop pending queries for enrollments that lost catalog eligibility. */
+export async function skipIneligibleMediaPasses(db: AppDatabase, runId: number, at: Date): Promise<void> {
+  const outlets = JSON.stringify(MEDIA_OUTLETS.map(({ name }) => name));
+  const stoppedAt = at.toISOString();
+  await db.prepare(
+    `INSERT INTO media_discovery_progress (run_id, appid, pass, outlet, status, stop_reason, stopped_at)
+     SELECT ?, app.appid, pass.value, outlet.value, 'stopped', ?, ?
+     FROM media_enrollments AS enrollment
+     JOIN apps AS app ON app.appid = enrollment.appid
+     CROSS JOIN json_each('["initial","later"]') AS pass
+     CROSS JOIN json_each(?) AS outlet
+     WHERE NOT (${ELIGIBLE_MEDIA_ROOT_SQL})
+     ON CONFLICT(appid, outlet, pass) DO NOTHING`,
+  ).bind(runId, ENTITY_INELIGIBLE, stoppedAt, outlets).run();
+  await db.prepare(
+    `UPDATE media_discovery_progress
+     SET status = 'stopped', stop_reason = ?, stopped_at = ?, updated_at = CURRENT_TIMESTAMP
+     WHERE (status IN ('queued', 'searching', 'fetching') OR (status = 'stopped' AND stop_reason IN (${DAY_SCOPED_STOPS_SQL})))
+       AND EXISTS (
+         SELECT 1 FROM apps AS app
+         WHERE app.appid = media_discovery_progress.appid AND (
+           EXISTS (SELECT 1 FROM media_enrollments WHERE appid = app.appid AND NOT (${ELIGIBLE_MEDIA_ROOT_SQL}))
+           OR (
+             EXISTS (SELECT 1 FROM media_enrollments WHERE appid = app.parent_appid)
+             AND NOT (app.is_eligible = 1 AND ${ELIGIBLE_MEDIA_ENTITY_SQL})
+           )
+         )
+       )`,
+  ).bind(ENTITY_INELIGIBLE, stoppedAt).run();
+}
 
 /**
  * Reopens the queries of `passes` for `games` that a day-scoped stop held on
@@ -364,59 +378,145 @@ function passFinishedAt(progress: readonly ProgressRow[], outlets: readonly Medi
   return finishedAt;
 }
 
+const INITIAL_PASS_RELEASE_AGE_DAYS = 7;
 const LATER_PASS_RELEASE_AGE_DAYS = 90;
+const ASSESSMENT_OUTLETS = MEDIA_OUTLETS.map(({ name }) => name);
 
-/**
- * The passes of `targets` that a scheduled discovery run started at `asOf`
- * serves, oldest due time first, then by entity. An entity's initial pass is
- * due from its root's enrollment until every outlet's initial query has
- * finished. Its one later pass is then due over the outlets with an accepted
- * initial article for it: for an experiment game as soon as its initial
- * discovery finished, otherwise once its Main Released date is also at least
- * 90 days old. A pass that becomes due after `asOf` waits for the next run.
- */
+function releaseAgeDueAt(releasedOn: string, days: number): string {
+  return new Date(Date.parse(`${releasedOn}T00:00:00.000Z`) + days * 86_400_000).toISOString();
+}
+
+function laterPassDueAt(initialFinishedAt: string, releasedOn: string | null, experiment: boolean): string | null {
+  if (experiment) return initialFinishedAt;
+  if (!releasedOn) return null;
+  const releaseDueAt = releaseAgeDueAt(releasedOn, LATER_PASS_RELEASE_AGE_DAYS);
+  return initialFinishedAt > releaseDueAt ? initialFinishedAt : releaseDueAt;
+}
+
+type AssessmentProgress = { initial: ProgressRow[]; later: ProgressRow[]; laterOutlets: MediaOutlet[] };
+type MediaRelease = MainReleasedFields & { appid: number };
+
+function startedDueAt(progress: readonly ProgressRow[], calculated: string | null): string | null {
+  const recorded = progress.find((row) => row.pass_due_at)?.pass_due_at;
+  if (recorded) return recorded;
+  // Retained queries predate the due-time column. A correction must still
+  // leave their unserved queries able to finish.
+  const attempt = progress.find((row) => row.query_attempted_at)?.query_attempted_at;
+  const attemptedAt = attempt ? isoTimestamp(attempt) : null;
+  return attemptedAt && (!calculated || attemptedAt < calculated) ? attemptedAt : calculated;
+}
+
+/** An unwatched child is in scope if released by the day both root passes finished. */
+function childWithinAssessmentWindow(
+  app: MediaRelease | undefined,
+  releasedOn: string | null,
+  rootFinishedAt: string | null,
+  experiment: boolean,
+  asOfDay: string,
+): boolean {
+  if (app?.release_status !== "released") return false;
+  // Preserve the experiment's existing coverage of released children whose
+  // catalog dates cannot establish whether they preceded the cutoff.
+  if (!releasedOn) return experiment;
+  return releasedOn <= asOfDay && (rootFinishedAt === null || releasedOn <= rootFinishedAt.slice(0, 10));
+}
+
+/** The initial and later passes due at the start of this run, ordered by due time and entity. */
 async function duePasses(db: AppDatabase, targets: readonly MediaTarget[], asOf: string): Promise<DuePass[]> {
   const appids = JSON.stringify(targets.map(({ appid }) => appid));
-  const roots = JSON.stringify([...new Set(targets.map(rootAppid))]);
-  const enrollments = new Map((await rows<{ appid: number; reason: string; enrolled_at: string }>(
+  const roots = JSON.stringify(targets.filter(({ parentAppid }) => parentAppid === null).map(({ appid }) => appid));
+  const enrollments = new Map((await rows<{ appid: number; reason: string; enrolled_at: string; empty_later_finished_at: string | null }>(
     db,
-    "SELECT appid, reason, enrolled_at FROM media_enrollments WHERE appid IN (SELECT value FROM json_each(?))",
+    "SELECT appid, reason, enrolled_at, empty_later_finished_at FROM media_enrollments WHERE appid IN (SELECT value FROM json_each(?))",
     roots,
   )).map((row) => [row.appid, row]));
-  const progress = await rows<ProgressRow>(db, `SELECT ${PROGRESS_COLUMNS} FROM media_discovery_progress WHERE appid IN (SELECT value FROM json_each(?))`, appids);
-  const represented = await rows<{ appid: number; outlet: MediaOutlet }>(
+  const progress = new Map<number, AssessmentProgress>(
+    targets.map(({ appid }) => [appid, { initial: [], later: [], laterOutlets: [] }]),
+  );
+  for (const row of await rows<ProgressRow>(db, `SELECT ${PROGRESS_COLUMNS} FROM media_discovery_progress WHERE appid IN (SELECT value FROM json_each(?))`, appids)) {
+    progress.get(row.appid)?.[row.pass].push(row);
+  }
+  for (const row of await rows<{ appid: number; outlet: MediaOutlet }>(
     db,
     "SELECT DISTINCT appid, outlet FROM media_sources WHERE pass = 'initial' AND appid IN (SELECT value FROM json_each(?))",
     appids,
-  );
-  const releases = new Map((await rows<MainReleasedFields & { appid: number }>(
+  )) {
+    progress.get(row.appid)?.laterOutlets.push(row.outlet);
+  }
+  const releases = new Map((await rows<MediaRelease>(
     db,
     "SELECT appid, release_status, release_date, release_date_source, steam_release_date, original_release_date FROM apps WHERE appid IN (SELECT value FROM json_each(?))",
     appids,
-  )).map((row) => [row.appid, row]));
+  )).map((app) => [app.appid, { app, releasedOn: parsePreciseReleaseDate(mainReleasedDate(app)?.date) }]));
+  const enrollmentStart = await first<{ value: string }>(db, "SELECT value FROM checkpoints WHERE key = ?", ENROLLMENT_START_DATE_KEY);
+  const asOfDay = asOf.slice(0, 10);
+  const cappedRoots = new Map((await rows<{ appid: number; capped_at: string }>(
+    db,
+    `SELECT appid, MAX(retrieved_at) AS capped_at
+     FROM media_sources
+     WHERE appid IN (SELECT value FROM json_each(?))
+     GROUP BY appid HAVING COUNT(*) >= ?`,
+    roots,
+    MAX_MEDIA_ARTICLES_PER_GAME,
+  )).map(({ appid, capped_at }) => [appid, isoTimestamp(capped_at)]));
+
+  const rootCutoffs = new Map([...cappedRoots].filter(([, cappedAt]) => cappedAt <= asOf));
+  const deferredRoots = new Set<number>();
+  for (const [appid, enrollment] of enrollments) {
+    if (enrollment.reason === "watchlist") continue;
+    const own = progress.get(appid)!;
+    const initialFinishedAt = passFinishedAt(own.initial, ASSESSMENT_OUTLETS);
+    const releasedOn = releases.get(appid)?.releasedOn ?? null;
+    const experiment = enrollment.reason === "experiment";
+    if (initialFinishedAt === null && !experiment && !own.initial.some((row) => row.query_attempted_at !== null) &&
+        enrollmentStart && !isNewReleaseDate(releasedOn, enrollmentStart.value, asOfDay)) deferredRoots.add(appid);
+    if (initialFinishedAt === null) continue;
+    const laterFinishedAt = passFinishedAt(own.later, own.laterOutlets);
+    if (laterFinishedAt === null && enrollment.empty_later_finished_at === null) continue;
+    // With zero represented outlets, the later pass has no searches to run.
+    // Persist its cutoff before release corrections can move it.
+    let finishedAt = enrollment.empty_later_finished_at ?? (laterFinishedAt || laterPassDueAt(initialFinishedAt, releasedOn, experiment));
+    if (own.laterOutlets.length === 0 && enrollment.empty_later_finished_at === null && finishedAt !== null && finishedAt <= asOf) {
+      const recorded = await first<{ empty_later_finished_at: string }>(
+        db,
+        `UPDATE media_enrollments
+         SET empty_later_finished_at = COALESCE(empty_later_finished_at, ?)
+         WHERE appid = ? RETURNING empty_later_finished_at`,
+        finishedAt || asOf,
+        appid,
+      );
+      finishedAt = recorded?.empty_later_finished_at ?? finishedAt;
+    }
+    const cutoff = rootCutoffs.get(appid);
+    if (finishedAt !== null && finishedAt <= asOf && (!cutoff || finishedAt < cutoff)) rootCutoffs.set(appid, finishedAt);
+  }
+
   const due: DuePass[] = [];
   for (const target of targets) {
     const enrollment = enrollments.get(rootAppid(target));
-    if (!enrollment) continue;
-    const ownProgress = (pass: MediaPass) => progress.filter((row) => row.appid === target.appid && row.pass === pass);
-    const initialFinishedAt = passFinishedAt(ownProgress("initial"), MEDIA_OUTLETS.map(({ name }) => name));
+    if (!enrollment || deferredRoots.has(rootAppid(target))) continue;
+    const own = progress.get(target.appid)!;
+    const experiment = enrollment.reason === "experiment";
+    const release = releases.get(target.appid);
+    const releasedOn = release?.releasedOn ?? null;
+    const initialFinishedAt = passFinishedAt(own.initial, ASSESSMENT_OUTLETS);
+    const initialStarted = own.initial.some((row) => row.query_attempted_at !== null);
+    if (target.parentAppid !== null && enrollment.reason !== "watchlist" && !initialStarted && initialFinishedAt === null &&
+        !childWithinAssessmentWindow(release?.app, releasedOn, rootCutoffs.get(target.parentAppid) ?? null, experiment, asOfDay)) continue;
+
     if (initialFinishedAt === null) {
-      const dueAt = isoTimestamp(enrollment.enrolled_at);
-      if (dueAt <= asOf) due.push({ target, pass: "initial", dueAt });
+      const calculated = experiment
+        ? isoTimestamp(enrollment.enrolled_at)
+        : releasedOn && releaseAgeDueAt(releasedOn, INITIAL_PASS_RELEASE_AGE_DAYS);
+      const dueAt = experiment ? calculated : startedDueAt(own.initial, calculated);
+      if (dueAt !== null && dueAt <= asOf) due.push({ target, pass: "initial", dueAt });
       continue;
     }
-    const laterOutlets = MEDIA_OUTLETS.map(({ name }) => name).filter((outlet) => represented.some((row) => row.appid === target.appid && row.outlet === outlet));
-    if (laterOutlets.length === 0 || passFinishedAt(ownProgress("later"), laterOutlets) !== null) continue;
-    let dueAt = initialFinishedAt;
-    if (enrollment.reason !== "experiment") {
-      const app = releases.get(target.appid);
-      const releasedOn = app ? parsePreciseReleaseDate(mainReleasedDate(app)?.date) : null;
-      if (!releasedOn) continue;
-      const releaseAgeDue = new Date(Date.parse(`${releasedOn}T00:00:00.000Z`) + LATER_PASS_RELEASE_AGE_DAYS * 86_400_000).toISOString();
-      if (releaseAgeDue > dueAt) dueAt = releaseAgeDue;
-    }
-    if (dueAt > asOf) continue;
-    due.push({ target, pass: "later", dueAt });
+    if (own.laterOutlets.length === 0 || (target.parentAppid === null && enrollment.empty_later_finished_at !== null) ||
+        passFinishedAt(own.later, own.laterOutlets) !== null) continue;
+    const calculated = laterPassDueAt(initialFinishedAt, releasedOn, experiment);
+    const dueAt = experiment ? calculated : startedDueAt(own.later, calculated);
+    if (dueAt !== null && dueAt <= asOf) due.push({ target, pass: "later", dueAt });
   }
   return due.sort((left, right) => left.dueAt.localeCompare(right.dueAt) || left.target.appid - right.target.appid || left.pass.localeCompare(right.pass));
 }
@@ -660,7 +760,7 @@ async function stopProgress(db: AppDatabase, progressId: number, reason: string,
  * their one query.
  */
 async function releaseRefusedQuery(db: AppDatabase, progressId: number, status: "queued" | "stopped", reason: string, at: Date): Promise<void> {
-  await db.prepare("UPDATE media_discovery_progress SET status = ?, stop_reason = ?, stopped_at = ?, query_attempted_at = NULL, candidate_urls = '[]', candidate_index = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(status, reason, status === "stopped" ? at.toISOString() : null, progressId).run();
+  await db.prepare("UPDATE media_discovery_progress SET status = ?, stop_reason = ?, stopped_at = ?, query_attempted_at = NULL, pass_due_at = NULL, candidate_urls = '[]', candidate_index = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(status, reason, status === "stopped" ? at.toISOString() : null, progressId).run();
 }
 
 /**
@@ -841,7 +941,9 @@ export async function runAuthorizedMediaDiscovery(db: AppDatabase, options: Medi
   const issued: MediaRunSummary["issued"] = { searches: 0, attempts: 0, articles: 0 };
   try {
     const clock: MediaClock = () => isoNow(options.now);
+    if (scheduled) await transaction(db, () => skipIneligibleMediaPasses(db, run.id, clock()));
     await reopenDayScopedProgress(db, run.id, passes, targetAppids, dayKey(clock()));
+    const scheduledPasses = scheduled ? await duePasses(db, discoveryTargets, isoTimestamp(run.started_at ?? clock().toISOString())) : null;
     const stopReasons = new Set<string>();
     const stoppedOutlets = new Set<MediaOutlet>();
     let searchesStopped = false;
@@ -861,10 +963,12 @@ export async function runAuthorizedMediaDiscovery(db: AppDatabase, options: Medi
     // A scheduled run takes its due passes oldest due first, then by entity,
     // each across the outlets in roster order; an authorized run takes its
     // pass outlet by outlet.
-    const queries = scheduled
-      ? (await duePasses(db, discoveryTargets, isoTimestamp(run.started_at ?? clock().toISOString()))).flatMap(({ target, pass }) => MEDIA_OUTLETS.map((outlet) => ({ outlet, target, pass })))
-      : MEDIA_OUTLETS.flatMap((outlet) => discoveryTargets.map((target) => ({ outlet, target, pass })));
-    for (const { outlet, target, pass } of queries) {
+    const queries = scheduledPasses
+      ? scheduledPasses.flatMap(({ target, pass, dueAt }) => MEDIA_OUTLETS.map((outlet) => ({ outlet, target, pass, dueAt })))
+      : MEDIA_OUTLETS.flatMap((outlet) => discoveryTargets.map((target) => ({ outlet, target, pass, dueAt: null })));
+    const dueEntities: Record<MediaPass, Set<number>> = { initial: new Set(), later: new Set() };
+    for (const { target, pass } of scheduledPasses ?? []) dueEntities[pass].add(target.appid);
+    for (const { outlet, target, pass, dueAt } of queries) {
       const appid = target.appid;
       if (await articleCeiling(db, appid)) continue;
       if (stoppedOutlets.has(outlet.name)) continue;
@@ -912,8 +1016,8 @@ export async function runAuthorizedMediaDiscovery(db: AppDatabase, options: Medi
           issued.searches += 1;
           issued.attempts += 1;
           await db.prepare(
-            "UPDATE media_discovery_progress SET query_attempted_at = ?, status = 'searching', stop_reason = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-          ).bind(attemptNow.toISOString(), progressId).run();
+            "UPDATE media_discovery_progress SET query_attempted_at = ?, pass_due_at = ?, status = 'searching', stop_reason = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+          ).bind(attemptNow.toISOString(), dueAt, progressId).run();
           const outcome = await tavily.search(query, outlet.domain);
           await finishOutletAttempt(db, attemptId, outcome.attempt);
           if (outcome.class === "provider_stop") {
@@ -978,6 +1082,7 @@ export async function runAuthorizedMediaDiscovery(db: AppDatabase, options: Medi
             if (!fetched) continue;
             source = parseSource(fetched.html, fetched.finalUrl, target, discoveryTargets, outlet.name, clock().toISOString());
             if (!source) continue;
+            if (scheduled && source.appid !== appid && !dueEntities[pass].has(source.appid)) continue;
             source.discoveryUrl = candidates[index]!.url;
             if (pass === "later" && !await qualifiesForLaterPass(db, source)) continue;
           } catch (error) {
@@ -999,7 +1104,13 @@ export async function runAuthorizedMediaDiscovery(db: AppDatabase, options: Medi
           if (!selected) continue;
           const ceiling = await articleCeiling(db, selected.appid);
           if (!ceiling) {
-            const inserted = await db.prepare("INSERT OR IGNORE INTO media_sources (appid, pass, original_url, discovery_url, title, outlet, author, published_at, updated_at, retrieved_at, type, hands_on, affiliation, platform, build_context) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").bind(selected.appid, pass, selected.originalUrl, selected.discoveryUrl, selected.title, selected.outlet, selected.author, selected.publishedAt, selected.updatedAt, selected.retrievedAt, selected.type, selected.handsOn === null ? null : selected.handsOn ? 1 : 0, selected.affiliation, selected.platform, selected.buildContext).run();
+            const inserted = await db.prepare(
+              `INSERT OR IGNORE INTO media_sources (appid, pass, original_url, discovery_url, title, outlet, author, published_at, updated_at, retrieved_at, type, hands_on, affiliation, platform, build_context)
+               SELECT app.appid, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+               FROM apps AS app
+               WHERE app.appid = ? AND app.is_eligible = 1 AND ${ELIGIBLE_MEDIA_ENTITY_SQL}
+                 AND COALESCE(app.parent_appid, app.appid) = ?`,
+            ).bind(pass, selected.originalUrl, selected.discoveryUrl, selected.title, selected.outlet, selected.author, selected.publishedAt, selected.updatedAt, selected.retrievedAt, selected.type, selected.handsOn === null ? null : selected.handsOn ? 1 : 0, selected.affiliation, selected.platform, selected.buildContext, selected.appid, rootAppid(target)).run();
             if (inserted.meta.changes === 1) issued.articles += 1;
           } else {
             stopReasons.add(ceiling);

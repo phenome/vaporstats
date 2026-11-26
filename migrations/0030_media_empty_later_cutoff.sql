@@ -1,0 +1,1 @@
+ALTER TABLE `media_enrollments` ADD `empty_later_finished_at` text;

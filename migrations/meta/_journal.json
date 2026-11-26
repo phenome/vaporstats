@@ -204,6 +204,20 @@
       "when": 1795009684811,
       "tag": "0028_requeue_truncated_extractions",
       "breakpoints": true
+    },
+    {
+      "idx": 29,
+      "version": "6",
+      "when": 1795713641103,
+      "tag": "0029_media_assessment_due_at",
+      "breakpoints": true
+    },
+    {
+      "idx": 30,
+      "version": "6",
+      "when": 1795713923446,
+      "tag": "0030_media_empty_later_cutoff",
+      "breakpoints": true
     }
   ]
 }
