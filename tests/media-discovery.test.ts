@@ -245,7 +245,7 @@ describe("bounded media discovery", () => {
   test("rejects review-drama, score-news, co-titled, and substantive comparisons while keeping incidental comparisons", async () => {
     const { db, cleanup } = fixture();
     const longComparison = `${"Cyberpunk 2077 is a focused role-playing game with a substantial playable campaign. ".repeat(12)} This is a direct comparison with Zelda throughout.`;
-    const incidentalComparisons = `Compared to Zelda, Cyberpunk 2077 has a denser city and more flexible builds. Better than many alternatives, its combat, quests, and exploration remain a substantial review subject. Higher than expected enemy variety keeps the campaign engaging.`;
+    const incidentalComparisons = `Compared to Zelda, Cyberpunk 2077 has a denser city and more flexible builds. Better than many alternatives, its combat, quests, and exploration remain a substantial review subject. Higher than expected enemy variety keeps the campaign engaging. If you want to keep exploring, here are some games like Cyberpunk 2077.`;
     const { fetchFn } = discoveryFetch({
       variants: {
         "https://ign.com/articles/1091500-ign-com": { body: html(1091500, "The Cyberpunk 2077 Review Drama") },

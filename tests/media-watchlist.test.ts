@@ -3,7 +3,8 @@ import type { TestDatabase } from "./support/db";
 import { openTestDatabase } from "./support/db";
 import { fetchSteamAppDetails } from "../workers/catalog-seed";
 import { upsertApp } from "../src/lib/catalog";
-import { getMediaSources, MEDIA_OUTLETS, nextMediaAssessment } from "../src/lib/media-discovery";
+import { getMediaSources, MEDIA_OUTLETS, nextMediaAssessment, replayRejectedPreviewCandidate } from "../src/lib/media-discovery";
+import { outletDailyAttemptCap } from "../src/lib/media-outlet-access";
 import { changeMediaWatch, expectedMediaReleaseDate, mediaWatchSchedule, previewInterval, PREVIEW_DEFERRAL_KEY, shiftMediaDay } from "../src/lib/media-watchlist";
 import { handleGameDetailRequest, type GameDetailResponseData } from "../src/routes/api.games.$appid.detail";
 import { controlledGeminiApi, controlledOpenRouterApi, controlledTavilyApi, discoveryArticleHtml, mediaObservation, runMediaTick, overviewOutputForUrls, type MediaTickOptions } from "./support/media";
@@ -480,6 +481,99 @@ test("reject non-preview candidates and admit the pre-release review in the rele
     { pass: "initial", title: titles.review }, { pass: "preview", title: titles.hands },
   ]);
 });
+
+test("preview discovery rejects a roundup lead and accepts a closing recommendation", async () => {
+  const database = fixture();
+  admit(database, ROOT);
+  await watch(database);
+  const api = world();
+  const roundup = "https://gamesradar.com/articles/roundup";
+  const preview = "https://gamesradar.com/articles/no-law";
+  api.tavily.results = ({ domain }) => domain === "gamesradar.com" ? [{ url: roundup }, { url: preview }] : [];
+  const body = "NO LAW takes place in a city where each mission lets you pick new equipment and routes. ".repeat(4);
+  await api.tick(database, "2027-01-25", { outlet: (url) => new Response(discoveryArticleHtml(ROOT, "NO LAW Preview", {
+    body: url === roundup
+      ? "In this roundup, we preview several games coming next year. " + body
+      : "We saw NO LAW in a hands-off preview. " + body + "If you can't wait, here are some games like Cyberpunk 2077.",
+  })) });
+  expect(database.native.query("SELECT discovery_url, type, hands_on FROM media_sources").all()).toEqual([
+    { discovery_url: preview, type: "preview", hands_on: 0 },
+  ]);
+  expect(database.native.query("SELECT url FROM media_preview_rejections").all()).toEqual([{ url: roundup }]);
+});
+
+test.each(["admit", "denied", "canonical_duplicate", "candidate_error"] as const)(
+  "scoped preview replay preserves history and outlet rules (%s)",
+  async (scenario) => {
+    const database = fixture();
+    admit(database, ROOT);
+    await watch(database);
+    const api = world();
+    const url = "https://gamesradar.com/articles/preview";
+    const canonical = "https://gamesradar.com/canonical";
+    api.tavily.results = ({ domain }) => domain === "gamesradar.com" ? [{ url }] : [];
+    const body = "NO LAW takes place in a city where each mission lets you pick new equipment and routes. ".repeat(4);
+    await api.tick(database, "2027-01-25", { outlet: () => new Response(discoveryArticleHtml(ROOT, "NO LAW Roundup", { body })) });
+    const progressForOutlet = () => database.native.query<{ id: number }, []>(
+      "SELECT * FROM media_discovery_progress WHERE outlet = 'GamesRadar+'",
+    ).get()!;
+    const progress = progressForOutlet();
+    const historical = database.native.query("SELECT * FROM media_discovery_attempts ORDER BY id").all();
+    const searches = api.tavily.requests.length;
+    const article = discoveryArticleHtml(ROOT, "NO LAW Preview", {
+      body: "We saw NO LAW in a hands-off preview. " + body + "Here are some games like Cyberpunk 2077.",
+    }).replace("</head>", `<link rel="canonical" href="${canonical}"></head>`);
+    const calls: string[] = [];
+    const fetch = async (input: RequestInfo | URL) => {
+      calls.push(String(input));
+      if (scenario === "candidate_error") {
+        return new class extends Response {
+          override async text(): Promise<string> { throw new Error("Article body read failed"); }
+        }(article);
+      }
+      return new Response(article);
+    };
+    const insertAttempt = database.native.prepare(`INSERT INTO media_discovery_attempts
+      (appid, outlet, pass, day, kind, status_code, succeeded, attempted_at)
+      VALUES (?, 'GamesRadar+', 'initial', '2027-01-25', 'fetch', ?, ?, '2027-01-25T07:00:00Z')`);
+    const replay = (date: string, candidate = url) => replayRejectedPreviewCandidate(database.db, { progressId: progress.id, url: candidate, now: new Date(date), fetch });
+    expect(await replay("2027-01-25T08:00Z", canonical)).toEqual({ admitted: false, reason: "not_a_rejected_candidate" });
+
+    if (scenario === "denied") insertAttempt.run(ROOT, 403, 0);
+    if (scenario === "admit") {
+      for (let i = 0; i < outletDailyAttemptCap(); i += 1) insertAttempt.run(ROOT, 200, 1);
+      expect(await replay("2027-01-25T08:00Z")).toEqual({ admitted: false, reason: "daily_attempt_cap" });
+      expect(calls).toEqual([]);
+    }
+    if (scenario === "canonical_duplicate") {
+      database.native.prepare(`INSERT INTO media_sources (appid, pass, original_url, title, outlet, retrieved_at, type)
+        VALUES (?, 'initial', ?, 'Existing assessment', 'GamesRadar+', '2027-01-25', 'review')`).run(ROOT, canonical);
+    }
+
+    const reason = { admit: null, denied: "fetch_http_403", canonical_duplicate: "already_admitted", candidate_error: "candidate_error" }[scenario];
+    expect(await replay("2027-01-26T05:00Z")).toEqual({ admitted: scenario === "admit", reason });
+    database.reopen();
+    expect(await replay("2027-01-26T05:01Z")).toEqual({
+      admitted: false, reason: scenario === "admit" ? "already_admitted" : "already_replayed",
+    });
+    expect(calls).toEqual(scenario === "denied" ? [] : [url]);
+    expect(progressForOutlet()).toEqual(progress);
+    expect(queries(database)).toHaveLength(searches);
+    expect(database.native.query("SELECT * FROM media_discovery_attempts ORDER BY id").all().slice(0, historical.length)).toEqual(historical);
+    expect(database.native.query("SELECT url FROM media_preview_rejections").all()).toEqual([{ url }]);
+    if (scenario === "admit") {
+      expect(database.native.query("SELECT discovery_url, type, hands_on FROM media_sources").all()).toEqual([
+        { discovery_url: url, type: "preview", hands_on: 0 },
+      ]);
+      await api.tick(database, "2027-01-26", { paidSubmissionsPerTick: 0 }, "05:30");
+      expect(api.tavily.requests).toHaveLength(searches);
+      expect(api.openRouter.requests).toHaveLength(0);
+      expect(database.native.query("SELECT stage, status FROM media_processing_jobs").all()).toEqual([
+        { stage: "extraction", status: "queued" },
+      ]);
+    }
+  },
+);
 
 test("a watch preserves an existing enrollment and preview metadata respects the public switch", async () => {
   const database = fixture();
