@@ -4,7 +4,7 @@ import { MIN_USABLE_ARTICLE_CHARS, parseArticleDocument } from "./article-docume
 import type { AppDatabase } from "./db";
 import { writeTransaction } from "./db-transaction";
 import { isOmissionAmendment, mediaAmendment, mediaAmendmentIdentity } from "./media-amendments";
-import { parseArticleObservations, readArticleObservations, synthesisSelections, validateObservationSynthesis, validateSynthesisClauses, validateSynthesisSelections, extractionReviewIssues, usesAuthoredTags, usesArticleTags, usesBrowseTags, usesControllerTags, usesTechnicalTiming, type ClauseVersion, type EditorialOmission } from "./media-observations";
+import { parseArticleObservations, readArticleObservations, synthesisSelections, validateObservationSynthesis, validateSynthesisClauses, validateSynthesisSelections, extractionReviewIssues, usesAuthoredTags, usesArticleTags, usesBrowseTags, usesControllerTags, usesTechnicalTiming, type ClauseVersion, type EditorialOmission, type MediaObservation } from "./media-observations";
 import { legacyObservationEvidence } from "./media-legacy-observations";
 import { boundedMediaError } from "./media-error";
 import { decodeVector, encodeVector, GEMINI_EMBEDDING_DIMENSIONS } from "./media-embedding-vector";
@@ -450,13 +450,25 @@ const CATEGORY_GUIDANCE = `Use these category boundaries:
 - Technical experience & accessibility: performance, stability, controls, readability, and access options.
 Split mixed evidence where appropriate and omit categories without evidence.`;
 
+function previewEvidenceScope(source: SourceRow): string | null {
+  if (source.pass !== "preview") return null;
+  if (source.type === "announcement") return "announcement";
+  return source.hands_on === 1 ? "hands-on preview" : "non-hands-on preview";
+}
+
+function eligiblePreviewObservations(source: SourceRow, observations: MediaObservation[]): MediaObservation[] {
+  if (source.pass !== "preview" || source.hands_on === 1) return observations;
+  return observations.filter((observation) =>
+    observation.kind !== "pro" && observation.kind !== "con" && observation.technicalTiming === undefined);
+}
+
 function makeExtractionRequest(source: SourceRow, content: string, configVersion: string): OpenRouterChatRequest {
   const request = chatRequest(
     EXTRACTION_MAX_OUTPUT_TOKENS,
     { role: "system", content: `Analyze the article about Steam app ${source.appid}. Return JSON only.
 Return {observations, originatingAssessment}. Each observation has id (unique short stable identifier), appid (the target Steam app ID as a JSON integer), kind ("finding", "pro", "con", "tag", "gameplay", or "storyWorld"), category (one of the categories below for findings, "" otherwise), text (one independently checkable assertion), quote (verbatim supporting excerpt, 12–480 characters), and qualifiers (array, empty only when scope does not materially change the claim). Omit originatingAssessment if unknown.
 ${CATEGORY_GUIDANCE}
-Ground every observation in substantive reporting about the target game. Omit factboxes, page metadata, incidental comparisons, and other games or editions. When a platform, edition, build, patch, preview, announcement, or release state changes the meaning of a specific observation, copy the exact phrase into qualifiers from that observation's own quote or from its non-null platform or buildContext metadata. Each qualifier must appear verbatim as a contiguous phrase in one of those places. Include a material qualifier even when the observation text already contains it. Use [] for general observations. Omit placeholders such as "platform and build not stated", labels such as "reviewer assessment", and a platform that merely identifies where the reviewer played. Publication dates do not establish the build played. If interpretation is uncertain, include a short reviewQuestion on the candidate observation identifying the unresolved issue; the candidate is held for editorial review.${extractsTechnicalTiming(configVersion) ? `
+Ground every observation in substantive reporting about the target game. Omit factboxes, page metadata, incidental comparisons, and other games or editions. When a platform, edition, build, patch, preview, announcement, or release state changes the meaning of a specific observation, copy the exact phrase into qualifiers from that observation's own quote or from its non-null platform or buildContext metadata. Each qualifier must appear verbatim as a contiguous phrase in one of those places. Include a material qualifier even when the observation text already contains it. Use [] for general observations. Omit placeholders such as "platform and build not stated", labels such as "reviewer assessment", and a platform that merely identifies where the reviewer played. Publication dates do not establish the build played.${source.pass === "preview" ? " Apply the pre-release scope to every claim. If handsOn is 0, extract only factual descriptions from reporting or attributed plans. Never describe play experience, performance, or an assessment of how the game feels. Omit originatingAssessment." : ""} If interpretation is uncertain, include a short reviewQuestion on the candidate observation identifying the unresolved issue; the candidate is held for editorial review.${extractsTechnicalTiming(configVersion) ? `
 For an observed bug or performance problem, use past tense. If the article explicitly ties the problem to a build, patch or period of play, choose a verbatim excerpt that includes both the problem and that timing and put the excerpt's exact timing phrase in qualifiers. For example, a quote saying a crash occurred on the launch build supports the qualifier "launch build". Publication dates, metadata and timing mentioned elsewhere do not establish when this problem occurred. If the article only establishes that the problem happened while the reviewer played, preserve that limited finding and leave build or release timing unspecified.` : ""}
 Tags must be concise factual characteristics with explicit evidence.${configVersion === EXTRACTION_CONFIG_VERSION ? ' Write each tag as a browsable label of a few words. Examples of form include "Open world", "No load screens", "FPS", "Choices matter", "Joy-Con support" and "Adaptive triggers". Include each only when the excerpt actually establishes that feature. First-person perspective alone does not establish a shooter. Keep the evidence sentence in quote.' : ""} Omit quality judgments, popularity, ratings, scores, performance and technical complaints. Playing solo does not establish a single-player mode. A past build does not establish a general characteristic. A concrete announced feature must remain announced. Use pro and con only for supported assessments. For similarity, separately record directly described mechanics or progression as gameplay observations and directly described settings, characters or narrative premises as storyWorld observations. When the same excerpt also supports a category finding, give the similarity observation its own id and the same supported scope. Exclude praise alone, ratings, popularity, technical complaints and hardware mappings from similarity. Omit any dimension the article does not describe.` },
     { role: "user", content: `Article metadata: ${JSON.stringify({
@@ -596,7 +608,7 @@ ${shortLead ? `For statements, first draft two or three sentences of 45–70 wor
 Only AFTER drafting that paragraph, divide it into citation spans. Different parts of a sentence may cite different articles. Fictional illustration of pacing and boundaries: "Low Tide puts you at the helm of a ferry as the last bridge out of town collapses." [premise] "Each crossing means choosing between another passenger" [capacity] "and enough fuel to make it home." [fuel]. Use the actual game evidence; never reuse details from this illustration.
 ` : ""}${usesSourceGroundedScope(version) ? `Treat the source platform, review date and build as review context. Give ordinary gameplay, story, world and qualitative assessments directly when the excerpt supports them without that context. A review of a PC release or console port does not establish that every detail differs by version. Use an explicit version distinction only for a concrete change, comparison, restriction or platform-specific behavior indicated by the observation's edition and required qualifiers. These come from the verified excerpt, or the accepted wording for legacy observations. Keep historical and technical limits listed in the observation's qualifiers, including patch-dependent bugs and preview-only evidence. Preserve both sides of an explicit version comparison in the claim text. Use the supplied scopeGroup when combining IDs.
 ` : ""}${(usesTechnicalTiming(version)) ? `For an observed bug or performance problem in any prose section, use past tense and put the timing in the clause itself. Preserve each material build, patch or period explicitly supported by every selected observation's excerpt. For example, say "Animation glitches interrupted scenes at launch" only if every citation establishes launch timing. If the citations only establish what happened while the reviewer played, say "during review" explicitly, such as "Animation glitches interrupted scenes during review." Do not infer launch or patch timing from a publication date, source metadata or other observations. Keep differently timed evidence in separate clauses. Ordinary gameplay and other general claims need no such timing.
-` : ""}${version === "v19" || usesAuthoredTags(version) ? "When a source describes the effect of a tested patch, include the observed change and any remaining problems as a separate technical finding with that source’s own citation and timing. Prioritize this over incidental interface complaints. Mention each hardware configuration only once.\n" : ""}${JSON.stringify(selections.evidence.map(({ observations, editorialOmissions: _editorialOmissions, legacySimilarityInputs: _legacySimilarityInputs, ...source }) => ({ ...source, extraction: { observations } })))}` });
+` : ""}${version === "v19" || usesAuthoredTags(version) ? "When a source describes the effect of a tested patch, include the observed change and any remaining problems as a separate technical finding with that source’s own citation and timing. Prioritize this over incidental interface complaints. Mention each hardware configuration only once.\n" : ""}${selections.evidence.some(({ pass }) => pass === "preview") ? "Describe announced features as announced and material shown in trailers as shown. Use hands-on language only when the source played the game, and keep its preview context.\n" : ""}${JSON.stringify(selections.evidence.map(({ observations, editorialOmissions: _editorialOmissions, legacySimilarityInputs: _legacySimilarityInputs, ...source }) => ({ ...source, extraction: { observations } })))}` });
   if (version === "v25") {
     const index = synthesisTagIndex(selections);
     const message = request.messages[0]!;
@@ -935,13 +947,16 @@ async function persistExtraction(db: AppDatabase, job: JobRow, output: unknown, 
     return { status: "stale" };
   }
   const parsed = parseExtraction(output);
-  const context = [source.platform, source.build_context, source.type === "preview" ? "preview" : null];
+  const scope = previewEvidenceScope(source);
+  const context = [source.platform, source.build_context, source.type === "preview" ? "preview" : null, scope];
   const includeTechnicalTiming = extractsTechnicalTiming(job.config_version);
   const includeVersionEvidence = includeTechnicalTiming || job.config_version === VERSION_EVIDENCE_EXTRACTION_VERSION;
-  const observations = article === undefined ? [] : parseArticleObservations(output, source.appid, article, context, false, includeVersionEvidence, includeTechnicalTiming);
-  const pendingObservations = article === undefined ? [] : parseArticleObservations(output, source.appid, article, context, true, includeVersionEvidence, includeTechnicalTiming);
+  const qualified = article === undefined ? [] : parseArticleObservations(output, source.appid, article, context, false, includeVersionEvidence, includeTechnicalTiming, scope ?? undefined);
+  const observations = eligiblePreviewObservations(source, qualified);
+  const pendingObservations = article === undefined ? [] : eligiblePreviewObservations(source,
+    parseArticleObservations(output, source.appid, article, context, true, includeVersionEvidence, includeTechnicalTiming, scope ?? undefined));
   const hasLegacyOutput = article === undefined && (parsed.contributions.length > 0 || parsed.traits.length > 0 || parsed.categories || parsed.similarityInputs);
-  const editorialOmissions = article === undefined ? [] : extractionReviewIssues(output, source.appid, job.input_identity, observations, article, context, includeTechnicalTiming);
+  const editorialOmissions = article === undefined ? [] : extractionReviewIssues(output, source.appid, job.input_identity, qualified, article, context, includeTechnicalTiming);
   if (observations.length === 0 && pendingObservations.length === 0 && !hasLegacyOutput) {
     await db.prepare("UPDATE media_sources SET processing_content = NULL WHERE id = ?").bind(source.id).run();
     return { status: "refused", error: "invalid_output: no supported contributions", ...(editorialOmissions.length ? { outputJson: JSON.stringify({ editorialOmissions }) } : {}) };
@@ -949,7 +964,7 @@ async function persistExtraction(db: AppDatabase, job: JobRow, output: unknown, 
   const stored = article === undefined ? storedExtractionJson(output, job.input_identity, source.original_url) : JSON.stringify({
     observations,
     pendingObservations,
-    originatingAssessment: parsed.originatingAssessment,
+    originatingAssessment: source.pass === "preview" && source.hands_on !== 1 ? null : parsed.originatingAssessment,
     editorialOmissions,
   });
   const earlier = await first<{ id: number }>(db, "SELECT id FROM media_article_extractions WHERE source_id = ? LIMIT 1", source.id);

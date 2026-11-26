@@ -6,6 +6,7 @@ import { ENROLLMENT_START_DATE_KEY, isNewReleaseDate } from "./media-enrollment"
 import { dailyCreditCheckDue, type PaidProvider } from "./media-paid-providers";
 import { runMediaDailyCreditCheck, type MediaProcessingOptions } from "./media-processing";
 import { ELIGIBLE_MEDIA_ROOT_SQL } from "./media-similarity";
+import { preparePreviewQueries, scheduleWatchedMedia } from "./media-watchlist";
 import { parsePreciseReleaseDate } from "./releases";
 
 /**
@@ -123,7 +124,10 @@ async function startScheduledDiscovery(db: AppDatabase, day: string, now: Date):
     "INSERT INTO media_discovery_runs (pass, identity_key, selected_games, status, origin, started_at, finished_at) VALUES ('initial', ?, ?, ?, 'scheduled', ?, ?) ON CONFLICT(identity_key) DO NOTHING",
   ).bind(identity, JSON.stringify(selected), selected.length > 0 ? "running" : "completed", now.toISOString(), selected.length > 0 ? null : now.toISOString()).run();
   const run = await first<{ id: number }>(db, "SELECT id FROM media_discovery_runs WHERE identity_key = ?", identity);
-  if (run) await skipIneligibleMediaPasses(db, run.id, now);
+  if (run) {
+    await skipIneligibleMediaPasses(db, run.id, now);
+    await preparePreviewQueries(db, run.id, day);
+  }
   return selected.length > 0 ? run?.id ?? null : null;
 }
 
@@ -146,6 +150,7 @@ export async function runDailyMediaRun(
   const { enrollmentStartDate, enrolled } = await recordEnrollment(db, now);
   let discoveryRunId: number | null = null;
   const probe = await runMediaDailyCreditCheck(db, now, options, async () => {
+    await scheduleWatchedMedia(db, now);
     discoveryRunId = await startScheduledDiscovery(db, day, now);
   });
   if (probe === null) return null;

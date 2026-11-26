@@ -99,7 +99,7 @@ async function attemptsToday(db: AppDatabase, outlet: MediaOutlet, date: Date): 
  * Search attempts go to the search provider, so a 401 or 403 there is a
  * provider stop, not an outlet denial.
  */
-async function outletDenial(db: AppDatabase, outlet: MediaOutlet): Promise<OutletHttpStop | null> {
+export async function outletDenial(db: AppDatabase, outlet: MediaOutlet): Promise<OutletHttpStop | null> {
   const denied = await first<{ status_code: number }>(
     db,
     `SELECT status_code FROM media_discovery_attempts WHERE outlet = ? AND kind = 'fetch' AND status_code IN (${OUTLET_DENIAL_STATUSES.join(", ")}) ORDER BY id LIMIT 1`,

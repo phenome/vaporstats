@@ -4,7 +4,7 @@ import { toSlug, getCanonicalGamePath } from "./slug";
 import { normalizeAppType, getCanonicalChildPath } from "./related";
 import { getLiveApiCacheHeaders, CACHE_POLICIES } from "./cache";
 
-const MONTH_MAP: Record<string, number> = {
+export const MONTH_MAP: Record<string, number> = {
   jan: 1, january: 1,
   feb: 2, february: 2,
   mar: 3, march: 3,

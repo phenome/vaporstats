@@ -336,14 +336,18 @@ function verifyReceptionRowsSurvivePublicationUpgrade(): void {
         FROM player_score_history WHERE appid = 900002`,
     ]);
     const tables = ["apps", "review_sources", "review_buckets", "review_summary_snapshots", "player_score_history", "player_score_state"];
-    const before = tables.map((table) => retained.query(`SELECT * FROM ${table} ORDER BY rowid`).all());
+    const columns = new Map(tables.map((table) => [
+      table, retained.query<{ name: string }, []>(`PRAGMA table_info(${table})`).all().map(({ name }) => `"${name}"`).join(", "),
+    ]));
+    const snapshot = (table: string) => retained.query(`SELECT ${columns.get(table)} FROM ${table} ORDER BY rowid`).all();
+    const before = tables.map(snapshot);
     for (const [index, table] of tables.entries()) {
       if (before[index]!.length === 0) throw new Error("Retained reception fixture is missing " + table + " rows");
     }
     const foreignKeys = tables.map((table) => retained.query(`PRAGMA foreign_key_list(${table})`).all());
     applyMigrations(retained, migrationDirectory);
     for (const [index, table] of tables.entries()) {
-      if (JSON.stringify(retained.query(`SELECT * FROM ${table} ORDER BY rowid`).all()) !== JSON.stringify(before[index])) {
+      if (JSON.stringify(snapshot(table)) !== JSON.stringify(before[index])) {
         throw new Error("Reception publication migration changed retained " + table + " rows");
       }
       if (JSON.stringify(retained.query(`PRAGMA foreign_key_list(${table})`).all()) !== JSON.stringify(foreignKeys[index])) {

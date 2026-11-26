@@ -22,6 +22,7 @@ export interface SeedAppInput {
   is_playable?: boolean;
   parent_appid?: number | null;
   release_date?: string | null;
+  storefront_release_date_text?: string | null;
   release_status?: string;
   description?: string;
   header_image?: string;
@@ -353,6 +354,7 @@ export async function fetchSteamAppDetails(
     is_playable: details.type === "game",
     parent_appid: null,
     ...releaseFields(null, appdetailsReleaseDate),
+    storefront_release_date_text: details.release_date?.date ?? null,
     release_status:
       details.release_date?.coming_soon === true
         ? "upcoming"

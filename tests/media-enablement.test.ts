@@ -299,9 +299,12 @@ describe("repair of the first live run's cut-off extractions (migration 0028)", 
       before = mediaState(native);
     }, "vaporstats-media-repair-production-");
     cleanups.push(production.cleanup);
-    // The subsequent scheduling migration adds a nullable column without changing retained progress.
+    // Subsequent scheduling migrations add nullable columns and empty watchlist tables. Retained progress and paid work are unchanged.
     const retainedProgress = before.media_discovery_progress as Array<Record<string, unknown>>;
-    before.media_discovery_progress = retainedProgress.map((row) => ({ ...row, pass_due_at: null }));
+    before.media_discovery_progress = retainedProgress.map((row) => ({ ...row, pass_due_at: null, occurrence_id: null }));
+    for (const table of ["media_watches", "media_watch_coverage", "media_preview_occurrences", "media_preview_rejections"]) {
+      before[table] = [];
+    }
     expect(mediaState(production.native)).toEqual(before);
   });
 });

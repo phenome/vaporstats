@@ -5,16 +5,19 @@ import { writeTransaction } from "./db-transaction";
 import { ENROLLMENT_START_DATE_KEY, isNewReleaseDate } from "./media-enrollment";
 import { boundedMediaError } from "./media-error";
 import { mainReleasedDate, type MainReleasedFields } from "./lifecycle-history";
-import { fetchOutletArticle, finishOutletAttempt, hostInOutlet, MEDIA_OUTLETS, OUTLET_HTTP_STOPS, OUTLET_STOP_REASONS, reserveOutletAttempt, type MediaOutlet } from "./media-outlet-access";
-import { MEDIA_EXPERIMENT_GAMES, PUBLIC_MEDIA_ROOT_SQL } from "./media-publication";
+import { fetchOutletArticle, finishOutletAttempt, hostInOutlet, isOutletDenialStop, outletDenial, MEDIA_OUTLETS, OUTLET_HTTP_STOPS, OUTLET_STOP_REASONS, reserveOutletAttempt, type MediaOutlet } from "./media-outlet-access";
+import { isMediaOverviewPublic, MEDIA_EXPERIMENT_GAMES, PUBLIC_MEDIA_ROOT_SQL } from "./media-publication";
 import { parsePreciseReleaseDate } from "./releases";
 import { ELIGIBLE_MEDIA_ENTITY_SQL, ELIGIBLE_MEDIA_ROOT_SQL } from "./media-similarity";
 import { createTavilyTransport } from "./media-tavily";
 
+import { endPreviewOccurrence, PREVIEW_DEFERRAL_KEY, previewCeilingReached, shiftMediaDay } from "./media-watchlist";
+
 export { MEDIA_GAME_CHOICES, type MediaGameChoice } from "./media-publication";
 export { MEDIA_OUTLETS, type MediaOutlet } from "./media-outlet-access";
-export type MediaPass = "initial" | "later";
-export type MediaArticleType = "review" | "preview";
+type AssessmentPass = "initial" | "later";
+export type MediaPass = AssessmentPass | "preview";
+export type MediaArticleType = "review" | "preview" | "announcement";
 
 export interface MediaOutletShortfall {
   required: number;
@@ -121,6 +124,7 @@ type ProgressRow = {
   status: string;
   query_attempted_at: string | null;
   pass_due_at: string | null;
+  occurrence_id: number | null;
   candidate_urls: string;
   candidate_index: number;
   stop_reason: string | null;
@@ -129,7 +133,7 @@ type ProgressRow = {
 };
 
 const RUN_COLUMNS = "id, pass, identity_key, selected_games, status, resumed, query_count, article_count, attempt_count, provider_request_ids, usage, stop_reason, summary, origin, started_at";
-const PROGRESS_COLUMNS = "id, run_id, appid, pass, outlet, status, query_attempted_at, pass_due_at, candidate_urls, candidate_index, stop_reason, stopped_at, completed_at";
+const PROGRESS_COLUMNS = "id, run_id, appid, pass, outlet, status, query_attempted_at, pass_due_at, occurrence_id, candidate_urls, candidate_index, stop_reason, stopped_at, completed_at";
 
 type TavilyResult = { url?: unknown; published_date?: unknown };
 
@@ -254,7 +258,7 @@ async function rows<T>(db: AppDatabase, query: string, ...values: unknown[]): Pr
   return result.results ?? [];
 }
 
-function transaction(db: AppDatabase, work: () => Promise<void>): Promise<void> {
+function transaction<T>(db: AppDatabase, work: () => Promise<T>): Promise<T> {
   return writeTransaction(db, work);
 }
 
@@ -303,7 +307,7 @@ export async function skipIneligibleMediaPasses(db: AppDatabase, runId: number, 
      CROSS JOIN json_each('["initial","later"]') AS pass
      CROSS JOIN json_each(?) AS outlet
      WHERE NOT (${ELIGIBLE_MEDIA_ROOT_SQL})
-     ON CONFLICT(appid, outlet, pass) DO NOTHING`,
+     ON CONFLICT(appid, outlet, pass) WHERE occurrence_id IS NULL DO NOTHING`,
   ).bind(runId, ENTITY_INELIGIBLE, stoppedAt, outlets).run();
   await db.prepare(
     `UPDATE media_discovery_progress
@@ -351,7 +355,7 @@ async function reopenDayScopedProgress(
 }
 
 /** A pass of one entity that a discovery run serves, and since when it has been due. */
-type DuePass = { target: MediaTarget; pass: MediaPass; dueAt: string };
+type DuePass = { target: MediaTarget; pass: AssessmentPass; dueAt: string; pendingInitial?: true };
 
 /** A recorded time as an ISO timestamp; SQLite's `CURRENT_TIMESTAMP` form is UTC. */
 function isoTimestamp(value: string): string {
@@ -422,7 +426,7 @@ function childWithinAssessmentWindow(
 }
 
 /** The initial and later passes due at the start of this run, ordered by due time and entity. */
-async function duePasses(db: AppDatabase, targets: readonly MediaTarget[], asOf: string): Promise<DuePass[]> {
+async function duePasses(db: AppDatabase, targets: readonly MediaTarget[], asOf: string, through = asOf): Promise<DuePass[]> {
   const appids = JSON.stringify(targets.map(({ appid }) => appid));
   const roots = JSON.stringify(targets.filter(({ parentAppid }) => parentAppid === null).map(({ appid }) => appid));
   const enrollments = new Map((await rows<{ appid: number; reason: string; enrolled_at: string; empty_later_finished_at: string | null }>(
@@ -433,8 +437,8 @@ async function duePasses(db: AppDatabase, targets: readonly MediaTarget[], asOf:
   const progress = new Map<number, AssessmentProgress>(
     targets.map(({ appid }) => [appid, { initial: [], later: [], laterOutlets: [] }]),
   );
-  for (const row of await rows<ProgressRow>(db, `SELECT ${PROGRESS_COLUMNS} FROM media_discovery_progress WHERE appid IN (SELECT value FROM json_each(?))`, appids)) {
-    progress.get(row.appid)?.[row.pass].push(row);
+  for (const row of await rows<ProgressRow>(db, `SELECT ${PROGRESS_COLUMNS} FROM media_discovery_progress WHERE pass <> 'preview' AND appid IN (SELECT value FROM json_each(?))`, appids)) {
+    if (row.pass === "initial" || row.pass === "later") progress.get(row.appid)?.[row.pass].push(row);
   }
   for (const row of await rows<{ appid: number; outlet: MediaOutlet }>(
     db,
@@ -448,13 +452,16 @@ async function duePasses(db: AppDatabase, targets: readonly MediaTarget[], asOf:
     "SELECT appid, release_status, release_date, release_date_source, steam_release_date, original_release_date FROM apps WHERE appid IN (SELECT value FROM json_each(?))",
     appids,
   )).map((app) => [app.appid, { app, releasedOn: parsePreciseReleaseDate(mainReleasedDate(app)?.date) }]));
+  const covered = new Map((await rows<{ appid: number; root_appid: number; covered_at: string; observed_released_on: string | null }>(
+    db, "SELECT appid, root_appid, covered_at, observed_released_on FROM media_watch_coverage WHERE appid IN (SELECT value FROM json_each(?))", appids,
+  )).map((row) => [row.appid, row]));
   const enrollmentStart = await first<{ value: string }>(db, "SELECT value FROM checkpoints WHERE key = ?", ENROLLMENT_START_DATE_KEY);
   const asOfDay = asOf.slice(0, 10);
   const cappedRoots = new Map((await rows<{ appid: number; capped_at: string }>(
     db,
     `SELECT appid, MAX(retrieved_at) AS capped_at
      FROM media_sources
-     WHERE appid IN (SELECT value FROM json_each(?))
+     WHERE pass <> 'preview' AND appid IN (SELECT value FROM json_each(?))
      GROUP BY appid HAVING COUNT(*) >= ?`,
     roots,
     MAX_MEDIA_ARTICLES_PER_GAME,
@@ -463,12 +470,11 @@ async function duePasses(db: AppDatabase, targets: readonly MediaTarget[], asOf:
   const rootCutoffs = new Map([...cappedRoots].filter(([, cappedAt]) => cappedAt <= asOf));
   const deferredRoots = new Set<number>();
   for (const [appid, enrollment] of enrollments) {
-    if (enrollment.reason === "watchlist") continue;
     const own = progress.get(appid)!;
     const initialFinishedAt = passFinishedAt(own.initial, ASSESSMENT_OUTLETS);
-    const releasedOn = releases.get(appid)?.releasedOn ?? null;
+    const releasedOn = covered.get(appid)?.observed_released_on ?? releases.get(appid)?.releasedOn ?? null;
     const experiment = enrollment.reason === "experiment";
-    if (initialFinishedAt === null && !experiment && !own.initial.some((row) => row.query_attempted_at !== null) &&
+    if (!covered.has(appid) && initialFinishedAt === null && !experiment && !own.initial.some((row) => row.query_attempted_at !== null) &&
         enrollmentStart && !isNewReleaseDate(releasedOn, enrollmentStart.value, asOfDay)) deferredRoots.add(appid);
     if (initialFinishedAt === null) continue;
     const laterFinishedAt = passFinishedAt(own.later, own.laterOutlets);
@@ -476,7 +482,7 @@ async function duePasses(db: AppDatabase, targets: readonly MediaTarget[], asOf:
     // With zero represented outlets, the later pass has no searches to run.
     // Persist its cutoff before release corrections can move it.
     let finishedAt = enrollment.empty_later_finished_at ?? (laterFinishedAt || laterPassDueAt(initialFinishedAt, releasedOn, experiment));
-    if (own.laterOutlets.length === 0 && enrollment.empty_later_finished_at === null && finishedAt !== null && finishedAt <= asOf) {
+    if (asOf === through && own.laterOutlets.length === 0 && enrollment.empty_later_finished_at === null && finishedAt !== null && finishedAt <= asOf) {
       const recorded = await first<{ empty_later_finished_at: string }>(
         db,
         `UPDATE media_enrollments
@@ -496,33 +502,131 @@ async function duePasses(db: AppDatabase, targets: readonly MediaTarget[], asOf:
     const enrollment = enrollments.get(rootAppid(target));
     if (!enrollment) continue;
     const own = progress.get(target.appid)!;
-    const experiment = enrollment.reason === "experiment";
+    const coverage = covered.get(target.appid);
+    const watched = coverage?.root_appid === rootAppid(target) ? coverage : null;
     const release = releases.get(target.appid);
-    const releasedOn = release?.releasedOn ?? null;
+    const experiment = enrollment.reason === "experiment" && (!watched || target.parentAppid === null ||
+      own.initial.some((row) => row.query_attempted_at !== null && row.query_attempted_at < watched.covered_at) ||
+      childWithinAssessmentWindow(release?.app, release?.releasedOn ?? watched.observed_released_on, rootCutoffs.get(target.parentAppid) ?? null,
+        true, watched.covered_at.slice(0, 10)));
+    if (watched && (watched.covered_at > asOf || release?.app.release_status !== "released")) continue;
+    const releasedOn = watched?.observed_released_on ?? release?.releasedOn ?? null;
     const initialFinishedAt = passFinishedAt(own.initial, ASSESSMENT_OUTLETS);
     const initialStarted = own.initial.some((row) => row.query_attempted_at !== null);
-    if (deferredRoots.has(rootAppid(target))) {
+    if (!watched && deferredRoots.has(rootAppid(target))) {
       const currentPass = initialFinishedAt === null ? own.initial : own.later;
       if (target.parentAppid === null || !currentPass.some((row) => row.query_attempted_at !== null)) continue;
     }
-    if (target.parentAppid !== null && enrollment.reason !== "watchlist" && !initialStarted && initialFinishedAt === null &&
-        !childWithinAssessmentWindow(release?.app, releasedOn, rootCutoffs.get(target.parentAppid) ?? null, experiment, asOfDay)) continue;
+    if (target.parentAppid !== null && !watched && !initialStarted && initialFinishedAt === null &&
+        !childWithinAssessmentWindow(release?.app, releasedOn, rootCutoffs.get(target.parentAppid) ?? null, experiment, through.slice(0, 10))) continue;
 
     if (initialFinishedAt === null) {
-      const calculated = experiment
-        ? isoTimestamp(enrollment.enrolled_at)
-        : releasedOn && releaseAgeDueAt(releasedOn, INITIAL_PASS_RELEASE_AGE_DAYS);
+      const releaseDue = releasedOn && releaseAgeDueAt(releasedOn, INITIAL_PASS_RELEASE_AGE_DAYS);
+      const calculated = experiment ? isoTimestamp(enrollment.enrolled_at)
+        : releaseDue && watched
+          ? [releaseDue, `${watched.covered_at.slice(0, 10)}T00:00:00.000Z`].sort()[1]!
+          : releaseDue;
       const dueAt = experiment ? calculated : startedDueAt(own.initial, calculated);
-      if (dueAt !== null && dueAt <= asOf) due.push({ target, pass: "initial", dueAt });
+      if (dueAt !== null && dueAt <= through) {
+        due.push({ target, pass: "initial", dueAt });
+        const projected = asOf !== through && dueAt.slice(0, 10) < through.slice(0, 10)
+          ? laterPassDueAt(dueAt, releasedOn, experiment) : null;
+        if (projected && projected <= through) {
+          due.push({ target, pass: "later", dueAt: projected, pendingInitial: true });
+        }
+      }
       continue;
     }
     if (own.laterOutlets.length === 0 || (target.parentAppid === null && enrollment.empty_later_finished_at !== null) ||
         passFinishedAt(own.later, own.laterOutlets) !== null) continue;
     const calculated = laterPassDueAt(initialFinishedAt, releasedOn, experiment);
     const dueAt = experiment ? calculated : startedDueAt(own.later, calculated);
-    if (dueAt !== null && dueAt <= asOf) due.push({ target, pass: "later", dueAt });
+    if (dueAt !== null && dueAt <= through) due.push({ target, pass: "later", dueAt });
   }
   return due.sort((left, right) => left.dueAt.localeCompare(right.dueAt) || left.target.appid - right.target.appid || left.pass.localeCompare(right.pass));
+}
+
+export async function nextMediaAssessment(db: AppDatabase, root: number, now: Date) {
+  const targets = await loadMediaTargets(db, [root]);
+  const upcoming = await duePasses(db, targets, now.toISOString(), "9999-12-31T23:59:59.999Z");
+  const next = new Map<number, { pass: AssessmentPass; dueAt: string }>();
+  for (const { target, pass, dueAt, pendingInitial } of upcoming) {
+    if (!pendingInitial && !await articleCeiling(db, target.appid, pass)) next.set(target.appid, { pass, dueAt });
+  }
+  return next;
+}
+
+type PreviewOccurrence = { id: number; appid: number; due_at: string };
+
+async function pendingPreviews(db: AppDatabase, targetAppids: number[], day: string): Promise<PreviewOccurrence[]> {
+  return rows(db,
+    `SELECT occurrence.id, occurrence.appid, occurrence.due_at FROM media_preview_occurrences AS occurrence
+     JOIN media_watch_coverage AS coverage ON coverage.appid = occurrence.appid
+     JOIN media_watches AS watch ON watch.appid = coverage.root_appid
+     JOIN apps AS app ON app.appid = occurrence.appid
+     WHERE occurrence.ended_at IS NULL AND occurrence.scheduled_on <= ? AND watch.unwatched_at IS NULL
+       AND DATE(watch.watched_at) <= occurrence.scheduled_on AND app.release_status <> 'released'
+       AND occurrence.appid IN (SELECT value FROM json_each(?))
+     ORDER BY occurrence.due_at, occurrence.appid`, day, JSON.stringify(targetAppids));
+}
+
+async function previewOpen(db: AppDatabase, id: number): Promise<boolean> {
+  return await first(db, `SELECT occurrence.id FROM media_preview_occurrences AS occurrence
+    JOIN media_watch_coverage AS coverage ON coverage.appid = occurrence.appid
+    JOIN media_watches AS watch ON watch.appid = coverage.root_appid
+    JOIN apps AS app ON app.appid = occurrence.appid
+    WHERE occurrence.id = ? AND occurrence.ended_at IS NULL AND watch.unwatched_at IS NULL
+      AND app.release_status <> 'released' AND app.is_eligible = 1 AND ${ELIGIBLE_MEDIA_ENTITY_SQL}`, id) !== null;
+}
+
+function needsSearch(progress: ProgressRow | undefined): boolean {
+  return !progress || (!progress.query_attempted_at && progress.status !== "completed" &&
+    (progress.status !== "stopped" || DAY_SCOPED_STOPS.some((stop) => stop === progress.stop_reason)));
+}
+
+/** Until initial discovery finishes, reserve room for any outlet that can still admit an initial source. */
+async function canRequireLaterSearch(db: AppDatabase, appid: number, outlet: MediaOutlet, initialPending: boolean, initial?: ProgressRow): Promise<boolean> {
+  return await first(db, "SELECT 1 FROM media_sources WHERE appid = ? AND outlet = ? AND pass = 'initial'", appid, outlet) !== null ||
+    (initialPending && (!initial || initial.status === "queued" || initial.status === "searching" || initial.status === "fetching" ||
+      (initial.status === "stopped" && DAY_SCOPED_STOPS.some((stop) => stop === initial.stop_reason))));
+}
+
+async function reviewSearchReservation(
+  db: AppDatabase, targets: MediaTarget[], at: string, progress: ProgressRow[], denied: ReadonlySet<MediaOutlet>,
+): Promise<number> {
+  const monthEnd = `${shiftMediaDay(`${at.slice(0, 7)}-01`, 32).slice(0, 7)}-01T00:00:00.000Z`;
+  const through = new Date(Date.parse(monthEnd) - 1).toISOString();
+  const forecast = await duePasses(db, targets, at, through);
+  const find = (appid: number, pass: MediaPass, outlet: MediaOutlet) =>
+    progress.find((item) => item.appid === appid && item.pass === pass && item.outlet === outlet);
+  let count = 0;
+  for (const { target, pass, pendingInitial } of forecast) {
+    if (await articleCeiling(db, target.appid, pass)) continue;
+    for (const { name } of MEDIA_OUTLETS) {
+      if (denied.has(name) || !needsSearch(find(target.appid, pass, name))) continue;
+      if (pass === "later") {
+        const initial = find(target.appid, "initial", name);
+        if (!await canRequireLaterSearch(db, target.appid, name, pendingInitial === true, initial)) continue;
+      }
+      count += 1;
+    }
+  }
+  return count;
+}
+
+async function admitSource(db: AppDatabase, pass: MediaPass, source: MediaSource, root: number): Promise<boolean> {
+  const result = await db.prepare(
+    `INSERT OR IGNORE INTO media_sources (appid, pass, original_url, discovery_url, title, outlet, author, published_at, updated_at, retrieved_at, type, hands_on, affiliation, platform, build_context)
+     SELECT app.appid, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+     FROM apps AS app
+     WHERE app.appid = ? AND app.is_eligible = 1 AND ${ELIGIBLE_MEDIA_ENTITY_SQL}
+       AND COALESCE(app.parent_appid, app.appid) = ?
+       AND NOT EXISTS (SELECT 1 FROM media_sources WHERE appid = app.appid
+         AND (original_url IN (?, ?) OR discovery_url IN (?, ?)))`,
+  ).bind(pass, source.originalUrl, source.discoveryUrl, source.title, source.outlet, source.author, source.publishedAt, source.updatedAt,
+    source.retrievedAt, source.type, source.handsOn === null ? null : Number(source.handsOn), source.affiliation, source.platform, source.buildContext, source.appid, root,
+    source.originalUrl, source.discoveryUrl, source.originalUrl, source.discoveryUrl).run();
+  return result.meta.changes === 1;
 }
 
 /**
@@ -569,6 +673,7 @@ async function admittedEntities(db: AppDatabase, pass: MediaPass, outlet: MediaO
 
 /** The one query an entity's pass sends to each outlet's domain. */
 function passQuery(target: MediaTarget, pass: MediaPass): string {
+  if (pass === "preview") return `${target.name} preview hands-on announcement`;
   return pass === "initial" ? `${target.name} review preview` : `${target.name} review revisited`;
 }
 
@@ -649,7 +754,7 @@ function meta(document: Document, ...names: string[]): string | null {
   return null;
 }
 
-function parseSource(html: string, finalUrl: string, target: MediaTarget, targets: readonly MediaTarget[], outlet: MediaOutlet, retrievedAt: string): MediaSource | null {
+function parseSource(html: string, finalUrl: string, target: MediaTarget, targets: readonly MediaTarget[], outlet: MediaOutlet, retrievedAt: string, pass: MediaPass): MediaSource | null {
   const document = parseArticleDocument(html);
   if (!document) return null;
   for (const element of Array.from(document.querySelectorAll("script,style,noscript,template"))) element.remove();
@@ -700,12 +805,16 @@ function parseSource(html: string, finalUrl: string, target: MediaTarget, target
   if (titleChild && leadChild && titleChild.appid !== leadChild.appid) return null;
   const attributedTarget = titleChild ?? leadChild ?? selected.target;
   const rootCanAttributeChild = target.parentAppid === null && attributedTarget.parentAppid === target.appid;
-  if (attributedTarget.appid !== target.appid && !rootCanAttributeChild) return null;
-  if (/\b(announcement|announces|revealed|reveal|trailer|launches|patch notes|update notes|roadmap)\b/.test(titleLower)) return null;
+  if (attributedTarget.appid !== target.appid && (pass === "preview" || !rootCanAttributeChild)) return null;
+  if (/\b(patch notes|update notes|roadmap)\b/.test(titleLower)) return null;
+  if (pass === "preview" && /\b(guide|walkthrough)\b/.test(titleLower)) return null;
+  const announcement = /\b(announced|announcement|announces|revealed|reveal|trailer|launches)\b/.test(titleLower);
+  if (announcement && pass !== "preview") return null;
   const reviewScoreNews = /\b(?:review\s+scores?|(?:gets?|earns?|receives?|scores?|rated)\s+(?:a\s+)?\d+(?:\.\d+)?\s*(?:\/\s*\d+|out of \d+))\b/.test(titleLower);
   const coTitledReview = /\b(?:and|&)\s+.+?\s+reviews?\b/.test(titleLower);
+  const coTitledPreview = pass === "preview" && /(?:\band|&)\s+.+?\s+(?:previews?|announcements?)\b/.test(titleLower);
   const reviewRelatedNews = /\breviews?\s*(?:[:\-–—]\s*|\s+)(?:embargo(?:es)?|details?|reactions?|coverage|codes?|copies|policies?|discourse)\b|\b(?:embargo(?:es)?|details?|reactions?|coverage|codes?|copies|policies?|discourse)\s*(?:[:\-–—]\s*|\s+)(?:about|around|for|on|of|to)?\s*reviews?\b/.test(titleLower);
-  if (reviewScoreNews || coTitledReview || reviewRelatedNews || /\b(round[- ]?up|best games?|games like|versus|\bvs\.?\b|comparison|ranking|ranked|top\s+\d+|lists?(?:icle)?|highest|metacritic|surpasses?|outperforms?|outscores?|beats?|review\s+drama|drama)\b/.test(titleLower)) return null;
+  if (reviewScoreNews || coTitledReview || coTitledPreview || reviewRelatedNews || /\b(round[- ]?up|best games?|games like|versus|\bvs\.?\b|comparison|ranking|ranked|top\s+\d+|lists?(?:icle)?|highest|metacritic|surpasses?|outperforms?|outscores?|beats?|review\s+drama|drama)\b/.test(titleLower)) return null;
   const bodyList = /\b(round[- ]?up|games like|top\s+\d+|listicle|ranking|ranked among|(?:a|the)\s+list\s+of|multi[- ]game|multiple games?|several games?|lists?)\b/.test(bodyLower);
   const substantiveBodyComparison = /\b(side[- ]by[- ]side|head[- ]to[- ]head|direct comparison|comparison\s+(?:of|between)|versus|vs\.?)\b/.test(bodyLower);
   if (bodyList || substantiveBodyComparison) return null;
@@ -714,10 +823,12 @@ function parseSource(html: string, finalUrl: string, target: MediaTarget, target
   const developerAuthorship = /developer|official|cd projekt|larian studios|supergiant|valve/i;
   if (developerAuthorship.test(byline ?? "") || developerAuthorship.test(affiliation ?? "")) return null;
   const isReview = /\breview\b/i.test(title) || /\bour review\b/i.test(fullArticleText.slice(0, 3_000));
-  const explicitHandsOn = /\b(hands?[- ]on|we played|after playing|played for|impressions?)\b/i.test(`${title} ${fullArticleText.slice(0, 4_000)}`);
+  const explicitHandsOn = pass === "preview"
+    ? !/\b(?:not (?:an? )?hands?[- ]on|non[- ]hands?[- ]on|no hands?[- ]on)\b/i.test(title) && (/\bhands?[- ]on\b/i.test(title) || /\b(?:we (?:played|went hands?[- ]on)|i played|after playing|played for)\b/i.test(fullArticleText.slice(0, 4_000)))
+    : /\b(hands?[- ]on|we played|after playing|played for|impressions?)\b/i.test(`${title} ${fullArticleText.slice(0, 4_000)}`);
   const isPreview = /\b(preview|early access)\b/i.test(`${title} ${fullArticleText.slice(0, 4_000)}`);
-  if (!isReview && !(isPreview && explicitHandsOn)) return null;
-  const handsOn = explicitHandsOn ? true : null;
+  if (pass === "preview" ? isReview || !(isPreview || announcement) : !isReview && !(isPreview && explicitHandsOn)) return null;
+  const handsOn = explicitHandsOn ? true : pass === "preview" ? false : null;
   const canonical = cleanText(canonicalMeta);
   let normalizedUrl: string;
   try {
@@ -727,7 +838,7 @@ function parseSource(html: string, finalUrl: string, target: MediaTarget, target
   }
   const outletConfig = MEDIA_OUTLETS.find((item) => item.name === outlet);
   if (!outletConfig || !hostInOutlet(normalizedUrl, outletConfig)) return null;
-  const articleType: MediaArticleType = isReview ? "review" : "preview";
+  const articleType: MediaArticleType = isReview ? "review" : announcement && !/\bpreview\b/i.test(title) ? "announcement" : "preview";
   const platform = cleanText(platformMeta) ?? (/\b(pc|playstation|xbox|switch)\b/i.exec(fullArticleText.slice(0, 4_000))?.[1] ?? null);
   const buildContext = cleanText(buildMeta) ?? (/\bearly access (?:review|preview|build)\b|\breview(?:ed)? in early access\b/i.test(title) || /\bthis early access (?:review|build|preview)\b/i.test(fullArticleText) ? "Early Access" : null);
   return {
@@ -754,7 +865,7 @@ function candidateDate(candidate: MediaSource): number {
 
 /** Stops a query for `reason` at `at`, the run's clock, which decides when a day-scoped stop reopens. */
 async function stopProgress(db: AppDatabase, progressId: number, reason: string, at: Date): Promise<void> {
-  await db.prepare("UPDATE media_discovery_progress SET status = 'stopped', stop_reason = ?, stopped_at = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(reason.slice(0, 128), at.toISOString(), progressId).run();
+  await db.prepare("UPDATE media_discovery_progress SET status = 'stopped', stop_reason = ?, stopped_at = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND (occurrence_id IS NULL OR EXISTS (SELECT 1 FROM media_preview_occurrences WHERE id = occurrence_id AND ended_at IS NULL))").bind(reason.slice(0, 128), at.toISOString(), progressId).run();
 }
 
 /**
@@ -764,7 +875,7 @@ async function stopProgress(db: AppDatabase, progressId: number, reason: string,
  * their one query.
  */
 async function releaseRefusedQuery(db: AppDatabase, progressId: number, status: "queued" | "stopped", reason: string, at: Date): Promise<void> {
-  await db.prepare("UPDATE media_discovery_progress SET status = ?, stop_reason = ?, stopped_at = ?, query_attempted_at = NULL, pass_due_at = NULL, candidate_urls = '[]', candidate_index = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(status, reason, status === "stopped" ? at.toISOString() : null, progressId).run();
+  await db.prepare("UPDATE media_discovery_progress SET status = ?, stop_reason = ?, stopped_at = ?, query_attempted_at = NULL, pass_due_at = CASE WHEN pass = 'preview' THEN pass_due_at END, candidate_urls = '[]', candidate_index = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND (occurrence_id IS NULL OR status = 'searching')").bind(status, reason, status === "stopped" ? at.toISOString() : null, progressId).run();
 }
 
 /**
@@ -837,11 +948,12 @@ async function loadRun(db: AppDatabase, runId?: number): Promise<RunRow> {
 
 /**
  * Why `appid` can admit no further article, if it cannot: it reached its own
- * 15-article ceiling, counting accepted articles from every pass. No total
+ * 15-article ceiling for its kind of discovery. No total
  * across entities applies.
  */
-async function articleCeiling(db: AppDatabase, appid: number): Promise<string | null> {
-  const row = await first<{ count: number }>(db, "SELECT COUNT(*) AS count FROM media_sources WHERE appid = ?", appid);
+async function articleCeiling(db: AppDatabase, appid: number, pass: MediaPass): Promise<string | null> {
+  if (pass === "preview") return await previewCeilingReached(db, appid) ? "preview_ceiling" : null;
+  const row = await first<{ count: number }>(db, "SELECT COUNT(*) AS count FROM media_sources WHERE appid = ? AND pass <> 'preview'", appid);
   return Number(row?.count ?? 0) >= MAX_MEDIA_ARTICLES_PER_GAME ? `article_cap:${appid}` : null;
 }
 
@@ -934,7 +1046,7 @@ export async function runAuthorizedMediaDiscovery(db: AppDatabase, options: Medi
   // A scheduled discovery run serves every pass due when the daily media run
   // started it; an authorized run serves its own pass.
   const scheduled = run.origin === "scheduled";
-  const passes: MediaPass[] = scheduled ? ["initial", "later"] : [pass];
+  const passes: MediaPass[] = scheduled ? ["initial", "later", "preview"] : [pass];
   const selectedGames = json<number[]>(run.selected_games, []);
   const discoveryTargets = await loadMediaTargets(db, selectedGames);
   const targetAppids = discoveryTargets.map((target) => target.appid);
@@ -947,7 +1059,10 @@ export async function runAuthorizedMediaDiscovery(db: AppDatabase, options: Medi
     const clock: MediaClock = () => isoNow(options.now);
     if (scheduled) await transaction(db, () => skipIneligibleMediaPasses(db, run.id, clock()));
     await reopenDayScopedProgress(db, run.id, passes, targetAppids, dayKey(clock()));
-    const scheduledPasses = scheduled ? await duePasses(db, discoveryTargets, isoTimestamp(run.started_at ?? clock().toISOString())) : null;
+    const startedAt = isoTimestamp(run.started_at ?? clock().toISOString());
+    const day = startedAt.slice(0, 10);
+    const scheduledPasses = scheduled ? await duePasses(db, discoveryTargets, startedAt) : null;
+    const previews = scheduled ? await pendingPreviews(db, targetAppids, day) : [];
     const stopReasons = new Set<string>();
     const stoppedOutlets = new Set<MediaOutlet>();
     let searchesStopped = false;
@@ -962,23 +1077,63 @@ export async function runAuthorizedMediaDiscovery(db: AppDatabase, options: Medi
       await db.prepare("UPDATE media_discovery_runs SET usage = ? WHERE id = ?").bind(JSON.stringify(usageSummary), run.id).run();
     }
     if (usage.stop) stopReasons.add(usage.stop);
-  if (stopReasons.size === 0) {
-    const progressRows = await rows<ProgressRow>(db, `SELECT ${PROGRESS_COLUMNS} FROM media_discovery_progress WHERE appid IN (SELECT value FROM json_each(?)) ORDER BY appid, id`, JSON.stringify(targetAppids));
+    const progressRows = await rows<ProgressRow>(db, `SELECT ${PROGRESS_COLUMNS} FROM media_discovery_progress
+      WHERE appid IN (SELECT value FROM json_each(?)) AND (occurrence_id IS NULL OR occurrence_id IN (SELECT value FROM json_each(?)))
+      ORDER BY appid, id`, JSON.stringify(targetAppids), JSON.stringify(previews.map(({ id }) => id)));
     // A scheduled run takes its due passes oldest due first, then by entity,
     // each across the outlets in roster order; an authorized run takes its
     // pass outlet by outlet.
-    const queries = scheduledPasses
-      ? scheduledPasses.flatMap(({ target, pass, dueAt }) => MEDIA_OUTLETS.map((outlet) => ({ outlet, target, pass, dueAt })))
-      : MEDIA_OUTLETS.flatMap((outlet) => discoveryTargets.map((target) => ({ outlet, target, pass, dueAt: null })));
-    const dueEntities: Record<MediaPass, Set<number>> = { initial: new Set(), later: new Set() };
-    for (const { target, pass } of scheduledPasses ?? []) dueEntities[pass].add(target.appid);
-    for (const { outlet, target, pass, dueAt } of queries) {
-      const appid = target.appid;
-      if (await articleCeiling(db, appid)) continue;
-      if (stoppedOutlets.has(outlet.name)) continue;
-      // The later pass asks only the outlets with an accepted initial article for the entity.
-      if (pass === "later" && !await first<{ id: number }>(db, "SELECT id FROM media_sources WHERE appid = ? AND outlet = ? AND pass = 'initial' LIMIT 1", appid, outlet.name)) continue;
-        const progress = progressRows.find((row) => row.appid === appid && row.outlet === outlet.name && row.pass === pass) ?? null;
+    const denied = new Set<MediaOutlet>();
+    for (const { name } of previews.length ? MEDIA_OUTLETS : []) {
+      const reason = await outletDenial(db, name);
+      if (!reason) continue;
+      denied.add(name);
+      for (const row of progressRows.filter((row) => row.outlet === name && row.occurrence_id !== null)) {
+        if (row.status !== "completed") await stopProgress(db, row.id, reason, clock());
+      }
+    }
+    const previewQueries = previews.flatMap(({ id, appid, due_at }) => MEDIA_OUTLETS.map((outlet) => ({
+      outlet, target: discoveryTargets.find((target) => target.appid === appid)!, pass: "preview" as const, dueAt: due_at, occurrenceId: id,
+    })));
+    const pendingPreviewQueries = () => progressRows.filter((row) => row.occurrence_id !== null
+      && row.status !== "completed" && !row.query_attempted_at && !denied.has(row.outlet)).length;
+    let deferred = previews.length > 0 && (await first<{ value: string }>(db,
+      "SELECT value FROM checkpoints WHERE key = ?", PREVIEW_DEFERRAL_KEY))?.value === day.slice(0, 7);
+    const checkPreviewCredits = async (progress: ProgressRow[], budget: number) => {
+      const pending = pendingPreviewQueries();
+      if (deferred || pending === 0) return;
+      const reserved = await reviewSearchReservation(db, discoveryTargets, startedAt, progress, denied);
+      if (budget - reserved >= pending) return;
+      deferred = true;
+      await db.prepare(
+        "INSERT INTO checkpoints (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+      ).bind(PREVIEW_DEFERRAL_KEY, day.slice(0, 7)).run();
+    };
+    if (searchCreditBudget !== null && usage.stop === "tavily_credits_exhausted") {
+      await checkPreviewCredits(progressRows, searchCreditBudget);
+    }
+    if (stopReasons.size === 0) {
+      const queries = scheduledPasses
+        ? [...scheduledPasses.flatMap(({ target, pass, dueAt }) => MEDIA_OUTLETS.map((outlet) => ({ outlet, target, pass, dueAt, occurrenceId: null }))), ...previewQueries]
+        : MEDIA_OUTLETS.flatMap((outlet) => discoveryTargets.map((target) => ({ outlet, target, pass, dueAt: null, occurrenceId: null })));
+      const dueEntities: Record<MediaPass, Set<number>> = { initial: new Set(), later: new Set(), preview: new Set() };
+      for (const { target, pass } of scheduledPasses ?? []) dueEntities[pass].add(target.appid);
+      let reviewed = false;
+      for (const { outlet, target, pass, dueAt, occurrenceId } of queries) {
+        if (occurrenceId !== null && !reviewed) {
+          reviewed = true;
+          if (searchCreditBudget !== null) {
+            const current = await rows<ProgressRow>(db, `SELECT ${PROGRESS_COLUMNS} FROM media_discovery_progress WHERE pass <> 'preview'`);
+            await checkPreviewCredits(current, searchCreditBudget - Math.max(searchesIssued, searchCreditsConsumed));
+          }
+        }
+        if (occurrenceId !== null && !await previewOpen(db, occurrenceId)) continue;
+        const appid = target.appid;
+        if (await articleCeiling(db, appid, pass)) continue;
+        if (stoppedOutlets.has(outlet.name)) continue;
+        // The later pass asks only the outlets with an accepted initial article for the entity.
+        if (pass === "later" && !await first<{ id: number }>(db, "SELECT id FROM media_sources WHERE appid = ? AND outlet = ? AND pass = 'initial' LIMIT 1", appid, outlet.name)) continue;
+        const progress = progressRows.find((row) => row.appid === appid && row.outlet === outlet.name && row.pass === pass && row.occurrence_id === occurrenceId) ?? null;
         let progressId = progress?.id;
         if (!progressId) {
           const inserted = await db.prepare("INSERT INTO media_discovery_progress (run_id, appid, pass, outlet, status) VALUES (?, ?, ?, ?, 'queued')").bind(run.id, appid, pass, outlet.name).run();
@@ -992,8 +1147,8 @@ export async function runAuthorizedMediaDiscovery(db: AppDatabase, options: Medi
         let candidates = json<Candidate[]>(current.candidate_urls, []).filter((candidate) => typeof candidate?.url === "string");
         let index = current.candidate_index;
         if (!current.query_attempted_at) {
-          if (searchesStopped) continue;
-          if (searchCreditBudget !== null && searchesIssued >= searchCreditBudget) {
+          if (searchesStopped || (occurrenceId !== null && deferred)) continue;
+          if (searchCreditBudget !== null && Math.max(searchesIssued, searchCreditsConsumed) >= searchCreditBudget) {
             // No credit is left for this query: stop searching for the rest of
             // the run as a provider stop and keep the query for the next
             // authorized run.
@@ -1019,13 +1174,17 @@ export async function runAuthorizedMediaDiscovery(db: AppDatabase, options: Medi
           searchesIssued += 1;
           issued.searches += 1;
           issued.attempts += 1;
-          await db.prepare(
-            "UPDATE media_discovery_progress SET query_attempted_at = ?, pass_due_at = ?, status = 'searching', stop_reason = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+          const marked = await db.prepare(
+            "UPDATE media_discovery_progress SET query_attempted_at = ?, pass_due_at = ?, status = 'searching', stop_reason = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND status <> 'stopped'",
           ).bind(attemptNow.toISOString(), dueAt, progressId).run();
+          if (marked.meta.changes === 0 || (occurrenceId !== null && !await previewOpen(db, occurrenceId))) {
+            await finishOutletAttempt(db, attemptId, { kind: "search", statusCode: null, succeeded: false, error: "preview_cancelled" });
+            continue;
+          }
           const outcome = await tavily.search(query, outlet.domain);
           await finishOutletAttempt(db, attemptId, outcome.attempt);
           if (outcome.class === "provider_stop") {
-            await releaseRefusedQuery(db, progressId, outcome.progress, outcome.reason, attemptNow);
+            if (occurrenceId === null || await previewOpen(db, occurrenceId)) await releaseRefusedQuery(db, progressId, outcome.progress, outcome.reason, attemptNow);
             stopReasons.add(outcome.reason);
             if (outcome.action === "break_run") break;
             searchesStopped = true;
@@ -1041,15 +1200,25 @@ export async function runAuthorizedMediaDiscovery(db: AppDatabase, options: Medi
           candidates = Array.isArray(jsonObject(body).results)
             ? (jsonObject(body).results as TavilyResult[]).slice(0, 10).map((item) => ({ url: typeof item.url === "string" ? item.url : "", publishedDate: dateValue(item.published_date) })).filter((item) => item.url && hostInOutlet(item.url, outlet))
             : [];
-          await db.prepare("UPDATE media_discovery_progress SET query_attempted_at = ?, status = 'fetching', candidate_urls = ?, candidate_index = 0, provider_request_id = ?, credits_used = ?, usage = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(attemptNow.toISOString(), JSON.stringify(candidates), providerRequestId, typeof (usage.credits ?? usage.credits_used) === "number" ? (usage.credits ?? usage.credits_used) : null, JSON.stringify(usage), progressId).run();
+          if (occurrenceId !== null && !await previewOpen(db, occurrenceId)) continue;
+          await db.prepare("UPDATE media_discovery_progress SET query_attempted_at = ?, status = 'fetching', candidate_urls = ?, candidate_index = 0, provider_request_id = ?, credits_used = ?, usage = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND status = 'searching'").bind(attemptNow.toISOString(), JSON.stringify(candidates), providerRequestId, typeof (usage.credits ?? usage.credits_used) === "number" ? (usage.credits ?? usage.credits_used) : null, JSON.stringify(usage), progressId).run();
           await db.prepare("UPDATE media_discovery_runs SET query_count = query_count + 1, provider_request_ids = json_insert(provider_request_ids, '$[#]', ?), usage = json_patch(usage, ?) WHERE id = ?").bind(providerRequestId, JSON.stringify(usage), run.id).run();
         }
         const selections = new Map<number, { review: MediaSource | null; preview: MediaSource | null }>();
         // Each query admits at most one article per entity, across resumes: an
         // entity this query already admitted an article for, before an Outlet
         // day stop held it, admits no other.
-        const admitted = await admittedEntities(db, pass, outlet.name, candidates.slice(0, index));
+        const admitted = occurrenceId === null ? await admittedEntities(db, pass, outlet.name, candidates.slice(0, index)) : new Set<number>();
         for (; index < candidates.length; index += 1) {
+          if (occurrenceId !== null && !await previewOpen(db, occurrenceId)) break;
+          const candidateUrl = candidates[index]!.url;
+          if (occurrenceId !== null && await first(db,
+            `SELECT 1 FROM media_sources WHERE appid = ? AND (original_url = ? OR discovery_url = ?)
+             UNION ALL SELECT 1 FROM media_preview_rejections WHERE appid = ? AND url = ? LIMIT 1`,
+            appid, candidateUrl, candidateUrl, appid, candidateUrl)) {
+            await db.prepare("UPDATE media_discovery_progress SET candidate_index = ? WHERE id = ?").bind(index + 1, progressId).run();
+            continue;
+          }
           // A later candidate already among the entity's sources is not fetched again.
           if (pass === "later" && await first<{ id: number }>(db, "SELECT id FROM media_sources WHERE appid = ? AND (original_url = ? OR discovery_url = ?) LIMIT 1", appid, candidates[index]!.url, candidates[index]!.url)) {
             await db.prepare("UPDATE media_discovery_progress SET candidate_index = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(index + 1, progressId).run();
@@ -1062,6 +1231,7 @@ export async function runAuthorizedMediaDiscovery(db: AppDatabase, options: Medi
           // again and is skipped.
           if (index === current.candidate_index && await closeInterruptedFetch(db, pass, appid, outlet.name, candidates[index]!.url)) {
             await db.prepare("UPDATE media_discovery_progress SET candidate_index = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(index + 1, progressId).run();
+            if (occurrenceId !== null) await db.prepare("INSERT OR IGNORE INTO media_preview_rejections (appid, url) VALUES (?, ?)").bind(appid, candidateUrl).run();
             stopReasons.add(`${outlet.name}:fetch_interrupted`);
             continue;
           }
@@ -1082,15 +1252,41 @@ export async function runAuthorizedMediaDiscovery(db: AppDatabase, options: Medi
               stopReasons.add(`${outlet.name}:${fetched.stop}`);
               break;
             }
+            if (occurrenceId !== null) {
+              const previewSource = fetched ? parseSource(fetched.html, fetched.finalUrl, target, discoveryTargets, outlet.name, clock().toISOString(), pass) : null;
+              const accepted = await transaction(db, async () => {
+                if (!await previewOpen(db, occurrenceId)) return false;
+                if (previewSource) previewSource.discoveryUrl = candidateUrl;
+                const accepted = previewSource && await admitSource(db, pass, previewSource, rootAppid(target));
+                if (accepted) {
+                  // The admission and its occurrence/outlet completion must survive a restart together.
+                  await db.prepare("UPDATE media_discovery_progress SET candidate_index = ?, status = 'completed', completed_at = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?")
+                    .bind(index + 1, clock().toISOString(), progressId).run();
+                } else {
+                  await db.prepare("INSERT OR IGNORE INTO media_preview_rejections (appid, url) VALUES (?, ?)").bind(appid, candidateUrl).run();
+                  await db.prepare("UPDATE media_discovery_progress SET candidate_index = ? WHERE id = ?").bind(index + 1, progressId).run();
+                }
+                return accepted;
+              });
+              if (accepted) {
+                issued.articles += 1;
+                break;
+              }
+              continue;
+            }
             await db.prepare("UPDATE media_discovery_progress SET candidate_index = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(index + 1, progressId).run();
             if (!fetched) continue;
-            source = parseSource(fetched.html, fetched.finalUrl, target, discoveryTargets, outlet.name, clock().toISOString());
+            source = parseSource(fetched.html, fetched.finalUrl, target, discoveryTargets, outlet.name, clock().toISOString(), pass);
             if (!source) continue;
             if (scheduled && source.appid !== appid && !dueEntities[pass].has(source.appid)) continue;
             source.discoveryUrl = candidates[index]!.url;
             if (pass === "later" && !await qualifiesForLaterPass(db, source)) continue;
+            if (pass === "initial" && await first(db, `SELECT 1 FROM media_sources WHERE appid = ? AND pass = 'preview'
+              AND (original_url IN (?, ?) OR discovery_url IN (?, ?))`, source.appid,
+              source.originalUrl, source.discoveryUrl, source.originalUrl, source.discoveryUrl)) continue;
           } catch (error) {
             await skipThrowingCandidate(db, { progressId, index, pass, appid, outlet: outlet.name, url: candidates[index]!.url }, boundedMediaError(error, [apiKey]));
+            if (occurrenceId !== null) await db.prepare("INSERT OR IGNORE INTO media_preview_rejections (appid, url) VALUES (?, ?)").bind(appid, candidateUrl).run();
             stopReasons.add(`${outlet.name}:${CANDIDATE_ERROR}`);
             continue;
           }
@@ -1106,56 +1302,57 @@ export async function runAuthorizedMediaDiscovery(db: AppDatabase, options: Medi
         for (const selection of selections.values()) {
           const selected = selection.review ?? selection.preview;
           if (!selected) continue;
-          const ceiling = await articleCeiling(db, selected.appid);
-          if (!ceiling) {
-            const inserted = await db.prepare(
-              `INSERT OR IGNORE INTO media_sources (appid, pass, original_url, discovery_url, title, outlet, author, published_at, updated_at, retrieved_at, type, hands_on, affiliation, platform, build_context)
-               SELECT app.appid, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-               FROM apps AS app
-               WHERE app.appid = ? AND app.is_eligible = 1 AND ${ELIGIBLE_MEDIA_ENTITY_SQL}
-                 AND COALESCE(app.parent_appid, app.appid) = ?`,
-            ).bind(pass, selected.originalUrl, selected.discoveryUrl, selected.title, selected.outlet, selected.author, selected.publishedAt, selected.updatedAt, selected.retrievedAt, selected.type, selected.handsOn === null ? null : selected.handsOn ? 1 : 0, selected.affiliation, selected.platform, selected.buildContext, selected.appid, rootAppid(target)).run();
-            if (inserted.meta.changes === 1) issued.articles += 1;
-          } else {
-            stopReasons.add(ceiling);
-          }
+          const ceiling = await articleCeiling(db, selected.appid, pass);
+          if (ceiling) stopReasons.add(ceiling);
+          else if (await admitSource(db, pass, selected, rootAppid(target))) issued.articles += 1;
         }
-        if (selections.size === 0 && current.status !== "stopped") {
+        if (occurrenceId === null && selections.size === 0 && current.status !== "stopped") {
           stopReasons.add(`${outlet.name}:no_qualifying_article`);
         }
         await db.prepare("UPDATE media_discovery_progress SET status = 'completed', completed_at = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND status <> 'stopped'").bind(clock().toISOString(), progressId).run();
+      }
     }
-  }
-  const counts = await mediaRunCounts(db, passes, targetAppids);
-  const providerStopped = [...stopReasons].some((reason) => reason.startsWith("tavily_"));
-  const status: MediaRunSummary["status"] = providerStopped ? "stopped" : "completed";
-  usageSummary = {
-    ...usageSummary,
-    searchCreditsConsumed,
-    planUsage: usageSummary.planUsageAtStart === null ? null : usageSummary.planUsageAtStart + searchCreditsConsumed,
-    remainingCredits: searchCreditBudget === null ? null : Math.max(0, searchCreditBudget - searchCreditsConsumed),
-  };
-  const stopReason = [...stopReasons][0] ?? null;
-  const summary: MediaRunSummary["summary"] = {
-    discovered: counts.discovered,
-    accepted: counts.accepted,
-    skipped: counts.skipped,
-    sourceFailures: counts.sourceFailures,
-    outletShortfall: counts.outletShortfall,
-    runId: run.id,
-    status,
-    stopReason,
-  };
-  const durableSummary = {
-    ...summary,
-    queries: counts.queries,
-    attempts: counts.attempts,
-    articles: counts.articles,
-    stopReasons: [...stopReasons].sort(),
-    usage: usageSummary,
-  };
-  await db.prepare("UPDATE media_discovery_runs SET status = ?, article_count = ?, query_count = ?, attempt_count = ?, stop_reason = ?, summary = ?, usage = ?, finished_at = CURRENT_TIMESTAMP WHERE id = ?").bind(status, counts.articles, counts.queries, counts.attempts, stopReason, JSON.stringify(durableSummary), JSON.stringify(usageSummary), run.id).run();
-  return { runId: run.id, pass, status, games: selectedGames, resumed: run.resumed === 1, newIdentity: run.resumed !== 1, queries: counts.queries, attempts: counts.attempts, articles: counts.articles, issued, stopReasons: [...stopReasons].sort(), summary, usage: usageSummary };
+    for (const preview of previews) {
+      if (!await previewOpen(db, preview.id)) continue;
+      const remaining = await rows<{ status: string; stop_reason: string | null }>(db,
+        "SELECT status, stop_reason FROM media_discovery_progress WHERE occurrence_id = ?", preview.id);
+      const reason = await previewCeilingReached(db, preview.appid) ? "preview_ceiling"
+        : remaining.every((row) => row.status === "completed" || (row.status === "stopped" && row.stop_reason && isOutletDenialStop(row.stop_reason))) ? "completed"
+        : null;
+      if (reason) await transaction(db, async () => {
+        if (await previewOpen(db, preview.id)) await endPreviewOccurrence(db, preview.id, clock().toISOString(), reason);
+      });
+    }
+    const counts = await mediaRunCounts(db, passes, targetAppids);
+    const providerStopped = [...stopReasons].some((reason) => reason.startsWith("tavily_"));
+    const status: MediaRunSummary["status"] = providerStopped ? "stopped" : "completed";
+    usageSummary = {
+      ...usageSummary,
+      searchCreditsConsumed,
+      planUsage: usageSummary.planUsageAtStart === null ? null : usageSummary.planUsageAtStart + searchCreditsConsumed,
+      remainingCredits: searchCreditBudget === null ? null : Math.max(0, searchCreditBudget - searchCreditsConsumed),
+    };
+    const stopReason = [...stopReasons][0] ?? null;
+    const summary: MediaRunSummary["summary"] = {
+      discovered: counts.discovered,
+      accepted: counts.accepted,
+      skipped: counts.skipped,
+      sourceFailures: counts.sourceFailures,
+      outletShortfall: counts.outletShortfall,
+      runId: run.id,
+      status,
+      stopReason,
+    };
+    const durableSummary = {
+      ...summary,
+      queries: counts.queries,
+      attempts: counts.attempts,
+      articles: counts.articles,
+      stopReasons: [...stopReasons].sort(),
+      usage: usageSummary,
+    };
+    await db.prepare("UPDATE media_discovery_runs SET status = ?, article_count = ?, query_count = ?, attempt_count = ?, stop_reason = ?, summary = ?, usage = ?, finished_at = CURRENT_TIMESTAMP WHERE id = ?").bind(status, counts.articles, counts.queries, counts.attempts, stopReason, JSON.stringify(durableSummary), JSON.stringify(usageSummary), run.id).run();
+    return { runId: run.id, pass, status, games: selectedGames, resumed: run.resumed === 1, newIdentity: run.resumed !== 1, queries: counts.queries, attempts: counts.attempts, articles: counts.articles, issued, stopReasons: [...stopReasons].sort(), summary, usage: usageSummary };
   } catch (error) {
     const counts = await mediaRunCounts(db, passes, targetAppids);
     const stopReason = "execution_error";
@@ -1224,6 +1421,7 @@ export async function getMediaSources(
       AND ${ELIGIBLE_MEDIA_ENTITY_SQL}
      WHERE source.appid = ?
        ${options.includeUnpublished ? "" : `AND ${PUBLIC_MEDIA_ROOT_SQL}`}
+       ${options.includeUnpublished || isMediaOverviewPublic() ? "" : "AND source.pass <> 'preview'"}
      ORDER BY source.published_at IS NULL, source.published_at, source.id`,
     appid,
   );

@@ -25,6 +25,7 @@ export const apps = sqliteTable(
     isPlayable: integer("is_playable").notNull().default(1),
     parentAppid: integer("parent_appid"),
     releaseDate: text("release_date"),
+    storefrontReleaseDateText: text("storefront_release_date_text"),
     releaseStatus: text("release_status").notNull().default("released"),
     description: text("description").default(""),
     headerImage: text("header_image").default(""),
@@ -924,6 +925,37 @@ export const mediaEnrollments = sqliteTable(
   ],
 );
 
+export const mediaWatches = sqliteTable("media_watches", {
+  appid: integer("appid").primaryKey().references(() => apps.appid, { onDelete: "cascade" }),
+  watchedAt: text("watched_at").notNull(),
+  unwatchedAt: text("unwatched_at"),
+});
+
+export const mediaWatchCoverage = sqliteTable("media_watch_coverage", {
+  appid: integer("appid").primaryKey().references(() => apps.appid, { onDelete: "cascade" }),
+  rootAppid: integer("root_appid").notNull().references(() => mediaWatches.appid, { onDelete: "cascade" }),
+  coveredAt: text("covered_at").notNull(),
+  observedReleasedOn: text("observed_released_on"),
+  reviewEligibleAt: text("review_eligible_at"),
+}, (table) => [index("idx_media_watch_coverage_root").on(table.rootAppid)]);
+
+export const mediaPreviewOccurrences = sqliteTable("media_preview_occurrences", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  appid: integer("appid").notNull().references(() => mediaWatchCoverage.appid, { onDelete: "cascade" }),
+  scheduledOn: text("scheduled_on").notNull(),
+  dueAt: text("due_at").notNull(),
+  endedAt: text("ended_at"),
+  endReason: text("end_reason"),
+}, (table) => [
+  uniqueIndex("uq_media_preview_occurrence_day").on(table.appid, table.scheduledOn),
+  uniqueIndex("uq_media_preview_occurrence_pending").on(table.appid).where(sql`${table.endedAt} IS NULL`),
+]);
+
+export const mediaPreviewRejections = sqliteTable("media_preview_rejections", {
+  appid: integer("appid").notNull().references(() => mediaWatchCoverage.appid, { onDelete: "cascade" }),
+  url: text("url").notNull(),
+}, (table) => [primaryKey({ columns: [table.appid, table.url] })]);
+
 export const mediaDiscoveryProgress = sqliteTable(
   "media_discovery_progress",
   {
@@ -936,6 +968,7 @@ export const mediaDiscoveryProgress = sqliteTable(
       .references(() => apps.appid, { onDelete: "cascade" }),
     pass: text("pass").notNull(),
     outlet: text("outlet").notNull(),
+    occurrenceId: integer("occurrence_id").references(() => mediaPreviewOccurrences.id, { onDelete: "cascade" }),
     status: text("status").notNull().default("queued"),
     queryAttemptedAt: text("query_attempted_at"),
     /** Scheduled due time captured when the first search in a pass is served. */
@@ -957,9 +990,11 @@ export const mediaDiscoveryProgress = sqliteTable(
       table.appid,
       table.outlet,
       table.pass,
-    ),
+    ).where(sql`${table.occurrenceId} IS NULL`),
+    uniqueIndex("uq_media_preview_occurrence_outlet").on(table.occurrenceId, table.outlet),
     index("idx_media_discovery_progress_run").on(table.runId),
-    check("media_discovery_progress_pass_check", sql`${table.pass} IN ('initial', 'later')`),
+    check("media_discovery_progress_occurrence_check", sql`(${table.pass} = 'preview') = (${table.occurrenceId} IS NOT NULL)`),
+    check("media_discovery_progress_pass_check", sql`${table.pass} IN ('initial', 'later', 'preview')`),
     check(
       "media_discovery_progress_outlet_check",
       sql`${table.outlet} IN ('IGN', 'Eurogamer', 'GameSpot', 'PC Gamer', 'Kotaku', 'GamesRadar+')`,
@@ -999,7 +1034,7 @@ export const mediaDiscoveryAttempts = sqliteTable(
   (table) => [
     index("idx_media_discovery_attempts_outlet_day").on(table.outlet, table.day),
     index("idx_media_discovery_attempts_game").on(table.appid, table.pass),
-    check("media_discovery_attempts_pass_check", sql`${table.pass} IN ('initial', 'later')`),
+    check("media_discovery_attempts_pass_check", sql`${table.pass} IN ('initial', 'later', 'preview')`),
     check(
       "media_discovery_attempts_outlet_check",
       sql`${table.outlet} IN ('IGN', 'Eurogamer', 'GameSpot', 'PC Gamer', 'Kotaku', 'GamesRadar+')`,
@@ -1049,12 +1084,12 @@ export const mediaSources = sqliteTable(
   (table) => [
     uniqueIndex("uq_media_sources_game_url").on(table.appid, table.originalUrl),
     index("idx_media_sources_game").on(table.appid, table.publishedAt),
-    check("media_sources_pass_check", sql`${table.pass} IN ('initial', 'later')`),
+    check("media_sources_pass_check", sql`${table.pass} IN ('initial', 'later', 'preview')`),
     check(
       "media_sources_outlet_check",
       sql`${table.outlet} IN ('IGN', 'Eurogamer', 'GameSpot', 'PC Gamer', 'Kotaku', 'GamesRadar+')`,
     ),
-    check("media_sources_type_check", sql`${table.type} IN ('review', 'preview')`),
+    check("media_sources_type_check", sql`${table.type} IN ('review', 'preview', 'announcement')`),
     check("media_sources_hands_on_check", sql`${table.handsOn} IN (0, 1)`),
   ],
 );

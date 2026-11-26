@@ -1,10 +1,11 @@
 import { describe, expect, it } from "bun:test";
 import { handleRequest, sanitizeMediaProcessingSummary } from "../src/server";
-import { getDb } from "../src/lib/db";
+import { closeDb, getDb } from "../src/lib/db";
 import { PAID_PROVIDERS, PROCESSING_STOP_REASONS, PROVIDER_PAUSE_REASONS } from "../src/lib/media-paid-providers";
 import { chmod, copyFile, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { openTestDatabase } from "./support/db";
 
 const root = dirname(import.meta.dir);
 const wrapperPath = join(root, "scripts", "remote-command.sh");
@@ -21,7 +22,7 @@ async function makeHarness() {
   );
   await writeFile(
     join(directory, "docker"),
-    "#!/bin/sh\nprintf 'docker:%s|%s|%s|%s|%s|%s\\n' \"$1\" \"$2\" \"$3\" \"$4\" \"$5\" \"$6\" >> \"$TRACE_FILE\"\nprintf '{\"accepted\":true}\\n'\n",
+    "#!/bin/sh\nfor arg do last2=$last; last=$arg; done\nprintf 'docker:%s|%s|%s|%s|%s|%s\\n' \"$1\" \"$2\" \"$3\" \"$4\" \"$last2\" \"$last\" >> \"$TRACE_FILE\"\nprintf '{\"accepted\":true}\\n'\n",
   );
   await chmod(wrapperCopy, 0o755);
   await chmod(join(directory, "deploy.sh"), 0o755);
@@ -145,6 +146,22 @@ describe("restricted remote command", () => {
     }
   });
 
+  it("executes watch and unwatch with literal arguments", async () => {
+    const harness = await makeHarness();
+    try {
+      for (const [action, game] of [["watch", "no-law"], ["unwatch", "2161710"]]) {
+        const result = await runWrapper(harness.directory, harness.tracePath, `media ${action} ${game}`);
+        expect(result.exitCode).toBe(0);
+        expect(result.trace).toBe(`docker:container|exec|vaporstats|bun|${action}|${game}\n`);
+      }
+      for (const game of ["0", "0123", "no--law", "no-law; exit", "12345678901", "a".repeat(129), "NO-LAW"]) {
+        expect(await runWrapper(harness.directory, harness.tracePath, `media watch ${game}`)).toMatchObject({ exitCode: 64, trace: "" });
+      }
+    } finally {
+      await rm(harness.directory, { recursive: true, force: true });
+    }
+  });
+
   it("keeps the wrapper free of shell evaluation", async () => {
     const wrapper = await readFile(wrapperPath, "utf8");
     expect(wrapper).not.toContain("eval ");
@@ -166,14 +183,15 @@ async function readWorkflow(): Promise<{ text: string; workflow: Workflow }> {
 }
 
 describe("media dispatch workflow", () => {
-  it("offers no discovery pass, and keeps the game choice", async () => {
+  it("offers the exact watch actions and a text game identifier", async () => {
     const { workflow } = await readWorkflow();
     const inputs = workflow.on.workflow_dispatch.inputs;
-    expect(inputs.pass).toMatchObject({ type: "choice", options: ["none"] });
-    expect(inputs.game).toMatchObject({ type: "choice", options: GAMES });
+    expect(inputs.pass).toBeUndefined();
+    expect(inputs.action).toMatchObject({ type: "choice", options: ["watch", "unwatch"] });
+    expect(inputs.game).toMatchObject({ type: "string" });
   });
 
-  it("stops every pass, including the retired initial and later passes, before any SSH connection", async () => {
+  it("sends exact watch commands and rejects malformed forms before SSH", async () => {
     const { workflow } = await readWorkflow();
     const trigger = workflow.jobs.trigger.steps.find((step) => step.name === "Trigger media discovery");
     expect(trigger?.run).toBeString();
@@ -183,7 +201,12 @@ describe("media dispatch workflow", () => {
       await writeFile(join(directory, "ssh"), "#!/bin/sh\nprintf 'ssh:%s\\n' \"$*\" >> \"$TRACE_FILE\"\n");
       await chmod(join(directory, "ssh"), 0o755);
       await writeFile(join(directory, "step.sh"), trigger!.run!);
-      for (const pass of ["none", "initial", "later", "status"]) {
+      for (const [action, game, allowed] of [
+        ["watch", "no-law", true], ["unwatch", "2161710", true],
+        ["initial", "no-law", false], ["later", "no-law", false], ["status", "no-law", false],
+        ["watch", "no-law; exit", false], ["unwatch", "no-law\n", false], ["watch", "0", false], ["watch", "0123", false],
+        ["watch", "12345678901", false], ["watch", "a".repeat(129), false], ["watch", "No-Law", false],
+      ] as const) {
         await writeFile(tracePath, "");
         const child = Bun.spawn([shell, "./step.sh"], {
           cwd: directory,
@@ -191,17 +214,18 @@ describe("media dispatch workflow", () => {
             PATH: `${directory}:${process.env.PATH}`,
             HOME: directory,
             TRACE_FILE: tracePath,
-            INPUT_PASS: pass,
-            INPUT_GAME: "all",
+            INPUT_ACTION: action,
+            INPUT_GAME: game,
             TARGET_HOST: "203.0.113.9",
             GITHUB_STEP_SUMMARY: join(directory, "summary.md"),
           },
           stdout: "pipe",
           stderr: "pipe",
         });
-        expect(await child.exited).toBe(1);
-        expect(await new Response(child.stderr).text()).toBe("unsupported discovery pass: media discovery runs in the daily media run\n");
-        expect(await readFile(tracePath, "utf8")).toBe("");
+        expect(await child.exited).toBe(allowed ? 0 : 1);
+        const trace = await readFile(tracePath, "utf8");
+        if (allowed) expect(trace).toEndWith(` media ${action} ${game}\n`);
+        else expect(trace).toBe("");
       }
     } finally {
       await rm(directory, { recursive: true, force: true });
@@ -310,6 +334,51 @@ describe("server media endpoint", () => {
       }
     });
     expect(attempted).toEqual([]);
+  });
+
+  it("resolves NO LAW by slug and AppID, reports children, and rejects invalid catalog targets", async () => {
+    const fixture = openTestDatabase("vaporstats-watch-trigger-");
+    const previousPath = process.env.DATABASE_PATH;
+    const previousToken = process.env.MEDIA_TRIGGER_TOKEN;
+    await closeDb();
+    process.env.DATABASE_PATH = fixture.databasePath;
+    process.env.MEDIA_TRIGGER_TOKEN = TOKEN;
+    try {
+      fixture.native.exec(`INSERT INTO apps (appid, name, slug, release_status, type, parent_appid, is_playable) VALUES
+        (2161710, 'NO LAW', 'no-law', 'upcoming', 'game', NULL, 1),
+        (2161711, 'Night Shift', 'night-shift', 'upcoming', 'dlc', 2161710, 0),
+        (2161712, 'Bonus Tracks', 'soundtrack', 'released', 'music', NULL, 0),
+        (2161713, 'Same Name', 'duplicate', 'released', 'game', NULL, 1),
+        (2161714, 'Same Name', 'duplicate', 'released', 'game', NULL, 1),
+        (2161715, 'Numeric Slug', '777', 'released', 'game', NULL, 1)`);
+      const trigger = (action: unknown, game: unknown) =>
+        handleRequest(mediaRequest(AUTHORIZED, JSON.stringify({ action, game })), "127.0.0.1");
+      const first = await trigger("watch", "no-law");
+      expect(first.status).toBe(200);
+      expect(await first.json()).toMatchObject({
+        appid: 2161710, name: "NO LAW", releaseStatus: "upcoming", watched: true, changed: true,
+        entities: [{ appid: 2161710, next: { pass: "preview" } }, { appid: 2161711, next: { pass: "preview" } }],
+      });
+      expect(await (await trigger("watch", "2161710")).json()).toMatchObject({ watched: true, changed: false });
+      expect(await (await trigger("unwatch", "no-law")).json()).toMatchObject({ watched: false, changed: true });
+      expect(await (await trigger("unwatch", "2161710")).json()).toMatchObject({ watched: false, changed: false });
+      expect((await trigger("watch", "unknown")).status).toBe(404);
+      expect((await trigger("watch", "777")).status).toBe(404);
+      expect(await (await trigger("watch", "duplicate")).text()).toContain("2161713, 2161714");
+      expect(await (await trigger("watch", "night-shift")).text()).toContain("NO LAW (AppID 2161710)");
+      expect(await (await trigger("watch", "soundtrack")).text()).toContain("ineligible");
+      for (const game of [2161710, "0", "02161710", "21617102020", "no-law\n", "NO-LAW", "a".repeat(129)]) {
+        expect((await trigger("watch", game)).status).toBe(400);
+      }
+      expect(fixture.native.query("SELECT appid FROM media_watches").all()).toEqual([{ appid: 2161710 }]);
+    } finally {
+      await closeDb();
+      fixture.cleanup();
+      if (previousPath === undefined) delete process.env.DATABASE_PATH;
+      else process.env.DATABASE_PATH = previousPath;
+      if (previousToken === undefined) delete process.env.MEDIA_TRIGGER_TOKEN;
+      else process.env.MEDIA_TRIGGER_TOKEN = previousToken;
+    }
   });
 
   it("answers every other internal path with 404 before any database or provider work", async () => {
