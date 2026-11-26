@@ -60,7 +60,7 @@ function CitedFindings({
         )}
         {wording}
         <CitationNotes sourceUrls={finding.sourceUrls} references={references} />
-        {(composedLead ? /[,;:.!?]$/ : /[.!?]$/).test(wording) ? "" : "."}
+        {(!composedLead || index === findings.length - 1) && !(composedLead ? /[,;:.!?]$/ : /[.!?]$/).test(wording) && "."}
       </span>
     );
   });

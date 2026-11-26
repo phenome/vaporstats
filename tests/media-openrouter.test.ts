@@ -174,7 +174,7 @@ describe("text generation through OpenRouter", () => {
     });
     expect(database.native.query("SELECT stage, config_version FROM media_processing_jobs WHERE stage IN ('extraction', 'synthesis') ORDER BY id").all()).toEqual([
       { stage: "extraction", config_version: "media-extraction-2026-11-26-v10" },
-      { stage: "synthesis", config_version: "media-synthesis-2026-11-26-v25" },
+      { stage: "synthesis", config_version: "media-synthesis-2026-11-26-v26" },
     ]);
     // Embeddings stay on Gemini Batch; no text is submitted to Gemini.
     expect(providers.gemini.submitted.map((key) => key.split(":")[0])).toEqual(["embedding"]);
@@ -194,7 +194,7 @@ describe("text generation through OpenRouter", () => {
   });
 });
 
-test("the OpenRouter extraction passes quote-supported timing to v25 synthesis and review-only timing reaches the API", async () => {
+test("the OpenRouter extraction passes quote-supported timing to synthesis and review-only timing reaches the API", async () => {
   const { database } = await authorizedGames();
   const providers = apis();
   const category = "Technical experience & accessibility";
