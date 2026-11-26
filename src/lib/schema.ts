@@ -916,6 +916,8 @@ export const mediaEnrollments = sqliteTable(
       .references(() => apps.appid, { onDelete: "cascade" }),
     reason: text("reason").notNull(),
     enrolledAt: text("enrolled_at").notNull(),
+    /** Completion cutoff of a root's later pass when no outlet had an initial article. */
+    emptyLaterFinishedAt: text("empty_later_finished_at"),
   },
   (table) => [
     check("media_enrollments_reason_check", sql`${table.reason} IN ('experiment', 'new_release', 'watchlist')`),
@@ -936,6 +938,8 @@ export const mediaDiscoveryProgress = sqliteTable(
     outlet: text("outlet").notNull(),
     status: text("status").notNull().default("queued"),
     queryAttemptedAt: text("query_attempted_at"),
+    /** Scheduled due time captured when the first search in a pass is served. */
+    passDueAt: text("pass_due_at"),
     candidateUrls: text("candidate_urls").notNull().default("[]"),
     candidateIndex: integer("candidate_index").notNull().default(0),
     providerRequestId: text("provider_request_id"),

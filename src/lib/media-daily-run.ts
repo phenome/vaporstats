@@ -1,8 +1,12 @@
 import type { AppDatabase } from "./db";
 import { writeTransaction } from "./db-transaction";
-import { MEDIA_GAME_CHOICES } from "./media-discovery";
+import { mainReleasedDate, type MainReleasedFields } from "./lifecycle-history";
+import { MEDIA_GAME_CHOICES, skipIneligibleMediaPasses } from "./media-discovery";
+import { ENROLLMENT_START_DATE_KEY, isNewReleaseDate } from "./media-enrollment";
 import { dailyCreditCheckDue, type PaidProvider } from "./media-paid-providers";
 import { runMediaDailyCreditCheck, type MediaProcessingOptions } from "./media-processing";
+import { ELIGIBLE_MEDIA_ROOT_SQL } from "./media-similarity";
+import { parsePreciseReleaseDate } from "./releases";
 
 /**
  * Automatic media ingestion: the daily media run and the paid-work queue it
@@ -16,7 +20,6 @@ export function automaticMediaIngestionEnabled(env: Record<string, string | unde
   return env[MEDIA_AUTOMATIC_INGESTION_ENV] === "true";
 }
 
-const ENROLLMENT_START_DATE_KEY = "media:enrollment-start-date";
 /** The games of the bounded media experiment, enrolled with reason `experiment`. */
 const EXPERIMENT_GAMES = Object.values(MEDIA_GAME_CHOICES).sort((a, b) => a - b);
 
@@ -49,11 +52,12 @@ async function first<T>(db: AppDatabase, query: string, ...values: unknown[]): P
 /**
  * Records the enrollment start date if none is recorded, and enrolls the
  * experiment games present in the catalog that are not enrolled yet, with
- * reason `experiment` and `now` as their enrollment time. Returns the start
- * date and the entities enrolled now.
+ * reason `experiment`. The same transaction enrolls newly released roots
+ * from the catalog, keeping each root's first enrollment reason and time.
  */
 async function recordEnrollment(db: AppDatabase, now: Date): Promise<{ enrollmentStartDate: string; enrolled: number[] }> {
-  let enrollmentStartDate = utcDay(now);
+  const day = utcDay(now);
+  let enrollmentStartDate = day;
   const enrolled: number[] = [];
   await writeTransaction(db, async () => {
     const recorded = await first<{ value: string }>(db, "SELECT value FROM checkpoints WHERE key = ?", ENROLLMENT_START_DATE_KEY);
@@ -65,8 +69,23 @@ async function recordEnrollment(db: AppDatabase, now: Date): Promise<{ enrollmen
       ).bind(now.toISOString(), appid, appid).run();
       if (inserted.meta.changes === 1) enrolled.push(appid);
     }
+    const candidates = await db.prepare(
+      `SELECT appid, release_status, release_date, release_date_source, steam_release_date, original_release_date
+       FROM apps AS app
+       WHERE ${ELIGIBLE_MEDIA_ROOT_SQL}
+         AND release_status = 'released'
+         AND NOT EXISTS (SELECT 1 FROM media_enrollments WHERE appid = app.appid)`,
+    ).all<MainReleasedFields & { appid: number }>();
+    for (const app of candidates.results ?? []) {
+      const releasedOn = parsePreciseReleaseDate(mainReleasedDate(app)?.date);
+      if (!isNewReleaseDate(releasedOn, enrollmentStartDate, day)) continue;
+      await db.prepare(
+        "INSERT INTO media_enrollments (appid, reason, enrolled_at) VALUES (?, 'new_release', ?)",
+      ).bind(app.appid, now.toISOString()).run();
+      enrolled.push(app.appid);
+    }
   });
-  return { enrollmentStartDate, enrolled };
+  return { enrollmentStartDate, enrolled: enrolled.sort((a, b) => a - b) };
 }
 
 /**
@@ -83,18 +102,29 @@ async function startScheduledDiscovery(db: AppDatabase, day: string, now: Date):
   const roots = await db.prepare(
     `SELECT enrollment.appid FROM media_enrollments AS enrollment
      JOIN apps AS app ON app.appid = enrollment.appid
-     WHERE app.type = 'game' AND app.is_playable = 1 AND app.is_eligible = 1 AND app.parent_appid IS NULL
+     WHERE ${ELIGIBLE_MEDIA_ROOT_SQL}
      ORDER BY enrollment.appid`,
   ).all<{ appid: number }>();
   const selected = (roots.results ?? []).map(({ appid }) => appid);
-  if (selected.length === 0) return null;
+  if (selected.length === 0) {
+    const previous = await latestScheduledDiscovery(db);
+    if (previous !== null) {
+      await skipIneligibleMediaPasses(db, previous, now);
+      return null;
+    }
+    // A root can lose eligibility before its first discovery run is recorded.
+    // Give skipped queries a durable run without opening it for discovery.
+    if (!await first(db, "SELECT appid FROM media_enrollments LIMIT 1")) return null;
+  }
   const identity = scheduledDiscoveryIdentity(day);
   await db.prepare(
     // A scheduled run serves both passes; each query and attempt records its
     // own pass, and the run's pass column keeps its `initial` default.
-    "INSERT INTO media_discovery_runs (pass, identity_key, selected_games, status, origin, started_at) VALUES ('initial', ?, ?, 'running', 'scheduled', ?) ON CONFLICT(identity_key) DO NOTHING",
-  ).bind(identity, JSON.stringify(selected), now.toISOString()).run();
-  return (await first<{ id: number }>(db, "SELECT id FROM media_discovery_runs WHERE identity_key = ?", identity))?.id ?? null;
+    "INSERT INTO media_discovery_runs (pass, identity_key, selected_games, status, origin, started_at, finished_at) VALUES ('initial', ?, ?, ?, 'scheduled', ?, ?) ON CONFLICT(identity_key) DO NOTHING",
+  ).bind(identity, JSON.stringify(selected), selected.length > 0 ? "running" : "completed", now.toISOString(), selected.length > 0 ? null : now.toISOString()).run();
+  const run = await first<{ id: number }>(db, "SELECT id FROM media_discovery_runs WHERE identity_key = ?", identity);
+  if (run) await skipIneligibleMediaPasses(db, run.id, now);
+  return selected.length > 0 ? run?.id ?? null : null;
 }
 
 /**
@@ -102,7 +132,7 @@ async function startScheduledDiscovery(db: AppDatabase, day: string, now: Date):
  * each UTC day. It shares the daily credit check's durable checkpoint, so it
  * runs once per UTC day, catches up once after downtime, and never makes up
  * a missed earlier day. In order, it records the enrollment start date and
- * the experiment enrollments, runs the daily provider credit checks, then
+ * the experiment and new-release enrollments, runs the daily provider credit checks, then
  * starts one scheduled discovery run, recorded in the same write as the
  * checkpoint. Returns null when it is not due.
  */

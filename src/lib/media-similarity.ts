@@ -14,8 +14,16 @@ const DEFAULT_MATCH_LIMIT = 3;
 const MAX_MATCH_LIMIT = 100;
 const MAX_MATCH_PATHS = MAX_MATCH_LIMIT * MEDIA_MATCH_DIMENSIONS.length;
 const CANDIDATE_BATCH_SIZE = 128;
+const MEDIA_ROOT_SQL = "app.type = 'game' AND app.is_playable = 1 AND app.parent_appid IS NULL";
+const notMediaAccessorySql = (alias: "app" | "parent") => `NOT EXISTS (
+  SELECT 1
+  FROM app_relationships AS relationship
+  WHERE relationship.child_appid = ${alias}.appid
+    AND relationship.relationship_type IN ('server', 'tool', 'demo', 'test', 'soundtrack')
+)`;
+export const ELIGIBLE_MEDIA_ROOT_SQL = `app.is_eligible = 1 AND ${MEDIA_ROOT_SQL} AND ${notMediaAccessorySql("app")}`;
 export const ELIGIBLE_MEDIA_ENTITY_SQL = `(
-  (app.type = 'game' AND app.is_playable = 1 AND app.parent_appid IS NULL)
+  (${MEDIA_ROOT_SQL})
   OR (
     app.type IN ('dlc', 'expansion')
     AND app.parent_appid IS NOT NULL
@@ -27,14 +35,10 @@ export const ELIGIBLE_MEDIA_ENTITY_SQL = `(
         AND parent.is_playable = 1
         AND parent.is_eligible = 1
         AND parent.parent_appid IS NULL
+        AND ${notMediaAccessorySql("parent")}
     )
   )
-) AND NOT EXISTS (
-  SELECT 1
-  FROM app_relationships AS relationship
-  WHERE relationship.child_appid = app.appid
-    AND relationship.relationship_type IN ('server', 'tool', 'demo', 'test', 'soundtrack')
-)`;
+) AND ${notMediaAccessorySql("app")}`;
 
 export interface MediaGameMatch {
   dimension: MediaMatchDimension;

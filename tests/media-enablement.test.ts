@@ -134,6 +134,10 @@ describe("automatic media ingestion over the production-like state", () => {
   // outlets. Day 3: nothing is due.
   test("switched on, day 1 takes the Baldur's Gate 3 and Cyberpunk 2077 later passes and resumes Hades II's capped queries without a new search or a second article, day 2 the Hades II later pass, and day 3 searches nothing", async () => {
     const database = productionLike();
+    // This catalog release enrolls on day 2. Its seven-day wait leaves the
+    // expected searches and paid work for the experiment games unchanged.
+    database.native.prepare(`INSERT INTO apps (appid, name, slug, type, is_eligible, is_playable, release_status, steam_release_date)
+      VALUES (10001, 'November release', 'november-release', 'game', 1, 1, 'released', '2026-11-20')`).run();
     const world = experimentWorld();
     const fetched: string[] = [];
     const retained = database.native.query("SELECT * FROM media_processing_jobs WHERE retained = 1 ORDER BY id").all();
@@ -143,6 +147,9 @@ describe("automatic media ingestion over the production-like state", () => {
       const lastJob = database.native.query<{ id: number }, []>("SELECT MAX(id) AS id FROM media_processing_jobs").get()!.id;
       const lastOverview = database.native.query<{ id: number }, []>("SELECT MAX(id) AS id FROM media_game_overviews").get()!.id;
       for (const time of TIMES) await runMediaTick(database, world, `${day}T${time}:00.000Z`, { outlet: world.outlet, fetched });
+      expect(database.native.query("SELECT reason, enrolled_at FROM media_enrollments WHERE appid = 10001").get()).toEqual(
+        day === DAYS[0] ? null : { reason: "new_release", enrolled_at: "2026-11-20T06:00:00.000Z" },
+      );
       observed.push({
         searches: world.tavily.searches.slice(searches),
         enqueued: database.native.query<{ stage: string; appid: number; count: number }, [number]>("SELECT stage, appid, COUNT(*) AS count FROM media_processing_jobs WHERE id > ? GROUP BY stage, appid ORDER BY stage, appid").all(lastJob).map(({ stage, appid, count }) => `${stage} ${name(appid)} ×${count}`),
@@ -286,12 +293,15 @@ describe("repair of the first live run's cut-off extractions (migration 0028)", 
     cleanups.push(empty.cleanup);
     expect(empty.native.query("SELECT COUNT(*) AS count FROM media_processing_jobs").get()).toEqual({ count: 0 });
 
-    let before: unknown = null;
+    let before: Record<string, unknown[]> = {};
     const production = openUpgradedTestDatabase(MIGRATION, (native) => {
       seedProductionLike(native);
       before = mediaState(native);
     }, "vaporstats-media-repair-production-");
     cleanups.push(production.cleanup);
-    expect(mediaState(production.native)).toEqual(before as Record<string, unknown[]>);
+    // The subsequent scheduling migration adds a nullable column without changing retained progress.
+    const retainedProgress = before.media_discovery_progress as Array<Record<string, unknown>>;
+    before.media_discovery_progress = retainedProgress.map((row) => ({ ...row, pass_due_at: null }));
+    expect(mediaState(production.native)).toEqual(before);
   });
 });

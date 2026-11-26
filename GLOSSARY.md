@@ -228,6 +228,9 @@ _Avoid_: Subscription, tracked game
 **Enrollment start date**:
 The UTC date of the first Daily media run while automatic media ingestion is enabled. The application records it durably at that moment, never in a migration, and never moves it. Newly released games are measured against it, so games released before it are not enrolled automatically.
 
+**Newly released game**:
+An eligible, playable root game already in the Steam catalog, with released status and a precise [Main Released date](docs/adr/0003-steam-release-date-semantics.md) between the Enrollment start date and the current UTC date, inclusive. Accessory listings are excluded. The Daily media run enrolls the game the first time its catalog data meets these conditions. Its initial assessment is due seven days after Main Released. A date correction before the initial pass moves that due date.
+
 **Daily media run**:
 The once-per-UTC-day start of media discovery, in the first ingestion tick at or after 06:00 UTC, sharing the daily credit check's durable checkpoint. In order, it records the Enrollment start date and enrollments, runs the daily credit checks, then starts one scheduled discovery run over the due Assessment passes, initial and later alike, oldest due time first and then by entity. After downtime it catches up once on that UTC day, and a missed earlier day is never made up. A scheduled discovery run interrupted by a restart resumes in a later tick on the same UTC day; ticks never start searches outside the Daily media run. It happens only while the `MEDIA_AUTOMATIC_INGESTION` server switch is `true`; while it is off, ticks only poll work already submitted to a provider, and queued work and due passes are kept.
 _Avoid_: Daily cycle, media cron, collection pass

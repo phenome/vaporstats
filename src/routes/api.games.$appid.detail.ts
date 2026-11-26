@@ -4,7 +4,6 @@ import type { AppDatabase } from "../lib/db";
 import { getGameByAppId, getChildGameDetail, type GameDetail } from "../lib/catalog";
 import { getRelatedApps, type GroupedRelatedApps } from "../lib/related";
 
-import { ensureAppLqips } from "../lib/lqip";
 import { getPlayerHistory, type PlayerHistoryResult } from "../lib/player-history";
 import { getCurrentPrice, getPriceHistory, type PriceState, type PriceHistoryResult } from "../lib/prices";
 import { CACHE_POLICIES, getEntityCacheHeaders } from "../lib/cache";
@@ -28,7 +27,8 @@ export interface GameDetailResponseData {
 export async function handleGameDetailRequest(
   request: Request,
   db: AppDatabase,
-  explicitAppid?: number
+  explicitAppid?: number,
+  mediaOptions: { includeUnpublished?: boolean } = {},
 ): Promise<Response> {
   let appid = explicitAppid;
 
@@ -100,18 +100,15 @@ export async function handleGameDetailRequest(
     );
   }
 
-  const [related, playerHistory, currentPrice, lqips, sources, mediaOverview, mediaMatches] = await Promise.all([
+  const [related, playerHistory, currentPrice, sources, mediaOverview, mediaMatches] = await Promise.all([
     getRelatedApps(db, game.appid),
     getPlayerHistory(db, game.appid, "30d"),
     getCurrentPrice(db, game.appid),
-    ensureAppLqips(db, game),
-    getMediaSources(db, game.appid),
-    getMediaOverview(db, game.appid),
-    getMediaGameMatches(db, game.appid),
+    getMediaSources(db, game.appid, mediaOptions),
+    getMediaOverview(db, game.appid, mediaOptions),
+    getMediaGameMatches(db, game.appid, mediaOptions),
   ]);
   const mediaMatchPaths = await getMediaGameMatchPaths(db, mediaMatches);
-  game.header_lqip = lqips.header_lqip;
-  game.icon_lqip = lqips.icon_lqip;
   const priceHistory = await getPriceHistory(db, game.appid, "all", { currentPrice });
 
   const responseData: GameDetailResponseData = {
@@ -131,7 +128,7 @@ export async function handleGameDetailRequest(
     {
       headers: {
         "Content-Type": "application/json; charset=utf-8",
-        ...getEntityCacheHeaders(),
+        ...(mediaOptions.includeUnpublished ? { "Cache-Control": CACHE_POLICIES.noStore } : getEntityCacheHeaders()),
       },
     }
   );

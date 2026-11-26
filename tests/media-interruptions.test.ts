@@ -3,6 +3,7 @@ import type { Database } from "bun:sqlite";
 import {
   BALDURS_GATE,
   CYBERPUNK,
+  controlledTavilyApi,
   experimentWorld,
   HADES_II,
   PROCESSING_FETCH_RESENT_AFTER_RESTART,
@@ -80,6 +81,28 @@ interface Registered {
 }
 
 const SCENARIOS: Registered[] = [
+  {
+    // The catalog learns about a release on the day its first pass is due.
+    // Each search returns no articles. Restarting between outlets must
+    // preserve served queries as well as the newly recorded enrollment.
+    scenario: {
+      name: "new release at seven days",
+      seed(native) {
+        native.exec("INSERT INTO checkpoints (key, value) VALUES ('media:enrollment-start-date', '2026-11-10')");
+        native.exec(`INSERT INTO apps (appid, name, slug, release_status, steam_release_date)
+          VALUES (10001, 'November release', 'november-release', 'released', '2026-11-13')`);
+      },
+      world() {
+        const tavily = controlledTavilyApi({ 10001: "November release" });
+        tavily.results = () => [];
+        return { ...experimentWorld(), tavily };
+      },
+      ticks: FIRST_DAY,
+      days: 1,
+    },
+    invariants: { restarts: ["search"] },
+    baseline: { search: 6, outlet_fetch: 0, openrouter: 0, gemini_submit: 0 },
+  },
   {
     // The first daily media run: 18 initial queries, three candidates each
     // (54 discovery fetches), 18 processing fetches, 18 extractions and 3
