@@ -58,7 +58,9 @@ export function MediaMethodologyView(): React.JSX.Element {
         </p>
         <p>
           A shared observation can cite several articles. When assessments differ, the brief describes each view
-          with its own citations. Coverage of different editions or builds keeps its context.
+          with its own citations. For bugs and performance issues, a brief names a patch or period when the
+          article connects it to the issue. “During review” means the issue occurred while the reviewer played;
+          its status in later builds may differ.
         </p>
       </Question>
 

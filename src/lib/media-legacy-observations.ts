@@ -13,7 +13,7 @@ function hasExplicitScope(text: string): boolean {
     || /\b(?:on|for) (?:the )?[^.,;]{1,40}\b(?:port|edition)\b/i.test(text);
 }
 
-export function legacyObservationEvidence(value: unknown, appid: number, buildContext?: string | null, sourceIdentity?: string) {
+export function legacyObservationEvidence(value: unknown, appid: number, buildContext?: string | null, sourceIdentity?: string, includeArticleTags = false) {
   const observations: MediaObservation[] = [];
   const editorialOmissions: LegacyQuestion[] = [];
   if (typeof value === "string") {
@@ -27,6 +27,8 @@ export function legacyObservationEvidence(value: unknown, appid: number, buildCo
     typeof scope === "string" && /^(?:\d+(?:\.\d+)?\s*(?:MB|GB)\s+)?(?:day[- ]\d+ patch|patch \d+(?:\.\d+)+)$/i.test(scope)) : [];
   const platforms = Array.isArray(root.qualifications) ? root.qualifications.filter((scope): scope is string =>
     typeof scope === "string" && /^[\w -]{1,40} platform$/i.test(scope)) : [];
+  const historicalBuilds = Array.isArray(root.qualifications) ? root.qualifications.filter((scope): scope is string =>
+    typeof scope === "string" && /^(?:early access|preview|press|alpha|beta|pre[- ]release)(?: build| version)?$/i.test(scope)) : [];
   const assessedBuild = buildContext || (patches.length === 1 ? patches[0] : undefined);
   function record(id: string, text: string, kind: MediaObservation["kind"], category: string) {
     const amended = sourceIdentity ? mediaAmendment(sourceIdentity, id) : undefined;
@@ -42,13 +44,22 @@ export function legacyObservationEvidence(value: unknown, appid: number, buildCo
       && root.qualifications.some((fact) => typeof fact === "string" && fact.toLowerCase().includes(platform.toLowerCase()));
     const unqualifiedDescription = Array.isArray(root.qualifications) && root.qualifications.length === 0
       && (category === "Gameplay & systems" || category === "Story & world");
-    if (amended || qualifiedTag || (kind !== "tag" && (explicit || assessedBuild || unqualifiedDescription))) {
+    // A bare mode label in the older output does not establish that the article
+    // actually identified a single-player mode.
+    const articleTag = includeArticleTags && kind === "tag"
+      && !/\bsingle[ -]player\b/i.test(text);
+    if (amended || qualifiedTag || articleTag || (kind !== "tag" && (explicit || assessedBuild || unqualifiedDescription))) {
       const qualifiers = kind !== "tag" && !explicit && assessedBuild ? [assessedBuild] : [];
+      if (articleTag && !buildContext && historicalBuilds.length === 1 && !explicit) {
+        qualifiers.push(historicalBuilds[0]!);
+      }
       if (qualifiers.length && category === "Technical experience & accessibility" && platforms.length === 1) {
         qualifiers.push(platforms[0]!.replace(/ platform$/i, ""));
       }
       const parsed = readArticleObservations({ observations: [{ id, appid, kind, category, text, qualifiers }] }, appid);
-      if (parsed.length && !(kind === "tag" && /^(?:early access|preview)(?: build| version)?$/i.test(text))) {
+      const releaseLabel = includeArticleTags && kind === "tag"
+        && /^(?:early access|preview|press|launch|release|full release)(?: build| version| edition)?[.!]?$/i.test(text);
+      if (parsed.length && !releaseLabel && !(kind === "tag" && /^(?:early access|preview)(?: build| version)?$/i.test(text))) {
         observations.push(...parsed);
         return;
       }

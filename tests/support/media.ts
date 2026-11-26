@@ -344,7 +344,7 @@ export function extractionOutput(options: string | { trait?: string; traitQuote?
   };
 }
 
-type SynthesisSource = { sourceIdentity: string; sourceUrl: string; extraction: { observations: Array<MediaObservation & { selectionId: string; scopeGroup?: string }> } };
+type SynthesisSource = { sourceIdentity: string; sourceUrl: string; extraction: { observations: Array<MediaObservation & { selectionId: string; scopeGroup?: string; tagScopeGroup?: string; tagQualifiers?: string[] }> } };
 
 export function synthesisEvidence({ messages }: Pick<OpenRouterRequestRecord["body"], "messages">): SynthesisSource[] {
   const content = messages[0]?.content ?? "";
@@ -363,7 +363,7 @@ export function emptySynthesisSelection(sources: readonly SynthesisSource[]) {
   const groups = (kind: "finding" | "pro" | "con" | "tag"): string[][] | null =>
     observations.some((observation) => observation.kind === kind) ? [] : null;
   const categories = Object.fromEntries(observations.filter(({ kind }) => kind === "finding").map(({ category }) => [category, []]));
-  return { statements: groups("finding"), categories, prosCons: { pros: groups("pro"), cons: groups("con") }, tags: groups("tag") };
+  return { statements: groups("finding"), categories, prosCons: { pros: groups("pro"), cons: groups("con") }, tags: observations.some(({ tagScopeGroup }) => tagScopeGroup) ? [] : groups("tag") };
 }
 
 export function overviewOutput(url: string): ChatOutput {
@@ -390,7 +390,10 @@ export function overviewOutputForUrls(urls: readonly string[], { tags = true }: 
     return {
       ...empty,
       statements: empty.statements === null ? null : entries("finding"),
-      tags: tags && empty.tags !== null ? entries("tag").map(({ observationIds }) => observationIds) : empty.tags,
+      tags: tags && empty.tags !== null
+        ? entries("tag").map(({ text, observationIds }) => /Author a short, standalone (?:noun phrase|label) in label/.test(body.messages[0]?.content ?? "")
+          ? { label: text, observationIds } : observationIds)
+        : empty.tags,
     };
   };
 }

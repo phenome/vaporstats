@@ -31,6 +31,9 @@ import {
   runMediaTick,
   seedApps,
   stableJson,
+  synthesisEvidence,
+  synthesisSelectionId,
+  emptySynthesisSelection,
   TLS_FAILURE_CODES,
   type GeminiReply,
   type MediaTickOptions,
@@ -109,6 +112,13 @@ describe("text generation through OpenRouter", () => {
       expect(request.body.max_tokens).toBeGreaterThan(0);
     }
     const [extraction, synthesis] = providers.openRouter.requests;
+    expect(extraction!.body.messages[0]!.content).toContain("choose a verbatim excerpt that includes both the problem and that timing");
+    expect(extraction!.body.messages[0]!.content).toContain("Publication dates, metadata and timing mentioned elsewhere do not establish when this problem occurred");
+    expect(synthesis!.body.messages[0]!.content).toContain('say "during review" explicitly');
+    expect(synthesis!.body.messages[0]!.content).toContain("‘Joy-Con aiming’ when the article describes Joy-Con mouse-style aiming");
+    expect(synthesis!.body.messages[0]!.content).toContain("‘Joy-Con support’ only when the article establishes compatibility");
+    expect(synthesis!.body.messages[0]!.content).toContain("A controller mapping does not establish a genre, a game-wide mechanic, another input mode, or support on another platform.");
+    expect(synthesis!.body.messages[0]!.content).toContain("only if every citation establishes launch timing");
     expect(extraction!.body.response_format).toEqual({ type: "json_object" });
     expect(extraction!.body).not.toHaveProperty("provider");
     expect(synthesis!.body).toMatchObject({
@@ -121,7 +131,7 @@ describe("text generation through OpenRouter", () => {
           schema: {
             type: "object",
             additionalProperties: false,
-            required: ["statements", "categories", "prosCons", "tags"],
+            required: ["tags", "statements", "categories", "prosCons"],
             properties: {
               statements: { type: "array", items: {
                 type: "object",
@@ -148,15 +158,23 @@ describe("text generation through OpenRouter", () => {
                 },
               },
               prosCons: { additionalProperties: false, required: ["pros", "cons"], properties: { pros: { type: "null" }, cons: { type: "null" } } },
-              tags: { type: "array", items: { type: "array", items: { type: "string", enum: ["o2"] } } },
+              tags: { type: "array", items: {
+                type: "object",
+                additionalProperties: false,
+                required: ["label", "observationIds"],
+                properties: {
+                  label: { type: "string" },
+                  observationIds: { type: "array", items: { type: "string", enum: ["o1", "o2"] } },
+                },
+              } },
             },
           },
         },
       },
     });
     expect(database.native.query("SELECT stage, config_version FROM media_processing_jobs WHERE stage IN ('extraction', 'synthesis') ORDER BY id").all()).toEqual([
-      { stage: "extraction", config_version: "media-extraction-2026-11-25-v8" },
-      { stage: "synthesis", config_version: "media-synthesis-2026-11-26-v17" },
+      { stage: "extraction", config_version: "media-extraction-2026-11-26-v10" },
+      { stage: "synthesis", config_version: "media-synthesis-2026-11-26-v25" },
     ]);
     // Embeddings stay on Gemini Batch; no text is submitted to Gemini.
     expect(providers.gemini.submitted.map((key) => key.split(":")[0])).toEqual(["embedding"]);
@@ -174,6 +192,42 @@ describe("text generation through OpenRouter", () => {
     expect(overview?.statements[0]?.sourceUrls).toEqual([url]);
     expect(overview?.tags.map(({ slug }) => slug)).toEqual(["build-experimentation"]);
   });
+});
+
+test("the OpenRouter extraction passes quote-supported timing to v25 synthesis and review-only timing reaches the API", async () => {
+  const { database } = await authorizedGames();
+  const providers = apis();
+  const category = "Technical experience & accessibility";
+  const launchQuote = "At launch, animation glitches interrupted cutscenes.";
+  const reviewQuote = "I saw frame-rate drops in crowded markets.";
+  const untimed = "Frame-rate drops affected crowded markets during review.";
+  providers.openRouter.output("extraction", { observations: [
+    { ...mediaObservation(CYBERPUNK, "animation", "finding", launchQuote, launchQuote, category), qualifiers: ["At launch"] },
+    mediaObservation(CYBERPUNK, "rates", "finding", "Frame-rate drops affected crowded markets.", reviewQuote, category),
+  ] });
+  providers.openRouter.output("synthesis", ({ body }: OpenRouterRequestRecord) => {
+    const sources = synthesisEvidence(body);
+    const [source] = sources;
+    return {
+      ...emptySynthesisSelection(sources),
+      statements: [
+        { text: launchQuote, observationIds: [synthesisSelectionId(source!, "animation")] },
+        { text: untimed, observationIds: [synthesisSelectionId(source!, "rates")] },
+      ],
+    };
+  });
+
+  await tick(database, providers, "2026-11-18T03:00:00.000Z", {
+    outlet: () => new Response(`<article><p>${launchQuote} ${reviewQuote} A long review examines how different build choices shape close encounters in the city.</p></article>`),
+  });
+
+  const synthesis = providers.openRouter.requests.find(({ stage }) => stage === "synthesis")!;
+  const [source] = synthesisEvidence(synthesis.body);
+  expect(source!.extraction.observations).toMatchObject([
+    { id: "animation", technicalTiming: ["At launch"] },
+    { id: "rates", technicalTiming: ["during review"] },
+  ]);
+  expect((await detailOverview(database, CYBERPUNK))?.statements.map(({ text }) => text)).toEqual([launchQuote, untimed]);
 });
 
 // The first live run (2026-11-18) showed Claude Haiku 5.5 reasoning by default,
@@ -524,6 +578,36 @@ function sourceUrls(database: TestDatabase): string[] {
 }
 
 describe("request lifecycle", () => {
+  test.each(["media-extraction-2026-11-25-v8", "media-extraction-2026-11-26-v9"])("a retained %s extraction sends and retries its original prompt and identity", async (configVersion) => {
+    const { database } = await authorizedGames();
+    const providers = apis();
+    await tick(database, providers, "2026-11-18T06:45:00.000Z", { openRouterApiKey: "" });
+    expect(database.native.prepare("UPDATE media_processing_jobs SET config_version = ? WHERE stage = 'extraction' AND status = 'queued'").run(configVersion).changes).toBe(1);
+    const item = () => database.native.query<{ config_version: string; input_identity: string; request_key: string }, []>(
+      "SELECT config_version, input_identity, request_key FROM media_processing_jobs WHERE stage = 'extraction'",
+    ).get()!;
+    const key = item().request_key;
+    providers.openRouter.reply("chat", { hang: true });
+    const sent: Array<ReturnType<typeof item>> = [];
+    providers.openRouter.onChat = (request) => {
+      if (request.stage === "extraction") sent.push(item());
+    };
+
+    await tick(database, providers, "2026-11-18T07:00:00.000Z", { openRouterTimeoutMs: 20 });
+    const first = item();
+    expect(first).toEqual({ config_version: configVersion, input_identity: expect.stringMatching(/^[a-f0-9]{64}$/), request_key: key });
+    await tick(database, providers, "2026-11-18T07:15:00.000Z");
+
+    expect(sent).toEqual([first, first]);
+    const [original, retry] = providers.openRouter.requests;
+    expect(original!.body.messages[0]!.content.includes("choose a verbatim excerpt that includes both the problem and that timing")).toBe(configVersion.endsWith("v9"));
+    expect(original!.body.messages[0]!.content).not.toContain("browsable label");
+    expect(retry!.body).toEqual(original!.body);
+    expect(database.native.query("SELECT config_version, input_identity FROM media_article_extractions").all()).toEqual([
+      { config_version: configVersion, input_identity: first.input_identity },
+    ]);
+  });
+
   test("each item is recorded in flight with its input identity and send time in a committed write before it is sent, and no write transaction is open during the request", async () => {
     const { database } = await authorizedGames();
     const providers = apis();

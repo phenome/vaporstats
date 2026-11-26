@@ -388,7 +388,7 @@ describe("later articles in processing and results", () => {
           { text: story, observationIds: [selectionId(ignInitial, "story"), selectionId(ignLater, "story")] },
           { text: combat, observationIds: [selectionId(ignInitial, "combat-detail"), selectionId(eurogamerInitial, "combat-detail")] },
         ],
-        tags: [[selectionId(ignLater, "skill-trees")]],
+        tags: [{ label: tag, observationIds: [selectionId(ignLater, "skill-trees")] }],
       });
     };
     for (const at of ["2026-11-20T06:00", "2026-11-20T06:15", "2026-11-20T06:30", "2026-11-21T06:00", "2026-11-21T06:15", "2026-11-21T06:30"]) await tick(database, `${at}:00.000Z`);

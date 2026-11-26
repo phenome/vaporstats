@@ -4,7 +4,7 @@ import { MIN_USABLE_ARTICLE_CHARS, parseArticleDocument } from "./article-docume
 import type { AppDatabase } from "./db";
 import { writeTransaction } from "./db-transaction";
 import { isOmissionAmendment, mediaAmendment, mediaAmendmentIdentity } from "./media-amendments";
-import { parseArticleObservations, readArticleObservations, synthesisSelections, validateObservationSynthesis, validateSynthesisClauses, validateSynthesisSelections, extractionReviewIssues, type EditorialOmission } from "./media-observations";
+import { parseArticleObservations, readArticleObservations, synthesisSelections, validateObservationSynthesis, validateSynthesisClauses, validateSynthesisSelections, extractionReviewIssues, usesAuthoredTags, usesArticleTags, usesBrowseTags, usesControllerTags, usesTechnicalTiming, type ClauseVersion, type EditorialOmission } from "./media-observations";
 import { legacyObservationEvidence } from "./media-legacy-observations";
 import { boundedMediaError } from "./media-error";
 import { decodeVector, encodeVector, GEMINI_EMBEDDING_DIMENSIONS } from "./media-embedding-vector";
@@ -23,6 +23,14 @@ import {
   PREMISE_FIRST_SYNTHESIS_VERSION,
   RELEASE_GROUNDED_SYNTHESIS_VERSION,
   SHORT_PREMISE_SYNTHESIS_VERSION,
+  TECHNICAL_TIMING_SYNTHESIS_VERSION,
+  DISCOVERY_LABEL_SYNTHESIS_VERSION,
+  AUTHORED_TAG_SYNTHESIS_VERSION,
+  ARTICLE_TAG_SYNTHESIS_VERSION,
+  BROWSE_TAG_SYNTHESIS_VERSION,
+  DISCOVERY_TRAIT_SYNTHESIS_VERSION,
+  TAG_FIRST_SYNTHESIS_VERSION,
+  CONTROLLER_TAG_SYNTHESIS_VERSION,
   type MediaEvidenceSource,
   validateMediaOverview,
 } from "./media-overview";
@@ -118,19 +126,33 @@ export type { MediaProcessingOutputCounts } from "./media-paid-ledger";
 
 /** The model that generates extractions and Overviews, through OpenRouter chat completions. */
 export const OPENROUTER_TEXT_MODEL = "anthropic/claude-haiku-5.5";
-const EXTRACTION_CONFIG_VERSION = "media-extraction-2026-11-25-v8";
+const VERSION_EVIDENCE_EXTRACTION_VERSION = "media-extraction-2026-11-25-v8";
+const TECHNICAL_TIMING_EXTRACTION_VERSION = "media-extraction-2026-11-26-v9";
+const EXTRACTION_CONFIG_VERSION = "media-extraction-2026-11-26-v10";
+
+function extractsTechnicalTiming(version: string) {
+  return version === TECHNICAL_TIMING_EXTRACTION_VERSION || version === EXTRACTION_CONFIG_VERSION;
+}
 const OBSERVATION_TEXT_SYNTHESIS_VERSION = "media-synthesis-2026-11-25-v9";
 const ORIGINAL_SELECTION_VERSION = "media-synthesis-2026-11-25-v10";
 const REVISED_SELECTION_VERSION = "media-synthesis-2026-11-25-v11";
 const FIRST_CLAUSE_VERSION = "media-synthesis-2026-11-25-v12";
 const REVIEW_SCOPE_CLAUSE_VERSION = "media-synthesis-2026-11-25-v13";
 const SOURCE_GROUNDED_CLAUSE_VERSION = "media-synthesis-2026-11-25-v14";
-const SYNTHESIS_CONFIG_VERSION = SHORT_PREMISE_SYNTHESIS_VERSION;
-const RETAINED_OPENROUTER_SYNTHESIS_VERSIONS = [REVIEW_SCOPE_CLAUSE_VERSION, SOURCE_GROUNDED_CLAUSE_VERSION, PREMISE_FIRST_SYNTHESIS_VERSION, RELEASE_GROUNDED_SYNTHESIS_VERSION];
+const SYNTHESIS_CONFIG_VERSION = TAG_FIRST_SYNTHESIS_VERSION;
+const RETAINED_OPENROUTER_SYNTHESIS_VERSIONS = [REVIEW_SCOPE_CLAUSE_VERSION, SOURCE_GROUNDED_CLAUSE_VERSION, PREMISE_FIRST_SYNTHESIS_VERSION, RELEASE_GROUNDED_SYNTHESIS_VERSION, SHORT_PREMISE_SYNTHESIS_VERSION, TECHNICAL_TIMING_SYNTHESIS_VERSION, DISCOVERY_LABEL_SYNTHESIS_VERSION, AUTHORED_TAG_SYNTHESIS_VERSION, CONTROLLER_TAG_SYNTHESIS_VERSION, ARTICLE_TAG_SYNTHESIS_VERSION, BROWSE_TAG_SYNTHESIS_VERSION, DISCOVERY_TRAIT_SYNTHESIS_VERSION];
 
 function synthesisClauseVersion(configVersion: string) {
   switch (configVersion) {
-    case SYNTHESIS_CONFIG_VERSION:
+    case TAG_FIRST_SYNTHESIS_VERSION: return "v25";
+    case DISCOVERY_TRAIT_SYNTHESIS_VERSION: return "v24";
+    case BROWSE_TAG_SYNTHESIS_VERSION: return "v23";
+    case ARTICLE_TAG_SYNTHESIS_VERSION: return "v22";
+    case CONTROLLER_TAG_SYNTHESIS_VERSION: return "v21";
+    case AUTHORED_TAG_SYNTHESIS_VERSION: return "v20";
+    case DISCOVERY_LABEL_SYNTHESIS_VERSION: return "v19";
+    case TECHNICAL_TIMING_SYNTHESIS_VERSION: return "v18";
+    case SHORT_PREMISE_SYNTHESIS_VERSION:
     case RELEASE_GROUNDED_SYNTHESIS_VERSION: return "v16";
     case PREMISE_FIRST_SYNTHESIS_VERSION: return "v15";
     case SOURCE_GROUNDED_CLAUSE_VERSION: return "v14";
@@ -140,7 +162,7 @@ function synthesisClauseVersion(configVersion: string) {
 }
 
 function usesSourceGroundedScope(version: ReturnType<typeof synthesisClauseVersion>) {
-  return version === "v14" || version === "v15" || version === "v16";
+  return version === "v14" || version === "v15" || version === "v16" || usesTechnicalTiming(version);
 }
 const CLEANUP_VERSION = "media-cleanup-2026-11-25-v3";
 /** How many paid items each provider may take from the queue in one ingestion tick. */
@@ -372,10 +394,6 @@ function extractionIdentityFor(
   return sha256(stableJson({ stage: "extraction", hash, cleanupVersion, model, configVersion, metadata: metadataFor(source) }));
 }
 
-function extractionIdentity(source: SourceRow, hash: string): string {
-  return extractionIdentityFor(source, hash, OPENROUTER_TEXT_MODEL, EXTRACTION_CONFIG_VERSION, CLEANUP_VERSION);
-}
-
 /** The input identity of new Overview work for `appid`'s current extractions. */
 function synthesisIdentity(appid: number, extractions: ExtractionRow[]): string {
   return synthesisIdentityFor(appid, extractions, OPENROUTER_TEXT_MODEL, SYNTHESIS_CONFIG_VERSION);
@@ -387,7 +405,7 @@ function synthesisIsCurrent(job: JobRow, extractions: ExtractionRow[]): boolean 
 }
 
 function usesObservationExtraction(version: string): boolean {
-  return version === EXTRACTION_CONFIG_VERSION || version === "media-extraction-2026-11-25-v5" || version === "media-extraction-2026-11-25-v6" || version === "media-extraction-2026-11-25-v7";
+  return extractsTechnicalTiming(version) || version === VERSION_EVIDENCE_EXTRACTION_VERSION || version === "media-extraction-2026-11-25-v5" || version === "media-extraction-2026-11-25-v6" || version === "media-extraction-2026-11-25-v7";
 }
 
 function usesObservationSynthesis(configVersion: string): boolean {
@@ -420,7 +438,7 @@ function chatRequest(maxTokens: number, ...messages: OpenRouterChatRequest["mess
 }
 
 /** A conservative local estimate of `request`'s input tokens. */
-function estimatedInputTokens(request: OpenRouterChatRequest): number {
+function estimatedInputTokens(request: Pick<OpenRouterChatRequest, "messages">): number {
   return Math.ceil(Buffer.byteLength(JSON.stringify(request.messages), "utf8") / ESTIMATE_BYTES_PER_TOKEN);
 }
 
@@ -432,14 +450,15 @@ const CATEGORY_GUIDANCE = `Use these category boundaries:
 - Technical experience & accessibility: performance, stability, controls, readability, and access options.
 Split mixed evidence where appropriate and omit categories without evidence.`;
 
-function makeExtractionRequest(source: SourceRow, content: string): OpenRouterChatRequest {
+function makeExtractionRequest(source: SourceRow, content: string, configVersion: string): OpenRouterChatRequest {
   const request = chatRequest(
     EXTRACTION_MAX_OUTPUT_TOKENS,
     { role: "system", content: `Analyze the article about Steam app ${source.appid}. Return JSON only.
 Return {observations, originatingAssessment}. Each observation has id (unique short stable identifier), appid (the target Steam app ID as a JSON integer), kind ("finding", "pro", "con", "tag", "gameplay", or "storyWorld"), category (one of the categories below for findings, "" otherwise), text (one independently checkable assertion), quote (verbatim supporting excerpt, 12–480 characters), and qualifiers (array, empty only when scope does not materially change the claim). Omit originatingAssessment if unknown.
 ${CATEGORY_GUIDANCE}
-Ground every observation in substantive reporting about the target game. Omit factboxes, page metadata, incidental comparisons, and other games or editions. When a platform, edition, build, patch, preview, announcement, or release state changes the meaning of a specific observation, copy the exact phrase into qualifiers from that observation's own quote or from its non-null platform or buildContext metadata. Each qualifier must appear verbatim as a contiguous phrase in one of those places. Include a material qualifier even when the observation text already contains it. Use [] for general observations. Omit placeholders such as "platform and build not stated", labels such as "reviewer assessment", and a platform that merely identifies where the reviewer played. Publication dates do not establish the build played. If interpretation is uncertain, include a short reviewQuestion on the candidate observation identifying the unresolved issue; the candidate is held for editorial review.
-Tags must be concise factual characteristics with explicit evidence. Omit quality judgments, popularity, ratings, scores, performance and technical complaints. Playing solo does not establish a single-player mode. A past build does not establish a general characteristic. A concrete announced feature must remain announced. Use pro and con only for supported assessments. For similarity, separately record directly described mechanics or progression as gameplay observations and directly described settings, characters or narrative premises as storyWorld observations. When the same excerpt also supports a category finding, give the similarity observation its own id and the same supported scope. Exclude praise alone, ratings, popularity, technical complaints and hardware mappings from similarity. Omit any dimension the article does not describe.` },
+Ground every observation in substantive reporting about the target game. Omit factboxes, page metadata, incidental comparisons, and other games or editions. When a platform, edition, build, patch, preview, announcement, or release state changes the meaning of a specific observation, copy the exact phrase into qualifiers from that observation's own quote or from its non-null platform or buildContext metadata. Each qualifier must appear verbatim as a contiguous phrase in one of those places. Include a material qualifier even when the observation text already contains it. Use [] for general observations. Omit placeholders such as "platform and build not stated", labels such as "reviewer assessment", and a platform that merely identifies where the reviewer played. Publication dates do not establish the build played. If interpretation is uncertain, include a short reviewQuestion on the candidate observation identifying the unresolved issue; the candidate is held for editorial review.${extractsTechnicalTiming(configVersion) ? `
+For an observed bug or performance problem, use past tense. If the article explicitly ties the problem to a build, patch or period of play, choose a verbatim excerpt that includes both the problem and that timing and put the excerpt's exact timing phrase in qualifiers. For example, a quote saying a crash occurred on the launch build supports the qualifier "launch build". Publication dates, metadata and timing mentioned elsewhere do not establish when this problem occurred. If the article only establishes that the problem happened while the reviewer played, preserve that limited finding and leave build or release timing unspecified.` : ""}
+Tags must be concise factual characteristics with explicit evidence.${configVersion === EXTRACTION_CONFIG_VERSION ? ' Write each tag as a browsable label of a few words. Examples of form include "Open world", "No load screens", "FPS", "Choices matter", "Joy-Con support" and "Adaptive triggers". Include each only when the excerpt actually establishes that feature. First-person perspective alone does not establish a shooter. Keep the evidence sentence in quote.' : ""} Omit quality judgments, popularity, ratings, scores, performance and technical complaints. Playing solo does not establish a single-player mode. A past build does not establish a general characteristic. A concrete announced feature must remain announced. Use pro and con only for supported assessments. For similarity, separately record directly described mechanics or progression as gameplay observations and directly described settings, characters or narrative premises as storyWorld observations. When the same excerpt also supports a category finding, give the similarity observation its own id and the same supported scope. Exclude praise alone, ratings, popularity, technical complaints and hardware mappings from similarity. Omit any dimension the article does not describe.` },
     { role: "user", content: `Article metadata: ${JSON.stringify({
       type: source.type,
       handsOn: source.hands_on,
@@ -454,7 +473,7 @@ function strictObject(properties: Record<string, unknown>) {
   return { type: "object", properties, required: Object.keys(properties), additionalProperties: false };
 }
 
-function synthesisResponseSchema({ choices }: ReturnType<typeof synthesisSelections>) {
+function synthesisResponseSchema({ choices }: ReturnType<typeof synthesisSelections>, version: ClauseVersion) {
   function ids(allowedIds: string[]) {
     return { type: "array", items: { type: "string", enum: allowedIds } };
   }
@@ -463,7 +482,11 @@ function synthesisResponseSchema({ choices }: ReturnType<typeof synthesisSelecti
   }
   function section(name: "statements" | "pros" | "cons" | "tags") {
     const allowedIds = choices.get(name);
-    return allowedIds ? { type: "array", items: name === "tags" ? ids(allowedIds) : clause(allowedIds) } : { type: "null" };
+    if (!allowedIds) return { type: "null" };
+    const items = name !== "tags" ? clause(allowedIds)
+      : usesAuthoredTags(version) ? strictObject({ label: { type: "string" }, observationIds: ids(allowedIds) })
+      : ids(allowedIds);
+    return { type: "array", items };
   }
   const categories = Object.fromEntries(MEDIA_CATEGORY_NAMES.flatMap((name) => {
     const allowedIds = choices.get(name);
@@ -472,12 +495,13 @@ function synthesisResponseSchema({ choices }: ReturnType<typeof synthesisSelecti
       items: clause(allowedIds),
     }]] : [];
   }));
-  return strictObject({
+  const prose = {
     statements: section("statements"),
     categories: strictObject(categories),
     prosCons: strictObject({ pros: section("pros"), cons: section("cons") }),
-    tags: section("tags"),
-  });
+  };
+  const tags = section("tags");
+  return strictObject(version === "v25" ? { tags, ...prose } : { ...prose, tags });
 }
 
 function observationReviewOutput(
@@ -489,9 +513,9 @@ function observationReviewOutput(
   return { editorialOmissions: [...unique.values()], observationOmissions: checked.diagnostics };
 }
 
-function readPendingObservations(row: ExtractionRow, appid: number, includeVersionEvidence = false) {
+function readPendingObservations(row: ExtractionRow, appid: number, includeVersionEvidence = false, includeTechnicalTiming = false) {
   const stored = jsonObject(parseJson(row.output_json));
-  return readArticleObservations({ observations: stored.pendingObservations }, appid, includeVersionEvidence);
+  return readArticleObservations({ observations: stored.pendingObservations }, appid, includeVersionEvidence, includeTechnicalTiming);
 }
 
 function storedExtractionQuestions(row: ExtractionRow): EditorialOmission[] {
@@ -500,16 +524,18 @@ function storedExtractionQuestions(row: ExtractionRow): EditorialOmission[] {
     issue?.sourceIdentity === row.input_identity && typeof issue.observationId === "string" && typeof issue.question === "string") : [];
 }
 
-function effectiveObservationSources(appid: number, extractions: ExtractionRow[], sources: SourceRow[], includeVersionEvidence = false) {
+function effectiveObservationSources(appid: number, extractions: ExtractionRow[], sources: SourceRow[], version: ReturnType<typeof synthesisClauseVersion>) {
+  const includeVersionEvidence = usesSourceGroundedScope(version);
+  const includeTechnicalTiming = usesTechnicalTiming(version);
   const sourceById = new Map(sources.map((source) => [source.id, source]));
   return extractions.flatMap((row) => {
     const source = sourceById.get(row.source_id);
     if (!source || source.appid !== appid) return [];
     const sourceIdentity = row.input_identity;
-    const current = readArticleObservations(row.output_json, appid, includeVersionEvidence);
+    const current = readArticleObservations(row.output_json, appid, includeVersionEvidence, includeTechnicalTiming);
     const legacy = current.length || usesObservationExtraction(row.config_version)
-      ? undefined : legacyObservationEvidence(row.output_json, appid, source.build_context, sourceIdentity);
-    const pending = readPendingObservations(row, appid, includeVersionEvidence);
+      ? undefined : legacyObservationEvidence(row.output_json, appid, source.build_context, sourceIdentity, usesArticleTags(version));
+    const pending = readPendingObservations(row, appid, includeVersionEvidence, includeTechnicalTiming);
     const editorialOmissions = storedExtractionQuestions(row).filter(({ observationId }) => {
       const amendment = mediaAmendment(sourceIdentity, observationId);
       return !isOmissionAmendment(amendment) && (amendment === undefined || !pending.some(({ id }) => id === observationId));
@@ -520,7 +546,7 @@ function effectiveObservationSources(appid: number, extractions: ExtractionRow[]
       const amendment = mediaAmendment(sourceIdentity, observation.id);
       if (amendment === undefined) return [observation];
       if (isOmissionAmendment(amendment)) return [];
-      return readArticleObservations({ observations: [{ ...observation, text: cleanLine(amendment) }] }, appid, includeVersionEvidence);
+      return readArticleObservations({ observations: [{ ...observation, text: cleanLine(amendment) }] }, appid, includeVersionEvidence, includeTechnicalTiming);
     });
     const editionContext = { platform: source.platform, build: source.build_context ?? (source.type === "preview" ? "preview" : null) };
     return [{ sourceIdentity, sourceUrl: source.original_url, outlet: source.outlet, editionContext,
@@ -528,25 +554,64 @@ function effectiveObservationSources(appid: number, extractions: ExtractionRow[]
   });
 }
 
+function synthesisTagIndex({ evidence, choices }: ReturnType<typeof synthesisSelections>): string {
+  const eligible = new Set(choices.get("tags"));
+  const tags = evidence.flatMap(({ observations }) => observations.filter(({ selectionId }) => eligible.has(selectionId)));
+  if (!tags.length) return "";
+  const scopes = Object.fromEntries(tags.map((tag) =>
+    [tag.tagScopeGroup ?? tag.scopeGroup, tag.tagQualifiers ?? tag.qualifiers]));
+  const index = (textLimit: number) => JSON.stringify({
+    scopes,
+    rows: tags.map((tag) => [tag.selectionId, tag.tagScopeGroup ?? tag.scopeGroup,
+      tag.text.length > textLimit ? tag.text.slice(0, textLimit) + "…" : tag.text]),
+  });
+  const limit = 12_000;
+  const overhead = Buffer.byteLength(index(0));
+  const textLimit = Math.min(220, Math.floor((limit - overhead) / tags.length));
+  if (textLimit <= 0) return "";
+  const compact = index(textLimit);
+  if (Buffer.byteLength(compact) > limit) return "";
+  return `Tag evidence index. Rows give [observationId, tagScopeGroup, text excerpt]. See the final article array for full evidence.
+${compact}
+`;
+}
+
 function makeSynthesisRequest(appid: number, name: string, version: NonNullable<ReturnType<typeof synthesisClauseVersion>>, selections: ReturnType<typeof synthesisSelections<ReturnType<typeof effectiveObservationSources>[number]>>, shortLead: boolean): OpenRouterChatRequest {
+  const releaseGroundedLead = version === "v16" || usesTechnicalTiming(version);
   const request = chatRequest(SYNTHESIS_MAX_OUTPUT_TOKENS, { role: "user", content: `Synthesize the current assessments for ${name || `game ${appid}`}: each outlet's initial assessment (pass "initial") and any later assessment by an outlet already represented (pass "later"). A later article from the same outlet is that outlet's own follow-up and adds no separate endorsement. A null publishedAt is an unknown date.
-Return JSON matching the response schema. ${version === "v15" || version === "v16" ? `Compose one short, connected Overview paragraph in statements, in reading order. Open with the game's name and its premise: the player role, setting, goal or stakes whenever the observations support them. Then show what play involves through a concrete choice, loop or mechanic. Use the most identifying supported facts available, even if the evidence is sparse. Mention a significant flaw after the premise and gameplay only when it materially affects the experience, preserving its scope. Use transitions that connect the sentences. Avoid a list of stand-alone remarks, generic praise, or technical details better suited to the topic sections.
-Each statements entry is a contiguous citation span of the paragraph. Include the punctuation that belongs at the end of that span. Split where the supporting evidence changes, including within a sentence when needed. Every cited observation must support the whole span's factual claim. Use finding, storyWorld and gameplay observations in statements. The typed storyWorld and gameplay observations can support the lead only. Include every independent article that supports the exact shared claim and scope, even if it uses a different observation kind or wording. A same-outlet follow-up can support its own facts but does not count as independent corroboration.${version === "v16" ? `
+Return JSON matching the response schema. ${version === "v25" ? "Select and write tags first, then compose the prose. " : ""}${version === "v15" || releaseGroundedLead ? `Compose one short, connected Overview paragraph in statements, in reading order. Open with the game's name and its premise: the player role, setting, goal or stakes whenever the observations support them. Then show what play involves through a concrete choice, loop or mechanic. Use the most identifying supported facts available, even if the evidence is sparse. Mention a significant flaw after the premise and gameplay only when it materially affects the experience, preserving its scope. Use transitions that connect the sentences. Avoid a list of stand-alone remarks, generic praise, or technical details better suited to the topic sections.
+Each statements entry is a contiguous citation span of the paragraph. Include the punctuation that belongs at the end of that span. Split where the supporting evidence changes, including within a sentence when needed. Every cited observation must support the whole span's factual claim. Use finding, storyWorld and gameplay observations in statements. The typed storyWorld and gameplay observations can support the lead only. Include every independent article that supports the exact shared claim and scope, even if it uses a different observation kind or wording. A same-outlet follow-up can support its own facts but does not count as independent corroboration.${releaseGroundedLead ? `
 Build the lead around the strongest release-grounded premise or stakes. Read across the available articles to find adjacent, complementary facts for the next sentence. Prefer a character's goal, the consequences of a choice, or a concrete example of how you play. Leave isolated trivia and action budgets to the topics. Use everyday language where possible and connect ideas only where the evidence supports the connection. If only a preview supplies an illustrative detail, separate it from release claims and state its qualification once in natural prose.
 For each citation span, choose one scopeGroup first. All observationIds for that span must be from that exact group, even when other observations describe the same mechanic. When release evidence fully supports the claim, use the release group alone and leave out preview IDs. If only historical evidence supports it, keep its qualification in the prose. Do not borrow platform or build wording from source metadata or incidental observations when the selected observation's qualifiers do not require it. Before returning, check every span for scopeGroup consistency and remove any ID that supports only one part of it; split separately supported facts into adjacent spans.` : ""}
-Write up to three additional clauses per topic under the exact finding categories.` : "Write up to three lead clauses in statements using finding observations, then up to three additional clauses per topic under the exact finding categories."} Put concrete edition-specific details under their categories, including when an observation also supports a different lead claim. Do not repeat claims. Pros and cons require observations of their respective kinds. Tags are groups of IDs with identical tag wording and scope. Use null for sections whose schema is null and empty arrays when selecting nothing from an available section.
+Write up to three additional clauses per topic under the exact finding categories.` : "Write up to three lead clauses in statements using finding observations, then up to three additional clauses per topic under the exact finding categories."} Put concrete edition-specific details under their categories, including when an observation also supports a different lead claim. Do not repeat claims. Pros and cons require observations of their respective kinds. ${usesAuthoredTags(version) ? `For tags, choose durable discovery characteristics that would help someone find another game with the same feature. Author a short, standalone ${usesBrowseTags(version) ? "label" : "noun phrase"} in label and cite the tag observationIds that each support its entire meaning and scope. Different wording can support one shared label. Keep each tag in one scopeGroup and retain material limits such as input mode, platform, build or edition. Turn a described mechanic into its reusable category, for example ‘Companion recruitment’ from specific ways of recruiting companions. If evidence describes choosing who you were before the story begins and that choice sets your starting situation, describe that option in plain language, without counting the options or using the names the game gives them. Skip lore, counts of options, performance measurements, promotional verdicts, and sentence-length descriptions. Do not broaden a restricted feature into a game-wide property or infer a genre from camera perspective alone.` : "Tags are groups of IDs with identical tag wording and scope."}${usesControllerTags(version) ? " For a controller tag, name the hardware and the specific use established by the evidence, such as ‘Joy-Con aiming’ when the article describes Joy-Con mouse-style aiming on Switch 2. Use ‘Joy-Con support’ only when the article establishes compatibility without describing a specific use. Leave an implied native platform out of the label and keep the original observation IDs. Keep a platform where it adds information, for example a controller used outside its native platform. Keep input mode, build, or edition distinctions when they change the capability. A controller mapping does not establish a genre, a game-wide mechanic, another input mode, or support on another platform." : ""}${version === "v22" ? " Prioritize reusable mechanics over names of characters, resources and other setting-specific lore. A recognizable setting such as Greek mythology can still help players find similar games. Treat retained article traits as candidates. Favor precise descriptions over terse labels when they supply additional details. Gameplay findings with tagScopeGroup are eligible too. For those findings use tagScopeGroup and tagQualifiers for tags, and scopeGroup and qualifiers for prose. One observation can support multiple distinct tags when it establishes each feature independently. For example, choosing between routes supports ‘Branching routes’. Add ‘Room reward previews’ separately only when the evidence shows rewards are visible before the player chooses a route. Door icons or randomized rewards alone do not establish what players can see before choosing. Merge equivalent labels and leave out unsupported modes, bugs, performance claims, and release states by themselves." : usesBrowseTags(version) ? ` For browse tags, prefer the shortest recognizable label, usually one to four words. Choose a reusable trait that helps someone find another game with that trait. Omit redundant words, one-off examples, names of particular items and resources, and generic details that would not help someone browse. Use established terms where the evidence supports them, such as “Open world”, “Roguelike”, “Crafting”, “Environmental interaction”, “Starting background choice”, “Branching main story”, and “Joy-Con aiming”. Use “Actions have consequences” when actions materially change future events, relationships, or outcomes. Use “Non-combat spells” when the evidence shows spells can be used outside combat. A recognizable setting or ruleset can be a tag in its own right, such as “Greek mythology”, “Faerûn”, or “D&D 5th Edition”. Use the named edition only when supported.
+Treat retained article traits as candidates. Gameplay findings with tagScopeGroup are eligible too. Use tagScopeGroup and tagQualifiers for tags, and scopeGroup and qualifiers for prose. Split independent dimensions such as “2D” and “Action” into separate tags. Use “Isometric” only when the evidence establishes an isometric view. One observation can support multiple distinct labels when it establishes each independently. Consider “Branching routes” when players choose among routes and “Room reward previews” when rewards are visible before that choice, even if both are in one finding. Merge equivalent labels. Omit unsupported modes, bugs, benchmarks, and labels that only name a release state.
+Use an ordinary mechanic from a historic review directly when the evidence describes it as part of the game. Early Access or preview context alone is not a tag qualifier. Keep material restrictions such as input mode, platform, or edition as indicated by tagQualifiers. If the evidence actually limits a trait to a preview, test, or development build, omit it from tags and preserve the qualification in prose.` : ""}${version === "v24" || version === "v25" ? `
+Review the tag candidates from every eligible article before choosing labels. Include Early Access articles in that review. A release article can corroborate a characteristic and does not replace distinct, durable mechanics described elsewhere.
+Discard generic labels such as “Character conversations” and broad judgments such as “Deep character customization”. Skip packaging, content listings, and peripheral trivia. Prefer recognizable choices and recurring mechanics. For example, “Pre-run loadouts” describes choosing equipment or abilities before a run, and “Tarot-card upgrades” describes tarot cards that function as an upgrade system. A passing mention of resources, card art, or conversation does not establish those mechanics.
+Inspect each structured observation for multiple independent traits. When a passage establishes both a choice between branching routes and advance visibility of the reward on each route, include both “Branching routes” and “Room reward previews” as separate tags. Reuse that observation's ID for both. Choose neither label from door icons, randomness, or sequential rooms alone.` : ""}${version === "v25" ? `
+Select both the broad, stable dimensions people browse by (for example 2D and Action separately) and the distinctive, recurring mechanics. Scan for compound observations before moving to prose. Physical paths and room choices establish route branching only. “Branching main story” requires a plot decision or distinct story outcomes. Use the setting name alone, such as “Greek mythology” or “Faerûn”.` : ""} Use null for sections whose schema is null and empty arrays when selecting nothing from an available section.
 Each prose entry must be one specific, game-first clause. Say what happens in the game directly. For example, say "Dialogue can overlap during missions." Avoid "was described," "were reported," "reviewer," outlet names, source counts, and claims about consensus. Use readable paraphrases and cite the exact selectionId values that individually support the whole clause. Keep material platform, edition, build, patch, timing, and subjective limits.
 First look for distinct outlets supporting the same specific point within a scopeGroup. Multiple IDs in a prose entry MUST have the same scopeGroup. Where observations agree, write a shared clause about their specific common point and cite them together, even when their original wording differs. Keep additional patch-specific examples and other scopeGroups in their own clauses and citations. Give each differing assessment its own concrete clause and citations. Do not combine different examples into one claim or describe the existence of disagreement as a finding. Keep neutral characteristics out of pros and cons.
-${shortLead ? `For statements, first draft two or three sentences of 45–70 words in total for a friend deciding what this game is about. Pick ONE through-line. Begin with the named character or party in their predicament. Follow them into one concrete decision, consequence, or repeated action. Finish there. A launch problem that actually disrupted that experience can earn the final sentence: describe it in the past tense and retain its supported timing. Cut generic verdicts, duplicate descriptions and any sentence that could be shuffled elsewhere in the paragraph. Write in natural spoken English ("you", "your party", "your next run" as appropriate); avoid phrases like "the player character", "narrative outcomes" or "build versatility". When a compatible release observation and a scoped early preview describe complementary facts, either attribute a preview-only illustration naturally or choose a different supported example. Do not pad with one review's observations when the other articles supply relevant concrete evidence.
+${shortLead ? `For statements, first draft two or three sentences of 45–70 words in total for a friend deciding what this game is about. Pick ONE through-line. Begin with the named character or party in their predicament. Follow them into one concrete decision, consequence, or repeated action. Finish there. A ${(usesTechnicalTiming(version)) ? "technical" : "launch"} problem that actually disrupted that experience can earn the final sentence: describe it in the past tense and retain its supported timing. Cut generic verdicts, duplicate descriptions and any sentence that could be shuffled elsewhere in the paragraph. Write in natural spoken English ("you", "your party", "your next run" as appropriate); avoid phrases like "the player character", "narrative outcomes" or "build versatility". When a compatible release observation and a scoped early preview describe complementary facts, either attribute a preview-only illustration naturally or choose a different supported example. Do not pad with one review's observations when the other articles supply relevant concrete evidence.
 Only AFTER drafting that paragraph, divide it into citation spans. Different parts of a sentence may cite different articles. Fictional illustration of pacing and boundaries: "Low Tide puts you at the helm of a ferry as the last bridge out of town collapses." [premise] "Each crossing means choosing between another passenger" [capacity] "and enough fuel to make it home." [fuel]. Use the actual game evidence; never reuse details from this illustration.
 ` : ""}${usesSourceGroundedScope(version) ? `Treat the source platform, review date and build as review context. Give ordinary gameplay, story, world and qualitative assessments directly when the excerpt supports them without that context. A review of a PC release or console port does not establish that every detail differs by version. Use an explicit version distinction only for a concrete change, comparison, restriction or platform-specific behavior indicated by the observation's edition and required qualifiers. These come from the verified excerpt, or the accepted wording for legacy observations. Keep historical and technical limits listed in the observation's qualifiers, including patch-dependent bugs and preview-only evidence. Preserve both sides of an explicit version comparison in the claim text. Use the supplied scopeGroup when combining IDs.
-` : ""}${JSON.stringify(selections.evidence.map(({ observations, editorialOmissions: _editorialOmissions, legacySimilarityInputs: _legacySimilarityInputs, ...source }) => ({ ...source, extraction: { observations } })))}` });
+` : ""}${(usesTechnicalTiming(version)) ? `For an observed bug or performance problem in any prose section, use past tense and put the timing in the clause itself. Preserve each material build, patch or period explicitly supported by every selected observation's excerpt. For example, say "Animation glitches interrupted scenes at launch" only if every citation establishes launch timing. If the citations only establish what happened while the reviewer played, say "during review" explicitly, such as "Animation glitches interrupted scenes during review." Do not infer launch or patch timing from a publication date, source metadata or other observations. Keep differently timed evidence in separate clauses. Ordinary gameplay and other general claims need no such timing.
+` : ""}${version === "v19" || usesAuthoredTags(version) ? "When a source describes the effect of a tested patch, include the observed change and any remaining problems as a separate technical finding with that source’s own citation and timing. Prioritize this over incidental interface complaints. Mention each hardware configuration only once.\n" : ""}${JSON.stringify(selections.evidence.map(({ observations, editorialOmissions: _editorialOmissions, legacySimilarityInputs: _legacySimilarityInputs, ...source }) => ({ ...source, extraction: { observations } })))}` });
+  if (version === "v25") {
+    const index = synthesisTagIndex(selections);
+    const message = request.messages[0]!;
+    const articleStart = message.content.lastIndexOf("\n") + 1;
+    const indexed = { ...request, messages: [{ ...message,
+      content: message.content.slice(0, articleStart) + index + message.content.slice(articleStart),
+    }] };
+    if (estimatedInputTokens(indexed) <= OPENROUTER_MAX_INPUT_TOKENS) request.messages = indexed.messages;
+  }
   return {
     ...request,
     provider: { require_parameters: true },
     response_format: {
       type: "json_schema",
-      json_schema: { name: "media_overview", strict: true, schema: synthesisResponseSchema(selections) },
+      json_schema: { name: "media_overview", strict: true, schema: synthesisResponseSchema(selections, version) },
     },
   };
 }
@@ -871,11 +936,12 @@ async function persistExtraction(db: AppDatabase, job: JobRow, output: unknown, 
   }
   const parsed = parseExtraction(output);
   const context = [source.platform, source.build_context, source.type === "preview" ? "preview" : null];
-  const includeVersionEvidence = job.config_version === EXTRACTION_CONFIG_VERSION;
-  const observations = article === undefined ? [] : parseArticleObservations(output, source.appid, article, context, false, includeVersionEvidence);
-  const pendingObservations = article === undefined ? [] : parseArticleObservations(output, source.appid, article, context, true, includeVersionEvidence);
+  const includeTechnicalTiming = extractsTechnicalTiming(job.config_version);
+  const includeVersionEvidence = includeTechnicalTiming || job.config_version === VERSION_EVIDENCE_EXTRACTION_VERSION;
+  const observations = article === undefined ? [] : parseArticleObservations(output, source.appid, article, context, false, includeVersionEvidence, includeTechnicalTiming);
+  const pendingObservations = article === undefined ? [] : parseArticleObservations(output, source.appid, article, context, true, includeVersionEvidence, includeTechnicalTiming);
   const hasLegacyOutput = article === undefined && (parsed.contributions.length > 0 || parsed.traits.length > 0 || parsed.categories || parsed.similarityInputs);
-  const editorialOmissions = article === undefined ? [] : extractionReviewIssues(output, source.appid, job.input_identity, observations, article, context);
+  const editorialOmissions = article === undefined ? [] : extractionReviewIssues(output, source.appid, job.input_identity, observations, article, context, includeTechnicalTiming);
   if (observations.length === 0 && pendingObservations.length === 0 && !hasLegacyOutput) {
     await db.prepare("UPDATE media_sources SET processing_content = NULL WHERE id = ?").bind(source.id).run();
     return { status: "refused", error: "invalid_output: no supported contributions", ...(editorialOmissions.length ? { outputJson: JSON.stringify({ editorialOmissions }) } : {}) };
@@ -953,7 +1019,7 @@ async function persistOverview(db: AppDatabase, job: JobRow, output: unknown, no
     return { status: "stale" };
   }
   const clauseVersion = synthesisClauseVersion(job.config_version);
-  const observationSources = effectiveObservationSources(job.appid, evidence.extractions, evidence.sources, usesSourceGroundedScope(clauseVersion));
+  const observationSources = effectiveObservationSources(job.appid, evidence.extractions, evidence.sources, clauseVersion);
   const usesObservations = usesObservationSynthesis(job.config_version);
   const parsed = parseJson(output);
   const invalidRoot = usesObservations && (typeof parsed !== "object" || parsed === null || Array.isArray(parsed));
@@ -984,7 +1050,7 @@ async function persistOverview(db: AppDatabase, job: JobRow, output: unknown, no
       const observationRefs = checked?.overview.tags
         .filter(({ label }) => normalizeMediaTag(label)?.slug === tag.slug)
         .flatMap(({ observationRefs }) => observationRefs);
-      return { ...tag, sourceUrls, ...(observationRefs ? { observationRefs } : {}) };
+      return { ...tag, sourceUrls, ...(observationRefs ? { observationRefs: [...new Map(observationRefs.map((ref) => [JSON.stringify(ref), ref])).values()] } : {}) };
     }),
     ...(similarityInputs ? { similarityInputs } : {}),
   };
@@ -1054,22 +1120,28 @@ async function persistEmbedding(db: AppDatabase, job: JobRow, output: unknown, n
   return { status: "succeeded", outputJson: JSON.stringify({ dimensions: GEMINI_EMBEDDING_DIMENSIONS, dimension: job.dimension, inputIdentity: job.input_identity, overviewInputIdentity }), replaced: earlier !== null };
 }
 
+function retainsOpenRouterTextContract(job: JobRow): boolean {
+  return job.provider === "openrouter" && (job.stage === "extraction"
+    ? job.config_version === VERSION_EVIDENCE_EXTRACTION_VERSION || job.config_version === TECHNICAL_TIMING_EXTRACTION_VERSION
+    : job.stage === "synthesis" && RETAINED_OPENROUTER_SYNTHESIS_VERSIONS.includes(job.config_version));
+}
+
 /**
  * The provider, model, configuration and input identity an item returned to
  * the queue waits with. Text generation runs only on OpenRouter, so an
  * extraction or Overview item from a Gemini text batch waits as OpenRouter
  * work for the text model; an Overview item that still describes its game's
  * current contributions takes the identity of new Overview work for them.
- * An embedding item keeps its own.
+ * Retained OpenRouter text contracts and embedding items keep their identities.
  */
 async function queuedIdentity(db: AppDatabase, job: JobRow): Promise<Pick<JobRow, "provider" | "model" | "config_version" | "max_output_tokens" | "input_identity">> {
+  if (retainsOpenRouterTextContract(job)) {
+    return { provider: job.provider, model: job.model, config_version: job.config_version, max_output_tokens: job.max_output_tokens, input_identity: job.input_identity };
+  }
   if (job.stage === "extraction") {
     return { provider: "openrouter", model: OPENROUTER_TEXT_MODEL, config_version: EXTRACTION_CONFIG_VERSION, max_output_tokens: EXTRACTION_MAX_OUTPUT_TOKENS, input_identity: job.input_identity };
   }
   if (job.stage === "synthesis") {
-    if (job.provider === "openrouter" && RETAINED_OPENROUTER_SYNTHESIS_VERSIONS.includes(job.config_version)) {
-      return { provider: job.provider, model: job.model, config_version: job.config_version, max_output_tokens: job.max_output_tokens, input_identity: job.input_identity };
-    }
     const { extractions } = await currentGameEvidence(db, job.appid);
     const identity = extractions.length > 0 && synthesisIsCurrent(job, extractions) ? synthesisIdentity(job.appid, extractions) : job.input_identity;
     return { provider: "openrouter", model: OPENROUTER_TEXT_MODEL, config_version: SYNTHESIS_CONFIG_VERSION, max_output_tokens: SYNTHESIS_MAX_OUTPUT_TOKENS, input_identity: identity };
@@ -1515,7 +1587,7 @@ async function takeExtractionTurn(advance: QueueAdvance, job: JobRow): Promise<b
   await resolveWithoutProvider(db, job, async () => {
     current = await currentSource(db, source.id);
     if (!current) return false;
-    identity = extractionIdentity(current, cleaned.hash);
+    identity = extractionIdentityFor(current, cleaned.hash, job.model, job.config_version, CLEANUP_VERSION);
     const prior = await first<ExtractionRow>(db, "SELECT id, source_id, input_identity, content_hash, cleanup_version, model, config_version, output_json, active FROM media_article_extractions WHERE source_id = ? AND active = 1 LIMIT 1", source.id);
     // Unchanged content keeps its extraction; legacy scope is checked when
     // the stored observations are used in new synthesis.
@@ -1553,7 +1625,7 @@ async function takeExtractionTurn(advance: QueueAdvance, job: JobRow): Promise<b
     return true;
   }
   await setWaitingInputIdentity(db, job, identity);
-  await sendTextItem(advance, { ...job, input_identity: identity }, makeExtractionRequest(current, cleaned.content), cleaned.content);
+  await sendTextItem(advance, { ...job, input_identity: identity }, makeExtractionRequest(current, cleaned.content, job.config_version), cleaned.content);
   return true;
 }
 
@@ -1574,14 +1646,14 @@ async function takeSynthesisTurn(advance: QueueAdvance, job: JobRow): Promise<bo
   }
   const game = await first<{ name: string }>(db, "SELECT name FROM apps WHERE appid = ?", job.appid);
   const version = synthesisClauseVersion(job.config_version)!;
-  const sources = effectiveObservationSources(job.appid, evidence.extractions, evidence.sources, usesSourceGroundedScope(version));
+  const sources = effectiveObservationSources(job.appid, evidence.extractions, evidence.sources, version);
   const selections = synthesisSelections(sources, { clauses: version });
   if (!selections.choices.has("statements")) {
     const checked = validateSynthesisClauses({}, job.appid, sources, selections, version);
     await refuseItem(db, job, "invalid_output: no cited statements", advance.now, JSON.stringify(observationReviewOutput(checked, sources)));
     return true;
   }
-  await sendTextItem(advance, job, makeSynthesisRequest(job.appid, game?.name ?? "", version, selections, job.config_version === SHORT_PREMISE_SYNTHESIS_VERSION));
+  await sendTextItem(advance, job, makeSynthesisRequest(job.appid, game?.name ?? "", version, selections, (usesTechnicalTiming(version)) || job.config_version === SHORT_PREMISE_SYNTHESIS_VERSION));
   return true;
 }
 
@@ -1608,7 +1680,7 @@ async function takeEmbeddingTurn(advance: QueueAdvance, job: JobRow): Promise<bo
 async function takeTurn(advance: QueueAdvance, job: JobRow): Promise<boolean> {
   // Items already waiting at deploy time must record the contract actually sent.
   // Submitted legacy work still settles under the version recorded at submission.
-  if (job.provider === "openrouter" && !(job.stage === "synthesis" && RETAINED_OPENROUTER_SYNTHESIS_VERSIONS.includes(job.config_version)) && job.config_version !==
+  if (job.provider === "openrouter" && !retainsOpenRouterTextContract(job) && job.config_version !==
       (job.stage === "extraction" ? EXTRACTION_CONFIG_VERSION : SYNTHESIS_CONFIG_VERSION)) {
     const { db } = advance;
     const next = await queuedIdentity(db, job);

@@ -208,7 +208,7 @@ export function MediaOverviewSection({
       )}
       {overview.tags.length > 0 && (
         <nav aria-label="Media tags" className="flex flex-wrap items-baseline gap-x-3 gap-y-1 border-t border-zinc-700 pt-3 text-xs" data-media-tags>
-          <span className="text-zinc-400">Related tags</span>
+          <span className="text-zinc-400">tags:</span>
           {overview.tags.map((tag) => (
             <AppLink
               key={tag.slug}

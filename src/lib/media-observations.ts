@@ -3,7 +3,7 @@ import { LEGACY_V10_SOURCE_SUPPORT_LANGUAGE, MEDIA_CATEGORY_NAMES, normalizeMedi
 
 const kinds = ["finding", "pro", "con", "tag", "gameplay", "storyWorld"] as const;
 type ObservationKind = (typeof kinds)[number];
-export type ClauseVersion = "v12" | "v13" | "v14" | "v15" | "v16";
+export type ClauseVersion = "v12" | "v13" | "v14" | "v15" | "v16" | "v18" | "v19" | "v20" | "v21" | "v22" | "v23" | "v24" | "v25";
 const categoryNames = new Set<string>(MEDIA_CATEGORY_NAMES);
 
 export interface MediaObservation {
@@ -14,6 +14,7 @@ export interface MediaObservation {
   text: string;
   qualifiers: string[];
   versionEvidence?: VersionEvidence;
+  technicalTiming?: string[];
 }
 
 export interface ObservationSource {
@@ -73,7 +74,7 @@ function observation(value: unknown, appid: number): MediaObservation | null {
 
 export function extractionReviewIssues(
   value: unknown, appid: number, sourceIdentity: string, observations: readonly MediaObservation[],
-  article: string, context: readonly (string | null)[],
+  article: string, context: readonly (string | null)[], includeTechnicalTiming = false,
 ): EditorialOmission[] {
   const body = line(article, Number.MAX_SAFE_INTEGER);
   const accepted = new Set(observations.map(({ id }) => id));
@@ -82,7 +83,7 @@ export function extractionReviewIssues(
     if (!matchesRequestedApp(subject, appid) || typeof id !== "string" || !/^[a-zA-Z0-9_-]{1,64}$/.test(id) || accepted.has(id)) return [];
     const candidate = observation(entry, appid);
     const reason = candidate
-      ? rejectedArticleEvidence(candidate, object(entry), body, context, false) ?? "observation ID is duplicated"
+      ? rejectedArticleEvidence(candidate, object(entry), body, context, false, includeTechnicalTiming) ?? "observation ID is duplicated"
       : "observation lacks a valid kind, category, text or qualification";
     const question = line(reviewQuestion, 240) || `What wording and scope does the article support? ${reason}.`;
     return [{ sourceIdentity, observationId: id, question }];
@@ -106,12 +107,18 @@ function articleObservations(value: unknown, appid: number, check: (item: MediaO
   return result.filter(({ id }) => !duplicate.has(id));
 }
 
-export function readArticleObservations(value: unknown, appid: number, includeVersionEvidence = false): MediaObservation[] {
+export function readArticleObservations(value: unknown, appid: number, includeVersionEvidence = false, includeTechnicalTiming = false): MediaObservation[] {
   return articleObservations(value, appid, (item, entry) => {
     if (includeVersionEvidence) {
       const { observed, distinctions, technical } = object(object(entry).versionEvidence);
       if (Array.isArray(observed) && Array.isArray(distinctions) && typeof technical === "boolean") {
         item.versionEvidence = { observed: markerLabels(observed), distinctions: markerLabels(distinctions), technical };
+      }
+    }
+    if (includeTechnicalTiming) {
+      const timing = list(object(entry).technicalTiming).map((label) => line(label, 120));
+      if (timing.length > 0 && timing.every((label) => timingMarkers(label).size === 1)) {
+        item.technicalTiming = [...new Set(timing)];
       }
     }
     return true;
@@ -120,10 +127,18 @@ export function readArticleObservations(value: unknown, appid: number, includeVe
 
 function rejectedArticleEvidence(
   item: MediaObservation, source: Record<string, unknown>, article: string,
-  context: readonly (string | null)[], pending: boolean,
+  context: readonly (string | null)[], pending: boolean, includeTechnicalTiming = false,
 ): string | null {
   const quote = line(source.quote, 480);
   if (quote.length < 12 || !article.includes(quote)) return "supporting excerpt is missing or absent from the article";
+  const timing = includeTechnicalTiming ? extractTechnicalTiming(item, quote) : undefined;
+  if (timing) {
+    // Retain context qualifiers on matching inputs for the embedding filter.
+    // V18 prose uses the separately derived timing when projecting these inputs.
+    const matchingInput = item.kind === "gameplay" || item.kind === "storyWorld";
+    const asserted = matchingInput ? item.text : [item.text, ...item.qualifiers].join(" ");
+    if (unsupportedTiming(asserted, timing)) return "technical timing is absent from the supporting excerpt";
+  }
   if (item.qualifiers.some((scope) => !contains(quote, scope) && !context.some((fact) => fact && contains(fact, scope)))) {
     return "qualification is absent from the excerpt and source context";
   }
@@ -139,7 +154,8 @@ function rejectedArticleEvidence(
       return "excerpt does not identify a single-player mode";
     }
   }
-  const scopes = [...quote.matchAll(BUILD_SCOPE_MARKER)].map(([scope]) => scope);
+  const scopes = [...quote.matchAll(BUILD_SCOPE_MARKER)].map(([scope]) => scope)
+    .filter((scope) => !timing || !timingMarkers(scope).size && !/^(?:announced|planned)$/i.test(scope));
   if (scopes.some((scope) => !item.qualifiers.some((qualifier) => contains(qualifier, scope)) && !contains(item.text, scope))) {
     return "observation does not carry the scope stated in the excerpt";
   }
@@ -154,20 +170,80 @@ export function parseArticleObservations(
   context: readonly (string | null)[] = [],
   pending = false,
   includeVersionEvidence = false,
+  includeTechnicalTiming = false,
 ): MediaObservation[] {
   const body = line(article, Number.MAX_SAFE_INTEGER);
   return articleObservations(value, appid, (item, raw) => {
     const source = object(raw);
     const needsReview = source.reviewQuestion !== undefined && source.reviewQuestion !== null && source.reviewQuestion !== "";
-    if (needsReview !== pending || rejectedArticleEvidence(item, source, body, context, pending) !== null) return false;
-    if (includeVersionEvidence) item.versionEvidence = classifyVersionEvidence(line(source.quote, 480));
+    if (needsReview !== pending || rejectedArticleEvidence(item, source, body, context, pending, includeTechnicalTiming) !== null) return false;
+    const quote = line(source.quote, 480);
+    if (includeVersionEvidence) item.versionEvidence = classifyVersionEvidence(quote);
+    const timing = includeTechnicalTiming ? extractTechnicalTiming(item, quote) : undefined;
+    if (timing) item.technicalTiming = timing;
     return true;
   });
+}
+
+// Synthesis can naturally omit articles and the generic GPU suffix.
+function includesHardwareQualifier(text: string, qualifier: string): boolean {
+  if (!/\b(?:GPU|graphics card)\b/i.test(qualifier)) return false;
+  const normalize = (value: string) => value.toLowerCase()
+    .replace(/\b(?:a|an|the|gpu|graphics card)\b/g, " ").replace(/\s+/g, " ").trim();
+  const hardware = normalize(qualifier);
+  return /[a-z].*\d/.test(hardware) && contains(normalize(text), hardware);
 }
 
 function displayText({ text, qualifiers }: MediaObservation): string {
   const missing = qualifiers.filter((qualifier) => !contains(text, qualifier));
   return missing.length === 0 ? text : `${text.replace(/[.]$/, "")} (${missing.join(", ")})`;
+}
+
+const discoveryTagAliases: ReadonlyArray<readonly [RegExp, string]> = [
+  [/^(?:open[- ]world(?: game)?|single, unrestricted open urban map)$/i, "Open world"],
+  [/^(?:(?:there are )?no (?:loading|load) screens?|seamless (?:world |open[- ]world )?traversal without (?:loading|load) screens?)$/i, "No load screens"],
+  [/^(?:fps|first[- ]person shooter)$/i, "FPS"],
+  [/^first[- ]person perspective$/i, "First-person perspective"],
+  [/^(?:choices matter|(?:player )?choices (?:affect|change|shape|influence) (?:the )?(?:story|endings?|outcomes?))$/i, "Choices matter"],
+  [/^(?:the player chooses )?one of (?:\d+|two|three|four|five|several|multiple) life paths at the start that set background and early events$/i, "Selectable backgrounds"],
+  [/^joy[- ]cons?(?: controller)?(?: support| (?:mouse-style |motion )?aiming)?$/i, "Joy-Con support"],
+  [/^dual\s?sense(?: controller)?(?: support)?$/i, "DualSense support"],
+  [/^adaptive triggers?(?: support)?$/i, "Adaptive triggers"],
+];
+
+function discoveryTagText(observation: MediaObservation): string {
+  const original = observation.text.replace(/[.!?]+$/, "");
+  const platform = /^(.*?) (?:on|for) (?:the )?((?:(?:Nintendo )?Switch(?: 2)?|PS5|PlayStation 5)(?: port)?)$/i.exec(original);
+  const wrapper = /^(?:(?:the game|it) is |(?:(?:the game|it) )?(?:has|uses|features|offers|supports) )(?:an? )?/i;
+  const text = original.replace(wrapper, "");
+  const candidate = (platform?.[1] ?? original).replace(wrapper, "");
+  const alias = discoveryTagAliases.find(([pattern]) => pattern.test(candidate))?.[1];
+  if (alias) return platform?.[2] ? `${alias} (${platform[2]})` : alias;
+  // Unrecognized prose does not have a safe deterministic short label.
+  if (!text || text.split(/\s+/).length > 6
+    || /[!?;,]|\.\s|\b(?:the game|the player|you can|there (?:are|is)|avoids|allows|offers|includes|requires|\d+\s*fps)\b/i.test(text)) return "";
+  return text;
+}
+
+// The model chooses the meaning and wording. Settlement checks that its
+// response is a label suitable for display before attaching evidence scope.
+function isDiscoveryLabel(value: unknown, version?: ClauseVersion): value is string {
+  if (typeof value !== "string" || !normalizeMediaTag(value)) return false;
+  const label = value.normalize("NFKC").trim();
+  return label.split(/\s+/).length <= 8
+    && !/[!?;,:{}<>`\p{Cc}]|\.\s|\.$/u.test(label)
+    && !/[()]/.test(label.replace(/\([^()]+\)/g, ""))
+    && !/\b\d+(?:\.\d+)?\s*fps\b/i.test(label)
+    && !/^(?:the game|the player|players? (?:can|choose|have|use)|you |there (?:is|are)|(?:supports|features|offers|uses|has) )/i.test(label)
+    && ((usesBrowseTags(version) && /^actions have consequences(?: \([^()]+\))?$/i.test(label))
+      || !/\b(?:allows|avoids|includes|requires|offers|supports|chooses|affects|changes|has|have|is|are|can|could|will|would)\b/i.test(label))
+    && !sourceSupportTrigger(label);
+}
+
+function observationDisplay(observation: MediaObservation, clauses?: ClauseVersion): string {
+  if (clauses !== "v19" || observation.kind !== "tag") return displayText(observation);
+  const text = discoveryTagText(observation);
+  return text ? displayText({ ...observation, text }) : "";
 }
 
 interface DisplayIssue {
@@ -188,7 +264,7 @@ function editorialQuestion({ reason, trigger }: DisplayIssue): string {
 }
 
 function isComposedLead(version?: ClauseVersion): boolean {
-  return version === "v15" || version === "v16";
+  return version === "v15" || version === "v16" || version === "v18" || version === "v19" || usesAuthoredTags(version);
 }
 
 function canSupportLead(source: ObservationSource, observation: MediaObservation, version?: ClauseVersion): boolean {
@@ -196,6 +272,13 @@ function canSupportLead(source: ObservationSource, observation: MediaObservation
     || (isComposedLead(version) && !source.legacySimilarityInputs
       && (observation.kind === "gameplay" || observation.kind === "storyWorld"));
 }
+
+type SynthesisObservation = MediaObservation & {
+  selectionId: string;
+  scopeGroup?: string;
+  tagScopeGroup?: string;
+  tagQualifiers?: string[];
+};
 
 type EditorialSection = "statements" | "pros" | "cons" | "tags" | (typeof MEDIA_CATEGORY_NAMES)[number];
 
@@ -209,16 +292,25 @@ export function synthesisSelections<T extends ObservationSource>(
   const editorialOmissions: EditorialOmission[] = [];
   const diagnostics: Array<{ section: string } & DisplayIssue> = [];
   const scopeGroups = new Map<string, string>();
-  const evidence = [...sources].sort((a, b) => a.sourceIdentity.localeCompare(b.sourceIdentity)).flatMap((source) => {
+  function groupFor(key: string): string {
+    const group = scopeGroups.get(key) ?? `s${scopeGroups.size + 1}`;
+    scopeGroups.set(key, group);
+    return group;
+  }
+  const evidence: Array<Omit<T, "observations"> & { observations: SynthesisObservation[] }> = [...sources].sort((a, b) => a.sourceIdentity.localeCompare(b.sourceIdentity)).flatMap((source) => {
     const observations = source.observations.flatMap((observation) => {
+      if (observation.kind === "tag" && !canSupportTag(observation, clauses)) return [];
       const similarity = observation.kind === "gameplay" || observation.kind === "storyWorld";
       if (similarity && !canSupportLead(source, observation, clauses)) return [];
       const sections: EditorialSection[] = observation.kind === "finding"
         ? ["statements", observation.category as (typeof MEDIA_CATEGORY_NAMES)[number]]
         : [similarity ? "statements" : observation.kind === "pro" ? "pros" : observation.kind === "con" ? "cons" : "tags"];
+      const tagFinding = observation.kind === "finding" && canSupportTag(observation, clauses);
+      if (tagFinding) sections.push("tags");
       const ref = { sourceIdentity: source.sourceIdentity, observationId: observation.id };
-      const text = displayText(observation);
-      const issue = invalidDisplay(text, observation.kind);
+      const text = observationDisplay(observation, clauses);
+      const authoredTag = usesAuthoredTags(clauses) && observation.kind === "tag";
+      const issue = authoredTag ? null : invalidDisplay(text, observation.kind);
       // A reply to a v10 request uses aliases assigned before the wording check changed.
       const excluded = legacyV10 && observation.kind !== "tag"
         ? text.length > 1_500 || LEGACY_V10_SOURCE_SUPPORT_LANGUAGE.test(text)
@@ -237,12 +329,18 @@ export function synthesisSelections<T extends ObservationSource>(
         ids.push(selectionId);
         choices.set(section, ids);
       }
-      if (!clauses || observation.kind === "tag") return [{ ...observation, selectionId }];
+      if (!clauses || (observation.kind === "tag" && !authoredTag)) return [{
+        ...observation,
+        ...(clauses === "v19" ? { discoveryLabel: text } : {}),
+        selectionId,
+      }];
       const { edition, qualifiers, key } = observationScope(source, observation, clauses);
-      const scopeGroup = scopeGroups.get(key) ?? `s${scopeGroups.size + 1}`;
-      scopeGroups.set(key, scopeGroup);
-      const promptText = clauses === "v16" ? removeIncidentalReviewWording(observation, qualifiers) : observation.text;
-      return [{ ...observation, text: promptText, selectionId, qualifiers, ...(edition ? { edition } : {}), ...(clauses !== "v12" ? { scopeGroup } : {}) }];
+      const scopeGroup = groupFor(key);
+      const tagScope = tagFinding ? authoredTagScope(source, observation, clauses) : undefined;
+      const tagContext = tagScope ? { tagScopeGroup: groupFor(tagScope.key), tagQualifiers: tagScope.qualifiers } : {};
+      const promptText = !authoredTag && (clauses === "v16" || usesTechnicalTiming(clauses))
+        ? removeIncidentalReviewWording(observation, qualifiers) : observation.text;
+      return [{ ...observation, text: promptText, selectionId, qualifiers, ...tagContext, ...(edition ? { edition } : {}), ...(clauses !== "v12" ? { scopeGroup } : {}) }];
     });
     return observations.length ? [{ ...source, observations }] : [];
   });
@@ -289,10 +387,11 @@ export function validateSynthesisClauses(
 ) {
   function entries(raw: unknown, tags = false) {
     return list(raw).map((entry) => {
-      const observationIds = tags ? entry : object(entry).observationIds;
+      const authoredTag = tags && usesAuthoredTags(version);
+      const observationIds = tags && !authoredTag ? entry : object(entry).observationIds;
       const observationRefs = [...new Set(list(observationIds))]
         .map((id) => typeof id === "string" ? selections.observationsById.get(id)?.ref ?? {} : {});
-      const label = tags && typeof list(observationIds)[0] === "string"
+      const label = authoredTag ? object(entry).label : tags && typeof list(observationIds)[0] === "string"
         ? selections.observationsById.get(list(observationIds)[0] as string)?.observation.text : undefined;
       return { text: object(entry).text, label, observationRefs };
     });
@@ -312,10 +411,42 @@ export function validateSynthesisClauses(
   };
 }
 
+export function usesAuthoredTags(version?: ClauseVersion): boolean {
+  return version === "v20" || usesControllerTags(version);
+}
+
+export function usesControllerTags(version?: ClauseVersion): boolean {
+  return version === "v21" || usesArticleTags(version);
+}
+
+export function usesArticleTags(version?: ClauseVersion): boolean {
+  return version === "v22" || usesBrowseTags(version);
+}
+
+export function usesBrowseTags(version?: ClauseVersion): boolean {
+  return version === "v23" || version === "v24" || version === "v25";
+}
+
+function canSupportTag(observation: MediaObservation, version?: ClauseVersion): boolean {
+  if (!usesArticleTags(version)) return observation.kind === "tag";
+  return !hasTechnicalIssue(observation.text)
+    && !/\b\d+(?:\.\d+)?\s*fps\b/i.test(observation.text)
+    && (!usesBrowseTags(version) || !isPreviewOnlyTagEvidence(observation))
+    && (observation.kind === "tag" || (observation.kind === "finding" && observation.category === "Gameplay & systems"));
+}
+
+export function usesTechnicalTiming(version?: ClauseVersion): boolean {
+  return version === "v18" || version === "v19" || usesAuthoredTags(version);
+}
+
 // Legacy amendments can carry play scope in the observation's wording.
 // Match explicit play context, without inferring a build from article dates.
 function observationScope(source: ObservationSource, observation: MediaObservation, version: ClauseVersion) {
-  if (version === "v14" || isComposedLead(version)) return sourceGroundedScope(source, observation);
+  if (version === "v14" || isComposedLead(version)) {
+    return usesAuthoredTags(version) && observation.kind === "tag"
+      ? authoredTagScope(source, observation, version)
+      : sourceGroundedScope(source, observation, usesTechnicalTiming(version));
+  }
   const scopeInText = version === "v12"
     ? /\b(?:on the (?:Nintendo )?Switch 2 port|reviewed (?:PC|PS5|Xbox Series X) (?:version|build)|at (?:PC )?launch|early access|day[- ]\d+ patch)\b/gi
     : /\b(?:on the (?:Nintendo )?Switch 2 port|reviewed (?:PC|PS5|Xbox Series X) (?:version|build)|at (?:PC )?launch|early access|(?:PC |version |v)?1\.0(?!\.\d)|day[- ]\d+ patch)\b/gi;
@@ -348,11 +479,20 @@ function observationScope(source: ObservationSource, observation: MediaObservati
   const editions = buildLabels.flatMap(([pattern, label]) => pattern.test(context) ? [label] : []);
   const edition = platform?.toLowerCase() === "switch 2" ? "Switch 2"
     : editions.length === 1 ? editions[0] : editions.length === 0 ? platform : undefined;
-  return { edition, qualifiers: [...qualifierByKey.values()], key: JSON.stringify([...qualifierByKey.keys()].sort()) };
+  return { edition, qualifiers: [...qualifierByKey.values()], key: JSON.stringify([...qualifierByKey.keys()].sort()), timing: undefined };
 }
 
 const VERSION_MARKER = /\b(?:early access|technical test|(?:press|preview|review|pre[- ]release) build|preview|full release|PC launch|at launch|launch build|(?:version |v)\d+\.\d+(?:\.\d+)*|1\.0(?!\.\d)|(?:\d+\s?GB )?day[- ]\d+ patch|patch \d+(?:\.\d+)*|(?:special|anniversary|ultimate|definitive) edition|(?:Nintendo )?Switch 2(?: port)?|(?:Nintendo )?Switch(?: port)?|PlayStation [45]|PS[45]|Xbox Series [XS]|PC)\b/gi;
 const HISTORICAL_BUILD = /^(?:early access|technical test|preview|(?:press|preview|review|pre[- ]release) build)$/i;
+const HISTORICAL_TAG_BUILD = /\b(?:early access|technical test|(?:press|preview|review|pre[- ]release|development|alpha|beta) (?:build|version)|preview|pre[- ]release|alpha|beta)\b/i;
+
+function isPreviewOnlyTagEvidence(observation: MediaObservation): boolean {
+  const build = `(?:the |an? |this )?(?:${HISTORICAL_TAG_BUILD.source})`;
+  const restriction = new RegExp(
+    `(?:\\b(?:only (?:available |playable |present )?|exclusive(?:ly)? |limited |restricted )(?:to |in |during |for )?${build}|${build}[- ]only\\b|\\b(?:removed|dropped|absent) (?:from|in|at) (?:the )?(?:full |final )?(?:release|launch))`, "i",
+  );
+  return [observation.text, ...observation.qualifiers].some((text) => restriction.test(text));
+}
 const VERSION_CHANGE = /\b(?:both|only|unlike|compared (?:with|to)|versus|than|no longer|newly|now|previously|introduced|added|removed|replaced|fixed|changed|limited to|exclusive to)\b/i;
 const TECHNICAL_FAILURE = /\b(?:glitches?|bugs?|crash(?:es|ed|ing)?|stutter(?:s|ed|ing)?|pop[- ]in|textures? (?:could |can )?load late|dialogue (?:could |can )?overlap|vehicles? (?:could |can )?spawn inside)\b/i;
 
@@ -390,6 +530,63 @@ function markerLabels(values: unknown[]): string[] {
 
 const PORT_FEATURE = /\b(?:FPS|frame[ -]?rate|frame pacing|resolution|\d{3,4}p|docked|handheld|Joy[- ]Con|DLSS|ray tracing|mouse controls?|performance mode)\b/i;
 
+const DURING_REVIEW = "during review";
+const TECHNICAL_ISSUE = /\b(?:glitches?|stutter(?:s|ed|ing)?|pop[- ]in|textures? (?:could |can )?load late|dialogue (?:could |can )?overlap|vehicles? (?:could |can )?spawn inside|broken (?:character )?animations?|(?:caught|stuck|locked) in (?:an? |their )?(?:idle )?animations?|(?:crashed|crashes|froze) (?:the )?(?:game|client|app)|(?:animation|game[- ]breaking|technical|visual|audio|progression|recurring|frequent|several) bugs?|bugs? (?:were |are )?(?:(?:slightly )?reduced|interrupt|block|break|disrupt|affect)\w*|(?:encountered|experienced|hit|fixed) (?:a |some |several |repeated )?bugs?|(?:game|app|build|client|screen|it) (?:can |could |would |kept )?(?:crash(?:es|ed|ing)?|froze|freez(?:es|ing))|(?:crashes|freezes) (?:to desktop|on startup|when loading)|(?:frequent|random|repeated|occasional|several) (?:crashes|freezes))\b/i;
+const PERFORMANCE_ISSUE = /\b(?:slowdowns?|hitch(?:es|ed|ing)?|input lag|lag spikes?|performance (?:issues?|problems?|drops?|dips?|is poor|was poor)|(?:frame[ -]?rates?|FPS) (?:drops?|dips?|dropped|dropping|dipped|dipping|fell|tanks?|plunges?)|(?:unstable|inconsistent|poor|low) (?:frame[ -]?rates?|FPS|performance)|(?:frame[ -]?rate|FPS) (?:issues?|drops?|dips?))\b/i;
+const PATCH = String.raw`(?:(?:(?:\d+\s?GB )?day[- ](?:\d+|one|zero)|launch) patch|(?:the |a |an )?(?:patch|update)(?: \d+(?:\.\d+)*)?)`;
+const BUILD = String.raw`(?:early access|technical test|(?:press|preview|review|launch|release|retail|pre[- ]release) build|preview|full release|(?:PC )?launch|release|(?:version |v)\d+\.\d+(?:\.\d+)*|1\.0(?!\.\d)|(?:special|anniversary|ultimate|definitive) edition)`;
+const DATE = String.raw`(?:(?:January|February|March|April|May|June|July|August|September|October|November|December)(?: \d{1,2}(?:st|nd|rd|th)?(?:,)?(?= |$|[.!?]))?(?: (?:19|20)\d{2})?|(?:19|20)\d{2}(?:-\d{2}-\d{2})?)`;
+const TIMING_MARKER = new RegExp(String.raw`\b(?:(?:before|after|since|until|at|on|during|in|with|as of) (?:the )?(?:${PATCH}|${BUILD}|${DATE})|on day[- ](?:one|1)|${PATCH}|(?:pre|post)[- ](?:launch|release|patch)|${BUILD}|during (?:the )?review|at the time of (?:the )?review|currently|still|now|recently|to this day)\b`, "gi");
+const SPECULATIVE_TIMING = /\b(?:will|(?:would|should|could|might) (?:address|fix|improve|resolve|be (?:fixed|patched))|forthcoming|upcoming|planned|expected|promised|not (?:at|on|in|with|before|after|since|until)|\w+n['’]t (?:at|on|in|with|before|after|since|until)|(?:did not|didn['’]t) (?:test|play|try)|had yet to|not yet)\b/i;
+
+function isTechnicalIssue(observation: MediaObservation): boolean {
+  return observation.kind !== "tag" && hasTechnicalIssue(observation.text);
+}
+
+function hasTechnicalIssue(text: string): boolean {
+  return TECHNICAL_ISSUE.test(text) || PERFORMANCE_ISSUE.test(text);
+}
+
+function timingMarkers(text: string): Map<string, string> {
+  return new Map([...text.matchAll(TIMING_MARKER)].map(([label]) => {
+    const key = label.toLowerCase()
+      .replace(/^(?:at the time of (?:the )?review|during (?:the )?review)$/, DURING_REVIEW)
+      .replace(/^(?:at|on|during|in|with) (?:the )?/, "")
+      .replace(/^(before|after|since|until) (?:the |a |an )/, "$1 ")
+      .replace(/\bday[- ]one(?= patch)/, "day 1")
+      .replace(/\bday[- ]zero(?= patch)/, "day 0")
+      .replace(/\bday-(?=\d)/, "day ")
+      .replace(/^(?:version |v)(?=\d)/, "")
+      .replace(/^(?:launch build|full release|release|day[- ](?:one|1))$/, "launch")
+      .replace(/^(?:pre|post)[- ](launch|release|patch)$/, (word, event: string) =>
+        `${word.startsWith("pre") ? "before" : "after"} ${event === "release" ? "launch" : event}`);
+    return [key, label];
+  }));
+}
+
+function extractTechnicalTiming(observation: MediaObservation, quote: string): string[] | undefined {
+  if (!isTechnicalIssue(observation)) return undefined;
+  // A timing marker must modify the issue in the same clause. Other review
+  // sentences and independent remarks about planned updates supply no scope.
+  const clauses = quote.split(/(?<=[.!?])\s+|;\s*|,?\s+\b(?:but|however|whereas|while|and (?=(?:the |a |an )?(?:game|developers?|studio|patch|update)\b))\s*/i);
+  const timings = new Map(clauses.flatMap((clause) => {
+    if (!hasTechnicalIssue(clause) || SPECULATIVE_TIMING.test(clause)) return [];
+    return [...timingMarkers(clause)].filter(([key, label]) =>
+      !/^(?:currently|still|now|recently|to this day|patch|update)$/.test(key)
+      && !/^(?:a |an |the )?(?:patch|update)$/i.test(label));
+  }));
+  return timings.size > 0 ? [...timings.values()] : [DURING_REVIEW];
+}
+
+function observationTiming(observation: MediaObservation): string[] | undefined {
+  return observation.technicalTiming ?? (isTechnicalIssue(observation) ? [DURING_REVIEW] : undefined);
+}
+
+function unsupportedTiming(text: string, timing: readonly string[]): string | undefined {
+  const supported = timingMarkers(timing.join(" "));
+  return [...timingMarkers(text)].find(([key]) => !supported.has(key))?.[1];
+}
+
 function classifyVersionEvidence(excerpt: string): VersionEvidence {
   const distinctions = excerpt.split(/(?<=[.!?])\s+/).flatMap((sentence) =>
     VERSION_CHANGE.test(sentence) || PORT_FEATURE.test(sentence) ? [...versionMarkers(sentence).values()] : []);
@@ -402,10 +599,19 @@ function classifyVersionEvidence(excerpt: string): VersionEvidence {
 
 // Use the facts derived from the validated quote at extraction. Older
 // extractions can only attest to what their accepted wording says.
-function sourceGroundedScope(source: ObservationSource, observation: MediaObservation) {
-  const { observed, distinctions: labels, technical } = observation.versionEvidence ?? classifyVersionEvidence(observation.text);
+function sourceGroundedScope(source: ObservationSource, observation: MediaObservation, includeTechnicalTiming = false) {
+  const { observed, distinctions: labels, technical: legacyTechnical } = observation.versionEvidence ?? classifyVersionEvidence(observation.text);
+  const timing = includeTechnicalTiming ? observationTiming(observation) : undefined;
+  const technical = includeTechnicalTiming ? Boolean(timing) || PORT_FEATURE.test(observation.text) : legacyTechnical;
   const distinctions = versionMarkers(labels.join(" "));
   const context = versionMarkers([...observed, ...observation.qualifiers, source.editionContext?.build ?? ""].join(" "));
+  if (timing) {
+    for (const markers of [distinctions, context]) {
+      for (const [key, label] of markers) {
+        if (timingMarkers(label).size) markers.delete(key);
+      }
+    }
+  }
   const required = new Map(distinctions);
   for (const [key, label] of context) {
     if ((HISTORICAL_BUILD.test(key) || technical) && !required.has(key)) required.set(key, label);
@@ -416,16 +622,90 @@ function sourceGroundedScope(source: ObservationSource, observation: MediaObserv
     }
   }
   const otherQualifiers = observation.qualifiers.filter((qualifier) =>
-    qualifier.replace(VERSION_MARKER, "").replace(/\b(?:at|in|on|with|the|reviewed|version|build|port|platform|release|and)\b|[(),]/gi, "").trim() !== "");
-  const qualifiers = [...otherQualifiers, ...required.values()];
+    (!timing || !timingMarkers(qualifier).size)
+    && qualifier.replace(VERSION_MARKER, "").replace(/\b(?:at|in|on|with|the|reviewed|version|build|port|platform|release|and)\b|[(),]/gi, "").trim() !== "");
+  const qualifiers = [...otherQualifiers, ...required.values(), ...(timing ?? [])];
   const nonPlatformDistinctions = [...distinctions].filter(([key]) => !/^(?:pc|ps[45]|xbox series [xs]|switch(?: 2)?)$/.test(key));
   const edition = nonPlatformDistinctions.length === 1 ? nonPlatformDistinctions[0]![1]
     : nonPlatformDistinctions.length === 0 && distinctions.size === 1 ? [...distinctions.values()][0] : undefined;
   return {
     edition,
     qualifiers,
-    key: JSON.stringify([[...distinctions.keys()].sort(), [...required.keys(), ...otherQualifiers.map(scopeKey)].sort()]),
+    key: JSON.stringify([[...distinctions.keys()].sort(), [...required.keys(), ...otherQualifiers.map(scopeKey)].sort(),
+      ...(timing ? [[...timingMarkers(timing.join(" ")).keys()].sort()] : [])]),
+    timing,
   };
+}
+
+function authoredTagScope(source: ObservationSource, observation: MediaObservation, version?: ClauseVersion) {
+  const scope = sourceGroundedScope(source, observation, true);
+  const byScope = new Map<string, string>();
+  for (const qualifier of [...observation.qualifiers, ...scope.qualifiers]) {
+    const material = usesBrowseTags(version) ? withoutHistoricalTagContext(qualifier) : qualifier;
+    if (!material) continue;
+    const versions = versionMarkers(material);
+    const key = versions.size && !qualifierWithoutVersion(material)
+      ? JSON.stringify([...versions.keys()].sort()) : scopeKey(material);
+    if (!byScope.has(key)) byScope.set(key, material);
+  }
+  const qualifiers = [...byScope.values()];
+  const versions = versionMarkers(qualifiers.join(" "));
+  // Older observations can carry their platform or build only in the wording.
+  for (const [key, label] of versionMarkers(observation.text)) {
+    if (usesBrowseTags(version) && HISTORICAL_TAG_BUILD.test(label)) continue;
+    if (!versions.has(key)) {
+      versions.set(key, label);
+      qualifiers.push(label);
+    }
+  }
+  const remaining = qualifiers.map(qualifierWithoutVersion).filter(Boolean).map(scopeKey);
+  return {
+    ...scope, qualifiers,
+    key: JSON.stringify([[...versions.keys()].sort(), [...new Set(remaining)].sort()]),
+  };
+}
+
+function withoutHistoricalTagContext(qualifier: string): string {
+  if (!HISTORICAL_TAG_BUILD.test(qualifier)) return qualifier;
+  return qualifier.replace(new RegExp(HISTORICAL_TAG_BUILD.source, "gi"), "")
+    .replace(/^(?:(?:on|in|for|during|the|and)\s+)+|\s+(?:(?:on|in|for|during|the|and)\s*)+$/gi, "")
+    .replace(/^[\s(),/–-]+|[\s(),/–-]+$/g, "").replace(/\s+/g, " ");
+}
+
+function qualifierWithoutVersion(qualifier: string): string {
+  return qualifier.replace(VERSION_MARKER, "").trim()
+    .replace(/^(?:on|at|in|for)(?: the)?$/i, "");
+}
+
+// The citation retains the exact edition even when the named controller already
+// establishes its platform family. Keep qualifiers that carry additional scope.
+function controllerImpliesPlatform(label: string, qualifier: string): boolean {
+  const platform = scopeKey(qualifier);
+  return (/\bjoy[- ]cons?\b/i.test(label) && /^switch(?: 2)?$/.test(platform))
+    || (/\bdualsense\b/i.test(label) && /^(?:playstation 5|ps5)$/.test(platform));
+}
+
+function omitImpliedControllerPlatform(label: string): string {
+  const marker = [...label.matchAll(VERSION_MARKER)].at(-1);
+  if (!marker) return label;
+  const [platform] = marker;
+  const prefix = label.slice(0, marker.index);
+  const suffix = label.slice(marker.index + platform.length);
+  const wording = suffix === ")" ? prefix.replace(/ \($/, "")
+    : suffix === "" ? prefix.replace(/ (?:on|for) (?:the )?$/i, "")
+    : prefix;
+  return (suffix === "" || suffix === ")") && wording !== prefix && controllerImpliesPlatform(wording, platform)
+    ? wording : label;
+}
+
+function missingTagQualifiers(label: string, qualifiers: readonly string[], version?: ClauseVersion): string[] {
+  const labelVersions = versionMarkers(label);
+  return qualifiers.filter((qualifier) => {
+    if (contains(label, qualifier) || (usesControllerTags(version) && controllerImpliesPlatform(label, qualifier))) return false;
+    const versions = versionMarkers(qualifier);
+    return qualifierWithoutVersion(qualifier) || versions.size === 0
+      || [...versions.keys()].some((key) => !labelVersions.has(key));
+  });
 }
 
 function scopeKey(qualifier: string): string {
@@ -434,6 +714,21 @@ function scopeKey(qualifier: string): string {
     .replace(/^nintendo (?=switch)/, "")
     .replace(/ (?:port|version|build)$/, "")
     .replace(/day-(?=\d)/, "day ");
+}
+
+function isTechnicalTagEvidence(text: string): boolean {
+  return hasTechnicalIssue(text)
+    || /\b(?:bug[- ]ridden|(?:technical|performance) (?:issues?|problems?|complaints?)|unstable (?:performance|frame[ -]?rates?))\b/i.test(text)
+    || /\b(?:\d{3,4}p|\d+(?:\.\d+)?\s*fps|\d+(?:\.\d+)?\s*frames per second|(?:4|8)K|benchmarks?)\b/i.test(text);
+}
+
+function supportsStoryBranching(evidence: string): boolean {
+  const branchingPlot = /\b(?:branching (?:main )?(?:story(?:line)?|plot|narrative)|(?:story(?:line)?|plot|narrative) branch(?:es|ed))\b/i;
+  const distinctOutcomes = /\b(?:multiple|different|alternate|alternative|distinct) (?:endings|(?:story|plot|narrative) outcomes)\b/i;
+  const decisionEffects = /\b(?:choices?|decisions?|actions?)\b[^.!?]*\b(?:affect|alter|change|determine|influence|reshape|shape)\w*\b[^.!?]*\b(?:main story|main quest|plot|narrative|ending)\b/i;
+  return evidence.split(/(?<=[.!?])\s+/).some((sentence) =>
+    !/\b(?:no|not|never|doesn['’]t|don['’]t|cannot|can['’]t|without)\b/i.test(sentence)
+    && (branchingPlot.test(sentence) || distinctOutcomes.test(sentence) || decisionEffects.test(sentence)));
 }
 
 // Declaring a sequence, or turning a possible effect into a routine result,
@@ -486,16 +781,43 @@ export function validateObservationSynthesis(
     const support = resolve.filter((ref) => ref !== null);
     if (support.some(({ source, observation }) => section === "statements"
       ? !canSupportLead(source, observation, clauses)
+      : kind === "tag" ? !canSupportTag(observation, clauses)
       : observation.kind !== kind || (category !== undefined && category !== observation.category))) {
       omit(section, "referenced observation has a different evidence category", refs);
       return [];
     }
+    const authoredTag = usesAuthoredTags(clauses) && kind === "tag";
+    if (authoredTag && !isDiscoveryLabel(entry.label, clauses)) {
+      omit(section, "tag label must be a concise discovery phrase", refs);
+      return [];
+    }
     const matchingText = kind === "tag" ? line(entry.label, 600) : line(entry.text, Infinity);
     const sourceTexts = [...new Set(support.map(({ observation }) => observation.text))];
-    const semantic = clauses !== undefined && kind !== "tag";
+    if (usesArticleTags(clauses) && authoredTag
+      && (isTechnicalTagEvidence(matchingText) || sourceTexts.some(isTechnicalTagEvidence))) {
+      omit(section, "tag describes or relies on a technical complaint or benchmark", refs);
+      return [];
+    }
+    if (usesArticleTags(clauses) && authoredTag && /\bsingle[ -]player\b/i.test(matchingText)
+      && sourceTexts.some((evidence) => !/\bsingle[ -]player\b/i.test(evidence))) {
+      omit(section, "evidence does not identify a single-player mode", refs);
+      return [];
+    }
+    if (usesBrowseTags(clauses) && authoredTag && /\bisometric\b/i.test(matchingText)
+      && sourceTexts.some((evidence) => !/\bisometric\b/i.test(evidence))) {
+      omit(section, "evidence does not establish an isometric view", refs);
+      return [];
+    }
+    if (clauses === "v25" && authoredTag && /\bbranching (?:main )?(?:story(?:line)?|plot|narrative)\b/i.test(matchingText)
+      && sourceTexts.some((evidence) => !supportsStoryBranching(evidence))) {
+      omit(section, "evidence does not establish story branching", refs);
+      return [];
+    }
+    const semantic = clauses !== undefined && (kind !== "tag" || authoredTag);
     const contested = !semantic && entry.contested === true && category !== undefined;
-    const displays = [...new Set(support.map(({ observation }) => displayText(observation)))];
-    const scopes = semantic ? support.map(({ source, observation }) => observationScope(source, observation, clauses)) : [];
+    const projectedTag = clauses === "v19" && kind === "tag";
+    const displays = [...new Set(support.map(({ observation }) => observationDisplay(observation, clauses)))];
+    const scopes = semantic ? support.map(({ source, observation }) => authoredTag ? authoredTagScope(source, observation, clauses) : observationScope(source, observation, clauses)) : [];
     if (semantic) {
       const scopeKeys = new Set(scopes.map(({ key }) => key));
       if (scopeKeys.size !== 1) {
@@ -527,22 +849,52 @@ export function validateObservationSynthesis(
         omit(section, "disagreement requires distinct observations with the same scope and wording joined by ' / '", refs);
         return [];
       }
-    } else if (sourceTexts.length !== 1 || matchingText !== sourceTexts[0] || displays.length !== 1) {
+    } else if ((!projectedTag && sourceTexts.length !== 1) || matchingText !== sourceTexts[0] || displays.length !== 1) {
       omit(section, "claim wording or scope differs from its observations", refs);
+      return [];
+    }
+    const timing = scopes[0]?.timing;
+    const unsupported = timing && unsupportedTiming(matchingText, timing);
+    if (unsupported) {
+      omit(section, "claim introduces technical timing absent from its evidence", refs, unsupported);
       return [];
     }
     const qualifiers = scopes[0]?.qualifiers ?? [];
     if ((clauses === "v14" || isComposedLead(clauses)) && semantic) {
       const supported = new Set(versionMarkers(qualifiers.join(" ")).keys());
-      const unsupported = [...versionMarkers(matchingText)].find(([key]) => !supported.has(key));
+      const unsupported = [...versionMarkers(matchingText)].find(([key, label]) =>
+        !supported.has(key) && (!timing || !timingMarkers(label).size));
       if (unsupported) {
         omit(section, "claim introduces a version distinction absent from its evidence", refs, unsupported[1]);
         return [];
       }
     }
-    const punctuation = isComposedLead(clauses) && section === "statements" ? /[,;:.!?]$/.exec(matchingText)?.[0] ?? "" : "";
+    const displayedTiming = timingMarkers(matchingText);
+    const missingTiming = timing?.filter((label) => [...timingMarkers(label).keys()].some((key) => !displayedTiming.has(key))) ?? [];
+    const displayQualifiers = timing ? [...qualifiers.filter((label) => !timing.includes(label)), ...missingTiming] : qualifiers;
+    if (authoredTag) {
+      const unsupported = unsupportedTiming(matchingText, qualifiers);
+      if (unsupported) {
+        omit(section, "tag introduces timing absent from its evidence", refs, unsupported);
+        return [];
+      }
+    }
+    const punctuation = isComposedLead(clauses) && (section === "statements" || timing) ? /[,;:.!?]$/.exec(matchingText)?.[0] ?? "" : "";
+    const unpunctuatedWording = punctuation ? matchingText.slice(0, -1) : matchingText;
+    const tagWording = clauses === "v25" && authoredTag
+      ? unpunctuatedWording.replace(/^Dungeons (?:&|and) Dragons (5th Edition)(?: rules(?:et| basis)?)?(?=$| \([^()]+\)$)/i, "D&D $1")
+      : unpunctuatedWording;
+    const wording = usesControllerTags(clauses) && authoredTag ? omitImpliedControllerPlatform(tagWording) : tagWording;
     const text = semantic
-      ? displayText({ ...support[0]!.observation, text: punctuation ? matchingText.slice(0, -1) : matchingText, qualifiers }) + punctuation
+      ? displayText({
+        ...support[0]!.observation,
+        text: missingTiming.includes(DURING_REVIEW) ? `${wording} ${DURING_REVIEW}` : wording,
+        qualifiers: authoredTag
+          ? missingTagQualifiers(wording, displayQualifiers, clauses)
+          : clauses === "v19" || usesAuthoredTags(clauses)
+            ? displayQualifiers.filter((q) => !includesHardwareQualifier(wording, q))
+            : displayQualifiers,
+      }) + punctuation
       : displays.join(" / ");
     const issue = invalidDisplay(text, kind);
     if (issue) {
