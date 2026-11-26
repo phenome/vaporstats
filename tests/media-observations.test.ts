@@ -1110,9 +1110,11 @@ test("preview scope follows cited spans and preserves material qualifiers", () =
   const input = {
     statements: [
       clause("A hands-off demo showed how you slip through empty streets", demo, "stealth"),
+      clause("A hands-on preview showed the district.", demo, "stealth"),
       clause("and choose a route.", demo, "routes"),
       clause("A ferry is planned.", demo, "plans"),
       clause("You choose a route.", playable, "routes"),
+      clause("The empty streets offer ways to move unseen.", demo, "stealth"),
       clause("The empty streets offer ways to move unseen.", demo, "stealth"),
       { text: "You choose a route.", observationIds: [id(demo, "routes"), id(playable, "routes")] },
     ],

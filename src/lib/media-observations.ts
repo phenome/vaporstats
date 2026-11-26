@@ -804,6 +804,7 @@ export function validateObservationSynthesis(
     }
   }
   let previousLeadPreview: string | undefined;
+  const previewDedupKeys = new WeakMap<object, string>();
   function claim(raw: unknown, section: string, kind: ObservationKind, category?: unknown) {
     const entry = object(raw);
     const refs = list(entry.observationRefs);
@@ -833,6 +834,10 @@ export function validateObservationSynthesis(
     const preview = clauses === "v26" && kind !== "tag" ? claimPreviewScope(support[0]!.source, support[0]!.observation) : undefined;
     const authoredText = kind === "tag" ? line(entry.label, 600) : line(entry.text, Infinity);
     const matchingText = preview ? withoutPreviewQualifierList(authoredText, preview) : authoredText;
+    if (preview && preview !== "hands-on preview" && /(?<!non[- ])\bhands[- ]on (?:preview|play|demo|demonstration|session)\b/i.test(matchingText)) {
+      omit(section, "claim describes firsthand play without hands-on evidence", refs);
+      return [];
+    }
     const sourceTexts = [...new Set(support.map(({ observation }) => observation.text))];
     if (usesArticleTags(clauses) && authoredTag
       && (isTechnicalTagEvidence(matchingText) || sourceTexts.some(isTechnicalTagEvidence))) {
@@ -954,7 +959,11 @@ export function validateObservationSynthesis(
     }
     const edition = scopes[0]?.edition;
     if (section === "statements") previousLeadPreview = previewKey;
-    return [{ text, sourceUrls, ...(contested ? { contested } : {}), ...(edition ? { edition } : {}), observationRefs: support.map(({ source, observation }) => ({ sourceIdentity: source.sourceIdentity, observationId: observation.id })) }];
+    const finding = { text, sourceUrls, ...(contested ? { contested } : {}), ...(edition ? { edition } : {}), observationRefs: support.map(({ source, observation }) => ({ sourceIdentity: source.sourceIdentity, observationId: observation.id })) };
+    if (preview) {
+      previewDedupKeys.set(finding, JSON.stringify([preview, withoutPreviewQualifierList(text, preview).toLowerCase().replace(/[.!?]+$/, "")]));
+    }
+    return [finding];
   }
   const root = object(value);
   for (const raw of list(root.categories)) {
@@ -968,7 +977,7 @@ export function validateObservationSynthesis(
   const seenEvidence = new Set<string>();
   function uniqueFinding(finding: ReturnType<typeof claim>[number]): boolean {
     if (!clauses) return true;
-    const textKey = JSON.stringify([finding.edition, finding.text.toLowerCase().replace(/[.!?]+$/, "")]);
+    const textKey = JSON.stringify([finding.edition, previewDedupKeys.get(finding) ?? finding.text.toLowerCase().replace(/[.!?]+$/, "")]);
     const evidenceKey = JSON.stringify(finding.observationRefs.map((ref) => JSON.stringify(ref)).sort());
     if (seenText.has(textKey) || (clauses === "v12" && seenEvidence.has(evidenceKey))) return false;
     seenText.add(textKey);

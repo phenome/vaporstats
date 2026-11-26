@@ -15,7 +15,7 @@ export function isMediaOverviewPublic(): boolean {
 }
 
 // Publication is an editorial decision independent of experiment enrollment or watch state.
-const publishedRootAppids = [...MEDIA_EXPERIMENT_GAMES.map(({ appid }) => appid), 2161710]; // NO LAW
+const publishedRootAppids = [1091500, 1086940, 1145350, 2161710] as const;
 export const PUBLIC_MEDIA_ROOT_SQL = `(
   app.appid IN (${publishedRootAppids.join(", ")})
   AND app.type = 'game'
