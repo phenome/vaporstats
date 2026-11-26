@@ -482,7 +482,10 @@ test("reject non-preview candidates and admit the pre-release review in the rele
   ]);
 });
 
-test("preview discovery rejects a roundup lead and accepts a closing recommendation", async () => {
+test.each([
+  "In this roundup, we preview several games coming next year.",
+  "NO LAW headlines our roundup of several upcoming games. We also preview Zelda and Starfield below.",
+])("preview discovery rejects roundup framing (%s) and accepts a closing recommendation", async (lead) => {
   const database = fixture();
   admit(database, ROOT);
   await watch(database);
@@ -493,7 +496,7 @@ test("preview discovery rejects a roundup lead and accepts a closing recommendat
   const body = "NO LAW takes place in a city where each mission lets you pick new equipment and routes. ".repeat(4);
   await api.tick(database, "2027-01-25", { outlet: (url) => new Response(discoveryArticleHtml(ROOT, "NO LAW Preview", {
     body: url === roundup
-      ? "In this roundup, we preview several games coming next year. " + body
+      ? lead + " " + body
       : "We saw NO LAW in a hands-off preview. " + body + "If you can't wait, here are some games like Cyberpunk 2077.",
   })) });
   expect(database.native.query("SELECT discovery_url, type, hands_on FROM media_sources").all()).toEqual([

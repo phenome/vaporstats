@@ -757,7 +757,7 @@ function meta(document: Document, ...names: string[]): string | null {
 
 function hasRoundupOrComparisonFraming(lead: string, body: string): boolean {
   const roundupLabel = /\b(?:in (?:this|our)|this is (?:a|our)|welcome to (?:this|our))\s+(?:\w+\s+){0,3}(?:round[- ]?up|listicle|ranking|list\s+of)\b/;
-  const roundupIntro = /^(?:(?:a|our) round[- ]?up of|(?:here (?:are|is)|we (?:rounded up|ranked|picked|preview))\s+.{0,60}\b(?:games like|best games|top\s+\d+|several games|multiple games)\b)/;
+  const roundupIntro = /(?:\b(?:headlines?|leads?|opens?|anchors?) (?:this|our|the) round[- ]?up of|^(?:a|our) round[- ]?up of|^(?:here (?:are|is)|we (?:rounded up|ranked|picked|preview))\s+.{0,60}\b(?:games like|best games|top\s+\d+|several games|multiple games)\b)/;
   const comparisonIntro = /^(?:(?:a|our) (?:direct comparison|comparison (?:of|between))|we compare .{1,80} (?:against|and|with) )\b/;
   const comparisonLabel = /\b(?:this is a|in this|in our)\s+(?:direct comparison|comparison\s+(?:of|between)|(?:side[- ]by[- ]side|head[- ]to[- ]head) comparison)\b/;
   return roundupLabel.test(lead) || roundupIntro.test(lead) || comparisonIntro.test(lead) || comparisonLabel.test(body);
