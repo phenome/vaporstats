@@ -513,7 +513,9 @@ test.each(["admit", "denied", "canonical_duplicate", "candidate_error"] as const
     const canonical = "https://gamesradar.com/canonical";
     api.tavily.results = ({ domain }) => domain === "gamesradar.com" ? [{ url }] : [];
     const body = "NO LAW takes place in a city where each mission lets you pick new equipment and routes. ".repeat(4);
-    await api.tick(database, "2027-01-25", { outlet: () => new Response(discoveryArticleHtml(ROOT, "NO LAW Roundup", { body })) });
+    await api.tick(database, "2027-01-25", { outlet: (candidate) =>
+      candidate === url ? Response.redirect(url + "/", 301) : new Response(discoveryArticleHtml(ROOT, "NO LAW Roundup", { body })),
+    });
     const progressForOutlet = () => database.native.query<{ id: number }, []>(
       "SELECT * FROM media_discovery_progress WHERE outlet = 'GamesRadar+'",
     ).get()!;

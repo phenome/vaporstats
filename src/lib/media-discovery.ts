@@ -1469,8 +1469,15 @@ async function replayPreview(
   if (!considered.some((candidate) => candidate.url === url) || !await first(db,
     `SELECT 1 FROM media_preview_rejections WHERE appid = ? AND url = ? AND EXISTS (
        SELECT 1 FROM media_discovery_attempts WHERE appid = ? AND outlet = ? AND pass = 'preview'
-       AND url = ? AND kind = 'fetch' AND succeeded = 1
-     )`, appid, url, appid, outlet.name, url)) return { admitted: false, reason: "not_a_rejected_candidate" };
+       AND kind = 'fetch' AND succeeded = 1 AND (url = ? OR (
+         rtrim(url, '/') = rtrim(?, '/') AND EXISTS (
+           SELECT 1 FROM media_discovery_attempts AS redirect
+           WHERE redirect.appid = media_discovery_attempts.appid AND redirect.outlet = media_discovery_attempts.outlet
+             AND redirect.pass = 'preview' AND redirect.kind = 'redirect' AND redirect.url = ?
+             AND redirect.id < media_discovery_attempts.id
+         )
+       ))
+     )`, appid, url, appid, outlet.name, url, url, url)) return { admitted: false, reason: "not_a_rejected_candidate" };
 
   const originalRun = await loadRun(db, progress.run_id);
   const selectedGames = json<number[]>(originalRun.selected_games, []);
