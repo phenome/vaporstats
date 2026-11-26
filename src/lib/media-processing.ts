@@ -31,6 +31,7 @@ import {
   DISCOVERY_TRAIT_SYNTHESIS_VERSION,
   TAG_FIRST_SYNTHESIS_VERSION,
   PREVIEW_SCOPE_SYNTHESIS_VERSION,
+  TRANSFERABLE_BROWSE_TAG_SYNTHESIS_VERSION,
   CONCISE_BROWSE_TAG_SYNTHESIS_VERSION,
   CONTROLLER_TAG_SYNTHESIS_VERSION,
   type MediaEvidenceSource,
@@ -141,11 +142,12 @@ const REVISED_SELECTION_VERSION = "media-synthesis-2026-11-25-v11";
 const FIRST_CLAUSE_VERSION = "media-synthesis-2026-11-25-v12";
 const REVIEW_SCOPE_CLAUSE_VERSION = "media-synthesis-2026-11-25-v13";
 const SOURCE_GROUNDED_CLAUSE_VERSION = "media-synthesis-2026-11-25-v14";
-const SYNTHESIS_CONFIG_VERSION = CONCISE_BROWSE_TAG_SYNTHESIS_VERSION;
-const RETAINED_OPENROUTER_SYNTHESIS_VERSIONS = [TAG_FIRST_SYNTHESIS_VERSION, PREVIEW_SCOPE_SYNTHESIS_VERSION, REVIEW_SCOPE_CLAUSE_VERSION, SOURCE_GROUNDED_CLAUSE_VERSION, PREMISE_FIRST_SYNTHESIS_VERSION, RELEASE_GROUNDED_SYNTHESIS_VERSION, SHORT_PREMISE_SYNTHESIS_VERSION, TECHNICAL_TIMING_SYNTHESIS_VERSION, DISCOVERY_LABEL_SYNTHESIS_VERSION, AUTHORED_TAG_SYNTHESIS_VERSION, CONTROLLER_TAG_SYNTHESIS_VERSION, ARTICLE_TAG_SYNTHESIS_VERSION, BROWSE_TAG_SYNTHESIS_VERSION, DISCOVERY_TRAIT_SYNTHESIS_VERSION];
+const SYNTHESIS_CONFIG_VERSION = TRANSFERABLE_BROWSE_TAG_SYNTHESIS_VERSION;
+const RETAINED_OPENROUTER_SYNTHESIS_VERSIONS = [CONCISE_BROWSE_TAG_SYNTHESIS_VERSION, TAG_FIRST_SYNTHESIS_VERSION, PREVIEW_SCOPE_SYNTHESIS_VERSION, REVIEW_SCOPE_CLAUSE_VERSION, SOURCE_GROUNDED_CLAUSE_VERSION, PREMISE_FIRST_SYNTHESIS_VERSION, RELEASE_GROUNDED_SYNTHESIS_VERSION, SHORT_PREMISE_SYNTHESIS_VERSION, TECHNICAL_TIMING_SYNTHESIS_VERSION, DISCOVERY_LABEL_SYNTHESIS_VERSION, AUTHORED_TAG_SYNTHESIS_VERSION, CONTROLLER_TAG_SYNTHESIS_VERSION, ARTICLE_TAG_SYNTHESIS_VERSION, BROWSE_TAG_SYNTHESIS_VERSION, DISCOVERY_TRAIT_SYNTHESIS_VERSION];
 
 function synthesisClauseVersion(configVersion: string) {
   switch (configVersion) {
+    case TRANSFERABLE_BROWSE_TAG_SYNTHESIS_VERSION:
     case CONCISE_BROWSE_TAG_SYNTHESIS_VERSION: return "v27";
     case PREVIEW_SCOPE_SYNTHESIS_VERSION: return "v26";
     case TAG_FIRST_SYNTHESIS_VERSION: return "v25";
@@ -594,7 +596,8 @@ ${compact}
 `;
 }
 
-function makeSynthesisRequest(appid: number, name: string, version: NonNullable<ReturnType<typeof synthesisClauseVersion>>, selections: ReturnType<typeof synthesisSelections<ReturnType<typeof effectiveObservationSources>[number]>>, shortLead: boolean): OpenRouterChatRequest {
+function makeSynthesisRequest(appid: number, name: string, version: NonNullable<ReturnType<typeof synthesisClauseVersion>>, selections: ReturnType<typeof synthesisSelections<ReturnType<typeof effectiveObservationSources>[number]>>, configVersion: string): OpenRouterChatRequest {
+  const shortLead = usesTechnicalTiming(version) || configVersion === SHORT_PREMISE_SYNTHESIS_VERSION;
   const releaseGroundedLead = version === "v16" || usesTechnicalTiming(version);
   const request = chatRequest(SYNTHESIS_MAX_OUTPUT_TOKENS, { role: "user", content: `Synthesize the current assessments for ${name || `game ${appid}`}: each outlet's initial assessment (pass "initial") and any later assessment by an outlet already represented (pass "later"). A later article from the same outlet is that outlet's own follow-up and adds no separate endorsement. A null publishedAt is an unknown date.
 Return JSON matching the response schema. ${usesTagFirst(version) ? "Select and write tags first, then compose the prose. " : ""}${version === "v15" || releaseGroundedLead ? `Compose one short, connected Overview paragraph in statements, in reading order. Open with the game's name and its premise: the player role, setting, goal or stakes whenever the observations support them. Then show what play involves through a concrete choice, loop or mechanic. Use the most identifying supported facts available, even if the evidence is sparse. Mention a significant flaw after the premise and gameplay only when it materially affects the experience, preserving its scope. Use transitions that connect the sentences. Avoid a list of stand-alone remarks, generic praise, or technical details better suited to the topic sections.
@@ -607,7 +610,9 @@ Use an ordinary mechanic from a historic review directly when the evidence descr
 Review the tag candidates from every eligible article before choosing labels. Include Early Access articles in that review. A release article can corroborate a characteristic and does not replace distinct, durable mechanics described elsewhere.
 Discard generic labels such as “Character conversations” and broad judgments such as “Deep character customization”. Skip packaging, content listings, and peripheral trivia. Prefer recognizable choices and recurring mechanics. For example, “Pre-run loadouts” describes choosing equipment or abilities before a run, and “Tarot-card upgrades” describes tarot cards that function as an upgrade system. A passing mention of resources, card art, or conversation does not establish those mechanics.
 Inspect each structured observation for multiple independent traits. When a passage establishes both a choice between branching routes and advance visibility of the reward on each route, include both “Branching routes” and “Room reward previews” as separate tags. Reuse that observation's ID for both. Choose neither label from door icons, randomness, or sequential rooms alone.` : ""}${usesTagFirst(version) ? `
-Select both the broad, stable dimensions people browse by (for example 2D and Action separately) and the distinctive, recurring mechanics. Scan for compound observations before moving to prose. Physical paths and room choices establish route branching only. “Branching main story” requires a plot decision or distinct story outcomes. Use the setting name alone, such as “Greek mythology” or “Faerûn”.` : ""} Use null for sections whose schema is null and empty arrays when selecting nothing from an available section.
+Select both the broad, stable dimensions people browse by (for example 2D and Action separately) and the distinctive, recurring mechanics. Scan for compound observations before moving to prose. Physical paths and room choices establish route branching only. “Branching main story” requires a plot decision or distinct story outcomes. Use the setting name alone, such as “Greek mythology” or “Faerûn”.` : ""}${configVersion === TRANSFERABLE_BROWSE_TAG_SYNTHESIS_VERSION ? `
+Prefer transferable mechanics: describe what players repeatedly do, choose, or plan around in terms that would help them find another game with the same mechanic. Leave out named moves, a game's specific pair of levels, incidental resource-reset rules, and lore names for upgrades. If such a detail establishes a distinct, reusable mechanic, label that mechanic in plain language. If no distinct mechanic is supported, omit the tag. A named charged attack alone does not establish a broader combat system, and clearing two named areas alone does not establish branching routes. Refilling a meter between rooms alone does not establish resource management. An upgrade's lore name alone does not establish how it works.
+Keep grounded distinctions even when they are niche. Choosing between routes, seeing room rewards before choosing, and using tarot cards as upgrades describe different reusable features. Keep recognizable proper setting names when established by the evidence. Use a broad label only when the cited evidence establishes it directly. Leave out generic substitutes when the evidence establishes only a game-specific detail.` : ""} Use null for sections whose schema is null and empty arrays when selecting nothing from an available section.
 Each prose entry must be one specific, game-first clause. Say what happens in the game directly. For example, say "Dialogue can overlap during missions." Avoid "was described," "were reported," "reviewer," outlet names, source counts, and claims about consensus. Use readable paraphrases and cite the exact selectionId values that individually support the whole clause. Keep material platform, edition, build, patch, timing, and subjective limits.
 First look for distinct outlets supporting the same specific point within a scopeGroup. Multiple IDs in a prose entry MUST have the same scopeGroup. Where observations agree, write a shared clause about their specific common point and cite them together, even when their original wording differs. Keep additional patch-specific examples and other scopeGroups in their own clauses and citations. Give each differing assessment its own concrete clause and citations. Do not combine different examples into one claim or describe the existence of disagreement as a finding. Keep neutral characteristics out of pros and cons.
 ${shortLead ? `For statements, first draft two or three sentences of 45–70 words in total for a friend deciding what this game is about. Pick ONE through-line. Begin with the named character or party in their predicament. Follow them into one concrete decision, consequence, or repeated action. Finish there. A ${(usesTechnicalTiming(version)) ? "technical" : "launch"} problem that actually disrupted that experience can earn the final sentence: describe it in the past tense and retain its supported timing. Cut generic verdicts, duplicate descriptions and any sentence that could be shuffled elsewhere in the paragraph. Write in natural spoken English ("you", "your party", "your next run" as appropriate); avoid phrases like "the player character", "narrative outcomes" or "build versatility". When a compatible release observation and a scoped early preview describe complementary facts, either attribute a preview-only illustration naturally or choose a different supported example. Do not pad with one review's observations when the other articles supply relevant concrete evidence.
@@ -1676,7 +1681,7 @@ async function takeSynthesisTurn(advance: QueueAdvance, job: JobRow): Promise<bo
     await refuseItem(db, job, "invalid_output: no cited statements", advance.now, JSON.stringify(observationReviewOutput(checked, sources)));
     return true;
   }
-  await sendTextItem(advance, job, makeSynthesisRequest(job.appid, game?.name ?? "", version, selections, (usesTechnicalTiming(version)) || job.config_version === SHORT_PREMISE_SYNTHESIS_VERSION));
+  await sendTextItem(advance, job, makeSynthesisRequest(job.appid, game?.name ?? "", version, selections, job.config_version));
   return true;
 }
 
