@@ -494,13 +494,17 @@ async function duePasses(db: AppDatabase, targets: readonly MediaTarget[], asOf:
   const due: DuePass[] = [];
   for (const target of targets) {
     const enrollment = enrollments.get(rootAppid(target));
-    if (!enrollment || deferredRoots.has(rootAppid(target))) continue;
+    if (!enrollment) continue;
     const own = progress.get(target.appid)!;
     const experiment = enrollment.reason === "experiment";
     const release = releases.get(target.appid);
     const releasedOn = release?.releasedOn ?? null;
     const initialFinishedAt = passFinishedAt(own.initial, ASSESSMENT_OUTLETS);
     const initialStarted = own.initial.some((row) => row.query_attempted_at !== null);
+    if (deferredRoots.has(rootAppid(target))) {
+      const currentPass = initialFinishedAt === null ? own.initial : own.later;
+      if (target.parentAppid === null || !currentPass.some((row) => row.query_attempted_at !== null)) continue;
+    }
     if (target.parentAppid !== null && enrollment.reason !== "watchlist" && !initialStarted && initialFinishedAt === null &&
         !childWithinAssessmentWindow(release?.app, releasedOn, rootCutoffs.get(target.parentAppid) ?? null, experiment, asOfDay)) continue;
 

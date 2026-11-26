@@ -478,3 +478,19 @@ test("a corrected release date leaves a partially searched initial pass due acro
   await media.tick(database, "2026-11-28", options);
   expect(media.searches).toEqual(MEDIA_OUTLETS.map(({ domain }) => ({ appid: ROOT, domain, later: false })));
 });
+
+test("a deferred root leaves its child's started pass due across restart", async () => {
+  const child = { ...dlc, original: "2026-11-10" };
+  const database = fixture(root, child, expansion);
+  const media = world(root, child, expansion);
+  const options = { paidSubmissionsPerTick: 0 };
+  media.tavily.remaining = 1;
+  await media.tick(database, START, options);
+  expect(media.searches.map(({ appid }) => appid)).toEqual([DLC]);
+
+  database.native.prepare("UPDATE apps SET original_release_date = '2026-11-01' WHERE appid = ?").run(ROOT);
+  database.reopen();
+  media.tavily.remaining = 100;
+  await media.tick(database, "2026-11-27", options);
+  expect(media.searches).toEqual(MEDIA_OUTLETS.map(({ domain }) => ({ appid: DLC, domain, later: false })));
+});
