@@ -4,7 +4,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { MediaOverviewSection } from "../src/components/media-overview";
 import { createHash } from "node:crypto";
 import { extractionReviewIssues, parseArticleObservations, readArticleObservations, synthesisSelections, validateSynthesisClauses, validateSynthesisSelections, validateObservationSynthesis, type ObservationSource } from "../src/lib/media-observations";
-import { createMediaEvidenceSource, getMediaOverview, parseMediaOverview, PREMISE_FIRST_SYNTHESIS_VERSION, PREVIEW_SCOPE_SYNTHESIS_VERSION } from "../src/lib/media-overview";
+import { createMediaEvidenceSource, getMediaOverview, parseMediaOverview, PREMISE_FIRST_SYNTHESIS_VERSION, CONCISE_BROWSE_TAG_SYNTHESIS_VERSION } from "../src/lib/media-overview";
 import { advanceMediaProcessing, authorizeMediaProcessing, OPENROUTER_TEXT_MODEL } from "../src/lib/media-processing";
 import { legacyObservationEvidence } from "../src/lib/media-legacy-observations";
 import { MEDIA_OUTLETS } from "../src/lib/media-outlet-access";
@@ -581,7 +581,8 @@ test("v14 combines general cross-platform evidence and keeps explicit version de
 });
 
 
-test.each(["v13", "v14", "v15", "v16", "v17", "v18", "v20", "v21", "v22", "v23", "v24", "v25"] as const)("a waiting %s synthesis keeps its request identity, prompt and settlement", async (version) => {
+test.each(["v13", "v14", "v15", "v16", "v17", "v18", "v20", "v21", "v22", "v23", "v24", "v25", "v26"] as const)("a waiting %s synthesis keeps its request identity, prompt and settlement", async (version) => {
+  const tagFirst = version === "v25" || version === "v26";
   const database = openTestDatabase("vaporstats-v13-synthesis-");
   try {
     seedApps(database.native, [CYBERPUNK]);
@@ -596,18 +597,19 @@ test.each(["v13", "v14", "v15", "v16", "v17", "v18", "v20", "v21", "v22", "v23",
         const sources = extraction ? [] : synthesisEvidence(request);
         if (!extraction) {
           const prompt = request.messages[0]!.content;
-          expect(prompt.includes("first draft two or three sentences")).toBe(version === "v17" || version === "v18" || version === "v20" || version === "v21" || version === "v22" || version === "v23" || version === "v24" || version === "v25");
-          expect(prompt.includes('say "during review" explicitly')).toBe(version === "v18" || version === "v20" || version === "v21" || version === "v22" || version === "v23" || version === "v24" || version === "v25");
-          expect(prompt.includes("effect of a tested patch")).toBe(version === "v20" || version === "v21" || version === "v22" || version === "v23" || version === "v24" || version === "v25");
+          expect(prompt.includes("first draft two or three sentences")).toBe(version === "v17" || version === "v18" || version === "v20" || version === "v21" || version === "v22" || version === "v23" || version === "v24" || tagFirst);
+          expect(prompt.includes('say "during review" explicitly')).toBe(version === "v18" || version === "v20" || version === "v21" || version === "v22" || version === "v23" || version === "v24" || tagFirst);
+          expect(prompt.includes("effect of a tested patch")).toBe(version === "v20" || version === "v21" || version === "v22" || version === "v23" || version === "v24" || tagFirst);
           expect(prompt.includes("Author a short, standalone noun phrase in label")).toBe(version === "v20" || version === "v21" || version === "v22");
-          expect(prompt.includes("‘Joy-Con aiming’")).toBe(version === "v21" || version === "v22" || version === "v23" || version === "v24" || version === "v25");
-          expect(prompt.includes("Room reward previews")).toBe(version === "v22" || version === "v23" || version === "v24" || version === "v25");
-          expect(prompt.includes("Actions have consequences")).toBe(version === "v23" || version === "v24" || version === "v25");
-          expect(prompt.includes("Review the tag candidates from every eligible article")).toBe(version === "v24" || version === "v25");
-          expect(prompt.includes("Tag evidence index.")).toBe(version === "v25");
+          expect(prompt.includes("‘Joy-Con aiming’")).toBe(version === "v21" || version === "v22" || version === "v23" || version === "v24" || tagFirst);
+          expect(prompt.includes("Room reward previews")).toBe(version === "v22" || version === "v23" || version === "v24" || tagFirst);
+          expect(prompt.includes("Actions have consequences")).toBe(version === "v23" || version === "v24" || tagFirst);
+          expect(prompt.includes("Review the tag candidates from every eligible article")).toBe(version === "v24" || tagFirst);
+          expect(prompt.includes("Tag evidence index.")).toBe(tagFirst);
           if (request.response_format.type === "json_schema") {
-            expect(request.response_format.json_schema.schema.required).toEqual(version === "v25" ? ["tags", "statements", "categories", "prosCons"] : ["statements", "categories", "prosCons", "tags"]);
+            expect(request.response_format.json_schema.schema.required).toEqual(tagFirst ? ["tags", "statements", "categories", "prosCons"] : ["statements", "categories", "prosCons", "tags"]);
           }
+          expect(prompt).not.toContain("Name the trait alone");
           promptEvidence.push(sources[0]?.extraction.observations[0]);
         }
         const content = extraction ? { observations: [finding] } : {
@@ -708,7 +710,7 @@ test("a new synthesis queues typed premise and play evidence for the lead, then 
       now: new Date("2026-11-26T03:00:00Z"),
     });
     const saved = database.native.query<{ config_version: string; output_json: string }, []>("SELECT config_version, output_json FROM media_game_overviews").get()!;
-    expect(saved.config_version).toBe(PREVIEW_SCOPE_SYNTHESIS_VERSION);
+    expect(saved.config_version).toBe(CONCISE_BROWSE_TAG_SYNTHESIS_VERSION);
     expect(JSON.parse(saved.output_json).statements.map(({ observationRefs }: { observationRefs: Array<{ observationId: string }> }) =>
       observationRefs.map(({ observationId }) => observationId))).toEqual([["premise"], ["play", "play"]]);
     const overview = await getMediaOverview(database.db, CYBERPUNK, { includeUnpublished: true });
@@ -969,7 +971,7 @@ test("current synthesis uses a retained article without refetch and serves disti
     expect(database.native.query("SELECT stage, status FROM media_processing_jobs").all())
       .toEqual([{ stage: "synthesis", status: "succeeded" }]);
     const saved = database.native.query<{ config_version: string; output_json: string }, []>("SELECT config_version, output_json FROM media_game_overviews WHERE active = 1").get()!;
-    expect(saved.config_version).toBe(PREVIEW_SCOPE_SYNTHESIS_VERSION);
+    expect(saved.config_version).toBe(CONCISE_BROWSE_TAG_SYNTHESIS_VERSION);
     const stored = JSON.parse(saved.output_json);
     const labels = ["Branching routes", "Room reward previews", "2D", "Action", "Actions have consequences", "Mouse aiming (Switch 2)"];
     const observationIds = ["legacy-1", "legacy-1", "legacy-tag-1", "legacy-tag-1", "legacy-tag-2", "legacy-tag-3"];
@@ -1094,6 +1096,7 @@ test("preview scope follows cited spans and preserves material qualifiers", () =
     observations: [
       { ...finding, id: "stealth", text: "You slip through empty streets.", qualifiers: ["non-hands-on preview"] },
       { ...finding, id: "routes", text: "You choose a route in the test district.", qualifiers: ["non-hands-on preview", "test district only"] },
+      { ...finding, id: "prototype", text: "The map filter was exclusive to the preview build.", qualifiers: ["non-hands-on preview", "preview build only"] },
       { ...finding, id: "plans", text: "The town will have a ferry.", qualifiers: ["announcement", "non-hands-on preview"] },
     ],
   };
@@ -1103,11 +1106,16 @@ test("preview scope follows cited spans and preserves material qualifiers", () =
     observations: [{ ...finding, id: "routes", text: "You choose a route.", qualifiers: ["hands-on preview"] }],
   };
   const sources = [demo, playable];
-  const selection = synthesisSelections(sources, { clauses: "v26" });
+  const selection = synthesisSelections(sources, { clauses: "v27" });
   const id = (source: ObservationSource, id: string) => selection.evidence
     .find(({ sourceIdentity }) => sourceIdentity === source.sourceIdentity)!.observations.find((item) => item.id === id)!.selectionId;
   const clause = (text: string, source: ObservationSource, observation: string) => ({ text, observationIds: [id(source, observation)] });
   const input = {
+    tags: [
+      { label: "Route selection (during a non-hands-on preview, upcoming)", observationIds: [id(demo, "routes")] },
+      { label: "Route selection (hands-on preview)", observationIds: [id(playable, "routes")] },
+      { label: "Map filters", observationIds: [id(demo, "prototype")] },
+    ],
     statements: [
       clause("A hands-off demo showed how you slip through empty streets", demo, "stealth"),
       clause("A hands-on preview showed the district.", demo, "stealth"),
@@ -1119,7 +1127,11 @@ test("preview scope follows cited spans and preserves material qualifiers", () =
       { text: "You choose a route.", observationIds: [id(demo, "routes"), id(playable, "routes")] },
     ],
   };
-  const { overview, diagnostics } = validateSynthesisClauses(input, CYBERPUNK, sources, selection, "v26");
+  const { overview, diagnostics } = validateSynthesisClauses(input, CYBERPUNK, sources, selection, "v27");
+  expect(overview.tags).toEqual([
+    { label: "Route selection (test district only)", sourceUrls: [demo.sourceUrl], observationRefs: [{ sourceIdentity: "demo", observationId: "routes" }] },
+    { label: "Route selection", sourceUrls: [playable.sourceUrl], observationRefs: [{ sourceIdentity: "playable", observationId: "routes" }] },
+  ]);
   expect(overview.statements.map(({ text }) => text)).toEqual([
     "A hands-off demo showed how you slip through empty streets",
     "and choose a route (test district only).",

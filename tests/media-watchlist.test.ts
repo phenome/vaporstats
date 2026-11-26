@@ -46,7 +46,7 @@ function queries(database: TestDatabase) {
   ).all();
 }
 
-function world() {
+function world(extraArticleText = "") {
   const tavily = controlledTavilyApi(names);
   const openRouter = controlledOpenRouterApi();
   const gemini = controlledGeminiApi();
@@ -67,7 +67,7 @@ function world() {
     return new Response(discoveryArticleHtml(Number(appid), `${name} ${articleType}`, {
       date: published,
       author: `${hostname} critic`,
-      body: `${name} features a mission on a cargo ship where players select their equipment before leaving port. ${quote} `.repeat(3),
+      body: `${name} features a mission on a cargo ship where players select their equipment before leaving port. ${quote} `.repeat(3) + extraArticleText,
     }));
   };
   return {
@@ -271,11 +271,12 @@ test("preview and review each admit 15 articles and rejected preview URLs are re
   expect(database.native.query("SELECT COUNT(*) AS count FROM media_sources WHERE appid = ? AND original_url LIKE '%via-root'").get(ROOT)).toEqual({ count: 0 });
 });
 
-test("non-hands-on coverage enters extraction and the Internal website API keeps its scope", async () => {
+test("non-hands-on coverage enters extraction and keeps NO LAW browse tags concise with scoped prose", async () => {
   const database = fixture();
   admit(database, ROOT);
   await watch(database);
-  const api = world();
+  const genreQuote = "NO LAW is an upcoming cyber-noir role-playing game.";
+  const api = world(genreQuote);
   const discoveryResults = api.tavily.results!;
   api.tavily.results = (request) => request.domain.includes("ign") || request.domain.includes("gamespot") ? discoveryResults(request) : [];
   api.openRouter.onChat = (request) => {
@@ -286,8 +287,11 @@ test("non-hands-on coverage enters extraction and the Internal website API keeps
       const departure = mediaObservation(ROOT, "departure", "finding", "Players leave port after selecting their equipment.",
         "features a mission on a cargo ship where players select their equipment before leaving port.");
       const assessment = mediaObservation(ROOT, "praise", "pro", "The combat feels responsive.", api.quote);
-      const tag = mediaObservation(ROOT, "gear-tag", "tag", "Mission loadouts", api.quote);
-      api.openRouter.output("extraction", { observations: [finding, setting, departure, tag, assessment], originatingAssessment: "An enthusiastic endorsement." });
+      const traits = [
+        { ...mediaObservation(ROOT, "world", "tag", "Cyber-noir", genreQuote), qualifiers: ["upcoming"] },
+        { ...mediaObservation(ROOT, "genre", "tag", "Role-playing game", genreQuote), qualifiers: ["upcoming"] },
+      ];
+      api.openRouter.output("extraction", { observations: [finding, setting, departure, assessment, ...traits], originatingAssessment: "An enthusiastic endorsement." });
       return;
     }
     const sources = synthesisEvidence(request.body);
@@ -295,9 +299,13 @@ test("non-hands-on coverage enters extraction and the Internal website API keeps
     const preview = sources.find(({ sourceUrl }) => sourceUrl.includes("gamespot"))!;
     const clause = (text: string, source: typeof preview, id: string) => ({ text, observationIds: [synthesisSelectionId(source, id)] });
     expect(request.body.messages[0]!.content).toContain("Attach the announcement only to the setting span.");
+    expect(request.body.messages[0]!.content).toContain("separate ‘Cyber-noir’ and ‘Role-playing game’ labels");
     api.openRouter.output("synthesis", {
       ...emptySynthesisSelection(sources),
-      tags: [announcement, preview].map((source) => ({ label: "Mission loadouts", observationIds: [synthesisSelectionId(source, "gear-tag")] })),
+      tags: [
+        { label: "Upcoming Cyber-noir (non-hands-on preview)", observationIds: [synthesisSelectionId(preview, "world")] },
+        { label: "Role-playing game", observationIds: [synthesisSelectionId(preview, "genre")] },
+      ],
       statements: [
         clause("The announcement sets the mission on a cargo ship.", announcement, "setting"),
         clause("You choose tools for each mission (non-hands-on preview, preview)", preview, "gear"),
@@ -339,10 +347,19 @@ test("non-hands-on coverage enters extraction and the Internal website API keeps
     expect(saved.statements.map(({ observationRefs }: { observationRefs: Array<{ observationId: string }> }) =>
       observationRefs.map(({ observationId }) => observationId))).toEqual([["setting"], ["gear"], ["departure"]]);
     expect(JSON.stringify(data.mediaOverview)).not.toContain("The combat feels responsive");
-    const memberships = database.native.query<{ tag_label: string }, []>("SELECT tag_label FROM media_tag_memberships ORDER BY tag_label").all();
-    expect(memberships.map(({ tag_label }) => tag_label)).toEqual(
-      expect.arrayContaining([expect.stringMatching(/Mission loadouts.*announcement/i), expect.stringMatching(/Mission loadouts.*non-hands-on preview/i)]),
-    );
+    const memberships = database.native.query(`SELECT tag_slug, tag_label, original_url
+      FROM media_tag_memberships JOIN media_sources ON media_sources.id = media_tag_memberships.source_id
+      ORDER BY tag_slug`).all();
+    expect(memberships).toEqual([
+      { tag_slug: "cyber-noir", tag_label: "Cyber-noir", original_url: preview },
+      { tag_slug: "role-playing-game", tag_label: "Role-playing game", original_url: preview },
+    ]);
+    expect(saved.tags.map(({ label, sourceUrls, observationRefs }: {
+      label: string; sourceUrls: string[]; observationRefs: Array<{ observationId: string }>;
+    }) => [label, sourceUrls, observationRefs.map(({ observationId }) => observationId)])).toEqual([
+      ["Cyber-noir", [preview], ["world"]],
+      ["Role-playing game", [preview], ["genre"]],
+    ]);
     const publicResponse = await handleGameDetailRequest(request, database.db, ROOT);
     const published = (await publicResponse.json()).data;
     expect(published.sources).toEqual(data.sources);

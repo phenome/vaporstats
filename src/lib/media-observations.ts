@@ -3,7 +3,7 @@ import { LEGACY_V10_SOURCE_SUPPORT_LANGUAGE, MEDIA_CATEGORY_NAMES, normalizeMedi
 
 const kinds = ["finding", "pro", "con", "tag", "gameplay", "storyWorld"] as const;
 type ObservationKind = (typeof kinds)[number];
-export type ClauseVersion = "v12" | "v13" | "v14" | "v15" | "v16" | "v18" | "v19" | "v20" | "v21" | "v22" | "v23" | "v24" | "v25" | "v26";
+export type ClauseVersion = "v12" | "v13" | "v14" | "v15" | "v16" | "v18" | "v19" | "v20" | "v21" | "v22" | "v23" | "v24" | "v25" | "v26" | "v27";
 const categoryNames = new Set<string>(MEDIA_CATEGORY_NAMES);
 
 export interface MediaObservation {
@@ -367,7 +367,7 @@ export function synthesisSelections<T extends ObservationSource>(
         selectionId,
       }];
       const { edition, qualifiers, key } = observationScope(source, observation, clauses);
-      const previewScope = clauses === "v26" && !authoredTag ? claimPreviewScope(source, observation) : undefined;
+      const previewScope = usesPreviewScope(clauses) && !authoredTag ? claimPreviewScope(source, observation) : undefined;
       const scopeGroup = groupFor(key);
       const tagScope = tagFinding ? authoredTagScope(source, observation, clauses) : undefined;
       const tagContext = tagScope ? { tagScopeGroup: groupFor(tagScope.key), tagQualifiers: tagScope.qualifiers } : {};
@@ -457,7 +457,11 @@ export function usesArticleTags(version?: ClauseVersion): boolean {
 }
 
 export function usesTagFirst(version?: ClauseVersion): boolean {
-  return version === "v25" || version === "v26";
+  return version === "v25" || usesPreviewScope(version);
+}
+
+export function usesPreviewScope(version?: ClauseVersion): boolean {
+  return version === "v26" || version === "v27";
 }
 
 export function usesBrowseTags(version?: ClauseVersion): boolean {
@@ -482,7 +486,7 @@ function observationScope(source: ObservationSource, observation: MediaObservati
   if (version === "v14" || isComposedLead(version)) {
     if (usesAuthoredTags(version) && observation.kind === "tag") return authoredTagScope(source, observation, version);
     const scope = sourceGroundedScope(source, observation, usesTechnicalTiming(version));
-    const preview = version === "v26" ? claimPreviewScope(source, observation) : undefined;
+    const preview = usesPreviewScope(version) ? claimPreviewScope(source, observation) : undefined;
     return preview ? { ...scope, key: JSON.stringify([scope.key, preview]) } : scope;
   }
   const scopeInText = version === "v12"
@@ -679,7 +683,8 @@ function authoredTagScope(source: ObservationSource, observation: MediaObservati
   const scope = sourceGroundedScope(source, observation, true);
   const byScope = new Map<string, string>();
   for (const qualifier of [...observation.qualifiers, ...scope.qualifiers]) {
-    const material = usesBrowseTags(version) ? withoutHistoricalTagContext(qualifier) : qualifier;
+    const context = version === "v27" ? withoutTagCoverageQualifiers(qualifier) : qualifier;
+    const material = usesBrowseTags(version) ? withoutHistoricalTagContext(context) : context;
     if (!material) continue;
     const versions = versionMarkers(material);
     const key = versions.size && !qualifierWithoutVersion(material)
@@ -701,6 +706,29 @@ function authoredTagScope(source: ObservationSource, observation: MediaObservati
     ...scope, qualifiers,
     key: JSON.stringify([[...versions.keys()].sort(), [...new Set(remaining)].sort()]),
   };
+}
+
+// Coverage and release status describe the citation. Keep any other
+// qualifier, including explicit limits on a mechanic or edition.
+function withoutTagCoverageQualifiers(qualifiers: string): string {
+  return qualifiers.split(",").map((label) => label.trim()).filter((label) => !isTagCoverageQualifier(label)).join(", ");
+}
+
+function isTagCoverageQualifier(label: string): boolean {
+  const context = label.replace(/^(?:in|during|from) (?:(?:a|an|the) )?/i, "");
+  return /^(?:upcoming|pre[- ]release|early access)$/i.test(context)
+    || (Object.keys(PREVIEW_WORDING) as PreviewScope[]).some((scope) => isPreviewCoverageLabel(context, scope));
+}
+
+function withoutTagCoverageWording(label: unknown): unknown {
+  if (typeof label !== "string") return label;
+  const text = label.normalize("NFKC").trim();
+  if (isTagCoverageQualifier(text)) return "";
+  return text.replace(/^upcoming\s+/i, "")
+    .replace(/ \(([^()]+)\)$/, (_suffix, qualifiers: string) => {
+      const material = withoutTagCoverageQualifiers(qualifiers);
+      return material ? ` (${material})` : "";
+    });
 }
 
 function withoutHistoricalTagContext(qualifier: string): string {
@@ -827,12 +855,13 @@ export function validateObservationSynthesis(
       return [];
     }
     const authoredTag = usesAuthoredTags(clauses) && kind === "tag";
-    if (authoredTag && !isDiscoveryLabel(entry.label, clauses)) {
+    const label = authoredTag && clauses === "v27" ? withoutTagCoverageWording(entry.label) : entry.label;
+    if (authoredTag && !isDiscoveryLabel(label, clauses)) {
       omit(section, "tag label must be a concise discovery phrase", refs);
       return [];
     }
-    const preview = clauses === "v26" && kind !== "tag" ? claimPreviewScope(support[0]!.source, support[0]!.observation) : undefined;
-    const authoredText = kind === "tag" ? line(entry.label, 600) : line(entry.text, Infinity);
+    const preview = usesPreviewScope(clauses) && kind !== "tag" ? claimPreviewScope(support[0]!.source, support[0]!.observation) : undefined;
+    const authoredText = kind === "tag" ? line(label, 600) : line(entry.text, Infinity);
     const matchingText = preview ? withoutPreviewQualifierList(authoredText, preview) : authoredText;
     if (preview && preview !== "hands-on preview" && /(?<!non[- ])\bhands[- ]on (?:preview|play|demo|demonstration|session)\b/i.test(matchingText)) {
       omit(section, "claim describes firsthand play without hands-on evidence", refs);
