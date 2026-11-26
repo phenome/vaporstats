@@ -3,7 +3,7 @@ import { LEGACY_V10_SOURCE_SUPPORT_LANGUAGE, MEDIA_CATEGORY_NAMES, normalizeMedi
 
 const kinds = ["finding", "pro", "con", "tag", "gameplay", "storyWorld"] as const;
 type ObservationKind = (typeof kinds)[number];
-export type ClauseVersion = "v12" | "v13" | "v14" | "v15" | "v16" | "v18" | "v19" | "v20" | "v21" | "v22" | "v23" | "v24" | "v25";
+export type ClauseVersion = "v12" | "v13" | "v14" | "v15" | "v16" | "v18" | "v19" | "v20" | "v21" | "v22" | "v23" | "v24" | "v25" | "v26";
 const categoryNames = new Set<string>(MEDIA_CATEGORY_NAMES);
 
 export interface MediaObservation {
@@ -17,12 +17,41 @@ export interface MediaObservation {
   technicalTiming?: string[];
 }
 
+export type PreviewScope = "announcement" | "hands-on preview" | "non-hands-on preview";
+
+function isPreviewCoverageLabel(label: string, scope: PreviewScope): boolean {
+  return /^preview$/i.test(label) || ({
+    announcement: /^announcement$/i,
+    "hands-on preview": /^hands[- ]on preview$/i,
+    "non-hands-on preview": /^(?:non[- ]hands[- ]on|hands[- ]off) preview$/i,
+  } satisfies Record<PreviewScope, RegExp>)[scope].test(label);
+}
+
+function withoutPreviewQualifierList(text: string, scope: PreviewScope): string {
+  return text.replace(/ \(([^()]+)\)(?=[,;:.!?]?$)/, (_suffix, labels: string) => {
+    const remaining = labels.split(",").map((label) => label.trim()).filter((label) => !isPreviewCoverageLabel(label, scope));
+    return remaining.length ? ` (${remaining.join(", ")})` : "";
+  });
+}
+const PREVIEW_WORDING: Record<PreviewScope, RegExp> = {
+  announcement: /\b(?:announcement|announced)\b/i,
+  "hands-on preview": /(?<!non[- ])\bhands[- ]on (?:preview|play|session)\b/i,
+  "non-hands-on preview": /\b(?:(?:non[- ]hands[- ]on|hands[- ]off) (?:preview|demo|demonstration)|(?:preview|demo|demonstration|trailer|footage) (?:showed|shows)|(?:shown|seen|observed) in (?:an? |the )?(?:demo|demonstration|trailer|footage))\b/i,
+};
+
+function claimPreviewScope(source: ObservationSource, observation: MediaObservation): PreviewScope | undefined {
+  if (!source.previewScope) return undefined;
+  // A preview can also report an announced plan outside what was shown or played.
+  return observation.qualifiers.some((label) => /^announcement$/i.test(label)) ? "announcement" : source.previewScope;
+}
+
 export interface ObservationSource {
   sourceIdentity: string;
   sourceUrl: string;
   observations: MediaObservation[];
   editionContext?: { platform: string | null; build: string | null };
   legacySimilarityInputs?: true;
+  previewScope?: PreviewScope;
 }
 
 export interface ObservationReference {
@@ -280,6 +309,7 @@ type SynthesisObservation = MediaObservation & {
   scopeGroup?: string;
   tagScopeGroup?: string;
   tagQualifiers?: string[];
+  previewScope?: PreviewScope;
 };
 
 type EditorialSection = "statements" | "pros" | "cons" | "tags" | (typeof MEDIA_CATEGORY_NAMES)[number];
@@ -337,12 +367,13 @@ export function synthesisSelections<T extends ObservationSource>(
         selectionId,
       }];
       const { edition, qualifiers, key } = observationScope(source, observation, clauses);
+      const previewScope = clauses === "v26" && !authoredTag ? claimPreviewScope(source, observation) : undefined;
       const scopeGroup = groupFor(key);
       const tagScope = tagFinding ? authoredTagScope(source, observation, clauses) : undefined;
       const tagContext = tagScope ? { tagScopeGroup: groupFor(tagScope.key), tagQualifiers: tagScope.qualifiers } : {};
       const promptText = !authoredTag && (clauses === "v16" || usesTechnicalTiming(clauses))
         ? removeIncidentalReviewWording(observation, qualifiers) : observation.text;
-      return [{ ...observation, text: promptText, selectionId, qualifiers, ...tagContext, ...(edition ? { edition } : {}), ...(clauses !== "v12" ? { scopeGroup } : {}) }];
+      return [{ ...observation, text: promptText, selectionId, qualifiers, ...tagContext, ...(previewScope ? { previewScope } : {}), ...(edition ? { edition } : {}), ...(clauses !== "v12" ? { scopeGroup } : {}) }];
     });
     return observations.length ? [{ ...source, observations }] : [];
   });
@@ -425,8 +456,12 @@ export function usesArticleTags(version?: ClauseVersion): boolean {
   return version === "v22" || usesBrowseTags(version);
 }
 
+export function usesTagFirst(version?: ClauseVersion): boolean {
+  return version === "v25" || version === "v26";
+}
+
 export function usesBrowseTags(version?: ClauseVersion): boolean {
-  return version === "v23" || version === "v24" || version === "v25";
+  return version === "v23" || version === "v24" || usesTagFirst(version);
 }
 
 function canSupportTag(observation: MediaObservation, version?: ClauseVersion): boolean {
@@ -445,9 +480,10 @@ export function usesTechnicalTiming(version?: ClauseVersion): boolean {
 // Match explicit play context, without inferring a build from article dates.
 function observationScope(source: ObservationSource, observation: MediaObservation, version: ClauseVersion) {
   if (version === "v14" || isComposedLead(version)) {
-    return usesAuthoredTags(version) && observation.kind === "tag"
-      ? authoredTagScope(source, observation, version)
-      : sourceGroundedScope(source, observation, usesTechnicalTiming(version));
+    if (usesAuthoredTags(version) && observation.kind === "tag") return authoredTagScope(source, observation, version);
+    const scope = sourceGroundedScope(source, observation, usesTechnicalTiming(version));
+    const preview = version === "v26" ? claimPreviewScope(source, observation) : undefined;
+    return preview ? { ...scope, key: JSON.stringify([scope.key, preview]) } : scope;
   }
   const scopeInText = version === "v12"
     ? /\b(?:on the (?:Nintendo )?Switch 2 port|reviewed (?:PC|PS5|Xbox Series X) (?:version|build)|at (?:PC )?launch|early access|day[- ]\d+ patch)\b/gi
@@ -767,6 +803,7 @@ export function validateObservationSynthesis(
       editorialOmissions.push({ sourceIdentity, observationId, question });
     }
   }
+  let previousLeadPreview: string | undefined;
   function claim(raw: unknown, section: string, kind: ObservationKind, category?: unknown) {
     const entry = object(raw);
     const refs = list(entry.observationRefs);
@@ -793,7 +830,9 @@ export function validateObservationSynthesis(
       omit(section, "tag label must be a concise discovery phrase", refs);
       return [];
     }
-    const matchingText = kind === "tag" ? line(entry.label, 600) : line(entry.text, Infinity);
+    const preview = clauses === "v26" && kind !== "tag" ? claimPreviewScope(support[0]!.source, support[0]!.observation) : undefined;
+    const authoredText = kind === "tag" ? line(entry.label, 600) : line(entry.text, Infinity);
+    const matchingText = preview ? withoutPreviewQualifierList(authoredText, preview) : authoredText;
     const sourceTexts = [...new Set(support.map(({ observation }) => observation.text))];
     if (usesArticleTags(clauses) && authoredTag
       && (isTechnicalTagEvidence(matchingText) || sourceTexts.some(isTechnicalTagEvidence))) {
@@ -810,7 +849,7 @@ export function validateObservationSynthesis(
       omit(section, "evidence does not establish an isometric view", refs);
       return [];
     }
-    if (clauses === "v25" && authoredTag && /\bbranching (?:main )?(?:story(?:line)?|plot|narrative)\b/i.test(matchingText)
+    if (usesTagFirst(clauses) && authoredTag && /\bbranching (?:main )?(?:story(?:line)?|plot|narrative)\b/i.test(matchingText)
       && sourceTexts.some((evidence) => !supportsStoryBranching(evidence))) {
       omit(section, "evidence does not establish story branching", refs);
       return [];
@@ -883,10 +922,20 @@ export function validateObservationSynthesis(
     }
     const punctuation = isComposedLead(clauses) && (section === "statements" || timing) ? /[,;:.!?]$/.exec(matchingText)?.[0] ?? "" : "";
     const unpunctuatedWording = punctuation ? matchingText.slice(0, -1) : matchingText;
-    const tagWording = clauses === "v25" && authoredTag
+    const tagWording = usesTagFirst(clauses) && authoredTag
       ? unpunctuatedWording.replace(/^Dungeons (?:&|and) Dragons (5th Edition)(?: rules(?:et| basis)?)?(?=$| \([^()]+\)$)/i, "D&D $1")
       : unpunctuatedWording;
     const wording = usesControllerTags(clauses) && authoredTag ? omitImpliedControllerPlatform(tagWording) : tagWording;
+    const sourceUrls = [...new Set(support.map(({ source }) => source.sourceUrl))];
+    const previewKey = preview ? JSON.stringify([preview, [...sourceUrls].sort()]) : undefined;
+    const needsPreviewLabel = preview && !PREVIEW_WORDING[preview].test(wording)
+      && (section !== "statements" || previewKey !== previousLeadPreview);
+    const sourceHasOtherPreviewScope = support[0]!.source.previewScope;
+    const proseQualifiers = preview
+      ? [
+        ...displayQualifiers.filter((label) => !isPreviewCoverageLabel(label, preview) && !(sourceHasOtherPreviewScope && label === sourceHasOtherPreviewScope)),
+        ...(needsPreviewLabel ? [preview === "non-hands-on preview" ? "hands-off preview" : preview] : []),
+      ] : displayQualifiers;
     const text = semantic
       ? displayText({
         ...support[0]!.observation,
@@ -894,7 +943,7 @@ export function validateObservationSynthesis(
         qualifiers: authoredTag
           ? missingTagQualifiers(wording, displayQualifiers, clauses)
           : clauses === "v19" || usesAuthoredTags(clauses)
-            ? displayQualifiers.filter((q) => !includesHardwareQualifier(wording, q))
+            ? proseQualifiers.filter((q) => !includesHardwareQualifier(wording, q))
             : displayQualifiers,
       }) + punctuation
       : displays.join(" / ");
@@ -904,7 +953,8 @@ export function validateObservationSynthesis(
       return [];
     }
     const edition = scopes[0]?.edition;
-    return [{ text, sourceUrls: [...new Set(support.map(({ source }) => source.sourceUrl))], ...(contested ? { contested } : {}), ...(edition ? { edition } : {}), observationRefs: support.map(({ source, observation }) => ({ sourceIdentity: source.sourceIdentity, observationId: observation.id })) }];
+    if (section === "statements") previousLeadPreview = previewKey;
+    return [{ text, sourceUrls, ...(contested ? { contested } : {}), ...(edition ? { edition } : {}), observationRefs: support.map(({ source, observation }) => ({ sourceIdentity: source.sourceIdentity, observationId: observation.id })) }];
   }
   const root = object(value);
   for (const raw of list(root.categories)) {
@@ -925,7 +975,12 @@ export function validateObservationSynthesis(
     seenEvidence.add(evidenceKey);
     return true;
   }
-  const statements = list(root.statements).slice(0, 60).flatMap((entry) => claim(entry, "statements", "finding")).filter(uniqueFinding);
+  const statements = list(root.statements).slice(0, 60).flatMap((entry) => {
+    const priorPreview = previousLeadPreview;
+    const findings = claim(entry, "statements", "finding").filter(uniqueFinding);
+    if (findings.length === 0) previousLeadPreview = priorPreview;
+    return findings;
+  });
   if (statements.length === 0) omit("statements", "no supported statements", []);
   const categories = MEDIA_CATEGORY_NAMES.flatMap((name) => {
     const findings = list(root.categories).map(object).filter((entry) => entry.name === name)

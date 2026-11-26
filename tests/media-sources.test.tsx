@@ -336,8 +336,8 @@ describe("game media sources", () => {
         appid: source.appid,
         composedLead: true,
         statements: [
-          { text: "Cyberpunk 2077 takes you to Night City,", sourceUrls: [source.originalUrl] },
-          { text: "where side jobs can change how the story ends.", sourceUrls: [source.originalUrl, second.originalUrl] },
+          { text: "You reach the flooded town by ferry", sourceUrls: [source.originalUrl] },
+          { text: "and choose which mission to take next.", sourceUrls: [source.originalUrl, second.originalUrl] },
         ],
         categories: [],
         prosCons: null,
@@ -348,9 +348,9 @@ describe("game media sources", () => {
     const { document } = parseHTML(html);
     const spans = document.querySelectorAll("#media-overview p > span");
     expect(spans).toHaveLength(2);
-    expect(spans[0]?.firstChild?.textContent).toBe("Cyberpunk 2077 takes you to Night City,");
+    expect(spans[0]?.firstChild?.textContent).toBe("You reach the flooded town by ferry");
     expect(spans[0]?.lastChild?.nodeName).toBe("A");
-    expect(spans[1]?.textContent).toContain("where side jobs can change how the story ends.");
+    expect(spans[1]?.textContent).toContain("and choose which mission to take next.");
     expect([...spans].map((span) => [...span.querySelectorAll("a")].map((link) => link.getAttribute("href"))))
       .toEqual([["#media-source-1"], ["#media-source-1", "#media-source-2"]]);
   });

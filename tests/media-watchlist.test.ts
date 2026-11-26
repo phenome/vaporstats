@@ -7,7 +7,7 @@ import { getMediaSources, MEDIA_OUTLETS, nextMediaAssessment, replayRejectedPrev
 import { outletDailyAttemptCap } from "../src/lib/media-outlet-access";
 import { changeMediaWatch, expectedMediaReleaseDate, mediaWatchSchedule, previewInterval, PREVIEW_DEFERRAL_KEY, shiftMediaDay } from "../src/lib/media-watchlist";
 import { handleGameDetailRequest, type GameDetailResponseData } from "../src/routes/api.games.$appid.detail";
-import { controlledGeminiApi, controlledOpenRouterApi, controlledTavilyApi, discoveryArticleHtml, mediaObservation, runMediaTick, overviewOutputForUrls, type MediaTickOptions } from "./support/media";
+import { controlledGeminiApi, controlledOpenRouterApi, controlledTavilyApi, discoveryArticleHtml, mediaObservation, runMediaTick, overviewOutputForUrls, synthesisEvidence, synthesisSelectionId, emptySynthesisSelection, type MediaTickOptions } from "./support/media";
 
 const ROOT = 2161710;
 const CHILD = 2161711;
@@ -281,12 +281,33 @@ test("non-hands-on coverage enters extraction and the Internal website API keeps
   api.openRouter.onChat = (request) => {
     if (request.stage === "extraction") {
       const finding = mediaObservation(ROOT, "gear", "finding", "Players choose tools for each mission.", api.quote);
+      const setting = mediaObservation(ROOT, "setting", "finding", "The mission takes place on a cargo ship.",
+        "features a mission on a cargo ship where players select their equipment before leaving port.");
+      const departure = mediaObservation(ROOT, "departure", "finding", "Players leave port after selecting their equipment.",
+        "features a mission on a cargo ship where players select their equipment before leaving port.");
       const assessment = mediaObservation(ROOT, "praise", "pro", "The combat feels responsive.", api.quote);
       const tag = mediaObservation(ROOT, "gear-tag", "tag", "Mission loadouts", api.quote);
-      api.openRouter.output("extraction", { observations: [finding, tag, assessment], originatingAssessment: "An enthusiastic endorsement." });
+      api.openRouter.output("extraction", { observations: [finding, setting, departure, tag, assessment], originatingAssessment: "An enthusiastic endorsement." });
       return;
     }
-    api.openRouter.output("synthesis", overviewOutputForUrls(request.urls));
+    const sources = synthesisEvidence(request.body);
+    const announcement = sources.find(({ sourceUrl }) => sourceUrl.includes("ign"))!;
+    const preview = sources.find(({ sourceUrl }) => sourceUrl.includes("gamespot"))!;
+    const clause = (text: string, source: typeof preview, id: string) => ({ text, observationIds: [synthesisSelectionId(source, id)] });
+    expect(request.body.messages[0]!.content).toContain("Attach the announcement only to the setting span.");
+    api.openRouter.output("synthesis", {
+      ...emptySynthesisSelection(sources),
+      tags: [announcement, preview].map((source) => ({ label: "Mission loadouts", observationIds: [synthesisSelectionId(source, "gear-tag")] })),
+      statements: [
+        clause("The announcement sets the mission on a cargo ship.", announcement, "setting"),
+        clause("You choose tools for each mission (non-hands-on preview, preview)", preview, "gear"),
+        clause("and leave port with your chosen equipment.", preview, "departure"),
+      ],
+      categories: {
+        ...emptySynthesisSelection(sources).categories,
+        "Gameplay & systems": [clause("You leave port after picking equipment.", preview, "departure")],
+      },
+    });
   };
   await api.tick(database, "2027-01-25");
   const extracted = database.native.query<{ output_json: string }, []>("SELECT output_json FROM media_article_extractions ORDER BY id").all();
@@ -304,7 +325,19 @@ test("non-hands-on coverage enters extraction and the Internal website API keeps
     const { data } = await response.json() as { data: GameDetailResponseData };
     expect(data.sources.map(({ type, handsOn }) => [type, handsOn]).sort()).toEqual([["announcement", false], ["preview", false]]);
     expect(data.mediaOverview).not.toBeNull();
-    expect(JSON.stringify(data.mediaOverview)).toMatch(/announcement|non-hands-on preview/);
+    const announcement = data.sources.find(({ type }) => type === "announcement")!.originalUrl;
+    const preview = data.sources.find(({ type }) => type === "preview")!.originalUrl;
+    expect(data.mediaOverview?.statements).toEqual([
+      { text: "The announcement sets the mission on a cargo ship.", sourceUrls: [announcement] },
+      { text: "You choose tools for each mission (hands-off preview)", sourceUrls: [preview] },
+      { text: "and leave port with your chosen equipment.", sourceUrls: [preview] },
+    ]);
+    expect(data.mediaOverview?.categories).toEqual([
+      { name: "Gameplay & systems", findings: [{ text: "You leave port after picking equipment (hands-off preview)", sourceUrls: [preview] }] },
+    ]);
+    const saved = JSON.parse(database.native.query<{ output_json: string }, []>("SELECT output_json FROM media_game_overviews WHERE active = 1").get()!.output_json);
+    expect(saved.statements.map(({ observationRefs }: { observationRefs: Array<{ observationId: string }> }) =>
+      observationRefs.map(({ observationId }) => observationId))).toEqual([["setting"], ["gear"], ["departure"]]);
     expect(JSON.stringify(data.mediaOverview)).not.toContain("The combat feels responsive");
     const memberships = database.native.query<{ tag_label: string }, []>("SELECT tag_label FROM media_tag_memberships ORDER BY tag_label").all();
     expect(memberships.map(({ tag_label }) => tag_label)).toEqual(
