@@ -4,7 +4,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { MediaOverviewSection } from "../src/components/media-overview";
 import { createHash } from "node:crypto";
 import { extractionReviewIssues, parseArticleObservations, readArticleObservations, synthesisSelections, validateSynthesisClauses, validateSynthesisSelections, validateObservationSynthesis, type ObservationSource } from "../src/lib/media-observations";
-import { createMediaEvidenceSource, getMediaOverview, parseMediaOverview, PREMISE_FIRST_SYNTHESIS_VERSION, COMPOUND_BROWSE_TAG_SYNTHESIS_VERSION } from "../src/lib/media-overview";
+import { createMediaEvidenceSource, getMediaOverview, parseMediaOverview, PREMISE_FIRST_SYNTHESIS_VERSION, BROWSE_INDEX_SYNTHESIS_VERSION } from "../src/lib/media-overview";
 import { advanceMediaProcessing, authorizeMediaProcessing, OPENROUTER_TEXT_MODEL } from "../src/lib/media-processing";
 import { legacyObservationEvidence } from "../src/lib/media-legacy-observations";
 import { MEDIA_OUTLETS } from "../src/lib/media-outlet-access";
@@ -717,7 +717,7 @@ test("a new synthesis queues typed premise and play evidence for the lead, then 
       now: new Date("2026-11-26T03:00:00Z"),
     });
     const saved = database.native.query<{ config_version: string; output_json: string }, []>("SELECT config_version, output_json FROM media_game_overviews").get()!;
-    expect(saved.config_version).toBe(COMPOUND_BROWSE_TAG_SYNTHESIS_VERSION);
+    expect(saved.config_version).toBe(BROWSE_INDEX_SYNTHESIS_VERSION);
     expect(JSON.parse(saved.output_json).statements.map(({ observationRefs }: { observationRefs: Array<{ observationId: string }> }) =>
       observationRefs.map(({ observationId }) => observationId))).toEqual([["premise"], ["play", "play"]]);
     const overview = await getMediaOverview(database.db, CYBERPUNK, { includeUnpublished: true });
@@ -985,7 +985,8 @@ test("current synthesis uses a retained article without refetch and serves disti
           { label: "Isometric", observationIds: [candidates[1]!.selectionId] },
           { label: "Single-player", observationIds: [routeId] },
         ];
-        return { generationId: "v29-fixture", model: request.model, provider: null, finishReason: "stop", nativeFinishReason: null,
+        expect(request.messages[0]!.content).toContain("Edit the tag list as a browse index");
+        return { generationId: "v32-fixture", model: request.model, provider: null, finishReason: "stop", nativeFinishReason: null,
           content: JSON.stringify({ ...emptySynthesisSelection(sources), statements: [{ text: routes, observationIds: [routeId] }], tags }),
           usage: { promptTokens: 100, completionTokens: 40, reasoningTokens: 0, cost: 0.00015 } };
       },
@@ -998,7 +999,7 @@ test("current synthesis uses a retained article without refetch and serves disti
     expect(database.native.query("SELECT stage, status FROM media_processing_jobs").all())
       .toEqual([{ stage: "synthesis", status: "succeeded" }]);
     const saved = database.native.query<{ config_version: string; output_json: string }, []>("SELECT config_version, output_json FROM media_game_overviews WHERE active = 1").get()!;
-    expect(saved.config_version).toBe(COMPOUND_BROWSE_TAG_SYNTHESIS_VERSION);
+    expect(saved.config_version).toBe(BROWSE_INDEX_SYNTHESIS_VERSION);
     const stored = JSON.parse(saved.output_json);
     const labels = ["Branching routes", "Room reward previews", "2D action", "Actions have consequences", "Mouse aiming (Switch 2)", "Tarot-card upgrades", "Greek mythology"];
     const observationIds = ["legacy-1", "legacy-1", "legacy-tag-1", "legacy-tag-2", "legacy-tag-3", "legacy-tag-4", "legacy-tag-5"];
