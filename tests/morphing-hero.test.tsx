@@ -1,4 +1,9 @@
 import { describe, expect, test } from "bun:test";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { parseHTML } from "linkedom";
+import { act } from "react";
+import { createRoot } from "react-dom/client";
+import { GamePageView } from "../src/components/game-page";
 import type { GameDetail } from "../src/lib/catalog";
 import { generateLqipFromBuffer, generateSquareLqipFromBuffer, ensureAppLqips } from "../src/lib/lqip";
 import { getDb } from "../src/lib/db";
@@ -33,6 +38,83 @@ const mockGame: GameDetail = {
   created_at: "2020-12-10T00:00:00Z",
   updated_at: "2026-09-06T00:00:00Z",
 };
+
+test("keeps header artwork on icon failure and crossfades a working icon after navigation", async () => {
+  const { window, document } = parseHTML("<html><body><main></main></body></html>");
+  let nextFrame = 0;
+  const frames = new Map<number, FrameRequestCallback>();
+  const globals = {
+    window,
+    document,
+    location: { hash: "" },
+    scrollY: 0,
+    fetch: async () => new Response(null, { status: 404 }),
+    ResizeObserver: class {
+      observe() {}
+      disconnect() {}
+    },
+    requestAnimationFrame: (callback: FrameRequestCallback) => {
+      frames.set(++nextFrame, callback);
+      return nextFrame;
+    },
+    cancelAnimationFrame: (id: number) => { frames.delete(id); },
+    IS_REACT_ACT_ENVIRONMENT: true,
+  };
+  const previous = Object.getOwnPropertyDescriptors(globalThis);
+  Object.assign(globalThis, globals);
+  const container = document.querySelector("main")!;
+  const root = createRoot(container);
+  const queryClient = new QueryClient({ defaultOptions: { queries: { enabled: false } } });
+  const renderGame = (game: GameDetail) => act(async () => {
+    root.render(<QueryClientProvider client={queryClient}><GamePageView game={game} /></QueryClientProvider>);
+  });
+  const header = () => container.querySelector<HTMLImageElement>(".hero-art-header")!;
+  const compact = () => container.querySelector<HTMLImageElement>(".hero-art-compact")!;
+  const warlock = {
+    ...mockGame,
+    appid: 3714800,
+    name: "Warlock",
+    header_image: "https://shared.cloudflare.steamstatic.com/store_item_assets/steam/apps/3714800/header.jpg",
+    icon_lqip: null,
+  };
+
+  try {
+    await renderGame(warlock);
+    act(() => {
+      const pending = [...frames.values()];
+      frames.clear();
+      pending.forEach((callback) => callback(0));
+    });
+    const hero = container.querySelector<HTMLElement>(".morphing-game-hero")!;
+    expect(hero.style.getPropertyValue("--hero-morph-progress")).toBe("1");
+    expect(compact().src).toContain("/3714800/");
+    act(() => { compact().dispatchEvent(new window.Event("error")); });
+    expect(compact().style.visibility).toBe("hidden");
+    expect(header().getAttribute("data-hero-crossfade")).toBeNull();
+    expect(header().src).toBe(warlock.header_image);
+
+    await renderGame(mockGame);
+    expect(compact().src).toContain("/1091500/");
+    expect(compact().style.visibility).toBe("hidden");
+    act(() => { compact().dispatchEvent(new window.Event("load")); });
+    expect(compact().style.visibility).not.toBe("hidden");
+    expect(compact().getAttribute("data-hero-crossfade")).toBe("compact");
+    expect(header().getAttribute("data-hero-crossfade")).toBe("header");
+
+    await renderGame(warlock);
+    expect(compact().style.visibility).toBe("hidden");
+    expect(header().src).toBe(warlock.header_image);
+    expect(header().getAttribute("data-hero-crossfade")).toBeNull();
+  } finally {
+    act(() => root.unmount());
+    queryClient.clear();
+    for (const key of Object.keys(globals)) {
+      const descriptor = previous[key];
+      if (descriptor) Object.defineProperty(globalThis, key, descriptor);
+      else Reflect.deleteProperty(globalThis, key);
+    }
+  }
+});
 
 describe("dual LQIP", () => {
   test("Bun.Image placeholder generators produce valid data URLs", async () => {
