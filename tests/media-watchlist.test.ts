@@ -995,6 +995,28 @@ test("a preview pass rejects two enrolled families joined in the title by a co-t
   expect(run.rejected().map(({ title }) => title).sort()).toEqual([...joined].sort());
 });
 
+test("a preview pass keeps single-game titles with a conjunction or a record word and reads a lone x after a short name as a joiner", async () => {
+  const WARLOCK = 3714800;
+  const database = fixture();
+  const crossover = "Warlock x Fort Harbor share a stage demo";
+  const crossoverBody = `Fort Harbor led the show. Fort Harbor returned twice, and Warlock: Dungeons & Dragons joined Fort Harbor on stage. ${filler}`;
+  const body = `NO LAW sends you through its harbor one mission at a time. ${filler}`;
+  const run = await subjectTick(database, { [ROOT]: { name: "NO LAW" }, [REVIEW]: { name: "Fort Harbor" }, [WARLOCK]: { name: "Warlock: Dungeons & Dragons" } }, {
+    [`${ROOT}:preview`]: {
+      "ign.com": [{ title: "NO LAW and the cost of running a harbor: a hands-off preview", body }],
+      "eurogamer.net": [{ title: "NO LAW beats its own wishlist record", body }],
+    },
+    // Fort Harbor is named most in the body, but the title names Warlock first, joined by "x".
+    [`${REVIEW}:preview`]: { "ign.com": [{ title: crossover, body: crossoverBody }] },
+    [`${WARLOCK}:preview`]: { "ign.com": [{ title: crossover, body: crossoverBody }] },
+  });
+  expect(run.sources()).toEqual([
+    { appid: ROOT, pass: "preview", title: "NO LAW and the cost of running a harbor: a hands-off preview" },
+    { appid: ROOT, pass: "preview", title: "NO LAW beats its own wishlist record" },
+  ]);
+  expect(run.rejected().map(({ appid }) => appid)).toEqual([REVIEW, WARLOCK].sort((a, b) => a - b));
+});
+
 test("a preview pass rejects an article whose title names two families at the same position", async () => {
   const database = fixture();
   const run = await subjectTick(database, { [ROOT]: { name: "NO LAW" }, [LATE]: { name: "NO LAW Lost Streets" } }, {

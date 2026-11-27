@@ -807,10 +807,10 @@ type EntityName = { text: string; short: boolean };
  * What follows a short name that heads a different title: a subtitle
  * separator ("dune: spice wars") or a sequel number in arabic digits or a
  * roman numeral token ("marvel's spider-man 2"). Such an occurrence names
- * that other game, not the entity.
+ * that other game, not the entity. A lone "x" is left to the co-title joiners.
  */
 const HEAD_OF_ANOTHER_TITLE = new RegExp(
-  `^(?:${SUBTITLE_SEPARATOR.source}|\\s+(?:\\d+|(?=[ivxlcdm]+(?![a-z0-9]))m{0,3}(?:cm|cd|d?c{0,3})(?:xc|xl|l?x{0,3})(?:ix|iv|v?i{0,3}))(?![a-z0-9]))`,
+  `^(?:${SUBTITLE_SEPARATOR.source}|\\s+(?:\\d+|(?!x(?![a-z0-9]))(?=[ivxlcdm]+(?![a-z0-9]))m{0,3}(?:cm|cd|d?c{0,3})(?:xc|xl|l?x{0,3})(?:ix|iv|v?i{0,3}))(?![a-z0-9]))`,
 );
 
 /**
@@ -970,6 +970,7 @@ type ArticleFacts = {
   reviewNews: boolean;
   coTitledReview: boolean;
   coTitledPreview: boolean;
+  multiGamePreviewTitle: boolean;
   multiGameTitle: boolean;
   roundupOrComparisonFraming: boolean;
   developerAuthored: boolean;
@@ -999,12 +1000,29 @@ function articleFacts(
     reviewNews: /\b(?:review\s+scores?|(?:gets?|earns?|receives?|scores?|rated)\s+(?:a\s+)?\d+(?:\.\d+)?\s*(?:\/\s*\d+|out of \d+))\b/.test(titleLower)
       || /\breviews?\s*(?:[:\-–—]\s*|\s+)(?:embargo(?:es)?|details?|reactions?|coverage|codes?|copies|policies?|discourse)\b|\b(?:embargo(?:es)?|details?|reactions?|coverage|codes?|copies|policies?|discourse)\s*(?:[:\-–—]\s*|\s+)(?:about|around|for|on|of|to)?\s*reviews?\b/.test(titleLower),
     coTitledReview: /\b(?:and|&)\s+.+?\s+reviews?\b/.test(titleWithoutNames),
-    coTitledPreview: /(?:\band|&)\s+.+?\s+(?:previews?|announcements?)\b/.test(titleWithoutNames),
     multiGameTitle: /\b(round[- ]?up|best games?|games like|versus|\bvs\.?\b|comparison|ranking|ranked|top\s+\d+|lists?(?:icle)?|highest|metacritic|surpasses?|outperforms?|outscores?|beats?|review\s+drama|drama)\b/.test(titleLower),
+    coTitledPreview: CO_TITLED_PREVIEW.test(titleWithoutNames),
+    multiGamePreviewTitle: MULTI_GAME_PREVIEW_TITLE.test(titleLower),
     roundupOrComparisonFraming: hasRoundupOrComparisonFraming(articleLeadLower, bodyLower),
     developerAuthored: developerAuthorship.test(meta.byline ?? "") || developerAuthorship.test(meta.affiliation ?? ""),
   };
 }
+
+/**
+ * Title wording that marks a multi-game piece in a preview pass. Words that
+ * also describe one game's own news ("beats", "highest", "surpasses") are
+ * not evidence of a second game. Two enrolled families joined in a title are
+ * refused by the subject decision.
+ */
+/**
+ * A preview co-titled with a second game no target names: the entity's full
+ * name ("§" once removed), a conjunction, then a short title directly before
+ * the preview word ("no law and fort harbor preview"). A phrase opening with
+ * an article or possessive describes the entity's own subject matter ("and
+ * the cost of magical power: a hands-off preview") and is not a second title.
+ */
+const CO_TITLED_PREVIEW = /§\s*(?:and|&)\s+(?!(?:the|a|an|its|their|our|my|more|other)\b)(?:[^\s:–—-]+\s+){1,3}(?:hands?[- ]o(?:n|ff)\s+)?(?:previews?|announcements?)\b/;
+const MULTI_GAME_PREVIEW_TITLE = /\b(round[- ]?up|best games?|games like|versus|vs\.?|comparison|ranking|ranked|top\s+\d+|listicle|metacritic)\b/;
 
 /**
  * Why a preview pass refuses an article whose subject is its exact entity, or
@@ -1016,7 +1034,7 @@ function previewPassRefusal(facts: ArticleFacts): string | null {
   if (facts.review) return "review"; // left for the released-game flow
   if (facts.patchNotes) return "patch_notes";
   if (facts.guide) return "guide";
-  if (facts.multiGameTitle || facts.coTitledReview || facts.coTitledPreview || facts.roundupOrComparisonFraming) return "multi_game";
+  if (facts.multiGamePreviewTitle || facts.coTitledPreview || facts.roundupOrComparisonFraming) return "multi_game";
   if (facts.reviewNews) return "review_news";
   if (facts.developerAuthored) return "developer_authored";
   return null;
@@ -1057,7 +1075,7 @@ function parseSource(html: string, finalUrl: string, target: MediaTarget, target
   const platformMeta = meta(document, "game:platform", "article:platform");
   const buildMeta = meta(document, "game:build", "article:build");
   const affiliationMeta = meta(document, "author_affiliation", "article:author_affiliation");
-  const gamesRadarTags = outlet === "GamesRadar+" ? (meta(document, "mrf:tags")?.split(";").map((tag) => tag.trim()) ?? []) : [];
+  const gamesRadarTags = outlet === "GamesRadar+" ? (meta(document, "mrf:tags")?.split(";") ?? []) : [];
   type ReadableResult = { title?: string; byline?: string; textContent?: string };
   let readable: ReadableResult | null = null;
   try {
