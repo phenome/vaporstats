@@ -30,8 +30,8 @@ export function previewMonthlyCreditShare(planLimit: number | null): number {
 async function previewDeferralHolds(db: AppDatabase, month: string): Promise<boolean> {
   const recorded = await db.prepare(
     `SELECT json_extract(usage, '$.planLimit') AS plan_limit FROM media_discovery_runs
-     WHERE origin = 'scheduled' AND json_valid(usage) AND json_extract(usage, '$.planLimit') IS NOT NULL ORDER BY id DESC LIMIT 1`,
-  ).first<{ plan_limit: number }>();
+     WHERE origin = 'scheduled' AND json_valid(usage) ORDER BY id DESC LIMIT 1`,
+  ).first<{ plan_limit: number | null }>();
   return await servedPreviewSearches(db, month) >= previewMonthlyCreditShare(recorded?.plan_limit ?? null);
 }
 

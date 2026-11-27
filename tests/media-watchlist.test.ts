@@ -1040,7 +1040,7 @@ test("a preview pass types announcements by title, preview wording and hands-on 
   const pages: Record<string, string> = {
     "ign.com": discoveryArticleHtml(ROOT, "NO LAW announced with a debut trailer", { body }),
     "eurogamer.net": discoveryArticleHtml(ROOT, "NO LAW revealed in a hands-on session", { body }),
-    "gamespot.com": discoveryArticleHtml(ROOT, "NO LAW announced for next year", { body: `We played the first district. ${body}` }),
+    "gamespot.com": discoveryArticleHtml(ROOT, "NO LAW announced for next year", { body: `I went hands-on with the first district. ${body}` }),
     "gamesradar.com": featureHtml("NO LAW revealed for next year", body),
     "pcgamer.com": featureHtml("NO LAW sends you through a harbor city", body, "articleType:Features"),
     // The word "preview" in the title outweighs an announcement word.

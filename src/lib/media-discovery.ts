@@ -992,7 +992,7 @@ function articleFacts(
     previewTitle: /\bpreview\b/i.test(title),
     outletPreviewMarker: meta.gamesRadarTags.includes("unindexedFreeform:preview"),
     explicitHandsOn: pass === "preview"
-      ? !/\b(?:not (?:an? )?hands?[- ]on|non[- ]hands?[- ]on|no hands?[- ]on)\b/i.test(title) && (/\bhands?[- ]on\b/i.test(title) || /\b(?:we (?:played|went hands?[- ]on)|i played|after playing|played for)\b/i.test(lead))
+      ? !/\b(?:not (?:an? )?hands?[- ]on|non[- ]hands?[- ]on|no hands?[- ]on)\b/i.test(title) && (/\bhands?[- ]on\b/i.test(title) || /\b(?:(?:we|i) (?:played|went hands?[- ]on)|after playing|played for)\b/i.test(lead))
       : /\b(hands?[- ]on|we played|after playing|played for|impressions?)\b/i.test(`${title} ${lead}`),
     announcement: /\b(announced|announcement|announces|revealed|reveal|trailer|launches)\b/.test(titleLower),
     patchNotes: /\b(patch notes|update notes|roadmap)\b/.test(titleLower),
@@ -1371,8 +1371,10 @@ export async function runAuthorizedMediaDiscovery(db: AppDatabase, options: Medi
     // Read at check time, not from the run's starting snapshot: preview
     // queries searched earlier in this run are no longer pending.
     const previewOccurrenceIds = JSON.stringify(previews.map(({ id }) => id));
+    // An occurrence ended since the run started, such as by an unwatch, has no pending query.
     const pendingPreviewQueries = async () => (await rows<ProgressRow>(db, `SELECT ${PROGRESS_COLUMNS} FROM media_discovery_progress
-      WHERE occurrence_id IN (SELECT value FROM json_each(?)) AND status <> 'completed' AND query_attempted_at IS NULL`, previewOccurrenceIds))
+      WHERE occurrence_id IN (SELECT value FROM json_each(?)) AND status <> 'completed' AND query_attempted_at IS NULL
+        AND occurrence_id IN (SELECT id FROM media_preview_occurrences WHERE ended_at IS NULL)`, previewOccurrenceIds))
       .filter((row) => !denied.has(row.outlet)).length;
     const month = day.slice(0, 7);
     // Previews have their own share of the month's plan credits; within it
