@@ -1005,6 +1005,8 @@ test("a preview pass keeps single-game titles with a conjunction or a record wor
     [`${ROOT}:preview`]: {
       "ign.com": [{ title: "NO LAW and the cost of running a harbor: a hands-off preview", body }],
       "eurogamer.net": [{ title: "NO LAW beats its own wishlist record", body }],
+      // A list of games is still a multi-game piece.
+      "kotaku.com": [{ title: "NO LAW leads our list of games to watch in 2027", body }],
     },
     // Fort Harbor is named most in the body, but the title names Warlock first, joined by "x".
     [`${REVIEW}:preview`]: { "ign.com": [{ title: crossover, body: crossoverBody }] },
@@ -1014,7 +1016,7 @@ test("a preview pass keeps single-game titles with a conjunction or a record wor
     { appid: ROOT, pass: "preview", title: "NO LAW and the cost of running a harbor: a hands-off preview" },
     { appid: ROOT, pass: "preview", title: "NO LAW beats its own wishlist record" },
   ]);
-  expect(run.rejected().map(({ appid }) => appid)).toEqual([REVIEW, WARLOCK].sort((a, b) => a - b));
+  expect(run.rejected().map(({ appid }) => appid)).toEqual([ROOT, REVIEW, WARLOCK].sort((a, b) => a - b));
 });
 
 test("a preview pass rejects an article whose title names two families at the same position", async () => {
