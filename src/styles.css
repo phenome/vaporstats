@@ -234,11 +234,11 @@
   object-position: center;
 }
 
-.morphing-game-hero[data-hero-morph-driver="css"] [data-hero-crossfade="header"] {
+.morphing-game-hero [data-hero-crossfade="header"] {
   opacity: calc(1 - var(--hero-morph-progress, 0));
 }
 
-.morphing-game-hero[data-hero-morph-driver="css"] [data-hero-crossfade="compact"] {
+.morphing-game-hero [data-hero-crossfade="compact"] {
   opacity: var(--hero-morph-progress, 0);
 }
 

@@ -236,10 +236,6 @@ function useHeroScrollController(
         bottomEdge.style.opacity = "";
         bottomEdge.style.transform = "";
       }
-      const headerImg = hero.querySelector<HTMLImageElement>(".hero-art-header");
-      const compactImg = hero.querySelector<HTMLImageElement>(".hero-art-compact");
-      if (headerImg) headerImg.style.opacity = "";
-      if (compactImg) compactImg.style.opacity = "";
       const fadeOnlyNodes = hero.querySelectorAll<HTMLElement>("[data-game-fade-only]");
       fadeOnlyNodes.forEach((node) => {
         node.style.transform = "";
@@ -366,15 +362,6 @@ function useHeroScrollController(
               }
             });
 
-            const headerImg = hero.querySelector<HTMLImageElement>(".hero-art-header");
-            const compactImg = hero.querySelector<HTMLImageElement>(".hero-art-compact");
-            if (headerImg && compactImg) {
-              headerImg.style.opacity = String(1 - progress);
-              compactImg.style.opacity = String(progress);
-            } else if (headerImg) {
-              headerImg.style.opacity = "1";
-            }
-
             const fadeOnlyNodes = hero.querySelectorAll<HTMLElement>("[data-game-fade-only]");
             fadeOnlyNodes.forEach((node) => {
               node.style.transformOrigin = "top left";
@@ -414,6 +401,46 @@ function useHeroScrollController(
     };
   }, [sentinelRef, heroRef, identityRefs, geometry, morphRange]);
 }
+
+function GameHeroArtwork({ game, compactImage }: { game: GameDetail; compactImage: string | null }) {
+  const [compactLoaded, setCompactLoaded] = useState(false);
+  const compactRef = useRef<HTMLImageElement>(null);
+  const headerImage = game.header_image || game.header_lqip;
+  const hasCrossfade = Boolean(headerImage && compactImage !== headerImage && compactLoaded);
+
+  useLayoutEffect(() => {
+    const image = compactRef.current;
+    // The server-rendered image can finish loading before hydration attaches handlers.
+    if (image?.complete && image.naturalWidth > 0) setCompactLoaded(true);
+  }, []);
+
+  return (
+    <>
+      {headerImage && (
+        <img
+          src={headerImage}
+          alt={game.name}
+          className="hero-art-image hero-art-header"
+          data-hero-crossfade={hasCrossfade ? "header" : undefined}
+          style={{ backgroundImage: game.header_lqip ? `url(${game.header_lqip})` : undefined }}
+        />
+      )}
+      {compactImage && compactImage !== headerImage && (
+        <img
+          ref={compactRef}
+          src={compactImage}
+          alt={headerImage ? "" : game.name}
+          className={headerImage ? "hero-art-image hero-art-compact" : "hero-art-image hero-art-header"}
+          data-hero-crossfade={hasCrossfade ? "compact" : undefined}
+          style={{ visibility: compactLoaded ? undefined : "hidden" }}
+          onLoad={() => setCompactLoaded(true)}
+          onError={() => setCompactLoaded(false)}
+        />
+      )}
+    </>
+  );
+}
+
 export interface GamePageProps {
   game: GameDetail;
   related?: GroupedRelatedApps;
@@ -545,9 +572,7 @@ export function GamePageView({
     : null;
   useHeroScrollController(sentinelRef, heroRef, identityRefs, geometry, morphRange);
   const communityIconUrl = game.icon_hash ? getCommunityIconUrl(game.appid, game.icon_hash) : null;
-  const compactImage = communityIconUrl ?? game.icon_lqip ?? game.header_lqip ?? game.header_image ?? null;
-  const headerImage = game.header_image ?? game.header_lqip ?? compactImage;
-  const hasCrossfade = Boolean(compactImage && compactImage !== headerImage);
+  const compactImage = communityIconUrl ?? game.icon_lqip ?? game.header_lqip ?? null;
   const dateLabel = mainReleaseDate
     ? formatReleaseDate(mainReleaseDate)
     : isUnreleased
@@ -618,25 +643,7 @@ export function GamePageView({
               data-game-identity="artwork"
               className="hero-artwork border border-zinc-800 overflow-hidden bg-zinc-900 relative shrink-0"
             >
-              {headerImage && (
-                <img
-                  src={headerImage}
-                  alt={game.name}
-                  className="hero-art-image hero-art-header"
-                  data-hero-crossfade={hasCrossfade ? "header" : undefined}
-                  style={{
-                    backgroundImage: game.header_lqip ? "url(" + game.header_lqip + ")" : undefined,
-                  }}
-                />
-              )}
-              {hasCrossfade && compactImage && (
-                <img
-                  src={compactImage}
-                  alt=""
-                  className="hero-art-image hero-art-compact"
-                  data-hero-crossfade="compact"
-                />
-              )}
+              <GameHeroArtwork key={`${game.appid}:${compactImage}`} game={game} compactImage={compactImage} />
             </div>
 
             <div className="hero-copy">
