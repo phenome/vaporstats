@@ -46,10 +46,11 @@ export const OUTLET_STOP_REASONS = {
   DAILY_ATTEMPT_CAP: "daily_attempt_cap",
   ARTICLE_UNREACHABLE: "article_unreachable",
   ARTICLE_UNUSABLE: "article_unusable",
+  PREVIEW_DAILY_SHARE: "preview_daily_share",
 } as const;
 
 type OutletHttpStop = (typeof OUTLET_HTTP_STOPS)[keyof typeof OUTLET_HTTP_STOPS];
-export type OutletAccessStop = OutletHttpStop | typeof OUTLET_STOP_REASONS.DAILY_ATTEMPT_CAP;
+export type OutletAccessStop = OutletHttpStop | typeof OUTLET_STOP_REASONS.DAILY_ATTEMPT_CAP | typeof OUTLET_STOP_REASONS.PREVIEW_DAILY_SHARE;
 export type OutletStopReason = OutletHttpStop | (typeof OUTLET_STOP_REASONS)[keyof typeof OUTLET_STOP_REASONS];
 
 function outletHttpStop(status: number): OutletHttpStop | null {
@@ -71,6 +72,33 @@ export function outletDailyAttemptCap(
   return value !== undefined && /^[1-9]\d*$/.test(value) ? Number(value) : DEFAULT_ATTEMPTS_PER_OUTLET_DAY;
 }
 
+/**
+ * The percentage of an outlet's daily attempt cap that preview-pass attempts
+ * may use in one UTC day, so Preview pass occurrences never take the
+ * allowance assessment queries need.
+ */
+export const PREVIEW_DAILY_SHARE_PERCENT = 10;
+
+/** Preview-pass attempts allowed per outlet and UTC day: 10% of the effective cap, rounded down, at least 1. */
+export function previewDailyAttemptShare(cap = outletDailyAttemptCap()): number {
+  return Math.max(1, Math.floor((cap * PREVIEW_DAILY_SHARE_PERCENT) / 100));
+}
+
+/**
+ * Which outlet requests the preview share limits. A discovery request of the
+ * preview pass (a search, a candidate fetch and its redirects, a scoped
+ * replay) is held once the outlet's preview attempts that UTC day reach the
+ * share. A processing fetch of an admitted preview article counts toward the
+ * share, since the log records it under its source's pass, but is never held
+ * by it: holding it would stop the processing advance's other work on the
+ * outlet, assessment articles included.
+ */
+export type OutletRequestStage = "discovery" | "processing";
+
+function previewShareApplies(pass: MediaPass, stage: OutletRequestStage): boolean {
+  return pass === "preview" && stage === "discovery";
+}
+
 function dayKey(date: Date): string {
   return date.toISOString().slice(0, 10);
 }
@@ -90,6 +118,21 @@ const SERVED_ATTEMPT_SQL = `NOT (kind = 'search' AND succeeded = 0
 /** Search, fetch, redirect and failed attempts on `outlet` during `date`'s UTC day, from every pass and stage. */
 async function attemptsToday(db: AppDatabase, outlet: MediaOutlet, date: Date): Promise<number> {
   const row = await first<{ count: number }>(db, `SELECT COUNT(*) AS count FROM media_discovery_attempts WHERE outlet = ? AND day = ? AND ${SERVED_ATTEMPT_SQL}`, outlet, dayKey(date));
+  return Number(row?.count ?? 0);
+}
+
+/** Preview-pass attempts on `outlet` during `date`'s UTC day, counted like the daily cap counts them. */
+async function previewAttemptsToday(db: AppDatabase, outlet: MediaOutlet, date: Date): Promise<number> {
+  const row = await first<{ count: number }>(db, `SELECT COUNT(*) AS count FROM media_discovery_attempts WHERE outlet = ? AND day = ? AND pass = 'preview' AND ${SERVED_ATTEMPT_SQL}`, outlet, dayKey(date));
+  return Number(row?.count ?? 0);
+}
+
+/**
+ * Preview searches served during the UTC month `month` (YYYY-MM), on every
+ * outlet, counted with the daily cap's served-attempt rule.
+ */
+export async function servedPreviewSearches(db: AppDatabase, month: string): Promise<number> {
+  const row = await first<{ count: number }>(db, `SELECT COUNT(*) AS count FROM media_discovery_attempts WHERE pass = 'preview' AND kind = 'search' AND substr(day, 1, 7) = ? AND ${SERVED_ATTEMPT_SQL}`, month);
   return Number(row?.count ?? 0);
 }
 
@@ -134,9 +177,21 @@ export function isOutletDenialStop(stop: string): boolean {
   return OUTLET_DENIAL_STATUSES.some((status) => stop === outletHttpStop(status));
 }
 
-/** Why `outlet` must not be contacted at `date`: a lasting access denial first, then a same-day stop. */
-async function mediaOutletStop(db: AppDatabase, outlet: MediaOutlet, date: Date): Promise<OutletAccessStop | null> {
-  return (await outletDenial(db, outlet)) ?? outletDayStop(db, outlet, date);
+/**
+ * Why `outlet` must not be contacted at `date` for a request of `pass` and
+ * `stage`: a lasting access denial first, then a same-day stop, then, for a
+ * preview discovery request, the preview share of the day. The preview share
+ * holds only preview requests and reopens on the next UTC day.
+ */
+async function mediaOutletStop(db: AppDatabase, outlet: MediaOutlet, date: Date, pass: MediaPass, stage: OutletRequestStage): Promise<OutletAccessStop | null> {
+  const stop = (await outletDenial(db, outlet)) ?? await outletDayStop(db, outlet, date);
+  if (stop || !previewShareApplies(pass, stage)) return stop;
+  return (await previewAttemptsToday(db, outlet, date)) >= previewDailyAttemptShare() ? OUTLET_STOP_REASONS.PREVIEW_DAILY_SHARE : null;
+}
+
+/** Whether `stop` holds only the preview pass on its outlet, leaving assessment work free to contact it. */
+export function isPreviewShareStop(stop: string): boolean {
+  return stop === OUTLET_STOP_REASONS.PREVIEW_DAILY_SHARE;
 }
 
 
@@ -151,10 +206,10 @@ type OutletAttemptKind = "search" | "fetch" | "redirect" | "failure";
  */
 export async function reserveOutletAttempt(
   db: AppDatabase,
-  attempt: { runId: number; pass: MediaPass; appid: number; outlet: MediaOutlet; kind: "search" | "fetch"; url: string | null; date: Date },
+  attempt: { runId: number; pass: MediaPass; appid: number; outlet: MediaOutlet; kind: "search" | "fetch"; url: string | null; date: Date; stage?: OutletRequestStage },
 ): Promise<{ attemptId: number } | { stop: OutletAccessStop }> {
   return writeTransaction(db, async () => {
-    const stop = await mediaOutletStop(db, attempt.outlet, attempt.date);
+    const stop = await mediaOutletStop(db, attempt.outlet, attempt.date, attempt.pass, attempt.stage ?? "discovery");
     if (stop) return { stop };
     const reserved = await first<{ id: number }>(
       db,
@@ -233,16 +288,18 @@ export async function fetchOutletArticle(
     fetch: (url: string, init?: RequestInit) => Promise<Response | string>;
     onAttempt?: () => void;
     secrets?: readonly (string | undefined)[];
+    /** Discovery unless the caller fetches an admitted article for processing. */
+    stage?: OutletRequestStage;
   },
 ): Promise<ArticleFetchResult> {
-  const { runId, pass, appid, outlet, clock } = options;
+  const { runId, pass, appid, outlet, clock, stage = "discovery" } = options;
   const config = MEDIA_OUTLETS.find((item) => item.name === outlet);
   if (!config) return null;
 
   let url = options.url;
   for (let redirects = 0; redirects <= MAX_REDIRECTS; redirects += 1) {
     if (!hostInOutlet(url, config)) return null;
-    const reservation = await reserveOutletAttempt(db, { runId, pass, appid, outlet, kind: "fetch", url, date: clock() });
+    const reservation = await reserveOutletAttempt(db, { runId, pass, appid, outlet, kind: "fetch", url, date: clock(), stage });
     if ("stop" in reservation) return { stop: reservation.stop, contacted: redirects > 0 };
     const { attemptId } = reservation;
 

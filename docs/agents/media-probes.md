@@ -30,10 +30,11 @@ A request answered with HTTP 429 by an injected day stop never reached its outle
 
 ## 2. Resume invariants
 
-A query or run resumed after a restart or an Outlet day stop keeps every per-query and per-day rule: one accepted article per entity and query, at most 30 attempts per outlet per UTC day (every pass, stage and run counts), and every day-stopped query reopens on a later day while processing fetches continue.
+A query or run resumed after a restart or an Outlet day stop keeps every per-query and per-day rule: one accepted article per entity and query, at most 30 attempts per outlet per UTC day (every pass, stage and run counts), at most the preview share of those (10%, so 3 of 30) for preview searches and discovery fetches ([ADR 0022](../adr/0022-preview-admission-and-preview-share.md)), and every day-stopped query, a preview query held by the share included, reopens on a later day while processing fetches continue.
 
 - Covered by `sweepInterruptions(scenario, { dayStops, combined })`. `dayStops` answers the k-th swept outlet fetch with HTTP 429 and resumes over the scenario's following `days`; `combined` adds runs that also restart after the next day's first outlet fetch and first search. `experimentWorld` returns three candidates per query, so a candidate that would qualify remains after a stop.
 - The "near IGN's daily attempt cap" scenario seeds 25 of IGN's 30 attempts on the swept day, so the cap engages under restarts and day stops; it asserts that the recorded peak is exactly 30.
+- The "preview occurrence at its daily share beside an initial pass" scenario runs a preview occurrence whose refused candidates meet every outlet's preview share while an initial pass is served on the same outlets that day; it asserts that the observed preview peak is exactly the share.
 - `tests/media-enablement.test.ts` covers the resume of production's capped Hades II queries, which had already admitted an article: they resume without a new search and admit no second article.
 - A change to how a query, pass or run resumes registers the resume path as a scenario. Assert the invariant on the resumed path, not only on a fresh run.
 

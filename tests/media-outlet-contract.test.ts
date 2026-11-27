@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { fetchOutletArticle, finishOutletAttempt, reserveOutletAttempt } from "../src/lib/media-outlet-access";
+import { fetchOutletArticle, finishOutletAttempt, previewDailyAttemptShare, reserveOutletAttempt } from "../src/lib/media-outlet-access";
 import { openTestDatabase, type TestDatabase } from "./support/db";
 import { CYBERPUNK, insertCompletedRun, seedApps, throwingResponse } from "./support/media";
 
@@ -118,4 +118,27 @@ describe("Outlet article response scopes", () => {
       expect(outlet.attempts()).toEqual([{ kind, status_code: status, succeeded: 0, error: "response failed" }]);
     });
   }
+});
+
+test("the preview share holds only preview discovery requests, counts preview processing fetches, and reopens the next UTC day", async () => {
+  const db = openTestDatabase("outlet-preview-share-");
+  database = db;
+  seedApps(db.native, [CYBERPUNK]);
+  const runId = insertCompletedRun(db.native, "outlet-preview-share", [CYBERPUNK]);
+  const calls: string[] = [];
+  const fetch = (pass: "preview" | "initial", stage: "discovery" | "processing" | undefined, day = DAY) => fetchOutletArticle(db.db, {
+    url: START, runId, outlet: "IGN", appid: CYBERPUNK, pass, stage, clock: () => day,
+    fetch: async (address) => { calls.push(address); return new Response("article"); },
+  });
+  expect(previewDailyAttemptShare()).toBe(3);
+  // A processing fetch of an admitted preview counts toward the share.
+  expect(await fetch("preview", "processing")).toHaveProperty("html");
+  expect(await fetch("preview", undefined)).toHaveProperty("html");
+  expect(await fetch("preview", "discovery")).toHaveProperty("html");
+  expect(await fetch("preview", "discovery")).toEqual({ stop: "preview_daily_share", contacted: false });
+  // Neither a processing fetch nor another pass is held by the preview share.
+  expect(await fetch("preview", "processing")).toHaveProperty("html");
+  expect(await fetch("initial", undefined)).toHaveProperty("html");
+  expect(await fetch("preview", "discovery", TOMORROW)).toHaveProperty("html");
+  expect(calls).toHaveLength(6);
 });

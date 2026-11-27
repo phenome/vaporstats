@@ -4,8 +4,8 @@ import { openTestDatabase } from "./support/db";
 import { fetchSteamAppDetails } from "../workers/catalog-seed";
 import { upsertApp } from "../src/lib/catalog";
 import { getMediaSources, MEDIA_OUTLETS, nextMediaAssessment, replayRejectedPreviewCandidate } from "../src/lib/media-discovery";
-import { outletDailyAttemptCap } from "../src/lib/media-outlet-access";
-import { changeMediaWatch, expectedMediaReleaseDate, mediaWatchSchedule, previewInterval, PREVIEW_DEFERRAL_KEY, shiftMediaDay } from "../src/lib/media-watchlist";
+import { outletDailyAttemptCap, previewDailyAttemptShare } from "../src/lib/media-outlet-access";
+import { changeMediaWatch, expectedMediaReleaseDate, mediaWatchSchedule, previewInterval, PREVIEW_DEFERRAL_KEY, previewMonthlyCreditShare, shiftMediaDay } from "../src/lib/media-watchlist";
 import { handleGameDetailRequest, type GameDetailResponseData } from "../src/routes/api.games.$appid.detail";
 import { controlledGeminiApi, controlledOpenRouterApi, controlledTavilyApi, discoveryArticleHtml, mediaObservation, runMediaTick, overviewOutputForUrls, synthesisEvidence, synthesisSelectionId, emptySynthesisSelection, type MediaTickOptions } from "./support/media";
 
@@ -36,14 +36,38 @@ function fixture() {
   return database;
 }
 
+/**
+ * Sets the production daily attempt cap of 200 per outlet for one test, so
+ * its preview share of 20 attempts leaves room for several candidates of
+ * several entities per outlet and UTC day.
+ */
+function productionOutletCap() {
+  const previous = process.env.MEDIA_OUTLET_DAILY_ATTEMPTS;
+  process.env.MEDIA_OUTLET_DAILY_ATTEMPTS = "200";
+  cleanup.push(() => {
+    if (previous === undefined) delete process.env.MEDIA_OUTLET_DAILY_ATTEMPTS;
+    else process.env.MEDIA_OUTLET_DAILY_ATTEMPTS = previous;
+  });
+}
+
+/** Marks the searches `usePreviewCreditShare` records, which `queries` leaves out. */
+const SEEDED_SEARCH = "seeded:preview-credit-share";
+
+/** Records `count` preview searches served earlier in `month`, so its preview credit share is used. */
+function usePreviewCreditShare(database: TestDatabase, month: string, count = 100) {
+  const insert = database.native.prepare(`INSERT INTO media_discovery_attempts (appid, outlet, pass, day, kind, url, status_code, succeeded, attempted_at)
+    VALUES (?, 'IGN', 'preview', ?, 'search', '${SEEDED_SEARCH}', 200, 1, ?)`);
+  for (let i = 0; i < count; i += 1) insert.run(ROOT, `${month}-01`, `${month}-01T00:00:00.000Z`);
+}
+
 async function watch(database: TestDatabase, appid = ROOT, day = "2027-01-25", action: "watch" | "unwatch" = "watch") {
   expect((await changeMediaWatch(database.db, action, String(appid), new Date(`${day}T05:00:00Z`))).status).toBe(200);
 }
 
 function queries(database: TestDatabase) {
-  return database.native.query<{ pass: string; appid: number; outlet: string; day: string }, []>(
-    "SELECT pass, appid, outlet, day FROM media_discovery_attempts WHERE kind = 'search' ORDER BY id",
-  ).all();
+  return database.native.query<{ pass: string; appid: number; outlet: string; day: string }, [string]>(
+    "SELECT pass, appid, outlet, day FROM media_discovery_attempts WHERE kind = 'search' AND url IS NOT ? ORDER BY id",
+  ).all(SEEDED_SEARCH);
 }
 
 function world(extraArticleText = "") {
@@ -166,7 +190,7 @@ test("disabled watches persist, release changes move preview cadence, and rewatc
   });
 });
 
-test("old reviews precede previews for new children and a late released child stays in scope", async () => {
+test("previews of new children precede old reviews and a late released child stays in scope", async () => {
   const database = fixture();
   admit(database, ROOT, { status: "released", date: "2024-12-01" });
   admit(database, CHILD, { parent: ROOT });
@@ -176,7 +200,7 @@ test("old reviews precede previews for new children and a late released child st
   const api = world();
   await api.tick(database, "2027-01-25");
   expect(queries(database).map(({ appid, pass }) => [appid, pass])).toEqual([
-    ...Array(6).fill([ROOT, "initial"]), ...Array(6).fill([CHILD, "preview"]),
+    ...Array(6).fill([CHILD, "preview"]), ...Array(6).fill([ROOT, "initial"]),
   ]);
   await api.tick(database, "2027-01-26");
   expect(queries(database).filter(({ pass, appid }) => pass === "later" && appid === ROOT)).toHaveLength(6);
@@ -192,12 +216,13 @@ test("old reviews precede previews for new children and a late released child st
   expect(database.native.query("SELECT DISTINCT appid FROM media_sources WHERE pass = 'preview'").all()).toEqual([{ appid: CHILD }]);
 });
 
-test("credit reservation survives restart and resets at the UTC month boundary", async () => {
+test("beyond the preview credit share, the credit reservation survives restart and resets at the UTC month boundary", async () => {
   const database = fixture();
   admit(database, ROOT, { date: "2027-01-30" });
   admit(database, REVIEW, { status: "released", date: "2027-01-22" });
   await watch(database);
   await watch(database, REVIEW);
+  usePreviewCreditShare(database, "2027-01");
   const api = world();
   api.noArticles();
   api.tavily.remaining = 11;
@@ -210,6 +235,7 @@ test("credit reservation survives restart and resets at the UTC month boundary",
   await api.tick(database, "2027-01-31");
   expect(queries(database).map(({ pass }) => pass)).toEqual(Array(6).fill("initial"));
   await api.tick(database, "2027-02-01");
+  // A new month brings a new preview credit share.
   expect(queries(database).map(({ pass }) => pass)).toEqual([...Array(6).fill("initial"), ...Array(6).fill("preview")]);
   expect(database.native.query("SELECT scheduled_on, due_at, end_reason FROM media_preview_occurrences ORDER BY id").all()).toEqual(
     ["2027-01-25", "2027-01-29", "2027-01-31", "2027-02-01"].map((scheduled_on, i) => ({
@@ -239,6 +265,7 @@ test("release without a date ends previews and uses the first observed day for b
 
 test("preview and review each admit 15 articles and rejected preview URLs are remembered", async () => {
   const database = fixture();
+  productionOutletCap();
   admit(database, ROOT, { date: "2027-01-30" });
   admit(database, CHILD, { parent: ROOT, date: "2027-01-30" });
   await watch(database);
@@ -397,6 +424,7 @@ test("preview searches share Outlet denials, the daily cap, and Tavily Provider 
 
 test("an unwatch during a due occurrence stops its remaining queries and keeps admitted evidence", async () => {
   const database = fixture();
+  productionOutletCap();
   admit(database, ROOT);
   admit(database, CHILD, { parent: ROOT });
   await watch(database);
@@ -485,6 +513,7 @@ test("reserve credits for later queries that depend on unfinished initial discov
     (appid, outlet, pass, day, kind, status_code, succeeded, attempted_at)
     VALUES (?, 'IGN', 'initial', '2027-01-25', 'fetch', 200, 1, '2027-01-25T05:00:00Z')`);
   for (let i = 0; i < 30; i += 1) capped.run(REVIEW);
+  usePreviewCreditShare(database, "2027-01");
   const api = world();
   api.tavily.remaining = 16;
   await api.tick(database, "2027-01-25");
@@ -495,41 +524,57 @@ test("reserve credits for later queries that depend on unfinished initial discov
   expect(queries(database).map(({ pass }) => pass)).toEqual([...Array(6).fill("initial"), ...Array(6).fill("later")]);
 });
 
-test("reject non-preview candidates and admit the pre-release review in the released assessment flow", async () => {
+test("reject non-preview candidates, admit plain coverage without preview wording, and admit the pre-release review in the released assessment flow", async () => {
   const database = fixture();
+  productionOutletCap();
   admit(database, ROOT, { date: "2027-01-30" });
   admit(database, CHILD, { parent: ROOT, status: "released", date: "2027-01-30" });
   await watch(database);
   const api = world();
+  // Every refused kind, in the order the outlets return them; IGN's hands-on preview comes last.
   const titles: Record<string, string> = {
     review: "NO LAW Review",
     guide: "NO LAW Preview Guide",
     patch: "NO LAW Patch Notes",
     roundup: "NO LAW Preview Roundup",
     comparison: "NO LAW and Fort Harbor Preview",
+    versus: "NO LAW versus Fort Harbor",
+    reviewNews: "NO LAW review embargo details",
+    developer: "NO LAW dev diary: building the harbor",
+    short: "NO LAW in brief",
     child: "NO LAW Night Shift Preview",
     hands: "NO LAW Hands-on Preview",
   };
+  const GAMESPOT_KINDS = ["developer", "short"];
+  // Eurogamer's only candidate: a plain descriptive feature with no preview wording.
+  const plain = "NO LAW sends you through a harbor city one mission at a time";
   api.tavily.results = ({ domain, query, appid }) => {
-    if (appid !== ROOT || domain !== MEDIA_OUTLETS[0]!.domain) return [];
-    const titlesForPass = query.endsWith("announcement") ? Object.keys(titles) : ["review"];
+    if (appid !== ROOT) return [];
+    if (domain === MEDIA_OUTLETS[1]!.domain) return query.endsWith("announcement") ? [{ url: `https://${domain}/articles/plain` }] : [];
+    // A query returns at most 10 candidates, so GameSpot returns the developer page and the unusable one.
+    if (domain === MEDIA_OUTLETS[2]!.domain) return query.endsWith("announcement") ? GAMESPOT_KINDS.map((kind) => ({ url: `https://${domain}/articles/${kind}` })) : [];
+    if (domain !== MEDIA_OUTLETS[0]!.domain) return [];
+    const titlesForPass = query.endsWith("announcement") ? Object.keys(titles).filter((kind) => !GAMESPOT_KINDS.includes(kind)) : ["review"];
     return titlesForPass.map((kind) => ({ url: `https://${domain}/articles/${kind}` }));
   };
   const outlet = (url: string) => {
     const name = new URL(url).pathname.split("/").at(-1)!;
-    return new Response(discoveryArticleHtml(ROOT, titles[name]!, {
-      body: `${titles[name]} details a campaign where you choose tools before each mission. ${api.quote} `.repeat(3),
+    const title = name === "plain" ? plain : titles[name]!;
+    return new Response(discoveryArticleHtml(ROOT, title, {
+      body: name === "short" ? "NO LAW in brief." : `${title} details a campaign where you choose tools before each mission. ${api.quote} `.repeat(3),
+      author: name === "developer" ? "NO LAW developer" : "Reviewer",
       date: "2027-01-25",
     }));
   };
   await api.tick(database, "2027-01-25", { outlet });
-  expect(database.native.query("SELECT type, hands_on, title FROM media_sources").all()).toEqual([
-    { type: "preview", hands_on: 1, title: titles.hands },
+  expect(database.native.query("SELECT outlet, type, hands_on, title FROM media_sources ORDER BY outlet").all()).toEqual([
+    { outlet: "Eurogamer", type: "preview", hands_on: 0, title: plain },
+    { outlet: "IGN", type: "preview", hands_on: 1, title: titles.hands },
   ]);
-  expect(database.native.query("SELECT COUNT(*) AS count FROM media_preview_rejections WHERE appid = ?").get(ROOT)).toEqual({ count: 6 });
+  expect(database.native.query("SELECT COUNT(*) AS count FROM media_preview_rejections WHERE appid = ?").get(ROOT)).toEqual({ count: Object.keys(titles).length - 1 });
   database.native.exec(`UPDATE apps SET release_status = 'released' WHERE appid = ${ROOT}`);
   await api.tick(database, "2027-02-06", { outlet });
-  expect(database.native.query("SELECT pass, title FROM media_sources WHERE appid = ? ORDER BY pass").all(ROOT)).toEqual([
+  expect(database.native.query("SELECT pass, title FROM media_sources WHERE appid = ? AND outlet = 'IGN' ORDER BY pass").all(ROOT)).toEqual([
     { pass: "initial", title: titles.review }, { pass: "preview", title: titles.hands },
   ]);
 });
@@ -557,7 +602,7 @@ test.each([
   expect(database.native.query("SELECT url FROM media_preview_rejections").all()).toEqual([{ url: roundup }]);
 });
 
-test.each(["admit", "denied", "canonical_duplicate", "candidate_error"] as const)(
+test.each(["admit", "preview_share", "denied", "canonical_duplicate", "candidate_error"] as const)(
   "scoped preview replay preserves history and outlet rules (%s)",
   async (scenario) => {
     const database = fixture();
@@ -602,23 +647,31 @@ test.each(["admit", "denied", "canonical_duplicate", "candidate_error"] as const
       expect(await replay("2027-01-25T08:00Z")).toEqual({ admitted: false, reason: "daily_attempt_cap" });
       expect(calls).toEqual([]);
     }
+    if (scenario === "preview_share") {
+      // The occurrence's search, fetch and redirect used GamesRadar+'s preview share for the day.
+      expect(database.native.query("SELECT COUNT(*) AS count FROM media_discovery_attempts WHERE outlet = 'GamesRadar+' AND pass = 'preview' AND day = '2027-01-25'").get())
+        .toEqual({ count: previewDailyAttemptShare() });
+      expect(await replay("2027-01-25T08:00Z")).toEqual({ admitted: false, reason: "preview_daily_share" });
+      expect(calls).toEqual([]);
+    }
     if (scenario === "canonical_duplicate") {
       database.native.prepare(`INSERT INTO media_sources (appid, pass, original_url, title, outlet, retrieved_at, type)
         VALUES (?, 'initial', ?, 'Existing assessment', 'GamesRadar+', '2027-01-25', 'review')`).run(ROOT, canonical);
     }
 
-    const reason = { admit: null, denied: "fetch_http_403", canonical_duplicate: "already_admitted", candidate_error: "candidate_error" }[scenario];
-    expect(await replay("2027-01-26T05:00Z")).toEqual({ admitted: scenario === "admit", reason });
+    const admits = scenario === "admit" || scenario === "preview_share";
+    const reason = { admit: null, preview_share: null, denied: "fetch_http_403", canonical_duplicate: "already_admitted", candidate_error: "candidate_error" }[scenario];
+    expect(await replay("2027-01-26T05:00Z")).toEqual({ admitted: admits, reason });
     database.reopen();
     expect(await replay("2027-01-26T05:01Z")).toEqual({
-      admitted: false, reason: scenario === "admit" ? "already_admitted" : "already_replayed",
+      admitted: false, reason: admits ? "already_admitted" : "already_replayed",
     });
     expect(calls).toEqual(scenario === "denied" ? [] : [url]);
     expect(progressForOutlet()).toEqual(progress);
     expect(queries(database)).toHaveLength(searches);
     expect(database.native.query("SELECT * FROM media_discovery_attempts ORDER BY id").all().slice(0, historical.length)).toEqual(historical);
     expect(database.native.query("SELECT url FROM media_preview_rejections").all()).toEqual([{ url }]);
-    if (scenario === "admit") {
+    if (admits) {
       expect(database.native.query("SELECT discovery_url, type, hands_on FROM media_sources").all()).toEqual([
         { discovery_url: url, type: "preview", hands_on: 0 },
       ]);
@@ -678,4 +731,243 @@ test("watching and unwatching an undated experiment root preserves its due asses
     ...MEDIA_OUTLETS.map(() => ["initial", "2027-01-25"]),
     ...MEDIA_OUTLETS.map(() => ["later", "2027-01-26"]),
   ]);
+});
+
+const WARLOCK = 3714800;
+const BG3 = 1086940;
+const WARLOCK_NAMES: Record<number, string> = { [WARLOCK]: "Warlock: Dungeons & Dragons", [BG3]: "Baldur's Gate 3" };
+
+/**
+ * A synthetic GamesRadar+-shaped feature page: `tags` in `mrf:tags`, no
+ * preview or announcement wording and no hands-on phrase unless the title or
+ * body adds them.
+ */
+function featureHtml(title: string, body: string, tags = "region:GB;articleType:Features;channel:Gaming software;unindexedFreeform:preview") {
+  return `<!doctype html><html><head><meta property="og:title" content="${title.replaceAll("\"", "&quot;")}">`
+    + `<meta property="article:published_time" content="2026-08-26T12:00:00Z"><meta name="author" content="Staff writer">`
+    + `<meta property="mrf:tags" content="${tags}"></head><body><article><h1>${title}</h1><p>${body}</p></article></body></html>`;
+}
+
+/** Warlock's GamesRadar+-shaped feature: short name first in the title, Baldur's Gate 3 also named, the full name once in the body. */
+const WARLOCK_FEATURE = {
+  title: "Warlock steps out of Baldur's Gate 3's shadow with its own spin on D&D that I want to see more of",
+  body: [
+    "Warlock: Dungeons & Dragons casts you as a lone spellcaster bound to a demanding patron.",
+    "In a demo shown behind closed doors, Warlock moved quickly from a ruined chapel to a flooded crypt.",
+    "Baldur's Gate 3 made party banter its heart, while Warlock keeps you alone with the voice of your patron.",
+    "Warlock trades turn order for real-time spell chains, and Warlock lets each pact reshape your spell list.",
+    "Fans of Baldur's Gate 3 will spot familiar monsters, but Warlock frames them as rivals for your patron's favour.",
+    "By the end of the demo, Warlock had shown three pacts and a boss that steals spells mid-fight.",
+  ].join(" "),
+};
+
+function warlockWorld(articles: Record<string, string>) {
+  const tavily = controlledTavilyApi(WARLOCK_NAMES);
+  const openRouter = controlledOpenRouterApi();
+  const gemini = controlledGeminiApi();
+  const fetched: string[] = [];
+  /** Candidate URLs by entity, pass and outlet domain. */
+  const results: Record<string, string[]> = {};
+  tavily.results = ({ appid, query, domain }) => {
+    const pass = query.endsWith("announcement") ? "preview" : query.endsWith("review preview") ? "initial" : "later";
+    return (results[`${appid}:${pass}:${domain}`] ?? []).map((url) => ({ url }));
+  };
+  const outlet = (url: string) => articles[url] === undefined ? new Response(null, { status: 404 }) : new Response(articles[url]);
+  return {
+    tavily, openRouter, gemini, fetched, results,
+    async tick(database: TestDatabase, at: string) {
+      const result = await runMediaTick(database, { tavily, openRouter, gemini }, at, { fetched, outlet, paidSubmissionsPerTick: 40 });
+      expect(result.status).toBe("completed");
+      expect(result.mediaError).toBeUndefined();
+      return result;
+    },
+  };
+}
+
+function admitWarlockCatalog(database: TestDatabase, warlockStatus = "upcoming", warlockDate: string | null = null) {
+  database.native.prepare(`INSERT INTO apps (appid, name, slug, type, release_status, steam_release_date) VALUES
+    (?, 'Warlock: Dungeons & Dragons', 'warlock-dungeons-dragons', 'game', ?, ?),
+    (?, 'Baldur''s Gate 3', 'baldurs-gate-3', 'game', 'released', '2023-08-03')`).run(WARLOCK, warlockStatus, warlockDate, BG3);
+}
+
+test("a Warlock-shaped feature naming Baldur's Gate 3 is admitted as a hands-off preview of Warlock and never as Baldur's Gate 3 coverage", async () => {
+  const database = fixture();
+  admitWarlockCatalog(database);
+  database.native.prepare("INSERT INTO media_enrollments (appid, reason, enrolled_at) VALUES (?, 'experiment', '2026-11-20T05:00:00.000Z')").run(BG3);
+  await watch(database, WARLOCK, "2026-11-27");
+  const feature = "https://gamesradar.com/articles/warlock-feature";
+  const api = warlockWorld({ [feature]: featureHtml(WARLOCK_FEATURE.title, WARLOCK_FEATURE.body) });
+  api.results[`${WARLOCK}:preview:gamesradar.com`] = [feature];
+  api.results[`${BG3}:initial:gamesradar.com`] = [feature];
+  await api.tick(database, "2026-11-27T06:00:00.000Z");
+  expect(database.native.query("SELECT appid, pass, type, hands_on, original_url FROM media_sources").all()).toEqual([
+    { appid: WARLOCK, pass: "preview", type: "preview", hands_on: 0, original_url: feature },
+  ]);
+  // Baldur's Gate 3's initial query fetched the same article and rejected it: its subject is Warlock.
+  expect(database.native.query("SELECT pass FROM media_discovery_attempts WHERE kind = 'fetch' AND url = ? AND appid = ? ORDER BY id").all(feature, BG3))
+    .toEqual([{ pass: "initial" }]);
+  expect(database.native.query("SELECT status FROM media_discovery_progress WHERE appid = ? AND outlet = 'GamesRadar+'").get(BG3)).toEqual({ status: "completed" });
+});
+
+test("preview subject attribution rejects unconfirmed short names, a game named only as a common word, and ambiguous families", async () => {
+  const database = fixture();
+  admitWarlockCatalog(database);
+  await watch(database, WARLOCK, "2026-11-27");
+  const warlockLine = "Warlock casts you as a lone spellcaster bound to a demanding patron, and Warlock lets each pact reshape your spell list.";
+  const fullName = "Warlock: Dungeons & Dragons";
+  const bg3Line = "Baldur's Gate 3 made party banter its heart and Baldur's Gate 3 keeps every companion close.";
+  const articles = {
+    // A short name the body never confirms with the full name.
+    unconfirmed: featureHtml("Warlock wants you to bargain with your patron", `${warlockLine} ${warlockLine}`),
+    // Baldur's Gate 3's warlock class: "warlock" names a class, not the game.
+    classGuide: featureHtml("Baldur's Gate 3 warlock class explained", `${bg3Line} The warlock class in Baldur's Gate 3 draws power from a patron. ${bg3Line}`, "articleType:Features"),
+    // Warlock is named first in the title, Baldur's Gate 3 most often in the body.
+    disagree: featureHtml("Warlock looks up to Baldur's Gate 3", `${fullName} borrows ideas. ${bg3Line} ${bg3Line} Baldur's Gate 3 again sets the bar.`),
+    // Both families are named equally often in the body.
+    tie: featureHtml("Warlock and its debt to Baldur's Gate 3, in pictures", `${fullName} borrows ideas, and Warlock owes much. ${bg3Line} Each spell feels distinct in a demo full of patrons and pacts.`),
+    // A plain descriptive feature with no preview wording, on the subject alone.
+    plain: featureHtml(`${fullName} builds its spellcasting around a patron's pact`, `${fullName} puts a patron's pact at the center of its spellcasting. ${warlockLine}`, "articleType:Features"),
+  };
+  const urls = Object.fromEntries(Object.keys(articles).map((kind) => [kind, `https://ign.com/articles/${kind}`]));
+  const api = warlockWorld(Object.fromEntries(Object.entries(articles).map(([kind, html]) => [urls[kind]!, html])));
+  api.results[`${WARLOCK}:preview:ign.com`] = Object.keys(articles).map((kind) => urls[kind]!);
+  productionOutletCap();
+  await api.tick(database, "2026-11-27T06:00:00.000Z");
+  expect(database.native.query("SELECT url FROM media_preview_rejections ORDER BY url").all()).toEqual(
+    ["classGuide", "disagree", "tie", "unconfirmed"].map((kind) => ({ url: urls[kind] })).sort((a, b) => a.url!.localeCompare(b.url!)),
+  );
+  expect(database.native.query("SELECT original_url, type, hands_on FROM media_sources").all()).toEqual([
+    { original_url: urls.plain, type: "preview", hands_on: 0 },
+  ]);
+});
+
+test("an initial pass admits a review titled with a confirmed short name and rejects an unconfirmed one", async () => {
+  const database = fixture();
+  admitWarlockCatalog(database, "released", "2026-10-01");
+  await watch(database, WARLOCK, "2026-11-27");
+  const confirmed = "https://ign.com/articles/warlock-review";
+  const unconfirmed = "https://eurogamer.net/articles/warlock-review";
+  const body = "Warlock rewards patient spell chains, and Warlock's pacts change how every fight plays out over its twenty-hour campaign.";
+  const api = warlockWorld({
+    [confirmed]: featureHtml("Warlock review", `Warlock: Dungeons & Dragons is a lean action RPG. ${body}`, "articleType:Reviews"),
+    [unconfirmed]: featureHtml("Warlock review", `${body} ${body}`, "articleType:Reviews"),
+  });
+  api.results[`${WARLOCK}:initial:ign.com`] = [confirmed];
+  api.results[`${WARLOCK}:initial:eurogamer.net`] = [unconfirmed];
+  await api.tick(database, "2026-11-27T06:00:00.000Z");
+  expect(database.native.query("SELECT appid, pass, type, original_url FROM media_sources").all()).toEqual([
+    { appid: WARLOCK, pass: "initial", type: "review", original_url: confirmed },
+  ]);
+});
+
+test("a preview pass types announcements by title and hands-on evidence, and an outlet preview marker is never hands-on", async () => {
+  const database = fixture();
+  admit(database, ROOT);
+  await watch(database);
+  const api = world();
+  const body = "NO LAW sends you through a harbor city where each mission lets you pick new equipment and routes. ".repeat(3);
+  const pages: Record<string, string> = {
+    "ign.com": discoveryArticleHtml(ROOT, "NO LAW announced with a debut trailer", { body }),
+    "eurogamer.net": discoveryArticleHtml(ROOT, "NO LAW revealed in a hands-on session", { body }),
+    "gamespot.com": discoveryArticleHtml(ROOT, "NO LAW announced for next year", { body: `We played the first district. ${body}` }),
+    "gamesradar.com": featureHtml("NO LAW revealed for next year", body),
+    "pcgamer.com": featureHtml("NO LAW sends you through a harbor city", body, "articleType:Features"),
+  };
+  api.tavily.results = ({ domain }) => pages[domain] ? [{ url: `https://${domain}/articles/no-law` }] : [];
+  await api.tick(database, "2027-01-25", { outlet: (url) => new Response(pages[new URL(url).hostname]) });
+  expect(database.native.query("SELECT outlet, type, hands_on FROM media_sources ORDER BY outlet").all()).toEqual([
+    { outlet: "Eurogamer", type: "preview", hands_on: 1 },
+    { outlet: "GameSpot", type: "preview", hands_on: 1 },
+    { outlet: "GamesRadar+", type: "preview", hands_on: 0 },
+    { outlet: "IGN", type: "announcement", hands_on: 0 },
+    { outlet: "PC Gamer", type: "preview", hands_on: 0 },
+  ]);
+});
+
+function previewProgress(database: TestDatabase) {
+  return database.native.query("SELECT outlet, status, stop_reason, candidate_index FROM media_discovery_progress WHERE pass = 'preview' ORDER BY id").all();
+}
+
+test("previews go first within each outlet's daily preview share, assessment queries on the same outlet are still served that day, and the share reopens the next UTC day", async () => {
+  const database = fixture();
+  admit(database, ROOT);
+  admit(database, REVIEW, { status: "released", date: "2024-12-05" });
+  await watch(database);
+  await watch(database, REVIEW);
+  const api = world();
+  const defaultResults = api.tavily.results!;
+  // Two rejected candidates (reviews, left for the released-game flow) come before the preview.
+  api.tavily.results = (search) => search.query.endsWith("announcement")
+    ? [`https://${search.domain}/articles/${ROOT}/review-1`, `https://${search.domain}/articles/${ROOT}/review-2`].map((url) => ({ url })).concat(defaultResults(search)!)
+    : defaultResults(search);
+  expect(previewDailyAttemptShare()).toBe(3);
+  expect(previewDailyAttemptShare(200)).toBe(20);
+  expect(previewDailyAttemptShare(5)).toBe(1);
+
+  await api.tick(database, "2027-01-25");
+  expect(queries(database).map(({ appid, pass }) => [appid, pass])).toEqual([
+    ...Array(6).fill([ROOT, "preview"]), ...Array(6).fill([REVIEW, "initial"]),
+  ]);
+  // Each preview query used the share on its search and two rejected fetches; its third candidate waits.
+  expect(previewProgress(database)).toEqual(MEDIA_OUTLETS.map(({ name }) => ({
+    outlet: name, status: "stopped", stop_reason: "preview_daily_share", candidate_index: 2,
+  })));
+  expect(database.native.query("SELECT outlet, COUNT(*) AS attempts FROM media_discovery_attempts WHERE pass = 'preview' GROUP BY outlet ORDER BY outlet").all())
+    .toEqual(MEDIA_OUTLETS.map(({ name }) => ({ outlet: name, attempts: 3 })).sort((a, b) => a.outlet.localeCompare(b.outlet)));
+  expect(database.native.query("SELECT COUNT(*) AS count FROM media_sources WHERE appid = ? AND pass = 'initial'").get(REVIEW)).toEqual({ count: 6 });
+  expect(database.native.query("SELECT COUNT(*) AS count FROM media_sources WHERE pass = 'preview'").get()).toEqual({ count: 0 });
+
+  await api.tick(database, "2027-01-26");
+  expect(queries(database).filter(({ pass, day }) => pass === "preview" && day === "2027-01-26")).toEqual([]);
+  expect(previewProgress(database)).toEqual(MEDIA_OUTLETS.map(({ name }) => ({ outlet: name, status: "completed", stop_reason: null, candidate_index: 3 })));
+  expect(database.native.query("SELECT COUNT(*) AS count FROM media_sources WHERE appid = ? AND pass = 'preview'").get(ROOT)).toEqual({ count: 6 });
+  expect(database.native.query("SELECT end_reason FROM media_preview_occurrences").all()).toEqual([{ end_reason: "completed" }]);
+});
+
+test("previews are searched within the month's preview credit share despite the review reservation and a deferral recorded earlier that month, deferred once the share is used, and resumed the next month", async () => {
+  const database = fixture();
+  admit(database, ROOT, { date: "2027-02-10" });
+  admit(database, REVIEW, { status: "released", date: "2024-12-05" });
+  await watch(database, ROOT, "2027-01-30");
+  await watch(database, REVIEW, "2027-01-30");
+  database.native.prepare("INSERT INTO checkpoints (key, value) VALUES (?, '2027-01')").run(PREVIEW_DEFERRAL_KEY);
+  // 94 of January's 100 preview searches are already served.
+  usePreviewCreditShare(database, "2027-01", 94);
+  expect(previewMonthlyCreditShare(1_000)).toBe(100);
+  expect(previewMonthlyCreditShare(null)).toBe(0);
+  const api = world();
+  // 13 credits: the initial and later passes reserve 12, which alone would defer the 6 preview queries.
+  api.tavily.remaining = 13;
+  await api.tick(database, "2027-01-30");
+  expect(queries(database).map(({ pass }) => pass)).toEqual([...Array(6).fill("preview"), ...Array(6).fill("initial")]);
+
+  // The share is used: the 6 later queries' reservation leaves too few credits, so previews wait for February.
+  api.tavily.remaining = 11;
+  await api.tick(database, "2027-01-31");
+  expect(queries(database).filter(({ day }) => day === "2027-01-31").map(({ pass }) => pass)).toEqual(Array(6).fill("later"));
+  expect(database.native.query("SELECT value FROM checkpoints WHERE key = ?").get(PREVIEW_DEFERRAL_KEY)).toEqual({ value: "2027-01" });
+
+  api.tavily.remaining = 100;
+  await api.tick(database, "2027-02-01");
+  expect(queries(database).filter(({ day }) => day === "2027-02-01").map(({ pass }) => pass)).toEqual(Array(6).fill("preview"));
+});
+
+test("a deferral recorded earlier in the month with previews still within their credit share holds nothing: status shows the next daily run, which searches them", async () => {
+  const database = fixture();
+  admit(database, ROOT);
+  admit(database, REVIEW, { status: "released", date: "2024-12-05" });
+  await watch(database, ROOT, "2027-01-30");
+  await watch(database, REVIEW, "2027-01-30");
+  // Production on 2026-11-27 in miniature: November's deferral, 5 preview searches served, and the plan limit of the last scheduled run.
+  database.native.prepare("INSERT INTO checkpoints (key, value) VALUES (?, '2027-01')").run(PREVIEW_DEFERRAL_KEY);
+  usePreviewCreditShare(database, "2027-01", 5);
+  database.native.prepare(`INSERT INTO media_discovery_runs (pass, identity_key, selected_games, status, origin, usage, started_at)
+    VALUES ('initial', 'scheduled:2027-01-29', '[]', 'completed', 'scheduled', '{"planLimit":1000,"remainingCredits":13}', '2027-01-29T06:00:00.000Z')`).run();
+  const schedule = await mediaWatchSchedule(database.db, ROOT, new Date("2027-01-30T05:30:00Z"), new Map());
+  expect(schedule.map(({ appid, next }) => [appid, next])).toEqual([[ROOT, { pass: "preview", dueAt: "2027-01-30T06:00:00.000Z" }]]);
+  const api = world();
+  api.noArticles();
+  api.tavily.remaining = 13;
+  await api.tick(database, "2027-01-30");
+  expect(queries(database).map(({ pass }) => pass)).toEqual([...Array(6).fill("preview"), ...Array(6).fill("initial")]);
 });

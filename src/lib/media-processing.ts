@@ -1606,7 +1606,7 @@ async function takeExtractionTurn(advance: QueueAdvance, job: JobRow): Promise<b
     return false;
   }
   const fetched = await fetchOutletArticle(db, {
-    url: source.original_url, outlet: source.outlet, appid: source.appid, pass: source.pass,
+    url: source.original_url, outlet: source.outlet, appid: source.appid, pass: source.pass, stage: "processing",
     runId: job.run_id, fetch: advance.articleFetch, clock: advance.clock, secrets: advance.secrets,
   });
   if (fetched && "stop" in fetched) {

@@ -7,6 +7,7 @@ import { createOpenRouterTransport, type OpenRouterTransport } from "../../src/l
 import { GeminiHttpError, MAX_CLIENT_ERROR_PAUSES, MAX_UNCERTAIN_SENDS } from "../../src/lib/media-paid-providers";
 import type { MediaObservation } from "../../src/lib/media-observations";
 import { MEDIA_OUTLETS, type MediaPass } from "../../src/lib/media-discovery";
+import { previewDailyAttemptShare } from "../../src/lib/media-outlet-access";
 
 export const CYBERPUNK = 1091500;
 export const BALDURS_GATE = 1086940;
@@ -1029,6 +1030,8 @@ export interface InterruptionScenario {
  *   so an exception while one item is handled stays at that item;
  * - at most one accepted article per entity and query (entity, pass and outlet);
  * - at most 30 attempts per outlet per UTC day, as recorded and as observed;
+ * - at most the preview share (3 of the 30) of preview searches and
+ *   discovery fetches per outlet per UTC day, as observed;
  * - every query a day-scoped stop held at the end of the swept day completes
  *   on a later day;
  * - every accepted article is extracted, unless its extraction ended
@@ -1063,6 +1066,8 @@ export interface InterruptionReport {
   dayStoppedQueries: number;
   /** Most attempts recorded on one outlet on one UTC day, across every run. */
   peakOutletDayAttempts: number;
+  /** Most preview searches and discovery fetches observed on one outlet on one UTC day, across every run. */
+  peakPreviewOutletDayCalls: number;
   /** Requests a run sent again under `PROCESSING_FETCH_RESENT_AFTER_RESTART`. */
   resentUnderException: string[];
   /** Paid requests, and their articles' processing fetches, a run sent again under `UNCERTAIN_PAID_RESEND`. */
@@ -1072,7 +1077,7 @@ export interface InterruptionReport {
   violations: string[];
 }
 
-const DAY_SCOPED_STOP_REASONS = ["daily_attempt_cap", "search_http_429", "fetch_http_429", "tavily_search_http_429"];
+const DAY_SCOPED_STOP_REASONS = ["daily_attempt_cap", "preview_daily_share", "search_http_429", "fetch_http_429", "tavily_search_http_429"];
 const QUIESCENCE_TICKS = 16;
 
 function addMinutes(at: string, minutes: number): string {
@@ -1269,6 +1274,15 @@ async function sweepRun(template: { database: TestDatabase; calls: OutboundCall[
     const observed = new Map<string, number>();
     for (const call of driver.calls) if (call.domain) observed.set(`${call.domain} ${call.day}`, (observed.get(`${call.domain} ${call.day}`) ?? 0) + 1);
     for (const [key, count] of observed) if (count > 30) violations.push(`${label}: ${count} searches and fetches for ${key}`);
+    // At most the preview share of preview searches and discovery fetches per outlet per UTC day.
+    const previewCandidates = new Set(native.query<{ candidate_urls: string }, []>("SELECT candidate_urls FROM media_discovery_progress WHERE pass = 'preview'").all()
+      .flatMap(({ candidate_urls }) => (JSON.parse(candidate_urls) as Array<{ url: string }>).map(({ url }) => url)));
+    const previewObserved = new Map<string, number>();
+    for (const call of driver.calls) {
+      const preview = call.kind === "search" ? call.identity.includes(" announcement@") : call.kind === "outlet_fetch" && call.identity.startsWith("discovery:") && previewCandidates.has(call.identity.slice("discovery:".length));
+      if (preview && call.domain) previewObserved.set(`${call.domain} ${call.day}`, (previewObserved.get(`${call.domain} ${call.day}`) ?? 0) + 1);
+    }
+    for (const [key, count] of previewObserved) if (count > previewDailyAttemptShare()) violations.push(`${label}: ${count} preview searches and fetches for ${key}`);
     // Every day-stopped query reopens and completes on a later day.
     for (const { id, stopped_at } of stopped) {
       const stopDay = (stopped_at ?? last).slice(0, 10);
@@ -1284,9 +1298,9 @@ async function sweepRun(template: { database: TestDatabase; calls: OutboundCall[
     for (const { original_url } of native.query<{ original_url: string }, []>("SELECT original_url FROM media_sources AS s WHERE NOT EXISTS (SELECT 1 FROM media_article_extractions AS e WHERE e.source_id = s.id AND e.active = 1) AND NOT EXISTS (SELECT 1 FROM media_processing_jobs AS j WHERE j.source_id = s.id AND j.stage = 'extraction' AND j.status IN ('uncertain_exhausted', 'client_error_exhausted'))").all()) {
       violations.push(`${label}: accepted ${original_url} was never extracted`);
     }
-    return { swept, violations, resentUnderException, resentAfterUncertain, retriedAfterItemError, dayStopped: stopped.length, peak: Math.max(0, ...recorded.map(({ attempts }) => attempts)) };
+    return { swept, violations, resentUnderException, resentAfterUncertain, retriedAfterItemError, dayStopped: stopped.length, peak: Math.max(0, ...recorded.map(({ attempts }) => attempts)), previewPeak: Math.max(0, ...previewObserved.values()) };
   } catch (error) {
-    return { swept: [], violations: [`${label}: ${error instanceof Error ? error.message : String(error)}`], resentUnderException: [], resentAfterUncertain: [], retriedAfterItemError: [], dayStopped: 0, peak: 0 };
+    return { swept: [], violations: [`${label}: ${error instanceof Error ? error.message : String(error)}`], resentUnderException: [], resentAfterUncertain: [], retriedAfterItemError: [], dayStopped: 0, peak: 0, previewPeak: 0 };
   } finally {
     database.cleanup();
   }
@@ -1328,6 +1342,7 @@ export async function sweepInterruptions(scenario: InterruptionScenario, invaria
       runs: results.length,
       dayStoppedQueries: results.reduce((sum, result) => sum + result.dayStopped, 0),
       peakOutletDayAttempts: Math.max(...results.map((result) => result.peak)),
+      peakPreviewOutletDayCalls: Math.max(...results.map((result) => result.previewPeak)),
       resentUnderException: results.flatMap((result) => result.resentUnderException),
       resentAfterUncertain: results.flatMap((result) => result.resentAfterUncertain),
       retriedAfterItemError: results.flatMap((result) => result.retriedAfterItemError),

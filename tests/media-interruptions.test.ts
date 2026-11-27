@@ -1,7 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import type { Database } from "bun:sqlite";
+import { previewDailyAttemptShare } from "../src/lib/media-outlet-access";
 import {
   BALDURS_GATE,
+  GAME_NAMES,
+  type MediaWorld,
   CYBERPUNK,
   controlledTavilyApi,
   discoveryArticleHtml,
@@ -72,6 +75,46 @@ function throwingItemWorld() {
   return world;
 }
 
+const NO_LAW = 2161710;
+
+/** NO LAW watched before the swept day, beside Hades II, an experiment game whose initial pass is due the same day. */
+function seedPreviewBesideAssessment(native: Database): void {
+  seedApps(native, [HADES_II]);
+  native.exec(`INSERT INTO apps (appid, name, slug, release_status) VALUES (${NO_LAW}, 'NO LAW', 'no-law', 'upcoming');
+    INSERT INTO media_watches (appid, watched_at) VALUES (${NO_LAW}, '2026-11-19T10:00:00.000Z');
+    INSERT INTO media_enrollments (appid, reason, enrolled_at) VALUES (${NO_LAW}, 'watchlist', '2026-11-19T10:00:00.000Z')`);
+}
+
+/**
+ * `experimentWorld` with NO LAW: each of its preview searches finds two patch
+ * notes pages, which a preview refuses, before its preview. The search and
+ * the two refused fetches use the outlet's preview share of 3, so the
+ * preview waits for the next UTC day while Hades II's initial queries on
+ * the same outlets are served.
+ */
+function previewShareWorld(): MediaWorld {
+  const world = experimentWorld();
+  const tavily = controlledTavilyApi({ ...GAME_NAMES, [NO_LAW]: "NO LAW" });
+  const experiment = world.tavily.results!;
+  const noLawUrl = (domain: string, name: string) => `https://${domain}/articles/${NO_LAW}-${name}`;
+  tavily.results = (search) => search.appid === NO_LAW
+    ? ["patch-1", "patch-2", "preview"].map((name) => ({ url: noLawUrl(search.domain, name) }))
+    : experiment(search);
+  const outlet = world.outlet!;
+  return {
+    ...world, tavily,
+    outlet: (url) => {
+      if (!url.includes(`/articles/${NO_LAW}-`)) return outlet(url);
+      const { hostname, pathname } = new URL(url);
+      const kind = pathname.slice(pathname.lastIndexOf("-") + 1);
+      return new Response(discoveryArticleHtml(NO_LAW, kind === "preview" ? "NO LAW Preview" : "NO LAW Patch Notes", {
+        body: `NO LAW coverage from ${hostname} describes a series of missions on a cargo ship with detailed systems. `.repeat(5) + `Builds reward experimentation. This page is ${pathname}.`,
+        author: `${hostname} journalist`,
+      }));
+    },
+  };
+}
+
 interface Registered {
   scenario: InterruptionScenario;
   invariants: InterruptionInvariants;
@@ -108,6 +151,17 @@ const SCENARIOS: Registered[] = [
     },
     invariants: { restarts: ["search", "outlet_fetch"], dayStops: true, combined: 2 },
     baseline: { search: 6, outlet_fetch: 12, openrouter: 7, gemini_submit: 1 },
+  },
+  {
+    // NO LAW's preview occurrence goes first and meets each outlet's preview
+    // share (3 of 30) on its search and two refused fetches; Hades II's
+    // initial queries on the same outlets are served that day (6 searches,
+    // 18 discovery and 6 processing fetches, 6 extractions, 1 Overview and
+    // its embedding). The next UTC day reopens the previews, which admit
+    // their third candidate. Restarts and day stops must keep the share.
+    scenario: { name: "preview occurrence at its daily share beside an initial pass", seed: seedPreviewBesideAssessment, world: previewShareWorld, ticks: FIRST_DAY, days: 1 },
+    invariants: { restarts: ["search", "outlet_fetch"], dayStops: true, combined: 2, sample: 10 },
+    baseline: { search: 12, outlet_fetch: 36, openrouter: 7, gemini_submit: 1 },
   },
   {
     // The catalog learns about a release on the day its first pass is due.
@@ -246,6 +300,7 @@ describe("interruption sweeps", () => {
       // Day stops hold queries, which shows the reopening check runs at all.
       if (invariants.dayStops && baseline.search > 0) expect(report.dayStoppedQueries).toBeGreaterThan(0);
       if (scenario.seed === seedNearIgnCap) expect(report.peakOutletDayAttempts).toBe(30);
+      if (scenario.seed === seedPreviewBesideAssessment) expect(report.peakPreviewOutletDayCalls).toBe(previewDailyAttemptShare());
     }, 600_000);
   }
 });
