@@ -146,8 +146,8 @@ type MediaTarget = {
   aliases: readonly string[];
   /**
    * Weak names: the leading part of a subtitled root name, such as
-   * "warlock" for "Warlock: Dungeons & Dragons". A short name identifies the
-   * entity only in an article whose body names one of its full aliases.
+   * "warlock" for "Warlock: Dungeons & Dragons". Only a preview pass uses
+   * them, and only in an article whose body names one of its full aliases.
    */
   shortNames: readonly string[];
 };
@@ -182,19 +182,26 @@ const MIN_SHORT_NAME_CHARS = 4;
 /** Separators between a game's name and its subtitle: a colon, or a spaced hyphen or dash. */
 const SUBTITLE_SEPARATOR = /:|\s[-–—]\s/;
 
+/** The part of `alias` before its first subtitle separator, or "" when it has none. */
+function subtitleLead(alias: string): string {
+  const match = SUBTITLE_SEPARATOR.exec(alias);
+  return match ? alias.slice(0, match.index).trim() : "";
+}
+
 /**
- * The short names of a root entity with full aliases `aliases`: the part of
- * each subtitled alias before its first subtitle separator. A short name is
- * dropped when it has fewer than MIN_SHORT_NAME_CHARS characters or equals a
- * full alias of any entity in `reserved`.
+ * The short names of each root among `targets`: the part of each subtitled
+ * full alias before its first subtitle separator. A lead is not a short name
+ * when it has fewer than MIN_SHORT_NAME_CHARS characters, equals a full alias
+ * of any loaded entity, or leads the names of more than one loaded root, as
+ * "warhammer 40,000" leads both Space Marine 2 and Rogue Trader.
  */
-function shortNamesFor(aliases: readonly string[], reserved: ReadonlySet<string>): string[] {
-  const names = aliases.flatMap((alias) => {
-    const match = SUBTITLE_SEPARATOR.exec(alias);
-    const lead = match ? alias.slice(0, match.index).trim() : "";
-    return lead.length >= MIN_SHORT_NAME_CHARS && !reserved.has(lead) ? [lead] : [];
-  });
-  return [...new Set(names)];
+function shortNamesByRoot(targets: readonly Pick<MediaTarget, "appid" | "parentAppid" | "aliases">[]): Map<number, string[]> {
+  const reserved = new Set(targets.flatMap(({ aliases }) => aliases));
+  const leads = new Map(targets.filter((target) => target.parentAppid === null).map((target) => [target.appid,
+    [...new Set(target.aliases.map(subtitleLead).filter((lead) => lead.length >= MIN_SHORT_NAME_CHARS && !reserved.has(lead)))]]));
+  const roots = new Map<string, number>();
+  for (const names of leads.values()) for (const lead of names) roots.set(lead, (roots.get(lead) ?? 0) + 1);
+  return new Map([...leads].map(([appid, names]) => [appid, names.filter((lead) => roots.get(lead) === 1)]));
 }
 
 
@@ -226,8 +233,8 @@ async function loadMediaTargets(db: AppDatabase, roots: readonly number[]): Prom
     const aliases = [...new Set([normalizedName, childName, ...(metadata?.aliases ?? []).map(normalizeTitle)].filter(Boolean))];
     return { appid: row.appid, name: row.name, parentAppid: row.parent_appid, aliases, shortNames: [] as string[] };
   });
-  const reserved = new Set(targets.flatMap(({ aliases }) => aliases));
-  return targets.map((target) => target.parentAppid === null ? { ...target, shortNames: shortNamesFor(target.aliases, reserved) } : target);
+  const shortNames = shortNamesByRoot(targets);
+  return targets.map((target) => ({ ...target, shortNames: shortNames.get(target.appid) ?? [] }));
 }
 
 
@@ -793,26 +800,58 @@ function hasRoundupOrComparisonFraming(lead: string, body: string): boolean {
   return roundupLabel.test(lead) || roundupIntro.test(lead) || comparisonIntro.test(lead) || comparisonLabel.test(body);
 }
 
-/** The names that identify `target` in an article with body `bodyLower`: its full aliases, plus its short names when the body names a full alias. */
-function identifyingNames(target: MediaTarget, bodyLower: string): readonly string[] {
-  if (target.shortNames.length === 0 || !target.aliases.some((alias) => hasEntityAlias(bodyLower, alias))) return target.aliases;
-  return [...target.aliases, ...target.shortNames];
+/** A name that identifies an entity in an article: a full alias, or a weak short name. */
+type EntityName = { text: string; short: boolean };
+
+/**
+ * What follows a short name that heads a different title: a subtitle
+ * separator ("dune: spice wars") or a sequel number in arabic digits or a
+ * roman numeral token ("marvel's spider-man 2"). Such an occurrence names
+ * that other game, not the entity.
+ */
+const HEAD_OF_ANOTHER_TITLE = new RegExp(
+  `^(?:${SUBTITLE_SEPARATOR.source}|\\s+(?:\\d+|(?=[ivxlcdm]+(?![a-z0-9]))m{0,3}(?:cm|cd|d?c{0,3})(?:xc|xl|l?x{0,3})(?:ix|iv|v?i{0,3}))(?![a-z0-9]))`,
+);
+
+/**
+ * The names that identify `target` in an article with body `bodyLower` for
+ * `pass`. Every pass uses the full aliases. Only a preview pass adds the short
+ * names, and only when the body names a full alias.
+ */
+function identifyingNames(target: MediaTarget, bodyLower: string, pass: MediaPass): readonly EntityName[] {
+  const full = target.aliases.map((text) => ({ text, short: false }));
+  if (pass !== "preview" || target.shortNames.length === 0 || !target.aliases.some((alias) => hasEntityAlias(bodyLower, alias))) return full;
+  return [...full, ...target.shortNames.map((text) => ({ text, short: true }))];
 }
 
-/** Word-bounded occurrences of any of `names` in `text`, with overlapping occurrences counted once. */
-function nameOccurrences(text: string, names: readonly string[]): { count: number; first: number } {
+/**
+ * Word-bounded occurrences of `names` in `text` as [start, end) spans. A
+ * short name's occurrence that heads a different title is no occurrence.
+ */
+function nameSpans(text: string, names: readonly EntityName[]): Array<[number, number]> {
   const spans: Array<[number, number]> = [];
-  for (const name of names) {
+  for (const { text: name, short } of names) {
     for (let offset = 0; offset <= text.length - name.length;) {
       const index = text.indexOf(name, offset);
       if (index < 0) break;
       const before = text[index - 1];
       const after = text[index + name.length];
-      if ((!before || !/[a-z0-9]/.test(before)) && (!after || !/[a-z0-9]/.test(after))) spans.push([index, index + name.length]);
+      if ((!before || !/[a-z0-9]/.test(before)) && (!after || !/[a-z0-9]/.test(after))
+          && !(short && HEAD_OF_ANOTHER_TITLE.test(text.slice(index + name.length)))) spans.push([index, index + name.length]);
       offset = index + 1;
     }
   }
-  spans.sort((left, right) => left[0] - right[0] || right[1] - left[1]);
+  return spans.sort((left, right) => left[0] - right[0] || right[1] - left[1]);
+}
+
+/** Whether `text` names `name`. */
+function names(text: string, name: EntityName): boolean {
+  return nameSpans(text, [name]).length > 0;
+}
+
+/** Occurrences of any of `names` in `text`, with overlapping occurrences counted once, and the first one's position. */
+function nameOccurrences(text: string, entityNames: readonly EntityName[]): { count: number; first: number } {
+  const spans = nameSpans(text, entityNames);
   let count = 0;
   let end = -1;
   for (const [start, stop] of spans) {
@@ -824,52 +863,79 @@ function nameOccurrences(text: string, names: readonly string[]): { count: numbe
 }
 
 /**
- * The root family an article is about when its title or lead names more than
- * one enrolled family: the family named first in the title that is also named
- * most often in the body. Null when those disagree or the body count ties,
- * so the article's subject is ambiguous.
+ * Words that join two games' names into one co-titled title, such as
+ * "NO LAW & Fort Harbor": the text between the two names is one of these,
+ * optionally surrounded by whitespace.
  */
-function subjectFamily(
-  families: ReadonlyMap<number, readonly string[]>, titleLower: string, bodyLower: string,
-): number | null {
-  let firstInTitle: number | null = null;
-  let firstIndex = Number.POSITIVE_INFINITY;
-  let mostInBody: number | null = null;
-  let mostCount = 0;
-  let tied = false;
-  for (const [root, names] of families) {
-    const { first } = nameOccurrences(titleLower, names);
-    if (first < firstIndex) { firstIndex = first; firstInTitle = root; }
-    const { count } = nameOccurrences(bodyLower, names);
-    if (count > mostCount) { mostCount = count; mostInBody = root; tied = false; }
-    else if (count === mostCount) tied = true;
+const CO_TITLE_JOINERS = ["&", "and", ",", "+", "/", "x", "meets", "vs", "vs.", "versus"] as const;
+const CO_TITLE_JOINER = new RegExp(`^\\s*(?:${CO_TITLE_JOINERS.map((joiner) => joiner.replace(/[.+/]/g, "\\$&")).join("|")})\\s*$`);
+
+/** Whether the title names two different families joined only by a co-title joiner. */
+function coTitledFamilies(families: ReadonlyMap<number, readonly EntityName[]>, titleLower: string): boolean {
+  const spans = [...families].flatMap(([root, entityNames]) => nameSpans(titleLower, entityNames).map(([start, end]) => ({ root, start, end })))
+    .sort((left, right) => left.start - right.start || right.end - left.end);
+  let previous: (typeof spans)[number] | null = null;
+  for (const span of spans) {
+    if (previous && span.start < previous.end) continue;
+    if (previous && previous.root !== span.root && CO_TITLE_JOINER.test(titleLower.slice(previous.end, span.start))) return true;
+    previous = span;
   }
-  return !tied && firstInTitle !== null && firstInTitle === mostInBody ? firstInTitle : null;
+  return false;
 }
 
 /**
- * The exact entity an article is about, shared by every pass. The title must
- * name the entity, by a full alias or a confirmed short name. When the title
- * and lead name one root family, the subject is that family; when they name
- * more, `subjectFamily` decides it or the article has no subject. Within the
- * family, the title and lead decide between the root and one child as before.
+ * The root family a preview-pass article is about when its title or lead
+ * names more than one enrolled family: the family named first in the title
+ * that is also named most often in the body. Null when those disagree, when
+ * two families are named first at the same position or equally often in the
+ * body, or when the title joins two families' names as a co-title.
  */
-function articleSubject(titleLower: string, articleLeadLower: string, bodyLower: string, targets: readonly MediaTarget[]): MediaTarget | null {
-  const names = new Map(targets.map((candidate) => [candidate.appid, identifyingNames(candidate, bodyLower)]));
+function subjectFamily(
+  families: ReadonlyMap<number, readonly EntityName[]>, titleLower: string, bodyLower: string,
+): number | null {
+  if (coTitledFamilies(families, titleLower)) return null;
+  let firstInTitle: number | null = null;
+  let firstIndex = Number.POSITIVE_INFINITY;
+  let titleTied = false;
+  let mostInBody: number | null = null;
+  let mostCount = 0;
+  let bodyTied = false;
+  for (const [root, entityNames] of families) {
+    const { first } = nameOccurrences(titleLower, entityNames);
+    if (first < firstIndex) { firstIndex = first; firstInTitle = root; titleTied = false; }
+    else if (first === firstIndex && Number.isFinite(first)) titleTied = true;
+    const { count } = nameOccurrences(bodyLower, entityNames);
+    if (count > mostCount) { mostCount = count; mostInBody = root; bodyTied = false; }
+    else if (count === mostCount) bodyTied = true;
+  }
+  return !titleTied && !bodyTied && firstInTitle !== null && firstInTitle === mostInBody ? firstInTitle : null;
+}
+
+/**
+ * The exact entity an article is about for `pass`. The title must name the
+ * entity. When the title and lead name one root family, the subject is that
+ * family. When they name more, an assessment pass has no subject, and a
+ * preview pass lets `subjectFamily` decide it. Within the family, the title
+ * and lead decide between the root and one child. Only a preview pass names
+ * an entity by its short names (`identifyingNames`).
+ */
+function articleSubject(titleLower: string, articleLeadLower: string, bodyLower: string, targets: readonly MediaTarget[], pass: MediaPass): MediaTarget | null {
+  const entityNames = new Map(targets.map((candidate) => [candidate.appid, identifyingNames(candidate, bodyLower, pass)]));
   const allTitleMatches = targets.flatMap((candidate) =>
-    names.get(candidate.appid)!.filter((alias) => hasEntityAlias(titleLower, alias)).map((alias) => {
+    entityNames.get(candidate.appid)!.filter((name) => names(titleLower, name)).map(({ text: alias }) => {
       const parent = candidate.parentAppid === null ? null : targets.find((item) => item.appid === candidate.parentAppid);
-      const parentAlias = parent ? names.get(parent.appid)!.find((parentAlias) => hasEntityAlias(titleLower, parentAlias)) ?? null : null;
+      const parentAlias = parent ? entityNames.get(parent.appid)!.find((name) => names(titleLower, name))?.text ?? null : null;
       return { target: candidate, alias, score: alias.length + (parentAlias?.length ?? 0) };
     }),
   ).sort((left, right) => right.score - left.score || right.alias.length - left.alias.length);
   if (allTitleMatches.length === 0) return null;
-  const allLeadTargets = targets.filter((candidate) => names.get(candidate.appid)!.some((alias) => hasEntityAlias(articleLeadLower, alias)));
+  const allLeadTargets = targets.filter((candidate) => entityNames.get(candidate.appid)!.some((name) => names(articleLeadLower, name)));
   const familyRoots = new Set([...allTitleMatches.map(({ target }) => rootAppid(target)), ...allLeadTargets.map(rootAppid)]);
   let subjectRoot = rootAppid(allTitleMatches[0]!.target);
   if (familyRoots.size > 1) {
+    if (pass !== "preview") return null;
     const families = new Map([...familyRoots].map((root) => [root,
-      targets.filter((candidate) => rootAppid(candidate) === root).flatMap((candidate) => names.get(candidate.appid)!)]));
+      targets.filter((candidate) => rootAppid(candidate) === root).flatMap((candidate) => entityNames.get(candidate.appid)!)]));
     const subject = subjectFamily(families, titleLower, bodyLower);
     if (subject === null) return null;
     subjectRoot = subject;
@@ -893,6 +959,8 @@ type ArticleFacts = {
   review: boolean;
   /** The words "preview" or "early access" in the title or the first 4,000 characters. */
   previewWording: boolean;
+  /** The word "preview" in the title. */
+  previewTitle: boolean;
   /** The outlet's own metadata marks the article a preview (GamesRadar+ `unindexedFreeform:preview`); never evidence of hands-on. */
   outletPreviewMarker: boolean;
   explicitHandsOn: boolean;
@@ -920,6 +988,7 @@ function articleFacts(
   return {
     review: meta.gamesRadarTags.includes("articleType:Reviews") || /\breview\b/i.test(title) || /\bour review\b/i.test(fullArticleText.slice(0, 3_000)),
     previewWording: /\b(preview|early access)\b/i.test(`${title} ${lead}`),
+    previewTitle: /\bpreview\b/i.test(title),
     outletPreviewMarker: meta.gamesRadarTags.includes("unindexedFreeform:preview"),
     explicitHandsOn: pass === "preview"
       ? !/\b(?:not (?:an? )?hands?[- ]on|non[- ]hands?[- ]on|no hands?[- ]on)\b/i.test(title) && (/\bhands?[- ]on\b/i.test(title) || /\b(?:we (?:played|went hands?[- ]on)|i played|after playing|played for)\b/i.test(lead))
@@ -965,12 +1034,14 @@ function assessmentPassRefusal(facts: ArticleFacts): string | null {
 }
 
 /**
- * The type a preview pass records: an announcement when the title has an
- * announcement word and the article shows neither hands-on evidence nor the
- * outlet's own preview marker; otherwise a preview.
+ * The type a preview pass records: a preview when the title says "preview",
+ * the article shows hands-on evidence or the outlet's own preview marker,
+ * even beside an announcement word; an announcement when the title has an
+ * announcement word and none of those; otherwise a preview.
  */
 function previewArticleType(facts: ArticleFacts): MediaArticleType {
-  return facts.announcement && !facts.explicitHandsOn && !facts.outletPreviewMarker ? "announcement" : "preview";
+  if (facts.previewTitle || facts.explicitHandsOn || facts.outletPreviewMarker) return "preview";
+  return facts.announcement ? "announcement" : "preview";
 }
 
 function parseSource(html: string, finalUrl: string, target: MediaTarget, targets: readonly MediaTarget[], outlet: MediaOutlet, retrievedAt: string, pass: MediaPass): MediaSource | null {
@@ -1001,7 +1072,7 @@ function parseSource(html: string, finalUrl: string, target: MediaTarget, target
   const titleLower = normalizeTitle(title);
   const bodyLower = normalizeTitle(fullArticleText);
   const articleLeadLower = bodyLower.slice(0, 240);
-  const attributedTarget = articleSubject(titleLower, articleLeadLower, bodyLower, targets);
+  const attributedTarget = articleSubject(titleLower, articleLeadLower, bodyLower, targets, pass);
   if (!attributedTarget) return null;
   const rootCanAttributeChild = target.parentAppid === null && attributedTarget.parentAppid === target.appid;
   if (attributedTarget.appid !== target.appid && (pass === "preview" || !rootCanAttributeChild)) return null;
@@ -1020,7 +1091,7 @@ function parseSource(html: string, finalUrl: string, target: MediaTarget, target
   const outletConfig = MEDIA_OUTLETS.find((item) => item.name === outlet);
   if (!outletConfig || !hostInOutlet(normalizedUrl, outletConfig)) return null;
   const articleType: MediaArticleType = pass === "preview" ? previewArticleType(facts)
-    : facts.review ? "review" : facts.announcement && !/\bpreview\b/i.test(title) ? "announcement" : "preview";
+    : facts.review ? "review" : facts.announcement && !facts.previewTitle ? "announcement" : "preview";
   const platform = cleanText(platformMeta) ?? (/\b(pc|playstation|xbox|switch)\b/i.exec(fullArticleText.slice(0, 4_000))?.[1] ?? null);
   const buildContext = cleanText(buildMeta) ?? (/\bearly access (?:review|preview|build)\b|\breview(?:ed)? in early access\b/i.test(title) || /\bthis early access (?:review|build|preview)\b/i.test(fullArticleText) ? "Early Access" : null);
   return {
@@ -1279,8 +1350,12 @@ export async function runAuthorizedMediaDiscovery(db: AppDatabase, options: Medi
     const previewQueries = previews.flatMap(({ id, appid, due_at }) => MEDIA_OUTLETS.map((outlet) => ({
       outlet, target: discoveryTargets.find((target) => target.appid === appid)!, pass: "preview" as const, dueAt: due_at, occurrenceId: id,
     })));
-    const pendingPreviewQueries = () => progressRows.filter((row) => row.occurrence_id !== null
-      && row.status !== "completed" && !row.query_attempted_at && !denied.has(row.outlet)).length;
+    // Read at check time, not from the run's starting snapshot: preview
+    // queries searched earlier in this run are no longer pending.
+    const previewOccurrenceIds = JSON.stringify(previews.map(({ id }) => id));
+    const pendingPreviewQueries = async () => (await rows<ProgressRow>(db, `SELECT ${PROGRESS_COLUMNS} FROM media_discovery_progress
+      WHERE occurrence_id IN (SELECT value FROM json_each(?)) AND status <> 'completed' AND query_attempted_at IS NULL`, previewOccurrenceIds))
+      .filter((row) => !denied.has(row.outlet)).length;
     const month = day.slice(0, 7);
     // Previews have their own share of the month's plan credits; within it
     // the review reservation never defers them, and neither does a deferral
@@ -1290,7 +1365,7 @@ export async function runAuthorizedMediaDiscovery(db: AppDatabase, options: Medi
     let deferred = previews.length > 0 && (await first<{ value: string }>(db,
       "SELECT value FROM checkpoints WHERE key = ?", PREVIEW_DEFERRAL_KEY))?.value === month;
     const checkPreviewCredits = async (progress: ProgressRow[], budget: number) => {
-      const pending = pendingPreviewQueries();
+      const pending = await pendingPreviewQueries();
       if (deferred || pending === 0) return;
       const reserved = await reviewSearchReservation(db, discoveryTargets, startedAt, progress, denied);
       if (budget - reserved >= pending) return;
@@ -1691,6 +1766,9 @@ async function replayPreview(
   if (stop || !target) return { admitted: false, reason: stop };
   const clock = () => isoNow(now);
   const identity = JSON.stringify([PREVIEW_REPLAY_ORIGIN, appid, outlet.name, url]);
+  // A stopped replay runs again only when none of its requests reached the
+  // outlet: `reserveOutletAttempt` counts every reserved hop, redirects
+  // included, in the run's `attempt_count` before the request is sent.
   const run = await first<{ id: number }>(db, `INSERT INTO media_discovery_runs
       (pass, identity_key, selected_games, status, origin, started_at)
       VALUES ('initial', ?, ?, 'running', ?, ?)

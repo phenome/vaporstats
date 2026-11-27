@@ -761,8 +761,8 @@ const WARLOCK_FEATURE = {
   ].join(" "),
 };
 
-function warlockWorld(articles: Record<string, string>) {
-  const tavily = controlledTavilyApi(WARLOCK_NAMES);
+function warlockWorld(articles: Record<string, string>, names: Record<number, string> = WARLOCK_NAMES) {
+  const tavily = controlledTavilyApi(names);
   const openRouter = controlledOpenRouterApi();
   const gemini = controlledGeminiApi();
   const fetched: string[] = [];
@@ -784,29 +784,31 @@ function warlockWorld(articles: Record<string, string>) {
   };
 }
 
-function admitWarlockCatalog(database: TestDatabase, warlockStatus = "upcoming", warlockDate: string | null = null) {
+function admitWarlockCatalog(database: TestDatabase, warlockStatus = "upcoming", warlockDate: string | null = null, bg3Status = "released") {
   database.native.prepare(`INSERT INTO apps (appid, name, slug, type, release_status, steam_release_date) VALUES
     (?, 'Warlock: Dungeons & Dragons', 'warlock-dungeons-dragons', 'game', ?, ?),
-    (?, 'Baldur''s Gate 3', 'baldurs-gate-3', 'game', 'released', '2023-08-03')`).run(WARLOCK, warlockStatus, warlockDate, BG3);
+    (?, 'Baldur''s Gate 3', 'baldurs-gate-3', 'game', ?, '2023-08-03')`).run(WARLOCK, warlockStatus, warlockDate, BG3, bg3Status);
 }
 
-test("a Warlock-shaped feature naming Baldur's Gate 3 is admitted as a hands-off preview of Warlock and never as Baldur's Gate 3 coverage", async () => {
+test("a Warlock-shaped feature naming Baldur's Gate 3 is admitted as a hands-off preview of Warlock and rejected by subject for Baldur's Gate 3's own preview query", async () => {
   const database = fixture();
-  admitWarlockCatalog(database);
-  database.native.prepare("INSERT INTO media_enrollments (appid, reason, enrolled_at) VALUES (?, 'experiment', '2026-11-20T05:00:00.000Z')").run(BG3);
+  // Baldur's Gate 3 is a second watched upcoming root here, so its preview query fetches the same article.
+  admitWarlockCatalog(database, "upcoming", null, "upcoming");
   await watch(database, WARLOCK, "2026-11-27");
+  await watch(database, BG3, "2026-11-27");
   const feature = "https://gamesradar.com/articles/warlock-feature";
   const api = warlockWorld({ [feature]: featureHtml(WARLOCK_FEATURE.title, WARLOCK_FEATURE.body) });
   api.results[`${WARLOCK}:preview:gamesradar.com`] = [feature];
-  api.results[`${BG3}:initial:gamesradar.com`] = [feature];
+  api.results[`${BG3}:preview:gamesradar.com`] = [feature];
+  productionOutletCap();
   await api.tick(database, "2026-11-27T06:00:00.000Z");
   expect(database.native.query("SELECT appid, pass, type, hands_on, original_url FROM media_sources").all()).toEqual([
     { appid: WARLOCK, pass: "preview", type: "preview", hands_on: 0, original_url: feature },
   ]);
-  // Baldur's Gate 3's initial query fetched the same article and rejected it: its subject is Warlock.
+  // Baldur's Gate 3's preview query fetched the same article and rejected it: its subject is Warlock.
   expect(database.native.query("SELECT pass FROM media_discovery_attempts WHERE kind = 'fetch' AND url = ? AND appid = ? ORDER BY id").all(feature, BG3))
-    .toEqual([{ pass: "initial" }]);
-  expect(database.native.query("SELECT status FROM media_discovery_progress WHERE appid = ? AND outlet = 'GamesRadar+'").get(BG3)).toEqual({ status: "completed" });
+    .toEqual([{ pass: "preview" }]);
+  expect(database.native.query("SELECT appid FROM media_preview_rejections WHERE url = ?").all(feature)).toEqual([{ appid: BG3 }]);
 });
 
 test("preview subject attribution rejects unconfirmed short names, a game named only as a common word, and ambiguous families", async () => {
@@ -841,7 +843,7 @@ test("preview subject attribution rejects unconfirmed short names, a game named 
   ]);
 });
 
-test("an initial pass admits a review titled with a confirmed short name and rejects an unconfirmed one", async () => {
+test("an initial pass rejects a review titled only with a short name, confirmed or not", async () => {
   const database = fixture();
   admitWarlockCatalog(database, "released", "2026-10-01");
   await watch(database, WARLOCK, "2026-11-27");
@@ -855,12 +857,155 @@ test("an initial pass admits a review titled with a confirmed short name and rej
   api.results[`${WARLOCK}:initial:ign.com`] = [confirmed];
   api.results[`${WARLOCK}:initial:eurogamer.net`] = [unconfirmed];
   await api.tick(database, "2026-11-27T06:00:00.000Z");
-  expect(database.native.query("SELECT appid, pass, type, original_url FROM media_sources").all()).toEqual([
-    { appid: WARLOCK, pass: "initial", type: "review", original_url: confirmed },
-  ]);
+  expect(database.native.query("SELECT COUNT(*) AS count FROM media_sources").get()).toEqual({ count: 0 });
+  expect(database.native.query("SELECT DISTINCT url FROM media_discovery_attempts WHERE kind = 'fetch' ORDER BY url").all())
+    .toEqual([{ url: unconfirmed }, { url: confirmed }]);
 });
 
-test("a preview pass types announcements by title and hands-on evidence, and an outlet preview marker is never hands-on", async () => {
+type SubjectGame = { name: string; status?: "upcoming" | "released"; parent?: number };
+
+/**
+ * Inserts `games` into the catalog: a released game is enrolled for its
+ * assessment passes, an upcoming one is watched for its preview pass.
+ */
+async function subjectCatalog(database: TestDatabase, games: Record<number, SubjectGame>) {
+  const insert = database.native.prepare(`INSERT INTO apps (appid, name, slug, type, release_status, steam_release_date, parent_appid) VALUES (?, ?, ?, ?, ?, ?, ?)`);
+  for (const [appid, { name, status = "upcoming", parent = null }] of Object.entries(games)) {
+    insert.run(Number(appid), name, `game-${appid}`, parent === null ? "game" : "dlc", status, status === "released" ? "2026-10-01" : null, parent);
+  }
+  for (const [appid, { status = "upcoming", parent }] of Object.entries(games)) {
+    if (parent !== undefined) continue;
+    if (status === "released") database.native.prepare("INSERT INTO media_enrollments (appid, reason, enrolled_at) VALUES (?, 'experiment', '2026-11-20T05:00:00.000Z')").run(Number(appid));
+    else await watch(database, Number(appid), "2026-11-27");
+  }
+}
+
+/** Runs one scheduled tick in which `candidates[appid:pass]` lists, per outlet domain, the article titles and bodies that query finds. */
+async function subjectTick(
+  database: TestDatabase, games: Record<number, SubjectGame>,
+  candidates: Record<string, Record<string, Array<{ title: string; body: string; tags?: string }>>>,
+) {
+  await subjectCatalog(database, games);
+  const articles: Record<string, string> = {};
+  const urls: Record<string, string[]> = {};
+  for (const [key, byDomain] of Object.entries(candidates)) {
+    for (const [domain, list] of Object.entries(byDomain)) {
+      urls[`${key}:${domain}`] = list.map(({ title, body, tags }, index) => {
+        const url = `https://${domain}/articles/${key.replace(":", "-")}-${index}`;
+        articles[url] = featureHtml(title, body, tags ?? "articleType:Features");
+        return url;
+      });
+    }
+  }
+  const api = warlockWorld(articles, Object.fromEntries(Object.entries(games).map(([appid, { name }]) => [appid, name])));
+  Object.assign(api.results, urls);
+  productionOutletCap();
+  await api.tick(database, "2026-11-27T06:00:00.000Z");
+  return {
+    sources: () => database.native.query<{ appid: number; pass: string; title: string }, []>("SELECT appid, pass, title FROM media_sources ORDER BY appid, title").all(),
+    rejected: () => database.native.query<{ appid: number; title: string }, []>(
+      `SELECT DISTINCT attempt.appid, attempt.url FROM media_discovery_attempts AS attempt WHERE attempt.kind = 'fetch'
+       AND NOT EXISTS (SELECT 1 FROM media_sources WHERE appid = attempt.appid AND original_url = attempt.url) ORDER BY attempt.appid, attempt.url`,
+    ).all().map((row) => ({ appid: row.appid, title: articleTitle(articles[(row as unknown as { url: string }).url]!) })),
+  };
+}
+
+function articleTitle(html: string) {
+  return /<h1>(.*?)<\/h1>/.exec(html)![1]!.replaceAll("&amp;", "&");
+}
+
+const filler = "The campaign moves between districts where each mission asks you to choose tools, routes and companions before leaving. ".repeat(3);
+
+test("an initial pass keeps the assessment subject rule: another enrolled family's full name in the title rejects, a short name never matches, and a full name containing a joiner is not co-titled", async () => {
+  const DUNE = 1172710, MARINE = 2183900, TRADER = 2186680, ORI = 1057090;
+  const database = fixture();
+  const games: Record<number, SubjectGame> = {
+    [DUNE]: { name: "Dune: Awakening", status: "released" },
+    [MARINE]: { name: "Warhammer 40,000: Space Marine 2", status: "released" },
+    [TRADER]: { name: "Warhammer 40,000: Rogue Trader", status: "released" },
+    [ROOT]: { name: "NO LAW", status: "released" },
+    [REVIEW]: { name: "Fort Harbor", status: "released" },
+    [WARLOCK]: { name: "Warlock: Dungeons & Dragons", status: "released" },
+    [ORI]: { name: "Ori and the Will of the Wisps", status: "released" },
+  };
+  const run = await subjectTick(database, games, {
+    // Only Dune: Awakening is enrolled; "Dune" heads a different game's title.
+    [`${DUNE}:initial`]: { "ign.com": [{ title: "Dune: Spice Wars review", body: `Unlike Dune: Awakening, this is a strategy game. ${filler}` }] },
+    // Rogue Trader is named once, past the lead.
+    [`${MARINE}:initial`]: { "ign.com": [{ title: "Warhammer 40,000: Space Marine 2 review", body: `${filler} Fans of Warhammer 40,000: Rogue Trader will recognise the setting.` }] },
+    [`${ROOT}:initial`]: {
+      "ign.com": [{ title: "NO LAW & Fort Harbor review", body: `NO LAW and its harbor. ${filler}` }],
+      "eurogamer.net": [{ title: "NO LAW, Fort Harbor review: two for one", body: `NO LAW and its harbor. ${filler}` }],
+      "gamespot.com": [{ title: "NO LAW and Fort Harbor hands-on preview", body: `We played NO LAW for hours. ${filler}` }],
+    },
+    [`${WARLOCK}:initial`]: { "ign.com": [{ title: "Warlock: Dungeons & Dragons review", body: `Warlock: Dungeons & Dragons is a lean action RPG. ${filler}` }] },
+    [`${ORI}:initial`]: { "ign.com": [{ title: "Ori and the Will of the Wisps review", body: `Ori and the Will of the Wisps is a gorgeous platformer. ${filler}` }] },
+  });
+  expect(run.sources()).toEqual([
+    { appid: ORI, pass: "initial", title: "Ori and the Will of the Wisps review" },
+    { appid: MARINE, pass: "initial", title: "Warhammer 40,000: Space Marine 2 review" },
+    { appid: WARLOCK, pass: "initial", title: "Warlock: Dungeons & Dragons review" },
+  ].sort((a, b) => a.appid - b.appid));
+  const byTitle = (a: { appid: number; title: string }, b: { appid: number; title: string }) => a.appid - b.appid || a.title.localeCompare(b.title);
+  expect(run.rejected().sort(byTitle)).toEqual([
+    { appid: DUNE, title: "Dune: Spice Wars review" },
+    ...["NO LAW & Fort Harbor review", "NO LAW, Fort Harbor review: two for one", "NO LAW and Fort Harbor hands-on preview"].map((title) => ({ appid: ROOT, title })),
+  ].sort(byTitle));
+});
+
+test("a preview pass refuses a short name that heads another title, is shared by two roots, or is shorter than four characters, and accepts a unique confirmed one", async () => {
+  const DUNE = 1172710, SPIDER = 1817190, MARINE = 2183900, TRADER = 2186680, RUIN = 3000001, ARC = 3000002, EMBER = 3000003, EMBER_ROOT = 3000004;
+  const database = fixture();
+  const games: Record<number, SubjectGame> = {
+    [DUNE]: { name: "Dune: Awakening" },
+    [SPIDER]: { name: "Marvel's Spider-Man: Miles Morales" },
+    [MARINE]: { name: "Warhammer 40,000: Space Marine 2" },
+    [TRADER]: { name: "Warhammer 40,000: Rogue Trader", status: "released" },
+    [RUIN]: { name: "Ruin: Ashes" },
+    [ARC]: { name: "Arc: Embers" },
+    [EMBER]: { name: "Ember: Rising" },
+    [EMBER_ROOT]: { name: "Ember", status: "released" },
+  };
+  const run = await subjectTick(database, games, {
+    [`${DUNE}:preview`]: { "ign.com": [{ title: "Dune: Spice Wars adds a new faction", body: `Dune: Awakening players may recognise it. ${filler}` }] },
+    [`${SPIDER}:preview`]: { "ign.com": [{ title: "Marvel's Spider-Man 2 shows a new suit", body: `Marvel's Spider-Man: Miles Morales fans will spot it. ${filler}` }] },
+    // "warhammer 40,000" leads both roots' names, so neither has it as a short name.
+    [`${MARINE}:preview`]: { "ign.com": [{ title: "Warhammer 40,000 returns to the hive cities", body: `Warhammer 40,000: Space Marine 2 opens in a hive city. ${filler}` }] },
+    // "ruin" has four characters and is derived; "arc" has three and is not.
+    [`${RUIN}:preview`]: { "ign.com": [{ title: "Ruin lets you rebuild a burned city", body: `Ruin: Ashes is about rebuilding. ${filler}` }] },
+    [`${ARC}:preview`]: { "ign.com": [{ title: "Arc lets you rebuild a burned city", body: `Arc: Embers is about rebuilding. ${filler}` }] },
+    // "ember" is another loaded root's full name, so it is no short name of Ember: Rising.
+    [`${EMBER}:preview`]: { "ign.com": [{ title: "Ember gets a winter festival", body: `Ember: Rising adds a festival. ${filler}` }] },
+  });
+  expect(run.sources()).toEqual([{ appid: RUIN, pass: "preview", title: "Ruin lets you rebuild a burned city" }]);
+  expect(run.rejected().map(({ appid }) => appid)).toEqual([DUNE, SPIDER, MARINE, ARC, EMBER].sort((a, b) => a - b));
+});
+
+test("a preview pass rejects two enrolled families joined in the title by a co-title joiner and admits the leading family when they are not joined", async () => {
+  const database = fixture();
+  const joined = ["&", "and", ",", "+", "/", "x", "meets", "vs", "versus"].map((joiner) => `NO LAW${joiner === "," ? "" : " "}${joiner} Fort Harbor share one harbor city`);
+  const body = `NO LAW sends you through its harbor. NO LAW rewards patience, and Fort Harbor is nearby. ${filler}`;
+  const run = await subjectTick(database, { [ROOT]: { name: "NO LAW" }, [REVIEW]: { name: "Fort Harbor" } }, {
+    [`${ROOT}:preview`]: {
+      "ign.com": joined.map((title) => ({ title, body })),
+      "eurogamer.net": [{ title: "NO LAW builds a harbor city that feels nothing like Fort Harbor", body }],
+    },
+  });
+  expect(run.sources()).toEqual([{ appid: ROOT, pass: "preview", title: "NO LAW builds a harbor city that feels nothing like Fort Harbor" }]);
+  expect(run.rejected().map(({ title }) => title).sort()).toEqual([...joined].sort());
+});
+
+test("a preview pass rejects an article whose title names two families at the same position", async () => {
+  const database = fixture();
+  const run = await subjectTick(database, { [ROOT]: { name: "NO LAW" }, [LATE]: { name: "NO LAW Lost Streets" } }, {
+    [`${ROOT}:preview`]: { "ign.com": [{ title: "NO LAW Lost Streets opens a new district", body: `NO LAW Lost Streets is set in NO LAW's city. NO LAW returns. ${filler}` }] },
+    [`${LATE}:preview`]: { "ign.com": [{ title: "NO LAW Lost Streets opens a new district", body: `NO LAW Lost Streets is set in NO LAW's city. NO LAW returns. ${filler}` }] },
+  });
+  expect(run.sources()).toEqual([]);
+  expect(run.rejected().map(({ appid }) => appid)).toEqual([ROOT, LATE].sort((a, b) => a - b));
+});
+
+test("a preview pass types announcements by title, preview wording and hands-on evidence, and an outlet preview marker is never hands-on", async () => {
   const database = fixture();
   admit(database, ROOT);
   await watch(database);
@@ -872,6 +1017,8 @@ test("a preview pass types announcements by title and hands-on evidence, and an 
     "gamespot.com": discoveryArticleHtml(ROOT, "NO LAW announced for next year", { body: `We played the first district. ${body}` }),
     "gamesradar.com": featureHtml("NO LAW revealed for next year", body),
     "pcgamer.com": featureHtml("NO LAW sends you through a harbor city", body, "articleType:Features"),
+    // The word "preview" in the title outweighs an announcement word.
+    "kotaku.com": discoveryArticleHtml(ROOT, "NO LAW preview: new trailer breakdown", { body }),
   };
   api.tavily.results = ({ domain }) => pages[domain] ? [{ url: `https://${domain}/articles/no-law` }] : [];
   await api.tick(database, "2027-01-25", { outlet: (url) => new Response(pages[new URL(url).hostname]) });
@@ -880,6 +1027,7 @@ test("a preview pass types announcements by title and hands-on evidence, and an 
     { outlet: "GameSpot", type: "preview", hands_on: 1 },
     { outlet: "GamesRadar+", type: "preview", hands_on: 0 },
     { outlet: "IGN", type: "announcement", hands_on: 0 },
+    { outlet: "Kotaku", type: "preview", hands_on: 0 },
     { outlet: "PC Gamer", type: "preview", hands_on: 0 },
   ]);
 });
@@ -970,4 +1118,70 @@ test("a deferral recorded earlier in the month with previews still within their 
   api.tavily.remaining = 13;
   await api.tick(database, "2027-01-30");
   expect(queries(database).map(({ pass }) => pass)).toEqual([...Array(6).fill("preview"), ...Array(6).fill("initial")]);
+});
+
+test.each(["daily_attempt_cap", "fetch_http_429", "preview_daily_share"] as const)(
+  "a scoped preview replay stopped by %s is re-runnable only when none of its requests reached the outlet",
+  async (stop) => {
+    const database = fixture();
+    admit(database, ROOT);
+    await watch(database);
+    const api = world();
+    const url = "https://gamesradar.com/articles/preview";
+    api.tavily.results = ({ domain }) => domain === "gamesradar.com" ? [{ url }] : [];
+    const body = "NO LAW takes place in a city where each mission lets you pick new equipment and routes. ".repeat(4);
+    await api.tick(database, "2027-01-25", { outlet: () => new Response(discoveryArticleHtml(ROOT, "NO LAW Roundup", { body })) });
+    const progress = database.native.query<{ id: number }, []>("SELECT id FROM media_discovery_progress WHERE outlet = 'GamesRadar+'").get()!;
+    const hop = `${url}/moved`;
+    const article = discoveryArticleHtml(ROOT, "NO LAW Preview", { body: `We saw NO LAW in a hands-off preview. ${body}` });
+    const calls: string[] = [];
+    const fetch = async (input: RequestInfo | URL) => {
+      const requested = String(input);
+      calls.push(requested);
+      if (requested === url) return new Response(null, { status: 301, headers: { location: hop } });
+      return stop === "fetch_http_429" ? new Response(null, { status: 429 }) : new Response(article);
+    };
+    const seed = (pass: string, day: string, count: number) => {
+      const insert = database.native.prepare(`INSERT INTO media_discovery_attempts (appid, outlet, pass, day, kind, status_code, succeeded, attempted_at)
+        VALUES (?, 'GamesRadar+', ?, ?, 'fetch', 200, 1, ?)`);
+      for (let i = 0; i < count; i += 1) insert.run(ROOT, pass, day, `${day}T05:00:00Z`);
+    };
+    const replay = (date: string) => replayRejectedPreviewCandidate(database.db, { progressId: progress.id, url, now: new Date(date), fetch });
+    // A replay refused before any contact stays re-runnable.
+    if (stop === "fetch_http_429") {
+      database.native.prepare(`INSERT INTO media_discovery_attempts (appid, outlet, pass, day, kind, status_code, succeeded, attempted_at)
+        VALUES (?, 'GamesRadar+', 'initial', '2027-01-26', 'fetch', 429, 0, '2027-01-26T04:00:00Z')`).run(ROOT);
+    } else if (stop === "daily_attempt_cap") {
+      seed("initial", "2027-01-26", outletDailyAttemptCap());
+    } else {
+      seed("preview", "2027-01-26", previewDailyAttemptShare());
+    }
+    expect(await replay("2027-01-26T05:00Z")).toEqual({ admitted: false, reason: stop });
+    expect(calls).toEqual([]);
+    // On the next day the replay runs again; its first hop reaches the outlet and the redirect hop is stopped.
+    if (stop === "daily_attempt_cap") seed("initial", "2027-01-27", outletDailyAttemptCap() - 1);
+    if (stop === "preview_daily_share") seed("preview", "2027-01-27", previewDailyAttemptShare() - 1);
+    expect(await replay("2027-01-27T05:00Z")).toEqual({ admitted: false, reason: stop });
+    expect(calls).toEqual(stop === "fetch_http_429" ? [url, hop] : [url]);
+    // A request of that replay reached the outlet, so it never runs again.
+    database.reopen();
+    expect(await replay("2027-01-28T05:00Z")).toEqual({ admitted: false, reason: "already_replayed" });
+    expect(calls).toEqual(stop === "fetch_http_429" ? [url, hop] : [url]);
+  },
+);
+
+test("the review reservation checked mid-run counts only the preview queries still unsearched, so previews served earlier in the run never cause a deferral", async () => {
+  const database = fixture();
+  admit(database, ROOT, { date: "2027-02-10" });
+  admit(database, REVIEW, { status: "released", date: "2024-12-05" });
+  await watch(database, ROOT, "2027-01-30");
+  await watch(database, REVIEW, "2027-01-30");
+  // 97 of January's 100 preview searches are served: three previews fit the share, the other three need the reservation check.
+  usePreviewCreditShare(database, "2027-01", 97);
+  const api = world();
+  // 19 credits: after three previews, 16 remain; the initial and later passes reserve 12, which leaves 4 for the 3 unsearched previews.
+  api.tavily.remaining = 19;
+  await api.tick(database, "2027-01-30");
+  expect(queries(database).map(({ pass }) => pass)).toEqual([...Array(6).fill("preview"), ...Array(6).fill("initial")]);
+  expect(database.native.query("SELECT value FROM checkpoints WHERE key = ?").get(PREVIEW_DEFERRAL_KEY)).toBeNull();
 });
