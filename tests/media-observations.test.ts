@@ -4,7 +4,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { MediaOverviewSection } from "../src/components/media-overview";
 import { createHash } from "node:crypto";
 import { extractionReviewIssues, parseArticleObservations, readArticleObservations, synthesisSelections, validateSynthesisClauses, validateSynthesisSelections, validateObservationSynthesis, type ObservationSource } from "../src/lib/media-observations";
-import { createMediaEvidenceSource, getMediaOverview, parseMediaOverview, PREMISE_FIRST_SYNTHESIS_VERSION, TRANSFERABLE_BROWSE_TAG_SYNTHESIS_VERSION } from "../src/lib/media-overview";
+import { createMediaEvidenceSource, getMediaOverview, parseMediaOverview, PREMISE_FIRST_SYNTHESIS_VERSION, COMPOUND_BROWSE_TAG_SYNTHESIS_VERSION } from "../src/lib/media-overview";
 import { advanceMediaProcessing, authorizeMediaProcessing, OPENROUTER_TEXT_MODEL } from "../src/lib/media-processing";
 import { legacyObservationEvidence } from "../src/lib/media-legacy-observations";
 import { MEDIA_OUTLETS } from "../src/lib/media-outlet-access";
@@ -581,8 +581,8 @@ test("v14 combines general cross-platform evidence and keeps explicit version de
 });
 
 
-test.each(["v13", "v14", "v15", "v16", "v17", "v18", "v20", "v21", "v22", "v23", "v24", "v25", "v26", "v27"] as const)("a waiting %s synthesis keeps its request identity, prompt and settlement", async (version) => {
-  const tagFirst = version === "v25" || version === "v26" || version === "v27";
+test.each(["v13", "v14", "v15", "v16", "v17", "v18", "v20", "v21", "v22", "v23", "v24", "v25", "v26", "v27", "v28"] as const)("a waiting %s synthesis keeps its request identity, prompt and settlement", async (version) => {
+  const tagFirst = version === "v25" || version === "v26" || version === "v27" || version === "v28";
   const database = openTestDatabase("vaporstats-v13-synthesis-");
   try {
     seedApps(database.native, [CYBERPUNK]);
@@ -609,8 +609,14 @@ test.each(["v13", "v14", "v15", "v16", "v17", "v18", "v20", "v21", "v22", "v23",
           if (request.response_format.type === "json_schema") {
             expect(request.response_format.json_schema.schema.required).toEqual(tagFirst ? ["tags", "statements", "categories", "prosCons"] : ["statements", "categories", "prosCons", "tags"]);
           }
-          expect(prompt.includes("Name the trait alone")).toBe(version === "v27");
-          expect(prompt).not.toContain("Prefer transferable mechanics");
+          expect(prompt.includes("Name the trait alone")).toBe(version === "v27" || version === "v28");
+          expect(prompt.includes("Prefer transferable mechanics")).toBe(version === "v28");
+          if (version === "v28") {
+            expect(prompt).toContain("Split independent dimensions");
+            expect(prompt).toContain("2D and Action separately");
+            expect(prompt).not.toContain("Keep “2D action” together");
+            expect(prompt).not.toContain("Omit browse tags that identify a named protagonist");
+          }
           promptEvidence.push(sources[0]?.extraction.observations[0]);
         }
         const content = extraction ? { observations: [finding] } : {
@@ -711,7 +717,7 @@ test("a new synthesis queues typed premise and play evidence for the lead, then 
       now: new Date("2026-11-26T03:00:00Z"),
     });
     const saved = database.native.query<{ config_version: string; output_json: string }, []>("SELECT config_version, output_json FROM media_game_overviews").get()!;
-    expect(saved.config_version).toBe(TRANSFERABLE_BROWSE_TAG_SYNTHESIS_VERSION);
+    expect(saved.config_version).toBe(COMPOUND_BROWSE_TAG_SYNTHESIS_VERSION);
     expect(JSON.parse(saved.output_json).statements.map(({ observationRefs }: { observationRefs: Array<{ observationId: string }> }) =>
       observationRefs.map(({ observationId }) => observationId))).toEqual([["premise"], ["play", "play"]]);
     const overview = await getMediaOverview(database.db, CYBERPUNK, { includeUnpublished: true });
@@ -892,11 +898,11 @@ test("v19 displays a reviewed hardware configuration once and preserves an omitt
 
 test("current synthesis uses a retained article without refetch and serves distinct labels from the same evidence", async () => {
   const database = openTestDatabase("vaporstats-article-tags-");
-  const routes = "Rooms are cleared of enemies, then the next room is chosen from doors whose icons indicate a God's gift or a resource reward.";
+  const routes = "Melinoë clears rooms of enemies, then chooses the next room from doors whose icons indicate a God's gift or a resource reward.";
   const traits = ["2D action game", "Exploration choices change later events", "Mouse aiming on Switch 2",
     "Equipped tarot cards grant persistent upgrades", "A setting rooted in Greek mythology",
     "A charged move called Moonburst", "The route passes through the Glass Docks and the Slate Steps in sequence",
-    "The focus meter refills at each new room", "Upgrades called Astral Seals",
+    "The focus meter refills at each new room", "Upgrades called Astral Seals", "Melinoë is the protagonist",
     "Photo mode exclusive to the preview build", "Single-player", "Early Access", "60 FPS", "Animation glitches"];
   const identity = "legacy-hades-review";
   try {
@@ -922,7 +928,14 @@ test("current synthesis uses a retained article without refetch and serves disti
         const prompt = request.messages[0]!.content;
         for (const phrase of [
           "usually one to four words", "Omit redundant words, one-off examples", "Open world", "D&D 5th Edition",
-          "Faerûn", "Non-combat spells", "Actions have consequences", "Split independent dimensions",
+          "Faerûn", "Non-combat spells", "Actions have consequences",
+          "Keep “2D action” together when the evidence supports that combined gameplay description",
+          "Omit duplicate component tags “2D” and “Action”",
+          "Keep the compound label intact and skip its standalone components",
+          "Keep named character identities in evidence-backed prose",
+          "Omit browse tags that identify a named protagonist or other named character",
+          "even when the name is followed by a role such as “protagonist”",
+          "Check the eligible evidence for separate branching routes and room reward previews, other recurring mechanics, and recognizable settings",
           "Early Access or preview context alone is not a tag qualifier",
           "Review the tag candidates from every eligible article", "Character conversations",
           "Pre-run loadouts", "Tarot-card upgrades", "include both “Branching routes” and “Room reward previews”",
@@ -937,10 +950,12 @@ test("current synthesis uses a retained article without refetch and serves disti
           "Leave out generic substitutes when the evidence establishes only a game-specific detail",
         ]) expect(prompt).toContain(phrase);
         expect(prompt).not.toContain("Favor precise descriptions over terse labels");
+        expect(prompt).not.toContain("Split independent dimensions");
+        expect(prompt).not.toContain("2D and Action separately");
         const sources = synthesisEvidence(request);
         const [source] = sources;
         const candidates = source!.extraction.observations;
-        expect(candidates.map(({ text }) => text)).toEqual([routes, ...traits.slice(0, 9)]);
+        expect(candidates.map(({ text }) => text)).toEqual([routes, ...traits.slice(0, 10)]);
         const routeCandidate = candidates[0]!;
         expect(routeCandidate).toMatchObject({ id: "legacy-1", qualifiers: ["Early Access"], tagQualifiers: [] });
         const routeId = routeCandidate.selectionId;
@@ -962,8 +977,7 @@ test("current synthesis uses a retained article without refetch and serves disti
           { label: "Branching routes", observationIds: [routeId] },
           { label: "Room reward previews", observationIds: [routeId] },
           { label: "Branching routes", observationIds: [routeId, routeId] },
-          { label: "2D", observationIds: [candidates[1]!.selectionId] },
-          { label: "Action", observationIds: [candidates[1]!.selectionId] },
+          { label: "2D action", observationIds: [candidates[1]!.selectionId] },
           { label: "Actions have consequences", observationIds: [candidates[2]!.selectionId] },
           { label: "Mouse aiming", observationIds: [candidates[3]!.selectionId] },
           { label: "Tarot-card upgrades", observationIds: [candidates[4]!.selectionId] },
@@ -971,7 +985,7 @@ test("current synthesis uses a retained article without refetch and serves disti
           { label: "Isometric", observationIds: [candidates[1]!.selectionId] },
           { label: "Single-player", observationIds: [routeId] },
         ];
-        return { generationId: "v28-fixture", model: request.model, provider: null, finishReason: "stop", nativeFinishReason: null,
+        return { generationId: "v29-fixture", model: request.model, provider: null, finishReason: "stop", nativeFinishReason: null,
           content: JSON.stringify({ ...emptySynthesisSelection(sources), statements: [{ text: routes, observationIds: [routeId] }], tags }),
           usage: { promptTokens: 100, completionTokens: 40, reasoningTokens: 0, cost: 0.00015 } };
       },
@@ -984,16 +998,17 @@ test("current synthesis uses a retained article without refetch and serves disti
     expect(database.native.query("SELECT stage, status FROM media_processing_jobs").all())
       .toEqual([{ stage: "synthesis", status: "succeeded" }]);
     const saved = database.native.query<{ config_version: string; output_json: string }, []>("SELECT config_version, output_json FROM media_game_overviews WHERE active = 1").get()!;
-    expect(saved.config_version).toBe(TRANSFERABLE_BROWSE_TAG_SYNTHESIS_VERSION);
+    expect(saved.config_version).toBe(COMPOUND_BROWSE_TAG_SYNTHESIS_VERSION);
     const stored = JSON.parse(saved.output_json);
-    const labels = ["Branching routes", "Room reward previews", "2D", "Action", "Actions have consequences", "Mouse aiming (Switch 2)", "Tarot-card upgrades", "Greek mythology"];
-    const observationIds = ["legacy-1", "legacy-1", "legacy-tag-1", "legacy-tag-1", "legacy-tag-2", "legacy-tag-3", "legacy-tag-4", "legacy-tag-5"];
+    const labels = ["Branching routes", "Room reward previews", "2D action", "Actions have consequences", "Mouse aiming (Switch 2)", "Tarot-card upgrades", "Greek mythology"];
+    const observationIds = ["legacy-1", "legacy-1", "legacy-tag-1", "legacy-tag-2", "legacy-tag-3", "legacy-tag-4", "legacy-tag-5"];
     expect(stored.tags.map(({ label, observationRefs }: { label: string; observationRefs: unknown[] }) => [label, observationRefs]))
       .toEqual(labels.map((label, index) => [label, [{ sourceIdentity: identity, observationId: observationIds[index] }]]));
     expect(stored.observationOmissions).toContainEqual({ section: "tags", reason: "evidence does not identify a single-player mode" });
     expect(database.native.query("SELECT tag_label, extraction_input_identity FROM media_tag_memberships ORDER BY tag_slug").all())
       .toEqual([...labels].sort().map((tag_label) => ({ tag_label, extraction_input_identity: identity })));
     expect(stored.observationOmissions).toContainEqual({ section: "tags", reason: "evidence does not establish an isometric view" });
+    expect(stored.statements[0].text).toContain("Melinoë");
     expect(stored.statements[0].text).toContain("(Early Access)");
     const overview = await getMediaOverview(database.db, HADES_II, { includeUnpublished: true });
     expect(overview?.tags.map(({ label }) => label)).toEqual(labels);

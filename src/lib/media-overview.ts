@@ -14,6 +14,7 @@ export const PREMISE_FIRST_SYNTHESIS_VERSION = "media-synthesis-2026-11-26-v15";
 export const RELEASE_GROUNDED_SYNTHESIS_VERSION = "media-synthesis-2026-11-26-v16";
 export const SHORT_PREMISE_SYNTHESIS_VERSION = "media-synthesis-2026-11-26-v17";
 export const TRANSFERABLE_BROWSE_TAG_SYNTHESIS_VERSION = "media-synthesis-2026-11-26-v28";
+export const COMPOUND_BROWSE_TAG_SYNTHESIS_VERSION = "media-synthesis-2026-11-26-v29";
 export const CONCISE_BROWSE_TAG_SYNTHESIS_VERSION = "media-synthesis-2026-11-26-v27";
 export const PREVIEW_SCOPE_SYNTHESIS_VERSION = "media-synthesis-2026-11-26-v26";
 export const TAG_FIRST_SYNTHESIS_VERSION = "media-synthesis-2026-11-26-v25";
@@ -273,7 +274,7 @@ export function validateMediaOverview(
     : Array.isArray(jsonObject(parsed.overview).statements)
       ? jsonObject(parsed.overview).statements as unknown[]
       : [];
-  const composedLead = configVersion === PREMISE_FIRST_SYNTHESIS_VERSION || configVersion === RELEASE_GROUNDED_SYNTHESIS_VERSION || configVersion === SHORT_PREMISE_SYNTHESIS_VERSION || configVersion === TECHNICAL_TIMING_SYNTHESIS_VERSION || configVersion === DISCOVERY_LABEL_SYNTHESIS_VERSION || configVersion === AUTHORED_TAG_SYNTHESIS_VERSION || configVersion === CONTROLLER_TAG_SYNTHESIS_VERSION || configVersion === ARTICLE_TAG_SYNTHESIS_VERSION || configVersion === BROWSE_TAG_SYNTHESIS_VERSION || configVersion === DISCOVERY_TRAIT_SYNTHESIS_VERSION || configVersion === TAG_FIRST_SYNTHESIS_VERSION || configVersion === PREVIEW_SCOPE_SYNTHESIS_VERSION || configVersion === CONCISE_BROWSE_TAG_SYNTHESIS_VERSION || configVersion === TRANSFERABLE_BROWSE_TAG_SYNTHESIS_VERSION;
+  const composedLead = configVersion === PREMISE_FIRST_SYNTHESIS_VERSION || configVersion === RELEASE_GROUNDED_SYNTHESIS_VERSION || configVersion === SHORT_PREMISE_SYNTHESIS_VERSION || configVersion === TECHNICAL_TIMING_SYNTHESIS_VERSION || configVersion === DISCOVERY_LABEL_SYNTHESIS_VERSION || configVersion === AUTHORED_TAG_SYNTHESIS_VERSION || configVersion === CONTROLLER_TAG_SYNTHESIS_VERSION || configVersion === ARTICLE_TAG_SYNTHESIS_VERSION || configVersion === BROWSE_TAG_SYNTHESIS_VERSION || configVersion === DISCOVERY_TRAIT_SYNTHESIS_VERSION || configVersion === TAG_FIRST_SYNTHESIS_VERSION || configVersion === PREVIEW_SCOPE_SYNTHESIS_VERSION || configVersion === CONCISE_BROWSE_TAG_SYNTHESIS_VERSION || configVersion === TRANSFERABLE_BROWSE_TAG_SYNTHESIS_VERSION || configVersion === COMPOUND_BROWSE_TAG_SYNTHESIS_VERSION;
   const statements = parseFindings(rawStatements, sources, composedLead);
   if (statements.length === 0) return { error: "no cited statements" };
 
