@@ -4,7 +4,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { MediaOverviewSection } from "../src/components/media-overview";
 import { createHash } from "node:crypto";
 import { extractionReviewIssues, parseArticleObservations, readArticleObservations, synthesisSelections, validateSynthesisClauses, validateSynthesisSelections, validateObservationSynthesis, type ObservationSource } from "../src/lib/media-observations";
-import { createMediaEvidenceSource, getMediaOverview, parseMediaOverview, PREMISE_FIRST_SYNTHESIS_VERSION, BROWSE_INDEX_SYNTHESIS_VERSION } from "../src/lib/media-overview";
+import { BROWSE_INDEX_SYNTHESIS_VERSION, createMediaEvidenceSource, getMediaOverview, parseMediaOverview, PREMISE_FIRST_SYNTHESIS_VERSION, SETTING_TAG_SYNTHESIS_VERSION } from "../src/lib/media-overview";
 import { advanceMediaProcessing, authorizeMediaProcessing, OPENROUTER_TEXT_MODEL } from "../src/lib/media-processing";
 import { legacyObservationEvidence } from "../src/lib/media-legacy-observations";
 import { MEDIA_OUTLETS } from "../src/lib/media-outlet-access";
@@ -717,7 +717,7 @@ test("a new synthesis queues typed premise and play evidence for the lead, then 
       now: new Date("2026-11-26T03:00:00Z"),
     });
     const saved = database.native.query<{ config_version: string; output_json: string }, []>("SELECT config_version, output_json FROM media_game_overviews").get()!;
-    expect(saved.config_version).toBe(BROWSE_INDEX_SYNTHESIS_VERSION);
+    expect(saved.config_version).toBe(SETTING_TAG_SYNTHESIS_VERSION);
     expect(JSON.parse(saved.output_json).statements.map(({ observationRefs }: { observationRefs: Array<{ observationId: string }> }) =>
       observationRefs.map(({ observationId }) => observationId))).toEqual([["premise"], ["play", "play"]]);
     const overview = await getMediaOverview(database.db, CYBERPUNK, { includeUnpublished: true });
@@ -986,7 +986,7 @@ test("current synthesis uses a retained article without refetch and serves disti
           { label: "Single-player", observationIds: [routeId] },
         ];
         expect(request.messages[0]!.content).toContain("Edit the tag list as a browse index");
-        return { generationId: "v32-fixture", model: request.model, provider: null, finishReason: "stop", nativeFinishReason: null,
+        return { generationId: "browse-index-fixture", model: request.model, provider: null, finishReason: "stop", nativeFinishReason: null,
           content: JSON.stringify({ ...emptySynthesisSelection(sources), statements: [{ text: routes, observationIds: [routeId] }], tags }),
           usage: { promptTokens: 100, completionTokens: 40, reasoningTokens: 0, cost: 0.00015 } };
       },
@@ -999,7 +999,7 @@ test("current synthesis uses a retained article without refetch and serves disti
     expect(database.native.query("SELECT stage, status FROM media_processing_jobs").all())
       .toEqual([{ stage: "synthesis", status: "succeeded" }]);
     const saved = database.native.query<{ config_version: string; output_json: string }, []>("SELECT config_version, output_json FROM media_game_overviews WHERE active = 1").get()!;
-    expect(saved.config_version).toBe(BROWSE_INDEX_SYNTHESIS_VERSION);
+    expect(saved.config_version).toBe(SETTING_TAG_SYNTHESIS_VERSION);
     const stored = JSON.parse(saved.output_json);
     const labels = ["Branching routes", "Room reward previews", "2D action", "Actions have consequences", "Mouse aiming (Switch 2)", "Tarot-card upgrades", "Greek mythology"];
     const observationIds = ["legacy-1", "legacy-1", "legacy-tag-1", "legacy-tag-2", "legacy-tag-3", "legacy-tag-4", "legacy-tag-5"];
@@ -1015,6 +1015,90 @@ test("current synthesis uses a retained article without refetch and serves disti
     expect(overview?.tags.map(({ label }) => label)).toEqual(labels);
     const markup = renderToStaticMarkup(createElement(MediaOverviewSection, { overview: overview!, sources: [] }));
     expect([...markup.matchAll(/mediaTag=([^"&]+)/g)].map(([, label]) => decodeURIComponent(label!))).toEqual(labels);
+  } finally {
+    database.cleanup();
+  }
+});
+
+test.each([SETTING_TAG_SYNTHESIS_VERSION, BROWSE_INDEX_SYNTHESIS_VERSION])("%s settles setting and packaging tags before persisting memberships", async (configVersion) => {
+  const database = openTestDatabase("vaporstats-setting-tags-");
+  const identity = "retained-port-review";
+  const premise = "The player chooses a background that changes the opening missions.";
+  const traits = [
+    "A cyberpunk setting",
+    "Futuristic setting",
+    "Includes Phantom Liberty DLC on Switch 2 and offers mouse aiming on Switch 2",
+    "Bundles the Glass Harbor expansion on Switch 2",
+    "Adjustable difficulty setting",
+  ];
+  try {
+    seedApps(database.native, [CYBERPUNK]);
+    insertSources(database.native, CYBERPUNK, "initial", 1);
+    const runId = insertCompletedRun(database.native, "initial:setting-tags", [CYBERPUNK]);
+    database.native.prepare("UPDATE media_sources SET processing_run_id = ?, contribution_run_id = ?").run(runId, runId);
+    database.native.prepare(`INSERT INTO media_article_extractions
+      (source_id, input_identity, content_hash, cleanup_version, model, config_version, output_json)
+      SELECT id, ?, 'port-hash', 'legacy-cleanup', 'legacy-model', 'legacy-extraction', ? FROM media_sources`)
+      .run(identity, JSON.stringify({ traits, qualifications: [], contributions: [{ text: premise, category }] }));
+    await authorizeMediaProcessing(database.db, runId);
+    const now = new Date("2026-11-27T03:00:00Z");
+    if (configVersion === BROWSE_INDEX_SYNTHESIS_VERSION) {
+      await advanceMediaProcessing(database.db, { runId, now, submissionsPerTick: 0 });
+      const extractions = database.native.query("SELECT source_id AS sourceId, input_identity AS inputIdentity FROM media_article_extractions").all();
+      const inputIdentity = createHash("sha256").update(stableJson({
+        stage: "synthesis", appid: CYBERPUNK, model: OPENROUTER_TEXT_MODEL, configVersion, extractions,
+      })).digest("hex");
+      expect(database.native.prepare("UPDATE media_processing_jobs SET config_version = ?, input_identity = ?, request_key = ? WHERE stage = 'synthesis' AND status = 'queued'")
+        .run(configVersion, inputIdentity, `synthesis:${CYBERPUNK}:${inputIdentity}`).changes).toBe(1);
+    }
+    const openRouter: OpenRouterTransport = {
+      currentKey: async () => ({ limit: null, limit_remaining: null }),
+      async complete(request) {
+        const prompt = request.messages[0]!.content;
+        expect(prompt.includes("Edit the tag list as a browse index")).toBe(true);
+        expect(prompt.includes("“Cyberpunk” or “Futuristic”, without appending “setting”")).toBe(configVersion === SETTING_TAG_SYNTHESIS_VERSION);
+        expect(prompt.includes("Omit labels that merely list a specific DLC")).toBe(configVersion === SETTING_TAG_SYNTHESIS_VERSION);
+        const sources = synthesisEvidence(request);
+        const [lead, cyberpunk, futuristic, dlc, expansion, difficulty] = sources[0]!.extraction.observations;
+        return { generationId: "setting-tags-fixture", model: request.model, provider: null, finishReason: "stop", nativeFinishReason: null,
+          content: JSON.stringify({
+            ...emptySynthesisSelection(sources),
+            statements: [{ text: premise, observationIds: [lead!.selectionId] }],
+            tags: [
+              { label: "Cyberpunk setting", observationIds: [cyberpunk!.selectionId] },
+              { label: "Cyberpunk", observationIds: [cyberpunk!.selectionId] },
+              { label: "Futuristic setting", observationIds: [futuristic!.selectionId] },
+              { label: "Phantom Liberty DLC (Switch 2)", observationIds: [dlc!.selectionId] },
+              { label: "Glass Harbor on Switch 2", observationIds: [expansion!.selectionId] },
+              { label: "Mouse aiming", observationIds: [dlc!.selectionId] },
+              { label: "Adjustable difficulty setting", observationIds: [difficulty!.selectionId] },
+            ],
+          }),
+          usage: { promptTokens: 100, completionTokens: 40, reasoningTokens: 0, cost: 0.00015 } };
+      },
+    };
+    await advanceMediaProcessing(database.db, { runId, openRouter, now });
+    expect(database.native.query("SELECT config_version, status FROM media_processing_jobs").all())
+      .toEqual([{ config_version: configVersion, status: "succeeded" }]);
+    const saved = database.native.query<{ config_version: string; output_json: string }, []>("SELECT config_version, output_json FROM media_game_overviews WHERE active = 1").get()!;
+    expect(saved.config_version).toBe(configVersion);
+    const tags = [
+      { label: "Cyberpunk", slug: "cyberpunk" },
+      { label: "Futuristic", slug: "futuristic" },
+      { label: "Mouse aiming (Switch 2)", slug: "mouse-aiming-switch-2" },
+      { label: "Adjustable difficulty setting", slug: "adjustable-difficulty-setting" },
+    ];
+    const stored = JSON.parse(saved.output_json);
+    expect(stored.tags).toMatchObject(tags.map((tag, index) => ({
+      ...tag, observationRefs: [{ sourceIdentity: identity, observationId: `legacy-tag-${[1, 2, 3, 5][index]}` }],
+    })));
+    expect(stored.observationOmissions.filter(({ reason }: { reason: string }) => reason === "tag lists packaged content")).toHaveLength(2);
+    const overview = await getMediaOverview(database.db, CYBERPUNK, { includeUnpublished: true });
+    expect(overview?.tags).toEqual(tags);
+    expect(database.native.query("SELECT tag_label, tag_slug, extraction_input_identity FROM media_tag_memberships ORDER BY tag_slug").all())
+      .toEqual([tags[3]!, ...tags.slice(0, 3)].map(({ label, slug }) => ({
+        tag_label: label, tag_slug: slug, extraction_input_identity: identity,
+      })));
   } finally {
     database.cleanup();
   }
