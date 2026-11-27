@@ -790,6 +790,35 @@ function isTechnicalTagEvidence(text: string): boolean {
     || /\b(?:\d{3,4}p|\d+(?:\.\d+)?\s*fps|\d+(?:\.\d+)?\s*frames per second|(?:4|8)K|benchmarks?)\b/i.test(text);
 }
 
+const INLINE_TAG_VERSION = ` (?:on|for) (?:the )?(?:${VERSION_MARKER.source})$`;
+const INLINE_TAG_VERSION_SUFFIX = new RegExp(INLINE_TAG_VERSION, "i");
+const REDUNDANT_SETTING = new RegExp(`^(Cyberpunk|Futuristic) setting(?=$| \\([^()]+\\)$|${INLINE_TAG_VERSION})`, "i");
+
+function withoutRedundantSetting(label: string): string {
+  return label.replace(REDUNDANT_SETTING, "$1");
+}
+
+// Compare the proposed label with the package named in the cited evidence.
+// Compound observations can still support a mechanic described alongside it.
+function namesPackagedContent(label: string, evidence: string): boolean {
+  const packageName = /\b(?:includes?|bundl(?:es|ed with)|ships? with|comes? with) (?:the )?([^.!?;]+?) (DLC|expansion)(?=$|[,.!?;]| (?:on|for|and|with|alongside)\b)/gi;
+  const bareLabel = label.replace(/ \([^()]+\)$/, "")
+    .replace(INLINE_TAG_VERSION_SUFFIX, "")
+    .replace(/ (?:included|bundled)$/i, "");
+  const slug = normalizeMediaTag(bareLabel)?.slug;
+  const nextPackage = /(?:,\s*(?:and\s+)?| and\s+)(?:the )?([^,.!?;]+?) (DLC|expansion)\b/iy;
+  for (const first of evidence.matchAll(packageName)) {
+    let item: RegExpExecArray | null = first;
+    while (item) {
+      const [, name, kind] = item;
+      if ([name, `${name} ${kind}`].some((wording) => normalizeMediaTag(wording)?.slug === slug)) return true;
+      nextPackage.lastIndex = item.index + item[0].length;
+      item = nextPackage.exec(evidence);
+    }
+  }
+  return false;
+}
+
 function supportsStoryBranching(evidence: string): boolean {
   const branchingPlot = /\b(?:branching (?:main )?(?:story(?:line)?|plot|narrative)|(?:story(?:line)?|plot|narrative) branch(?:es|ed))\b/i;
   const distinctOutcomes = /\b(?:multiple|different|alternate|alternative|distinct) (?:endings|(?:story|plot|narrative) outcomes)\b/i;
@@ -875,6 +904,10 @@ export function validateObservationSynthesis(
       omit(section, "tag describes or relies on a technical complaint or benchmark", refs);
       return [];
     }
+    if (usesBrowseTags(clauses) && authoredTag && sourceTexts.some((evidence) => namesPackagedContent(matchingText, evidence))) {
+      omit(section, "tag lists packaged content", refs);
+      return [];
+    }
     if (usesArticleTags(clauses) && authoredTag && /\bsingle[ -]player\b/i.test(matchingText)
       && sourceTexts.some((evidence) => !/\bsingle[ -]player\b/i.test(evidence))) {
       omit(section, "evidence does not identify a single-player mode", refs);
@@ -958,9 +991,10 @@ export function validateObservationSynthesis(
     }
     const punctuation = isComposedLead(clauses) && (section === "statements" || timing) ? /[,;:.!?]$/.exec(matchingText)?.[0] ?? "" : "";
     const unpunctuatedWording = punctuation ? matchingText.slice(0, -1) : matchingText;
+    const browseWording = usesBrowseTags(clauses) && authoredTag ? withoutRedundantSetting(unpunctuatedWording) : unpunctuatedWording;
     const tagWording = usesTagFirst(clauses) && authoredTag
-      ? unpunctuatedWording.replace(/^Dungeons (?:&|and) Dragons (5th Edition)(?: rules(?:et| basis)?)?(?=$| \([^()]+\)$)/i, "D&D $1")
-      : unpunctuatedWording;
+      ? browseWording.replace(/^Dungeons (?:&|and) Dragons (5th Edition)(?: rules(?:et| basis)?)?(?=$| \([^()]+\)$)/i, "D&D $1")
+      : browseWording;
     const wording = usesControllerTags(clauses) && authoredTag ? omitImpliedControllerPlatform(tagWording) : tagWording;
     const sourceUrls = [...new Set(support.map(({ source }) => source.sourceUrl))];
     const previewKey = preview ? JSON.stringify([preview, [...sourceUrls].sort()]) : undefined;
