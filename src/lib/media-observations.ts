@@ -806,8 +806,17 @@ function namesPackagedContent(label: string, evidence: string): boolean {
     .replace(INLINE_TAG_VERSION_SUFFIX, "")
     .replace(/ (?:included|bundled)$/i, "");
   const slug = normalizeMediaTag(bareLabel)?.slug;
-  return [...evidence.matchAll(packageName)].some(([, name, kind]) =>
-    [name, `${name} ${kind}`].some((wording) => normalizeMediaTag(wording)?.slug === slug));
+  const nextPackage = /(?:,\s*(?:and\s+)?| and\s+)(?:the )?([^,.!?;]+?) (DLC|expansion)\b/iy;
+  for (const first of evidence.matchAll(packageName)) {
+    let item: RegExpExecArray | null = first;
+    while (item) {
+      const [, name, kind] = item;
+      if ([name, `${name} ${kind}`].some((wording) => normalizeMediaTag(wording)?.slug === slug)) return true;
+      nextPackage.lastIndex = item.index + item[0].length;
+      item = nextPackage.exec(evidence);
+    }
+  }
+  return false;
 }
 
 function supportsStoryBranching(evidence: string): boolean {

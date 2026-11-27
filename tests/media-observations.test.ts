@@ -1027,7 +1027,7 @@ test.each([SETTING_TAG_SYNTHESIS_VERSION, BROWSE_INDEX_SYNTHESIS_VERSION])("%s s
   const traits = [
     "A cyberpunk setting",
     "Futuristic setting",
-    "Includes Phantom Liberty DLC on Switch 2 and offers mouse aiming on Switch 2",
+    "Includes Phantom Liberty DLC and the Glass Harbor expansion on Switch 2 and offers mouse aiming on Switch 2",
     "Bundles the Glass Harbor expansion on Switch 2",
     "Adjustable difficulty setting",
   ];
@@ -1070,6 +1070,7 @@ test.each([SETTING_TAG_SYNTHESIS_VERSION, BROWSE_INDEX_SYNTHESIS_VERSION])("%s s
               { label: "Futuristic setting", observationIds: [futuristic!.selectionId] },
               { label: "Phantom Liberty DLC (Switch 2)", observationIds: [dlc!.selectionId] },
               { label: "Glass Harbor on Switch 2", observationIds: [expansion!.selectionId] },
+              { label: "Glass Harbor", observationIds: [dlc!.selectionId] },
               { label: "Mouse aiming", observationIds: [dlc!.selectionId] },
               { label: "Adjustable difficulty setting", observationIds: [difficulty!.selectionId] },
             ],
@@ -1092,7 +1093,7 @@ test.each([SETTING_TAG_SYNTHESIS_VERSION, BROWSE_INDEX_SYNTHESIS_VERSION])("%s s
     expect(stored.tags).toMatchObject(tags.map((tag, index) => ({
       ...tag, observationRefs: [{ sourceIdentity: identity, observationId: `legacy-tag-${[1, 2, 3, 5][index]}` }],
     })));
-    expect(stored.observationOmissions.filter(({ reason }: { reason: string }) => reason === "tag lists packaged content")).toHaveLength(2);
+    expect(stored.observationOmissions.filter(({ reason }: { reason: string }) => reason === "tag lists packaged content")).toHaveLength(3);
     const overview = await getMediaOverview(database.db, CYBERPUNK, { includeUnpublished: true });
     expect(overview?.tags).toEqual(tags);
     expect(database.native.query("SELECT tag_label, tag_slug, extraction_input_identity FROM media_tag_memberships ORDER BY tag_slug").all())
