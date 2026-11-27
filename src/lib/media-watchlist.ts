@@ -1,12 +1,39 @@
 import type { AppDatabase } from "./db";
 import { writeTransaction } from "./db-transaction";
 import { mainReleasedDate, type MainReleasedFields } from "./lifecycle-history";
-import { isOutletDenialStop, MEDIA_OUTLETS } from "./media-outlet-access";
+import { isOutletDenialStop, MEDIA_OUTLETS, servedPreviewSearches } from "./media-outlet-access";
 import { ELIGIBLE_MEDIA_ENTITY_SQL, ELIGIBLE_MEDIA_ROOT_SQL } from "./media-similarity";
 import { MONTH_MAP, parsePreciseReleaseDate } from "./releases";
 
 export const PREVIEW_CEILING = 15;
 export const PREVIEW_DEFERRAL_KEY = "media:preview-deferred-month";
+
+/** The percentage of the Search provider's monthly plan credits that preview searches may use before the review reservation can defer them. */
+export const PREVIEW_MONTHLY_CREDIT_SHARE_PERCENT = 10;
+
+/**
+ * Preview searches a UTC month allows before the review reservation applies:
+ * 10% of the plan limit the usage endpoint reports, rounded down. With no
+ * reported plan limit the share is 0, so the reservation applies from the
+ * first preview search.
+ */
+export function previewMonthlyCreditShare(planLimit: number | null): number {
+  return planLimit === null || !Number.isFinite(planLimit) || planLimit <= 0 ? 0 : Math.floor((planLimit * PREVIEW_MONTHLY_CREDIT_SHARE_PERCENT) / 100);
+}
+
+/**
+ * Whether the deferral recorded for `month` holds previews in the schedule
+ * a status reports. The schedule has no usage reading of its own, so it uses
+ * the plan limit the latest scheduled discovery run recorded; a deferral
+ * holds only once the month's preview searches reach their share of it.
+ */
+async function previewDeferralHolds(db: AppDatabase, month: string): Promise<boolean> {
+  const recorded = await db.prepare(
+    `SELECT json_extract(usage, '$.planLimit') AS plan_limit FROM media_discovery_runs
+     WHERE origin = 'scheduled' AND json_valid(usage) ORDER BY id DESC LIMIT 1`,
+  ).first<{ plan_limit: number | null }>();
+  return await servedPreviewSearches(db, month) >= previewMonthlyCreditShare(recorded?.plan_limit ?? null);
+}
 
 const PERIOD_STARTS: Readonly<Record<string, string>> = {
   q1: "01-01", q2: "04-01", q3: "07-01", q4: "10-01",
@@ -267,7 +294,7 @@ export async function mediaWatchSchedule(db: AppDatabase, root: number, now: Dat
       // Cadence can tighten between today's checkpoint and the projected search.
       while (dueOn < nextPreviewDay(entity, dueOn, previous)) dueOn = shiftMediaDay(dueOn, 1);
     }
-    if (deferred?.value === dueOn.slice(0, 7)) dueOn = `${shiftMediaDay(`${deferred.value}-01`, 32).slice(0, 7)}-01`;
+    if (deferred?.value === dueOn.slice(0, 7) && await previewDeferralHolds(db, deferred.value)) dueOn = `${shiftMediaDay(`${deferred.value}-01`, 32).slice(0, 7)}-01`;
     return { ...next, next: { pass: "preview", dueAt: `${dueOn}T06:00:00.000Z` } };
   }));
 }

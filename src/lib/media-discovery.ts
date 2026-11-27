@@ -5,13 +5,13 @@ import { writeTransaction } from "./db-transaction";
 import { ENROLLMENT_START_DATE_KEY, isNewReleaseDate } from "./media-enrollment";
 import { boundedMediaError } from "./media-error";
 import { mainReleasedDate, type MainReleasedFields } from "./lifecycle-history";
-import { fetchOutletArticle, finishOutletAttempt, hostInOutlet, isOutletDenialStop, outletDenial, MEDIA_OUTLETS, OUTLET_HTTP_STOPS, OUTLET_STOP_REASONS, reserveOutletAttempt, type MediaOutlet } from "./media-outlet-access";
+import { fetchOutletArticle, finishOutletAttempt, hostInOutlet, isOutletDenialStop, isPreviewShareStop, outletDenial, MEDIA_OUTLETS, OUTLET_HTTP_STOPS, OUTLET_STOP_REASONS, reserveOutletAttempt, servedPreviewSearches, type MediaOutlet } from "./media-outlet-access";
 import { isMediaOverviewPublic, MEDIA_EXPERIMENT_GAMES, PUBLIC_MEDIA_ROOT_SQL } from "./media-publication";
 import { parsePreciseReleaseDate } from "./releases";
 import { ELIGIBLE_MEDIA_ENTITY_SQL, ELIGIBLE_MEDIA_ROOT_SQL } from "./media-similarity";
 import { createTavilyTransport } from "./media-tavily";
 
-import { endPreviewOccurrence, PREVIEW_DEFERRAL_KEY, previewCeilingReached, shiftMediaDay } from "./media-watchlist";
+import { endPreviewOccurrence, PREVIEW_DEFERRAL_KEY, previewCeilingReached, previewMonthlyCreditShare, shiftMediaDay } from "./media-watchlist";
 
 export { MEDIA_GAME_CHOICES, type MediaGameChoice } from "./media-publication";
 export { MEDIA_OUTLETS, type MediaOutlet } from "./media-outlet-access";
@@ -142,7 +142,14 @@ type MediaTarget = {
   appid: number;
   name: string;
   parentAppid: number | null;
+  /** Full names that identify the entity on their own. */
   aliases: readonly string[];
+  /**
+   * Weak names: the leading part of a subtitled root name, such as
+   * "warlock" for "Warlock: Dungeons & Dragons". Only a preview pass uses
+   * them, and only in an article whose body names one of its full aliases.
+   */
+  shortNames: readonly string[];
 };
 
 type MediaTargetRow = {
@@ -170,6 +177,33 @@ function rootAppid(target: MediaTarget): number {
   return target.parentAppid ?? target.appid;
 }
 
+/** A derived short name shorter than this is too generic to identify a game. */
+const MIN_SHORT_NAME_CHARS = 4;
+/** Separators between a game's name and its subtitle: a colon, or a spaced hyphen or dash. */
+const SUBTITLE_SEPARATOR = /:|\s[-–—]\s/;
+
+/** The part of `alias` before its first subtitle separator, or "" when it has none. */
+function subtitleLead(alias: string): string {
+  const match = SUBTITLE_SEPARATOR.exec(alias);
+  return match ? alias.slice(0, match.index).trim() : "";
+}
+
+/**
+ * The short names of each root among `targets`: the part of each subtitled
+ * full alias before its first subtitle separator. A lead is not a short name
+ * when it has fewer than MIN_SHORT_NAME_CHARS characters, equals a full alias
+ * of any loaded entity, or leads the names of more than one loaded root, as
+ * "warhammer 40,000" leads both Space Marine 2 and Rogue Trader.
+ */
+function shortNamesByRoot(targets: readonly Pick<MediaTarget, "appid" | "parentAppid" | "aliases">[]): Map<number, string[]> {
+  const reserved = new Set(targets.flatMap(({ aliases }) => aliases));
+  const leads = new Map(targets.filter((target) => target.parentAppid === null).map((target) => [target.appid,
+    [...new Set(target.aliases.map(subtitleLead).filter((lead) => lead.length >= MIN_SHORT_NAME_CHARS && !reserved.has(lead)))]]));
+  const roots = new Map<string, number>();
+  for (const names of leads.values()) for (const lead of names) roots.set(lead, (roots.get(lead) ?? 0) + 1);
+  return new Map([...leads].map(([appid, names]) => [appid, names.filter((lead) => roots.get(lead) === 1)]));
+}
+
 
 
 async function loadMediaTargets(db: AppDatabase, roots: readonly number[]): Promise<MediaTarget[]> {
@@ -184,7 +218,7 @@ async function loadMediaTargets(db: AppDatabase, roots: readonly number[]): Prom
      ORDER BY appid`,
     rootsJson,
   );
-  return targetRows.map((row) => {
+  const targets = targetRows.map((row) => {
     const metadata = row.parent_appid === null
       ? MEDIA_EXPERIMENT_GAMES.find((game) => game.appid === row.appid)
       : undefined;
@@ -197,8 +231,10 @@ async function loadMediaTargets(db: AppDatabase, roots: readonly number[]): Prom
       ? suffix.replace(/^[\s:–—-]+/, "").trim()
       : "";
     const aliases = [...new Set([normalizedName, childName, ...(metadata?.aliases ?? []).map(normalizeTitle)].filter(Boolean))];
-    return { appid: row.appid, name: row.name, parentAppid: row.parent_appid, aliases };
+    return { appid: row.appid, name: row.name, parentAppid: row.parent_appid, aliases, shortNames: [] as string[] };
   });
+  const shortNames = shortNamesByRoot(targets);
+  return targets.map((target) => ({ ...target, shortNames: shortNames.get(target.appid) ?? [] }));
 }
 
 
@@ -288,10 +324,11 @@ async function prepareProgressForAuthorization(
 
 /**
  * Stops that hold a query only for the rest of their UTC day: an Outlet day
- * stop (the daily attempt cap or an outlet rate limit) or the search
- * provider's rate limit. Any other stop, an Outlet denial, never reopens.
+ * stop (the daily attempt cap or an outlet rate limit), a preview query held
+ * by its outlet's preview share, or the search provider's rate limit. Any
+ * other stop, an Outlet denial, never reopens.
  */
-const DAY_SCOPED_STOPS = [OUTLET_STOP_REASONS.DAILY_ATTEMPT_CAP, "search_http_429", OUTLET_HTTP_STOPS[429], "tavily_search_http_429"] as const;
+const DAY_SCOPED_STOPS = [OUTLET_STOP_REASONS.DAILY_ATTEMPT_CAP, OUTLET_STOP_REASONS.PREVIEW_DAILY_SHARE, "search_http_429", OUTLET_HTTP_STOPS[429], "tavily_search_http_429"] as const;
 const DAY_SCOPED_STOPS_SQL = DAY_SCOPED_STOPS.map((reason) => `'${reason}'`).join(", ");
 const ENTITY_INELIGIBLE = "entity_ineligible";
 
@@ -763,6 +800,268 @@ function hasRoundupOrComparisonFraming(lead: string, body: string): boolean {
   return roundupLabel.test(lead) || roundupIntro.test(lead) || comparisonIntro.test(lead) || comparisonLabel.test(body);
 }
 
+/** A name that identifies an entity in an article: a full alias, or a weak short name. */
+type EntityName = { text: string; short: boolean };
+
+/**
+ * What follows a short name that heads a different title: a subtitle
+ * separator ("dune: spice wars") or a sequel number in arabic digits or a
+ * roman numeral token ("marvel's spider-man 2"). Such an occurrence names
+ * that other game, not the entity. A lone "x" is left to the co-title joiners.
+ */
+const HEAD_OF_ANOTHER_TITLE = new RegExp(
+  `^(?:${SUBTITLE_SEPARATOR.source}|\\s+(?:\\d+|(?!x(?![a-z0-9]))(?=[ivxlcdm]+(?![a-z0-9]))m{0,3}(?:cm|cd|d?c{0,3})(?:xc|xl|l?x{0,3})(?:ix|iv|v?i{0,3}))(?![a-z0-9]))`,
+);
+
+/**
+ * The names that identify `target` in an article with body `bodyLower` for
+ * `pass`. Every pass uses the full aliases. Only a preview pass adds the short
+ * names, and only when the body names a full alias.
+ */
+function identifyingNames(target: MediaTarget, bodyLower: string, pass: MediaPass): readonly EntityName[] {
+  const full = target.aliases.map((text) => ({ text, short: false }));
+  if (pass !== "preview" || target.shortNames.length === 0 || !target.aliases.some((alias) => hasEntityAlias(bodyLower, alias))) return full;
+  return [...full, ...target.shortNames.map((text) => ({ text, short: true }))];
+}
+
+/**
+ * Word-bounded occurrences of `names` in `text` as [start, end) spans. A
+ * short name's occurrence that heads a different title is no occurrence.
+ */
+function nameSpans(text: string, names: readonly EntityName[]): Array<[number, number]> {
+  const spans: Array<[number, number]> = [];
+  for (const { text: name, short } of names) {
+    for (let offset = 0; offset <= text.length - name.length;) {
+      const index = text.indexOf(name, offset);
+      if (index < 0) break;
+      const before = text[index - 1];
+      const after = text[index + name.length];
+      if ((!before || !/[a-z0-9]/.test(before)) && (!after || !/[a-z0-9]/.test(after))
+          && !(short && HEAD_OF_ANOTHER_TITLE.test(text.slice(index + name.length)))) spans.push([index, index + name.length]);
+      offset = index + 1;
+    }
+  }
+  return spans.sort((left, right) => left[0] - right[0] || right[1] - left[1]);
+}
+
+/** Whether `text` names `name`. */
+function names(text: string, name: EntityName): boolean {
+  return nameSpans(text, [name]).length > 0;
+}
+
+/** Occurrences of any of `names` in `text`, with overlapping occurrences counted once, and the first one's position. */
+function nameOccurrences(text: string, entityNames: readonly EntityName[]): { count: number; first: number } {
+  const spans = nameSpans(text, entityNames);
+  let count = 0;
+  let end = -1;
+  for (const [start, stop] of spans) {
+    if (start < end) { end = Math.max(end, stop); continue; }
+    count += 1;
+    end = stop;
+  }
+  return { count, first: spans[0]?.[0] ?? Number.POSITIVE_INFINITY };
+}
+
+/**
+ * Words that join two games' names into one co-titled title, such as
+ * "NO LAW & Fort Harbor": the text between the two names is one of these,
+ * optionally surrounded by whitespace.
+ */
+const CO_TITLE_JOINERS = ["&", "and", ",", "+", "/", "x", "meets", "vs", "vs.", "versus"] as const;
+const CO_TITLE_JOINER = new RegExp(`^\\s*(?:${CO_TITLE_JOINERS.map((joiner) => joiner.replace(/[.+/]/g, "\\$&")).join("|")})\\s*$`);
+
+/** Whether the title names two different families joined only by a co-title joiner. */
+function coTitledFamilies(families: ReadonlyMap<number, readonly EntityName[]>, titleLower: string): boolean {
+  const spans = [...families].flatMap(([root, entityNames]) => nameSpans(titleLower, entityNames).map(([start, end]) => ({ root, start, end })))
+    .sort((left, right) => left.start - right.start || right.end - left.end);
+  let previous: (typeof spans)[number] | null = null;
+  for (const span of spans) {
+    if (previous && span.start < previous.end) continue;
+    if (previous && previous.root !== span.root && CO_TITLE_JOINER.test(titleLower.slice(previous.end, span.start))) return true;
+    previous = span;
+  }
+  return false;
+}
+
+/**
+ * The root family a preview-pass article is about when its title or lead
+ * names more than one enrolled family: the family named first in the title
+ * that is also named most often in the body. Null when those disagree, when
+ * two families are named first at the same position or equally often in the
+ * body, or when the title joins two families' names as a co-title.
+ */
+function subjectFamily(
+  families: ReadonlyMap<number, readonly EntityName[]>, titleLower: string, bodyLower: string,
+): number | null {
+  if (coTitledFamilies(families, titleLower)) return null;
+  let firstInTitle: number | null = null;
+  let firstIndex = Number.POSITIVE_INFINITY;
+  let titleTied = false;
+  let mostInBody: number | null = null;
+  let mostCount = 0;
+  let bodyTied = false;
+  for (const [root, entityNames] of families) {
+    const { first } = nameOccurrences(titleLower, entityNames);
+    if (first < firstIndex) { firstIndex = first; firstInTitle = root; titleTied = false; }
+    else if (first === firstIndex && Number.isFinite(first)) titleTied = true;
+    const { count } = nameOccurrences(bodyLower, entityNames);
+    if (count > mostCount) { mostCount = count; mostInBody = root; bodyTied = false; }
+    else if (count === mostCount) bodyTied = true;
+  }
+  return !titleTied && !bodyTied && firstInTitle !== null && firstInTitle === mostInBody ? firstInTitle : null;
+}
+
+/**
+ * The exact entity an article is about for `pass`. The title must name the
+ * entity. When the title and lead name one root family, the subject is that
+ * family. When they name more, an assessment pass has no subject, and a
+ * preview pass lets `subjectFamily` decide it. Within the family, the title
+ * and lead decide between the root and one child. Only a preview pass names
+ * an entity by its short names (`identifyingNames`).
+ */
+function articleSubject(titleLower: string, articleLeadLower: string, bodyLower: string, targets: readonly MediaTarget[], pass: MediaPass): MediaTarget | null {
+  const entityNames = new Map(targets.map((candidate) => [candidate.appid, identifyingNames(candidate, bodyLower, pass)]));
+  const allTitleMatches = targets.flatMap((candidate) =>
+    entityNames.get(candidate.appid)!.filter((name) => names(titleLower, name)).map(({ text: alias }) => {
+      const parent = candidate.parentAppid === null ? null : targets.find((item) => item.appid === candidate.parentAppid);
+      const parentAlias = parent ? entityNames.get(parent.appid)!.find((name) => names(titleLower, name))?.text ?? null : null;
+      return { target: candidate, alias, score: alias.length + (parentAlias?.length ?? 0) };
+    }),
+  ).sort((left, right) => right.score - left.score || right.alias.length - left.alias.length);
+  if (allTitleMatches.length === 0) return null;
+  const allLeadTargets = targets.filter((candidate) => entityNames.get(candidate.appid)!.some((name) => names(articleLeadLower, name)));
+  const familyRoots = new Set([...allTitleMatches.map(({ target }) => rootAppid(target)), ...allLeadTargets.map(rootAppid)]);
+  let subjectRoot = rootAppid(allTitleMatches[0]!.target);
+  if (familyRoots.size > 1) {
+    if (pass !== "preview") return null;
+    const families = new Map([...familyRoots].map((root) => [root,
+      targets.filter((candidate) => rootAppid(candidate) === root).flatMap((candidate) => entityNames.get(candidate.appid)!)]));
+    const subject = subjectFamily(families, titleLower, bodyLower);
+    if (subject === null) return null;
+    subjectRoot = subject;
+  }
+  const titleMatches = allTitleMatches.filter(({ target }) => rootAppid(target) === subjectRoot);
+  const selected = titleMatches[0];
+  if (!selected) return null;
+  const titleTargets = [...new Map(titleMatches.map((match) => [match.target.appid, match.target])).values()];
+  const titleChildren = titleTargets.filter((candidate) => candidate.parentAppid !== null);
+  if (titleChildren.length > 1) return null;
+  const childMentions = allLeadTargets.filter((candidate) => rootAppid(candidate) === subjectRoot && candidate.parentAppid !== null);
+  if (childMentions.length > 1) return null;
+  const titleChild = titleChildren[0] ?? null;
+  const leadChild = childMentions[0] ?? null;
+  if (titleChild && leadChild && titleChild.appid !== leadChild.appid) return null;
+  return titleChild ?? leadChild ?? selected.target;
+}
+
+/** What discovery reads from an article on its subject to decide whether a pass admits it, and as what. */
+type ArticleFacts = {
+  review: boolean;
+  /** The words "preview" or "early access" in the title or the first 4,000 characters. */
+  previewWording: boolean;
+  /** The word "preview" in the title. */
+  previewTitle: boolean;
+  /** The outlet's own metadata marks the article a preview (GamesRadar+ `unindexedFreeform:preview`); never evidence of hands-on. */
+  outletPreviewMarker: boolean;
+  explicitHandsOn: boolean;
+  announcement: boolean;
+  patchNotes: boolean;
+  guide: boolean;
+  reviewNews: boolean;
+  coTitledReview: boolean;
+  coTitledPreview: boolean;
+  multiGamePreviewTitle: boolean;
+  multiGameTitle: boolean;
+  roundupOrComparisonFraming: boolean;
+  developerAuthored: boolean;
+};
+
+function articleFacts(
+  title: string, titleLower: string, articleLeadLower: string, bodyLower: string, fullArticleText: string, targets: readonly MediaTarget[],
+  meta: { byline: string | null; affiliation: string | null; gamesRadarTags: readonly string[] }, pass: MediaPass,
+): ArticleFacts {
+  // A game name containing "and" or "&" (Warlock: Dungeons & Dragons) does
+  // not make a title co-titled.
+  const titleWithoutNames = targets.flatMap(({ aliases }) => aliases).sort((left, right) => right.length - left.length)
+    .reduce((text, alias) => text.split(alias).join("§"), titleLower);
+  const developerAuthorship = /developer|official|cd projekt|larian studios|supergiant|valve/i;
+  const lead = fullArticleText.slice(0, 4_000);
+  return {
+    review: meta.gamesRadarTags.includes("articleType:Reviews") || /\breview\b/i.test(title) || /\bour review\b/i.test(fullArticleText.slice(0, 3_000)),
+    previewWording: /\b(preview|early access)\b/i.test(`${title} ${lead}`),
+    previewTitle: /\bpreview\b/i.test(title),
+    outletPreviewMarker: meta.gamesRadarTags.includes("unindexedFreeform:preview"),
+    explicitHandsOn: pass === "preview"
+      ? !/\b(?:not (?:an? )?hands?[- ]on|non[- ]hands?[- ]on|no hands?[- ]on)\b/i.test(title) && (/\bhands?[- ]on\b/i.test(title) || /\b(?:(?:we|i) (?:played|went hands?[- ]on)|after playing|played for)\b/i.test(lead))
+      : /\b(hands?[- ]on|we played|after playing|played for|impressions?)\b/i.test(`${title} ${lead}`),
+    announcement: /\b(announced|announcement|announces|revealed|reveal|trailer|launches)\b/.test(titleLower),
+    patchNotes: /\b(patch notes|update notes|roadmap)\b/.test(titleLower),
+    guide: /\b(guide|walkthrough)\b/.test(titleLower),
+    reviewNews: /\b(?:review\s+scores?|(?:gets?|earns?|receives?|scores?|rated)\s+(?:a\s+)?\d+(?:\.\d+)?\s*(?:\/\s*\d+|out of \d+))\b/.test(titleLower)
+      || /\breviews?\s*(?:[:\-–—]\s*|\s+)(?:embargo(?:es)?|details?|reactions?|coverage|codes?|copies|policies?|discourse)\b|\b(?:embargo(?:es)?|details?|reactions?|coverage|codes?|copies|policies?|discourse)\s*(?:[:\-–—]\s*|\s+)(?:about|around|for|on|of|to)?\s*reviews?\b/.test(titleLower),
+    coTitledReview: /\b(?:and|&)\s+.+?\s+reviews?\b/.test(titleWithoutNames),
+    multiGameTitle: /\b(round[- ]?up|best games?|games like|versus|\bvs\.?\b|comparison|ranking|ranked|top\s+\d+|lists?(?:icle)?|highest|metacritic|surpasses?|outperforms?|outscores?|beats?|review\s+drama|drama)\b/.test(titleLower),
+    coTitledPreview: CO_TITLED_PREVIEW.test(titleWithoutNames),
+    multiGamePreviewTitle: MULTI_GAME_PREVIEW_TITLE.test(titleLower),
+    roundupOrComparisonFraming: hasRoundupOrComparisonFraming(articleLeadLower, bodyLower),
+    developerAuthored: developerAuthorship.test(meta.byline ?? "") || developerAuthorship.test(meta.affiliation ?? ""),
+  };
+}
+
+/**
+ * Title wording that marks a multi-game piece in a preview pass. Words that
+ * also describe one game's own news ("beats", "highest", "surpasses") are
+ * not evidence of a second game. Two enrolled families joined in a title are
+ * refused by the subject decision.
+ */
+/**
+ * A preview co-titled with a second game no target names: the entity's full
+ * name ("§" once removed), a conjunction, then a short title directly before
+ * the preview word ("no law and fort harbor preview"). A phrase opening with
+ * an article or possessive describes the entity's own subject matter ("and
+ * the cost of magical power: a hands-off preview") and is not a second title.
+ */
+const CO_TITLED_PREVIEW = /§\s*(?:and|&)\s+(?!(?:the|a|an|its|their|our|my|more|other)\b)(?:[^\s:–—-]+\s+){1,3}(?:hands?[- ]o(?:n|ff)\s+)?(?:previews?|announcements?)\b/;
+const MULTI_GAME_PREVIEW_TITLE = /\b(round[- ]?up|best games?|games like|versus|vs\.?|comparison|ranking|ranked|top\s+\d+|listicle|(?:our|this|my)\s+lists?\s+of\s+(?:\w+\s+){0,3}games|metacritic)\b/;
+
+/**
+ * Why a preview pass refuses an article whose subject is its exact entity, or
+ * null when it admits it. Preview coverage of any kind is admitted, with no
+ * preview or announcement wording required, unless it is one of these. An
+ * unusable article never reaches this check.
+ */
+function previewPassRefusal(facts: ArticleFacts): string | null {
+  if (facts.review) return "review"; // left for the released-game flow
+  if (facts.patchNotes) return "patch_notes";
+  if (facts.guide) return "guide";
+  if (facts.multiGamePreviewTitle || facts.coTitledPreview || facts.roundupOrComparisonFraming) return "multi_game";
+  if (facts.reviewNews) return "review_news";
+  if (facts.developerAuthored) return "developer_authored";
+  return null;
+}
+
+/** Why an initial or later pass refuses an article on its entity: it must be a review or an explicit hands-on preview, and none of these. */
+function assessmentPassRefusal(facts: ArticleFacts): string | null {
+  if (facts.patchNotes) return "patch_notes";
+  if (facts.announcement) return "announcement";
+  if (facts.multiGameTitle || facts.coTitledReview || facts.roundupOrComparisonFraming) return "multi_game";
+  if (facts.reviewNews) return "review_news";
+  if (facts.developerAuthored) return "developer_authored";
+  if (!facts.review && !(facts.previewWording && facts.explicitHandsOn)) return "not_an_assessment";
+  return null;
+}
+
+/**
+ * The type a preview pass records: a preview when the title says "preview",
+ * the article shows hands-on evidence or the outlet's own preview marker,
+ * even beside an announcement word; an announcement when the title has an
+ * announcement word and none of those; otherwise a preview.
+ */
+function previewArticleType(facts: ArticleFacts): MediaArticleType {
+  if (facts.previewTitle || facts.explicitHandsOn || facts.outletPreviewMarker) return "preview";
+  return facts.announcement ? "announcement" : "preview";
+}
+
 function parseSource(html: string, finalUrl: string, target: MediaTarget, targets: readonly MediaTarget[], outlet: MediaOutlet, retrievedAt: string, pass: MediaPass): MediaSource | null {
   const document = parseArticleDocument(html);
   if (!document) return null;
@@ -776,8 +1075,7 @@ function parseSource(html: string, finalUrl: string, target: MediaTarget, target
   const platformMeta = meta(document, "game:platform", "article:platform");
   const buildMeta = meta(document, "game:build", "article:build");
   const affiliationMeta = meta(document, "author_affiliation", "article:author_affiliation");
-  const gamesRadarReview = outlet === "GamesRadar+" &&
-    (meta(document, "mrf:tags")?.split(";").includes("articleType:Reviews") ?? false);
+  const gamesRadarTags = outlet === "GamesRadar+" ? (meta(document, "mrf:tags")?.split(";") ?? []) : [];
   type ReadableResult = { title?: string; byline?: string; textContent?: string };
   let readable: ReadableResult | null = null;
   try {
@@ -792,52 +1090,15 @@ function parseSource(html: string, finalUrl: string, target: MediaTarget, target
   const titleLower = normalizeTitle(title);
   const bodyLower = normalizeTitle(fullArticleText);
   const articleLeadLower = bodyLower.slice(0, 240);
-  const titleMatches = targets.flatMap((candidate) =>
-    candidate.aliases.filter((alias) => hasEntityAlias(titleLower, alias)).map((alias) => {
-      const parent = candidate.parentAppid === null ? null : targets.find((item) => item.appid === candidate.parentAppid);
-      const parentAlias = parent?.aliases.find((parentAlias) => hasEntityAlias(titleLower, parentAlias)) ?? null;
-      return { target: candidate, alias, score: alias.length + (parentAlias?.length ?? 0) };
-    }),
-  ).sort((left, right) => right.score - left.score || right.alias.length - left.alias.length);
-  const selected = titleMatches[0];
-  if (!selected) return null;
-  const titleTargets = [...new Map(titleMatches.map((match) => [match.target.appid, match.target])).values()];
-  const selectedRootAppid = rootAppid(selected.target);
-  if (titleTargets.some((candidate) => rootAppid(candidate) !== selectedRootAppid)) return null;
-  const titleChildren = titleTargets.filter((candidate) => candidate.parentAppid !== null);
-  if (titleChildren.length > 1) return null;
-  const articleLeadTargets = targets.filter((candidate) => candidate.aliases.some((alias) => hasEntityAlias(articleLeadLower, alias)));
-  const articleLeadFamilies = new Set(articleLeadTargets.map(rootAppid));
-  if (articleLeadFamilies.size > 1 || [...articleLeadFamilies].some((appid) => appid !== selectedRootAppid)) return null;
-  const childMentions = articleLeadTargets.filter((candidate) => candidate.parentAppid !== null);
-  if (childMentions.length > 1) return null;
-  const titleChild = titleChildren[0] ?? null;
-  const leadChild = childMentions[0] ?? null;
-  if (titleChild && leadChild && titleChild.appid !== leadChild.appid) return null;
-  const attributedTarget = titleChild ?? leadChild ?? selected.target;
+  const attributedTarget = articleSubject(titleLower, articleLeadLower, bodyLower, targets, pass);
+  if (!attributedTarget) return null;
   const rootCanAttributeChild = target.parentAppid === null && attributedTarget.parentAppid === target.appid;
   if (attributedTarget.appid !== target.appid && (pass === "preview" || !rootCanAttributeChild)) return null;
-  if (/\b(patch notes|update notes|roadmap)\b/.test(titleLower)) return null;
-  if (pass === "preview" && /\b(guide|walkthrough)\b/.test(titleLower)) return null;
-  const announcement = /\b(announced|announcement|announces|revealed|reveal|trailer|launches)\b/.test(titleLower);
-  if (announcement && pass !== "preview") return null;
-  const reviewScoreNews = /\b(?:review\s+scores?|(?:gets?|earns?|receives?|scores?|rated)\s+(?:a\s+)?\d+(?:\.\d+)?\s*(?:\/\s*\d+|out of \d+))\b/.test(titleLower);
-  const coTitledReview = /\b(?:and|&)\s+.+?\s+reviews?\b/.test(titleLower);
-  const coTitledPreview = pass === "preview" && /(?:\band|&)\s+.+?\s+(?:previews?|announcements?)\b/.test(titleLower);
-  const reviewRelatedNews = /\breviews?\s*(?:[:\-–—]\s*|\s+)(?:embargo(?:es)?|details?|reactions?|coverage|codes?|copies|policies?|discourse)\b|\b(?:embargo(?:es)?|details?|reactions?|coverage|codes?|copies|policies?|discourse)\s*(?:[:\-–—]\s*|\s+)(?:about|around|for|on|of|to)?\s*reviews?\b/.test(titleLower);
-  if (reviewScoreNews || coTitledReview || coTitledPreview || reviewRelatedNews || /\b(round[- ]?up|best games?|games like|versus|\bvs\.?\b|comparison|ranking|ranked|top\s+\d+|lists?(?:icle)?|highest|metacritic|surpasses?|outperforms?|outscores?|beats?|review\s+drama|drama)\b/.test(titleLower)) return null;
-  if (hasRoundupOrComparisonFraming(articleLeadLower, bodyLower)) return null;
   const byline = cleanText(authorMeta ?? readable?.byline ?? document.querySelector("[rel='author'],.byline,[class*='author']")?.textContent);
   const affiliation = cleanText(affiliationMeta);
-  const developerAuthorship = /developer|official|cd projekt|larian studios|supergiant|valve/i;
-  if (developerAuthorship.test(byline ?? "") || developerAuthorship.test(affiliation ?? "")) return null;
-  const isReview = gamesRadarReview || /\breview\b/i.test(title) || /\bour review\b/i.test(fullArticleText.slice(0, 3_000));
-  const explicitHandsOn = pass === "preview"
-    ? !/\b(?:not (?:an? )?hands?[- ]on|non[- ]hands?[- ]on|no hands?[- ]on)\b/i.test(title) && (/\bhands?[- ]on\b/i.test(title) || /\b(?:we (?:played|went hands?[- ]on)|i played|after playing|played for)\b/i.test(fullArticleText.slice(0, 4_000)))
-    : /\b(hands?[- ]on|we played|after playing|played for|impressions?)\b/i.test(`${title} ${fullArticleText.slice(0, 4_000)}`);
-  const isPreview = /\b(preview|early access)\b/i.test(`${title} ${fullArticleText.slice(0, 4_000)}`);
-  if (pass === "preview" ? isReview || !(isPreview || announcement) : !isReview && !(isPreview && explicitHandsOn)) return null;
-  const handsOn = explicitHandsOn ? true : pass === "preview" ? false : null;
+  const facts = articleFacts(title, titleLower, articleLeadLower, bodyLower, fullArticleText, targets, { byline, affiliation, gamesRadarTags }, pass);
+  if ((pass === "preview" ? previewPassRefusal(facts) : assessmentPassRefusal(facts)) !== null) return null;
+  const handsOn = facts.explicitHandsOn ? true : pass === "preview" ? false : null;
   const canonical = cleanText(canonicalMeta);
   let normalizedUrl: string;
   try {
@@ -847,7 +1108,8 @@ function parseSource(html: string, finalUrl: string, target: MediaTarget, target
   }
   const outletConfig = MEDIA_OUTLETS.find((item) => item.name === outlet);
   if (!outletConfig || !hostInOutlet(normalizedUrl, outletConfig)) return null;
-  const articleType: MediaArticleType = isReview ? "review" : announcement && !/\bpreview\b/i.test(title) ? "announcement" : "preview";
+  const articleType: MediaArticleType = pass === "preview" ? previewArticleType(facts)
+    : facts.review ? "review" : facts.announcement && !facts.previewTitle ? "announcement" : "preview";
   const platform = cleanText(platformMeta) ?? (/\b(pc|playstation|xbox|switch)\b/i.exec(fullArticleText.slice(0, 4_000))?.[1] ?? null);
   const buildContext = cleanText(buildMeta) ?? (/\bearly access (?:review|preview|build)\b|\breview(?:ed)? in early access\b/i.test(title) || /\bthis early access (?:review|build|preview)\b/i.test(fullArticleText) ? "Early Access" : null);
   return {
@@ -1106,42 +1368,71 @@ export async function runAuthorizedMediaDiscovery(db: AppDatabase, options: Medi
     const previewQueries = previews.flatMap(({ id, appid, due_at }) => MEDIA_OUTLETS.map((outlet) => ({
       outlet, target: discoveryTargets.find((target) => target.appid === appid)!, pass: "preview" as const, dueAt: due_at, occurrenceId: id,
     })));
-    const pendingPreviewQueries = () => progressRows.filter((row) => row.occurrence_id !== null
-      && row.status !== "completed" && !row.query_attempted_at && !denied.has(row.outlet)).length;
+    // Read at check time, not from the run's starting snapshot: preview
+    // queries searched earlier in this run are no longer pending.
+    const previewOccurrenceIds = JSON.stringify(previews.map(({ id }) => id));
+    // An occurrence ended since the run started, such as by an unwatch, has no pending query.
+    const pendingPreviewQueries = async () => (await rows<ProgressRow>(db, `SELECT ${PROGRESS_COLUMNS} FROM media_discovery_progress
+      WHERE occurrence_id IN (SELECT value FROM json_each(?)) AND status <> 'completed' AND query_attempted_at IS NULL
+        AND occurrence_id IN (SELECT id FROM media_preview_occurrences WHERE ended_at IS NULL)`, previewOccurrenceIds))
+      .filter((row) => !denied.has(row.outlet)).length;
+    const month = day.slice(0, 7);
+    // Previews have their own share of the month's plan credits; within it
+    // the review reservation never defers them, and neither does a deferral
+    // recorded earlier in the month.
+    const previewCreditShare = previewMonthlyCreditShare(usage.details?.planLimit ?? null);
+    const withinPreviewCreditShare = async () => await servedPreviewSearches(db, month) < previewCreditShare;
     let deferred = previews.length > 0 && (await first<{ value: string }>(db,
-      "SELECT value FROM checkpoints WHERE key = ?", PREVIEW_DEFERRAL_KEY))?.value === day.slice(0, 7);
+      "SELECT value FROM checkpoints WHERE key = ?", PREVIEW_DEFERRAL_KEY))?.value === month;
     const checkPreviewCredits = async (progress: ProgressRow[], budget: number) => {
-      const pending = pendingPreviewQueries();
+      const pending = await pendingPreviewQueries();
       if (deferred || pending === 0) return;
       const reserved = await reviewSearchReservation(db, discoveryTargets, startedAt, progress, denied);
       if (budget - reserved >= pending) return;
       deferred = true;
       await db.prepare(
         "INSERT INTO checkpoints (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-      ).bind(PREVIEW_DEFERRAL_KEY, day.slice(0, 7)).run();
+      ).bind(PREVIEW_DEFERRAL_KEY, month).run();
     };
     if (searchCreditBudget !== null && usage.stop === "tavily_credits_exhausted") {
       await checkPreviewCredits(progressRows, searchCreditBudget);
     }
     if (stopReasons.size === 0) {
+      // Due preview queries go first, within their daily share of each
+      // outlet and their monthly share of search credits; the assessment
+      // queries follow. Each group is ordered oldest due first, then by entity.
       const queries = scheduledPasses
-        ? [...scheduledPasses.flatMap(({ target, pass, dueAt }) => MEDIA_OUTLETS.map((outlet) => ({ outlet, target, pass, dueAt, occurrenceId: null }))), ...previewQueries]
+        ? [...previewQueries, ...scheduledPasses.flatMap(({ target, pass, dueAt }) => MEDIA_OUTLETS.map((outlet) => ({ outlet, target, pass, dueAt, occurrenceId: null })))]
         : MEDIA_OUTLETS.flatMap((outlet) => discoveryTargets.map((target) => ({ outlet, target, pass, dueAt: null, occurrenceId: null })));
       const dueEntities: Record<MediaPass, Set<number>> = { initial: new Set(), later: new Set(), preview: new Set() };
       for (const { target, pass } of scheduledPasses ?? []) dueEntities[pass].add(target.appid);
-      let reviewed = false;
-      for (const { outlet, target, pass, dueAt, occurrenceId } of queries) {
-        if (occurrenceId !== null && !reviewed) {
-          reviewed = true;
-          if (searchCreditBudget !== null) {
-            const current = await rows<ProgressRow>(db, `SELECT ${PROGRESS_COLUMNS} FROM media_discovery_progress WHERE pass <> 'preview'`);
-            await checkPreviewCredits(current, searchCreditBudget - Math.max(searchesIssued, searchCreditsConsumed));
-          }
+      /** Outlets whose preview share is used today: their preview queries wait, their assessment queries do not. */
+      const previewHeldOutlets = new Set<MediaOutlet>();
+      const holdOutlet = (name: MediaOutlet, stop: string) => {
+        if (isPreviewShareStop(stop)) previewHeldOutlets.add(name);
+        else stoppedOutlets.add(name);
+        stopReasons.add(`${name}:${stop}`);
+      };
+      /**
+       * Whether a preview query may be searched now as far as credits go:
+       * always within the month's preview share; beyond it, unless the
+       * review reservation defers previews for the rest of the month.
+       */
+      let reservationChecked = false;
+      const previewSearchAllowed = async () => {
+        if (await withinPreviewCreditShare()) return true;
+        if (!deferred && !reservationChecked && searchCreditBudget !== null) {
+          reservationChecked = true;
+          const current = await rows<ProgressRow>(db, `SELECT ${PROGRESS_COLUMNS} FROM media_discovery_progress WHERE pass <> 'preview'`);
+          await checkPreviewCredits(current, searchCreditBudget - Math.max(searchesIssued, searchCreditsConsumed));
         }
+        return !deferred;
+      };
+      for (const { outlet, target, pass, dueAt, occurrenceId } of queries) {
         if (occurrenceId !== null && !await previewOpen(db, occurrenceId)) continue;
         const appid = target.appid;
         if (await articleCeiling(db, appid, pass)) continue;
-        if (stoppedOutlets.has(outlet.name)) continue;
+        if (stoppedOutlets.has(outlet.name) || (occurrenceId !== null && previewHeldOutlets.has(outlet.name))) continue;
         // The later pass asks only the outlets with an accepted initial article for the entity.
         if (pass === "later" && !await first<{ id: number }>(db, "SELECT id FROM media_sources WHERE appid = ? AND outlet = ? AND pass = 'initial' LIMIT 1", appid, outlet.name)) continue;
         const progress = progressRows.find((row) => row.appid === appid && row.outlet === outlet.name && row.pass === pass && row.occurrence_id === occurrenceId) ?? null;
@@ -1158,7 +1449,7 @@ export async function runAuthorizedMediaDiscovery(db: AppDatabase, options: Medi
         let candidates = json<Candidate[]>(current.candidate_urls, []).filter((candidate) => typeof candidate?.url === "string");
         let index = current.candidate_index;
         if (!current.query_attempted_at) {
-          if (searchesStopped || (occurrenceId !== null && deferred)) continue;
+          if (searchesStopped || (occurrenceId !== null && !await previewSearchAllowed())) continue;
           if (searchCreditBudget !== null && Math.max(searchesIssued, searchCreditsConsumed) >= searchCreditBudget) {
             // No credit is left for this query: stop searching for the rest of
             // the run as a provider stop and keep the query for the next
@@ -1177,8 +1468,7 @@ export async function runAuthorizedMediaDiscovery(db: AppDatabase, options: Medi
           const reservation = await reserveOutletAttempt(db, { runId: run.id, pass, appid, outlet: outlet.name, kind: "search", url: null, date: attemptNow });
           if ("stop" in reservation) {
             await stopProgress(db, progressId, reservation.stop, attemptNow);
-            stoppedOutlets.add(outlet.name);
-            stopReasons.add(`${outlet.name}:${reservation.stop}`);
+            holdOutlet(outlet.name, reservation.stop);
             continue;
           }
           const attemptId = reservation.attemptId;
@@ -1259,8 +1549,7 @@ export async function runAuthorizedMediaDiscovery(db: AppDatabase, options: Medi
               // request is retried when the outlet reopens.
               if (fetched.contacted) await db.prepare("UPDATE media_discovery_progress SET candidate_index = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(index + 1, progressId).run();
               await stopProgress(db, progressId, fetched.stop, clock());
-              stoppedOutlets.add(outlet.name);
-              stopReasons.add(`${outlet.name}:${fetched.stop}`);
+              holdOutlet(outlet.name, fetched.stop);
               break;
             }
             if (occurrenceId !== null) {
@@ -1497,13 +1786,16 @@ async function replayPreview(
   if (stop || !target) return { admitted: false, reason: stop };
   const clock = () => isoNow(now);
   const identity = JSON.stringify([PREVIEW_REPLAY_ORIGIN, appid, outlet.name, url]);
+  // A stopped replay runs again only when none of its requests reached the
+  // outlet: `reserveOutletAttempt` counts every reserved hop, redirects
+  // included, in the run's `attempt_count` before the request is sent.
   const run = await first<{ id: number }>(db, `INSERT INTO media_discovery_runs
       (pass, identity_key, selected_games, status, origin, started_at)
       VALUES ('initial', ?, ?, 'running', ?, ?)
       ON CONFLICT(identity_key) DO UPDATE SET status = 'running', stop_reason = NULL, finished_at = NULL
-        WHERE status = 'stopped' AND stop_reason IN (?, ?) AND attempt_count = 0
+        WHERE status = 'stopped' AND stop_reason IN (?, ?, ?) AND attempt_count = 0
       RETURNING id`, identity, JSON.stringify([rootAppid(target)]), PREVIEW_REPLAY_ORIGIN, clock().toISOString(),
-    OUTLET_STOP_REASONS.DAILY_ATTEMPT_CAP, OUTLET_HTTP_STOPS[429]);
+    OUTLET_STOP_REASONS.DAILY_ATTEMPT_CAP, OUTLET_HTTP_STOPS[429], OUTLET_STOP_REASONS.PREVIEW_DAILY_SHARE);
   if (!run) return { admitted: false, reason: "already_replayed" };
   let reason: string | null = null;
   let admitted = false;

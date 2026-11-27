@@ -15,8 +15,10 @@ const HADES_II = 1145350;
 const PHANTOM_LIBERTY = 2138330;
 const OTHER_GAME = 99001;
 const NO_LAW = 2161710;
-const PUBLIC_ROOTS = [CYBERPUNK, BALDURS_GATE, HADES_II, NO_LAW];
+const WARLOCK = 3714800;
+const PUBLIC_ROOTS = [CYBERPUNK, BALDURS_GATE, HADES_II, NO_LAW, WARLOCK];
 const PRIVATE_ENTITIES = [PHANTOM_LIBERTY, OTHER_GAME];
+const DETAIL_MATCHES_PER_DIMENSION = 3;
 
 function seedCoverage(native: Database) {
   native.run(`INSERT INTO apps (appid, name, slug, type, is_eligible, is_playable, parent_appid) VALUES
@@ -24,6 +26,7 @@ function seedCoverage(native: Database) {
     (${BALDURS_GATE}, 'Baldur''s Gate 3', 'baldurs-gate-3', 'game', 1, 1, NULL),
     (${HADES_II}, 'Hades II', 'hades-ii', 'game', 1, 1, NULL),
     (${NO_LAW}, 'NO LAW', 'no-law', 'game', 1, 1, NULL),
+    (${WARLOCK}, 'Warlock: Dungeons & Dragons', 'warlock-dungeons-dragons', 'game', 1, 1, NULL),
     (${PHANTOM_LIBERTY}, 'Phantom Liberty', 'phantom-liberty', 'expansion', 1, 0, ${CYBERPUNK}),
     (${OTHER_GAME}, 'Another Game', 'another-game', 'game', 1, 1, NULL)`);
 
@@ -49,7 +52,7 @@ function seedCoverage(native: Database) {
     const values = Array<number>(GEMINI_EMBEDDING_DIMENSIONS).fill(0);
     // Unpublished candidates rank ahead of the other public roots for Cyberpunk.
     values[0] = 1;
-    values[1] = appid === BALDURS_GATE || appid === HADES_II || appid === NO_LAW ? 1 : 0;
+    values[1] = appid === BALDURS_GATE || appid === HADES_II || appid === NO_LAW || appid === WARLOCK ? 1 : 0;
     for (const dimension of ["gameplay", "story_world"]) {
       native.run(
         `INSERT INTO media_game_embeddings
@@ -89,12 +92,17 @@ test("publishes generated media and matches for the approved roots through publi
       expect(result.mediaOverview?.statements[0]?.text).toBe(`Overview for ${appid}`);
       expect(result.mediaOverview?.tags[0]).toEqual({ label: "Joy-Con aiming (Switch 2)", slug: "joy-con-aiming-switch-2" });
       expect(result.sources.map((source) => source.appid)).toEqual([appid]);
-      const candidates = PUBLIC_ROOTS.filter((candidate) => candidate !== appid).sort((a, b) => a - b);
+      const candidates = PUBLIC_ROOTS.filter((candidate) => candidate !== appid);
+      // Every other public root ties, and the detail page shows three matches per dimension.
+      const shown = Math.min(DETAIL_MATCHES_PER_DIMENSION, candidates.length);
+      const matched = new Set<number>();
       for (const dimension of ["gameplay", "story_world"]) {
-        expect(result.mediaMatches.filter((match) => match.dimension === dimension)
-          .map((match) => match.matchedGame.appid).sort((a, b) => a - b)).toEqual(candidates);
+        const appids = result.mediaMatches.filter((match) => match.dimension === dimension).map((match) => match.matchedGame.appid);
+        expect(new Set(appids).size).toBe(shown);
+        expect(appids.every((candidate) => candidates.includes(candidate))).toBe(true);
+        for (const candidate of appids) matched.add(candidate);
       }
-      expect(Object.keys(result.mediaMatchPaths).map(Number)).toEqual(candidates);
+      expect(Object.keys(result.mediaMatchPaths).map(Number).sort((a, b) => a - b)).toEqual([...matched].sort((a, b) => a - b));
     }
     for (const appid of PRIVATE_ENTITIES) {
       const result = await detail(appid);
