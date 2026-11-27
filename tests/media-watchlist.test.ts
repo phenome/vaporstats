@@ -1005,8 +1005,9 @@ test("a preview pass keeps single-game titles with a conjunction or a record wor
     [`${ROOT}:preview`]: {
       "ign.com": [{ title: "NO LAW and the cost of running a harbor: a hands-off preview", body }],
       "eurogamer.net": [{ title: "NO LAW beats its own wishlist record", body }],
-      // A list of games is still a multi-game piece.
+      // The outlet's own list of games is still a multi-game piece; news of joining someone else's list is not.
       "kotaku.com": [{ title: "NO LAW leads our list of games to watch in 2027", body }],
+      "pcgamer.com": [{ title: "NO LAW joins Steam's list of most wishlisted games", body }],
     },
     // Fort Harbor is named most in the body, but the title names Warlock first, joined by "x".
     [`${REVIEW}:preview`]: { "ign.com": [{ title: crossover, body: crossoverBody }] },
@@ -1015,6 +1016,7 @@ test("a preview pass keeps single-game titles with a conjunction or a record wor
   expect(run.sources()).toEqual([
     { appid: ROOT, pass: "preview", title: "NO LAW and the cost of running a harbor: a hands-off preview" },
     { appid: ROOT, pass: "preview", title: "NO LAW beats its own wishlist record" },
+    { appid: ROOT, pass: "preview", title: "NO LAW joins Steam's list of most wishlisted games" },
   ]);
   expect(run.rejected().map(({ appid }) => appid)).toEqual([ROOT, REVIEW, WARLOCK].sort((a, b) => a - b));
 });

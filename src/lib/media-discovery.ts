@@ -1022,7 +1022,7 @@ function articleFacts(
  * the cost of magical power: a hands-off preview") and is not a second title.
  */
 const CO_TITLED_PREVIEW = /§\s*(?:and|&)\s+(?!(?:the|a|an|its|their|our|my|more|other)\b)(?:[^\s:–—-]+\s+){1,3}(?:hands?[- ]o(?:n|ff)\s+)?(?:previews?|announcements?)\b/;
-const MULTI_GAME_PREVIEW_TITLE = /\b(round[- ]?up|best games?|games like|versus|vs\.?|comparison|ranking|ranked|top\s+\d+|listicle|lists?\s+of\s+(?:\w+\s+){0,3}games|metacritic)\b/;
+const MULTI_GAME_PREVIEW_TITLE = /\b(round[- ]?up|best games?|games like|versus|vs\.?|comparison|ranking|ranked|top\s+\d+|listicle|(?:our|this|my)\s+lists?\s+of\s+(?:\w+\s+){0,3}games|metacritic)\b/;
 
 /**
  * Why a preview pass refuses an article whose subject is its exact entity, or
