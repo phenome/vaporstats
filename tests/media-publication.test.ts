@@ -7,6 +7,7 @@ import { getMediaGameMatches, MEDIA_MATCH_EMBEDDING } from "../src/lib/media-sim
 import { handleGameDetailRequest, type GameDetailResponseData } from "../src/routes/api.games.$appid.detail";
 import { handleGameHttpRequest } from "../src/routes/games.$game";
 import { handleChildHttpRequest } from "../src/routes/games.$game_.$child";
+import { STEAM_GAMEPLAY_TAGS } from "../src/lib/steam-gameplay-tags";
 import { openMemoryDatabase } from "./support/db";
 
 const CYBERPUNK = 1091500;
@@ -19,6 +20,9 @@ const WARLOCK = 3714800;
 const PUBLIC_ROOTS = [CYBERPUNK, BALDURS_GATE, HADES_II, NO_LAW, WARLOCK];
 const PRIVATE_ENTITIES = [PHANTOM_LIBERTY, OTHER_GAME];
 const DETAIL_MATCHES_PER_DIMENSION = 3;
+const OPEN_WORLD = "1695";
+const FPS = "1663";
+const RPG = "122";
 
 function seedCoverage(native: Database) {
   native.run(`INSERT INTO apps (appid, name, slug, type, is_eligible, is_playable, parent_appid) VALUES
@@ -53,13 +57,25 @@ function seedCoverage(native: Database) {
     // Unpublished candidates rank ahead of the other public roots for Cyberpunk.
     values[0] = 1;
     values[1] = appid === BALDURS_GATE || appid === HADES_II || appid === NO_LAW || appid === WARLOCK ? 1 : 0;
-    for (const dimension of ["gameplay", "story_world"]) {
+    native.run(
+      `INSERT INTO media_game_embeddings
+        (appid, dimension, input_identity, overview_input_identity, model, dimensions, config_version, vector)
+       VALUES (?, 'story_world', ?, ?, ?, ?, ?, ?)`,
+      [appid, `${identity}-story_world`, identity, MEDIA_MATCH_EMBEDDING.model,
+        MEDIA_MATCH_EMBEDDING.dimensions, MEDIA_MATCH_EMBEDDING.configVersion, encodeVector(values)!],
+    );
+    // Gameplay needs no embedding. The same split as above: Cyberpunk and the unpublished
+    // candidates share identical gameplay tags; the other public roots add RPG and stay above the bar.
+    const tags: Array<[string, number]> = [[OPEN_WORLD, 100], [FPS, 50]];
+    if (values[1] === 1) tags.push([RPG, 60]);
+    for (const [order, [sourceId, weight]] of tags.entries()) {
       native.run(
-        `INSERT INTO media_game_embeddings
-          (appid, dimension, input_identity, overview_input_identity, model, dimensions, config_version, vector)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-        [appid, dimension, `${identity}-${dimension}`, identity, MEDIA_MATCH_EMBEDDING.model,
-          MEDIA_MATCH_EMBEDDING.dimensions, MEDIA_MATCH_EMBEDDING.configVersion, encodeVector(values)!],
+        "INSERT OR IGNORE INTO app_facets (facet_group, source_id, name) VALUES ('community_tag', ?, ?)",
+        [sourceId, STEAM_GAMEPLAY_TAGS[sourceId]!.name],
+      );
+      native.run(
+        "INSERT INTO app_facet_memberships (appid, facet_group, source_id, source_order, weight) VALUES (?, 'community_tag', ?, ?, ?)",
+        [appid, sourceId, order, weight],
       );
     }
   }
@@ -97,7 +113,12 @@ test("publishes generated media and matches for the approved roots through publi
       const shown = Math.min(DETAIL_MATCHES_PER_DIMENSION, candidates.length);
       const matched = new Set<number>();
       for (const dimension of ["gameplay", "story_world"]) {
-        const appids = result.mediaMatches.filter((match) => match.dimension === dimension).map((match) => match.matchedGame.appid);
+        const dimensionMatches = result.mediaMatches.filter((match) => match.dimension === dimension);
+        const appids = dimensionMatches.map((match) => match.matchedGame.appid);
+        for (const match of dimensionMatches) {
+          if (dimension === "gameplay") expect(match.sharedTags?.slice(0, 2)).toEqual(["Open World", "FPS"]);
+          else expect(match.sharedTags).toBeUndefined();
+        }
         expect(new Set(appids).size).toBe(shown);
         expect(appids.every((candidate) => candidates.includes(candidate))).toBe(true);
         for (const candidate of appids) matched.add(candidate);
@@ -128,6 +149,7 @@ test("publishes generated media and matches for the approved roots through publi
     for (const id of ["media-overview", "media-sources", "media-matches"]) {
       expect(rootHtml).toContain(`id="${id}"`);
     }
+    expect(rootHtml).toContain("Open World · FPS");
     const childResponse = await handleChildHttpRequest(
       new Request("https://vaporstats.test/games/1091500-cyberpunk-2077/2138330-phantom-liberty"), db,
     );

@@ -1,4 +1,10 @@
-/** Run with Bun from the repository root. Always operates on a disposable backup. */
+/**
+ * Run with Bun from the repository root. Always operates on a disposable backup.
+ *
+ * Replays the 2026-11-25 fixed evaluations. Its match assertions describe the ranking those
+ * evaluations measured, in which both dimensions came from embeddings. ADR 0023 moved
+ * Gameplay & systems to community tags, so run this harness at revision 7a83316.
+ */
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";

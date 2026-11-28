@@ -63,6 +63,21 @@ describe("media methodology page", () => {
     expect(text).toContain("original article");
   });
 
+  test("explains that gameplay compares Steam community tags, story and world compares coverage, and only similar enough games appear", () => {
+    const html = renderToString(React.createElement(MediaMethodologyView));
+    const section = html.slice(html.indexOf('id="media-matches"'), html.indexOf('id="media-discovery-tags"'));
+    const text = section.replace(/<[^>]+>/g, " ").replace(/&amp;/g, "&").replace(/&#x27;/g, "'").replace(/\s+/g, " ");
+    expect(text).toContain("Gameplay & systems compares the Steam community tags");
+    expect(text).toMatch(/genre, viewpoint, and mechanics/);
+    expect(text).toContain("rarer tags");
+    expect(text).toContain("listed only when the overlap is strong enough");
+    expect(text).toContain("shows the tags the two games share");
+    expect(text).toContain("Story & world compares what the coverage describes");
+    expect(text).toContain("Quality judgments, popularity, and technical problems are left out");
+    expect(text).toContain("No outlet made the comparison");
+    expect(text).toContain("Only games with processed coverage can appear");
+  });
+
   test("names the approach without model names, versions or accuracy promises", () => {
     const text = methodologyText();
     expect(text).toContain("language model");

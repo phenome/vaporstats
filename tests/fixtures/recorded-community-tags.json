@@ -1,0 +1,748 @@
+{
+ "recordedOn": "2026-11-28",
+ "source": "Steam IStoreBrowseService/GetItems, include_tag_count 20",
+ "games": [
+  {
+   "appid": 1086940,
+   "name": "Baldur's Gate 3",
+   "tags": [
+    {
+     "tagid": 122,
+     "name": "RPG",
+     "weight": 956
+    },
+    {
+     "tagid": 4747,
+     "name": "Character Customization",
+     "weight": 723
+    },
+    {
+     "tagid": 6426,
+     "name": "Choices Matter",
+     "weight": 707
+    },
+    {
+     "tagid": 4325,
+     "name": "Turn-Based Combat",
+     "weight": 698
+    },
+    {
+     "tagid": 1742,
+     "name": "Story Rich",
+     "weight": 679
+    },
+    {
+     "tagid": 12095,
+     "name": "Sexual Content",
+     "weight": 566
+    },
+    {
+     "tagid": 4474,
+     "name": "CRPG",
+     "weight": 527
+    },
+    {
+     "tagid": 1684,
+     "name": "Fantasy",
+     "weight": 526
+    },
+    {
+     "tagid": 21,
+     "name": "Adventure",
+     "weight": 492
+    },
+    {
+     "tagid": 4947,
+     "name": "Romance",
+     "weight": 489
+    },
+    {
+     "tagid": 3843,
+     "name": "Online Co-Op",
+     "weight": 450
+    },
+    {
+     "tagid": 3859,
+     "name": "Multiplayer",
+     "weight": 434
+    },
+    {
+     "tagid": 6650,
+     "name": "Nudity",
+     "weight": 405
+    },
+    {
+     "tagid": 9,
+     "name": "Strategy",
+     "weight": 393
+    },
+    {
+     "tagid": 4182,
+     "name": "Singleplayer",
+     "weight": 389
+    },
+    {
+     "tagid": 4508,
+     "name": "Co-op Campaign",
+     "weight": 364
+    },
+    {
+     "tagid": 4155,
+     "name": "Class-Based",
+     "weight": 350
+    },
+    {
+     "tagid": 4604,
+     "name": "Dark Fantasy",
+     "weight": 312
+    },
+    {
+     "tagid": 3993,
+     "name": "Combat",
+     "weight": 283
+    },
+    {
+     "tagid": 44868,
+     "name": "LGBTQ+",
+     "weight": 246
+    }
+   ]
+  },
+  {
+   "appid": 1145350,
+   "name": "Hades II",
+   "tags": [
+    {
+     "tagid": 19,
+     "name": "Action",
+     "weight": 793
+    },
+    {
+     "tagid": 1716,
+     "name": "Roguelike",
+     "weight": 761
+    },
+    {
+     "tagid": 3959,
+     "name": "Roguelite",
+     "weight": 724
+    },
+    {
+     "tagid": 1646,
+     "name": "Hack and Slash",
+     "weight": 698
+    },
+    {
+     "tagid": 16094,
+     "name": "Mythology",
+     "weight": 636
+    },
+    {
+     "tagid": 42804,
+     "name": "Action Roguelike",
+     "weight": 628
+    },
+    {
+     "tagid": 7208,
+     "name": "Female Protagonist",
+     "weight": 602
+    },
+    {
+     "tagid": 122,
+     "name": "RPG",
+     "weight": 569
+    },
+    {
+     "tagid": 1720,
+     "name": "Dungeon Crawler",
+     "weight": 540
+    },
+    {
+     "tagid": 4231,
+     "name": "Action RPG",
+     "weight": 500
+    },
+    {
+     "tagid": 1742,
+     "name": "Story Rich",
+     "weight": 477
+    },
+    {
+     "tagid": 492,
+     "name": "Indie",
+     "weight": 461
+    },
+    {
+     "tagid": 4182,
+     "name": "Singleplayer",
+     "weight": 460
+    },
+    {
+     "tagid": 5851,
+     "name": "Isometric",
+     "weight": 458
+    },
+    {
+     "tagid": 6815,
+     "name": "Hand-drawn",
+     "weight": 409
+    },
+    {
+     "tagid": 4166,
+     "name": "Atmospheric",
+     "weight": 356
+    },
+    {
+     "tagid": 4026,
+     "name": "Difficult",
+     "weight": 266
+    },
+    {
+     "tagid": 29482,
+     "name": "Souls-like",
+     "weight": 247
+    },
+    {
+     "tagid": 44868,
+     "name": "LGBTQ+",
+     "weight": 222
+    },
+    {
+     "tagid": 1759,
+     "name": "Perma Death",
+     "weight": 183
+    }
+   ]
+  },
+  {
+   "appid": 1091500,
+   "name": "Cyberpunk 2077",
+   "tags": [
+    {
+     "tagid": 4115,
+     "name": "Cyberpunk",
+     "weight": 872
+    },
+    {
+     "tagid": 1695,
+     "name": "Open World",
+     "weight": 827
+    },
+    {
+     "tagid": 6650,
+     "name": "Nudity",
+     "weight": 731
+    },
+    {
+     "tagid": 122,
+     "name": "RPG",
+     "weight": 670
+    },
+    {
+     "tagid": 4182,
+     "name": "Singleplayer",
+     "weight": 669
+    },
+    {
+     "tagid": 1742,
+     "name": "Story Rich",
+     "weight": 632
+    },
+    {
+     "tagid": 1663,
+     "name": "FPS",
+     "weight": 595
+    },
+    {
+     "tagid": 3942,
+     "name": "Sci-fi",
+     "weight": 593
+    },
+    {
+     "tagid": 4295,
+     "name": "Futuristic",
+     "weight": 582
+    },
+    {
+     "tagid": 3839,
+     "name": "First-Person",
+     "weight": 547
+    },
+    {
+     "tagid": 4166,
+     "name": "Atmospheric",
+     "weight": 503
+    },
+    {
+     "tagid": 3834,
+     "name": "Exploration",
+     "weight": 484
+    },
+    {
+     "tagid": 19,
+     "name": "Action",
+     "weight": 422
+    },
+    {
+     "tagid": 4667,
+     "name": "Violent",
+     "weight": 368
+    },
+    {
+     "tagid": 1756,
+     "name": "Great Soundtrack",
+     "weight": 328
+    },
+    {
+     "tagid": 4231,
+     "name": "Action RPG",
+     "weight": 321
+    },
+    {
+     "tagid": 4747,
+     "name": "Character Customization",
+     "weight": 299
+    },
+    {
+     "tagid": 21,
+     "name": "Adventure",
+     "weight": 297
+    },
+    {
+     "tagid": 9204,
+     "name": "Immersive Sim",
+     "weight": 166
+    },
+    {
+     "tagid": 44868,
+     "name": "LGBTQ+",
+     "weight": 84
+    }
+   ]
+  },
+  {
+   "appid": 3714800,
+   "name": "Warlock: Dungeons & Dragons",
+   "tags": [
+    {
+     "tagid": 19,
+     "name": "Action",
+     "weight": 1181
+    },
+    {
+     "tagid": 21,
+     "name": "Adventure",
+     "weight": 1106
+    },
+    {
+     "tagid": 3834,
+     "name": "Exploration",
+     "weight": 757
+    },
+    {
+     "tagid": 1695,
+     "name": "Open World",
+     "weight": 681
+    },
+    {
+     "tagid": 1742,
+     "name": "Story Rich",
+     "weight": 651
+    },
+    {
+     "tagid": 1684,
+     "name": "Fantasy",
+     "weight": 560
+    },
+    {
+     "tagid": 4345,
+     "name": "Gore",
+     "weight": 560
+    },
+    {
+     "tagid": 4667,
+     "name": "Violent",
+     "weight": 545
+    },
+    {
+     "tagid": 1697,
+     "name": "Third Person",
+     "weight": 545
+    },
+    {
+     "tagid": 7208,
+     "name": "Female Protagonist",
+     "weight": 484
+    },
+    {
+     "tagid": 4166,
+     "name": "Atmospheric",
+     "weight": 454
+    },
+    {
+     "tagid": 4182,
+     "name": "Singleplayer",
+     "weight": 454
+    },
+    {
+     "tagid": 4172,
+     "name": "Medieval",
+     "weight": 424
+    },
+    {
+     "tagid": 3993,
+     "name": "Combat",
+     "weight": 378
+    },
+    {
+     "tagid": 4106,
+     "name": "Action-Adventure",
+     "weight": 333
+    },
+    {
+     "tagid": 5608,
+     "name": "Emotional",
+     "weight": 318
+    },
+    {
+     "tagid": 4608,
+     "name": "Swordplay",
+     "weight": 212
+    },
+    {
+     "tagid": 4604,
+     "name": "Dark Fantasy",
+     "weight": 136
+    },
+    {
+     "tagid": 4057,
+     "name": "Magic",
+     "weight": 121
+    },
+    {
+     "tagid": 44868,
+     "name": "LGBTQ+",
+     "weight": 90
+    }
+   ]
+  },
+  {
+   "appid": 2161710,
+   "name": "NO LAW",
+   "tags": [
+    {
+     "tagid": 122,
+     "name": "RPG",
+     "weight": 781
+    },
+    {
+     "tagid": 4115,
+     "name": "Cyberpunk",
+     "weight": 740
+    },
+    {
+     "tagid": 1695,
+     "name": "Open World",
+     "weight": 703
+    },
+    {
+     "tagid": 19,
+     "name": "Action",
+     "weight": 691
+    },
+    {
+     "tagid": 1663,
+     "name": "FPS",
+     "weight": 687
+    },
+    {
+     "tagid": 4182,
+     "name": "Singleplayer",
+     "weight": 650
+    },
+    {
+     "tagid": 9204,
+     "name": "Immersive Sim",
+     "weight": 605
+    },
+    {
+     "tagid": 1687,
+     "name": "Stealth",
+     "weight": 593
+    },
+    {
+     "tagid": 3839,
+     "name": "First-Person",
+     "weight": 576
+    },
+    {
+     "tagid": 3942,
+     "name": "Sci-fi",
+     "weight": 486
+    },
+    {
+     "tagid": 1742,
+     "name": "Story Rich",
+     "weight": 462
+    },
+    {
+     "tagid": 97070,
+     "name": "Assassins",
+     "weight": 408
+    },
+    {
+     "tagid": 21,
+     "name": "Adventure",
+     "weight": 376
+    },
+    {
+     "tagid": 6869,
+     "name": "Nonlinear",
+     "weight": 368
+    },
+    {
+     "tagid": 6426,
+     "name": "Choices Matter",
+     "weight": 347
+    },
+    {
+     "tagid": 3834,
+     "name": "Exploration",
+     "weight": 335
+    },
+    {
+     "tagid": 1774,
+     "name": "Shooter",
+     "weight": 314
+    },
+    {
+     "tagid": 8369,
+     "name": "Investigation",
+     "weight": 306
+    },
+    {
+     "tagid": 4295,
+     "name": "Futuristic",
+     "weight": 294
+    },
+    {
+     "tagid": 5613,
+     "name": "Detective",
+     "weight": 269
+    }
+   ]
+  },
+  {
+   "appid": 588650,
+   "name": "Dead Cells",
+   "tags": [
+    {
+     "tagid": 21,
+     "name": "Adventure",
+     "weight": 620
+    },
+    {
+     "tagid": 1716,
+     "name": "Roguelike",
+     "weight": 592
+    },
+    {
+     "tagid": 1628,
+     "name": "Metroidvania",
+     "weight": 588
+    },
+    {
+     "tagid": 42804,
+     "name": "Action Roguelike",
+     "weight": 588
+    },
+    {
+     "tagid": 3964,
+     "name": "Pixel Graphics",
+     "weight": 588
+    },
+    {
+     "tagid": 3871,
+     "name": "2D",
+     "weight": 583
+    },
+    {
+     "tagid": 3959,
+     "name": "Roguelite",
+     "weight": 563
+    },
+    {
+     "tagid": 29482,
+     "name": "Souls-like",
+     "weight": 560
+    },
+    {
+     "tagid": 1646,
+     "name": "Hack and Slash",
+     "weight": 544
+    },
+    {
+     "tagid": 4711,
+     "name": "Replay Value",
+     "weight": 543
+    },
+    {
+     "tagid": 1625,
+     "name": "Platformer",
+     "weight": 538
+    },
+    {
+     "tagid": 4182,
+     "name": "Singleplayer",
+     "weight": 538
+    },
+    {
+     "tagid": 19,
+     "name": "Action",
+     "weight": 528
+    },
+    {
+     "tagid": 4604,
+     "name": "Dark Fantasy",
+     "weight": 516
+    },
+    {
+     "tagid": 4166,
+     "name": "Atmospheric",
+     "weight": 513
+    },
+    {
+     "tagid": 5125,
+     "name": "Procedural Generation",
+     "weight": 511
+    },
+    {
+     "tagid": 4136,
+     "name": "Funny",
+     "weight": 504
+    },
+    {
+     "tagid": 4026,
+     "name": "Difficult",
+     "weight": 292
+    },
+    {
+     "tagid": 492,
+     "name": "Indie",
+     "weight": 204
+    },
+    {
+     "tagid": 1756,
+     "name": "Great Soundtrack",
+     "weight": 77
+    }
+   ]
+  },
+  {
+   "appid": 1920780,
+   "name": "Stray Gods: The Roleplaying Musical",
+   "tags": [
+    {
+     "tagid": 11014,
+     "name": "Interactive Fiction",
+     "weight": 612
+    },
+    {
+     "tagid": 1742,
+     "name": "Story Rich",
+     "weight": 594
+    },
+    {
+     "tagid": 6426,
+     "name": "Choices Matter",
+     "weight": 587
+    },
+    {
+     "tagid": 1621,
+     "name": "Music",
+     "weight": 580
+    },
+    {
+     "tagid": 7208,
+     "name": "Female Protagonist",
+     "weight": 571
+    },
+    {
+     "tagid": 4182,
+     "name": "Singleplayer",
+     "weight": 538
+    },
+    {
+     "tagid": 6971,
+     "name": "Multiple Endings",
+     "weight": 529
+    },
+    {
+     "tagid": 16094,
+     "name": "Mythology",
+     "weight": 516
+    },
+    {
+     "tagid": 4166,
+     "name": "Atmospheric",
+     "weight": 509
+    },
+    {
+     "tagid": 4947,
+     "name": "Romance",
+     "weight": 509
+    },
+    {
+     "tagid": 4486,
+     "name": "Choose Your Own Adventure",
+     "weight": 504
+    },
+    {
+     "tagid": 21,
+     "name": "Adventure",
+     "weight": 504
+    },
+    {
+     "tagid": 1751,
+     "name": "Comic Book",
+     "weight": 463
+    },
+    {
+     "tagid": 4252,
+     "name": "Stylized",
+     "weight": 456
+    },
+    {
+     "tagid": 6815,
+     "name": "Hand-drawn",
+     "weight": 451
+    },
+    {
+     "tagid": 1684,
+     "name": "Fantasy",
+     "weight": 442
+    },
+    {
+     "tagid": 4145,
+     "name": "Cinematic",
+     "weight": 433
+    },
+    {
+     "tagid": 1719,
+     "name": "Comedy",
+     "weight": 410
+    },
+    {
+     "tagid": 4136,
+     "name": "Funny",
+     "weight": 399
+    },
+    {
+     "tagid": 3799,
+     "name": "Visual Novel",
+     "weight": 385
+    }
+   ]
+  }
+ ]
+}
