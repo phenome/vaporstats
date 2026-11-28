@@ -156,7 +156,7 @@ export function MediaOverviewSection({
   return (
     <section id="media-overview" aria-labelledby="media-overview-title" className="min-w-0 space-y-4 rounded-lg border border-[#323339] bg-[#1c1d22] p-4 sm:p-7">
       <div className="flex flex-wrap items-baseline justify-between gap-2">
-        <h2 id="media-overview-title" className="font-serif text-3xl font-semibold tracking-tight text-zinc-100">
+        <h2 id="media-overview-title" className="font-mono text-3xl font-semibold tracking-tight text-zinc-100">
           Overview
         </h2>
         <AppLink
