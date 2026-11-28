@@ -15,7 +15,7 @@ The pool was the five published games (Baldur's Gate 3, Warlock: Dungeons & Drag
 | Pair | Live gameplay score | Tag overlap | Strongest shared tags |
 |---|---|---|---|
 | Cyberpunk 2077 – NO LAW | 0.757 | 0.685 | Open World, FPS, RPG |
-| Dead Cells – Hades II (reference) | 0.768 | 0.551 | Hack and Slash, Action Roguelike, Roguelike |
+| Dead Cells – Hades II (reference) | 0.768 | 0.589 | Hack and Slash, Action Roguelike, Roguelike |
 | Cyberpunk 2077 – Warlock | not returned | 0.489 | Open World, Exploration, Action |
 | NO LAW – Warlock | 0.683 | 0.326 | Open World, Exploration, Action |
 | Baldur's Gate 3 – Cyberpunk 2077 | 0.742 | 0.209 | RPG, Character Customization, Adventure |
@@ -41,6 +41,6 @@ Direct tag overlap needs no provider call, separates the pairs, and names the ta
 
 ## Sources
 
-Prototype source, inputs and report: branch [`prototype/gameplay-tag-match`](https://github.com/phenome/vaporstats/tree/prototype/gameplay-tag-match/scripts/prototypes/gameplay-tag-match). The recorded community tags of the seven games are kept as a test fixture, [`tests/fixtures/recorded-community-tags.json`](../../tests/fixtures/recorded-community-tags.json), and `tests/media-gameplay-tags.test.ts` reproduces every pair's tag overlap score from it with the checked-in gameplay tag table ([`tests/fixtures/gameplay-tag-expected-scores.txt`](../../tests/fixtures/gameplay-tag-expected-scores.txt)). With that table's classification and Steam-wide counts, Dead Cells – Hades II scores 0.589 rather than the prototype's 0.551; every other pair above agrees to three decimals, and no pair changes side of the bar.
+Prototype source, inputs and report: branch [`prototype/gameplay-tag-match`](https://github.com/phenome/vaporstats/tree/prototype/gameplay-tag-match/scripts/prototypes/gameplay-tag-match). The recorded community tags of the seven games are kept as a test fixture, [`tests/fixtures/recorded-community-tags.json`](../../tests/fixtures/recorded-community-tags.json), and `tests/media-gameplay-tags.test.ts` reproduces every pair's tag overlap score from it with the checked-in gameplay tag table ([`tests/fixtures/gameplay-tag-expected-scores.txt`](../../tests/fixtures/gameplay-tag-expected-scores.txt)). The table above uses that checked-in gameplay tag table. The prototype classified only the 75 tags of these seven games, so its Dead Cells – Hades II score was 0.551; every other pair agrees to three decimals, and no pair changes side of the bar.
 
 The gameplay cases of the [2026-11-25 fixed ranking evaluation](2026-11-25-fixed-ranking.md) (R01 and the gameplay half of R03 and R11) describe the superseded embedding ranking.
