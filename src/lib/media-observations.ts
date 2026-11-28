@@ -190,6 +190,10 @@ function rejectedArticleEvidence(
     const evidence = readClaimPreviewEvidence(source.previewEvidence);
     if (!evidence) return "preview evidence has no valid claim scope or attribution";
     if (evidence.scope === "developer statement" && !contains(quote, evidence.attribution)) return "developer attribution is absent from the supporting excerpt";
+    if ((evidence.scope === "demo" || evidence.scope === "hands-on preview")
+      && /\b(?:said|says|told|explained|confirmed|according to)\b/i.test(quote)) {
+      return "reported speech does not establish witnessed play or demonstration";
+    }
     if (evidence.scope === "hands-on preview" && !previewContext.handsOn) return "source does not establish firsthand play";
   }
   const timing = includeTechnicalTiming ? extractTechnicalTiming(item, quote) : undefined;

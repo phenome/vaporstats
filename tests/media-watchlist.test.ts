@@ -1274,6 +1274,7 @@ test.each([
   "‘I played the game for hours.’",
   "'I played the game for hours.'",
   "“I played the game for hours.”",
+  "‘After testing both players’ builds, I played the game for hours.’",
   "</p><blockquote>I played the game for hours.</blockquote><p>",
 ])("an RPG Site recap of an IGN interview does not claim hands-on from %s", async (quote) => {
   const database = fixture();
@@ -1305,6 +1306,10 @@ test("one written preview keeps played, demonstrated and developer-reported clai
     { ...mediaObservation(ROOT, "play", "finding", "Players select gear before leaving port.", play), previewEvidence: { scope: "hands-on preview" } },
     { ...mediaObservation(ROOT, "demo", "finding", "Players navigate flooded streets.", demo), previewEvidence: { scope: "demo" } },
     { ...mediaObservation(ROOT, "plan", "finding", "The team plans to add optional rescue missions.", plan), previewEvidence: { scope: "developer statement", attribution: "Mira Dane" } },
+    ...["demo", "hands-on preview"].map((scope) => ({
+      ...mediaObservation(ROOT, "misattributed-" + scope, "finding", "Optional rescue missions are available.", plan),
+      previewEvidence: { scope },
+    })),
     { ...mediaObservation(ROOT, "false-speaker", "finding", "Another director plans to add optional rescue missions.", plan), previewEvidence: { scope: "developer statement", attribution: "Other Director" } },
     { ...mediaObservation(ROOT, "dev-assessment", "pro", "Rescue missions are satisfying.", plan), previewEvidence: { scope: "developer statement", attribution: "Mira Dane" } },
   ];

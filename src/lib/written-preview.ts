@@ -30,7 +30,7 @@ const FIRST_PERSON_INTERVIEW = /\b(?:in our interview|(?:I|we) (?:interviewed|sp
 
 export function writtenPreviewEvidence(outlet: MediaOutlet, title: string, body: string) {
   // Exclude quoted first-person accounts when looking for what the journalist did.
-  const withoutQuotes = (text: string) => text.replace(/“[^”]*”|"[^"]*"|‘.*?’(?![\p{L}\p{N}])|(?<![\p{L}\p{N}])'.*?'(?![\p{L}\p{N}])/gu, " ");
+  const withoutQuotes = (text: string) => text.replace(/“[^”]*”|"[^"]*"|‘.*?(?!(?<=s)’\s+\p{Ll})’(?![\p{L}\p{N}])|(?<![\p{L}\p{N}])'.*?(?!(?<=s)'\s+\p{Ll})'(?![\p{L}\p{N}])/gu, " ");
   const lead = withoutQuotes(body).slice(0, 4_000);
   const headline = withoutQuotes(title);
   const context = `${headline} ${lead}`;
