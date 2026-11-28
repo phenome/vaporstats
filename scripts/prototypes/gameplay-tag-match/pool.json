@@ -1,0 +1,818 @@
+{
+ "catalogGames": 192269,
+ "games": [
+  {
+   "appid": 1086940,
+   "name": "Baldur's Gate 3",
+   "short": "BG3",
+   "inPool": true,
+   "coverage": "Baldur's Gate 3 is a Dungeons & Dragons campaign on the Sword Coast in Faerûn, where your traveling party's personal quests become part of your story. Companions have more agency than typical RPG party members, and their personal quests tie into the main quest. Combat is turn-based, while exploration is real-time. Spells interact with the battlefield, so one can set up a combined effect with a follow-up spell.",
+   "tags": [
+    {
+     "name": "RPG",
+     "weight": 956,
+     "catalogCount": 37899
+    },
+    {
+     "name": "Character Customization",
+     "weight": 723,
+     "catalogCount": 14152
+    },
+    {
+     "name": "Choices Matter",
+     "weight": 707,
+     "catalogCount": 18780
+    },
+    {
+     "name": "Turn-Based Combat",
+     "weight": 698,
+     "catalogCount": 9599
+    },
+    {
+     "name": "Story Rich",
+     "weight": 679,
+     "catalogCount": 34710
+    },
+    {
+     "name": "Sexual Content",
+     "weight": 566,
+     "catalogCount": 3769
+    },
+    {
+     "name": "CRPG",
+     "weight": 527,
+     "catalogCount": 2831
+    },
+    {
+     "name": "Fantasy",
+     "weight": 526,
+     "catalogCount": 31987
+    },
+    {
+     "name": "Adventure",
+     "weight": 492,
+     "catalogCount": 76967
+    },
+    {
+     "name": "Romance",
+     "weight": 489,
+     "catalogCount": 5438
+    },
+    {
+     "name": "Online Co-Op",
+     "weight": 450,
+     "catalogCount": 12348
+    },
+    {
+     "name": "Multiplayer",
+     "weight": 434,
+     "catalogCount": 27811
+    },
+    {
+     "name": "Nudity",
+     "weight": 405,
+     "catalogCount": 3054
+    },
+    {
+     "name": "Strategy",
+     "weight": 393,
+     "catalogCount": 45688
+    },
+    {
+     "name": "Singleplayer",
+     "weight": 389,
+     "catalogCount": 131397
+    },
+    {
+     "name": "Co-op Campaign",
+     "weight": 364,
+     "catalogCount": 1574
+    },
+    {
+     "name": "Class-Based",
+     "weight": 350,
+     "catalogCount": 2631
+    },
+    {
+     "name": "Dark Fantasy",
+     "weight": 312,
+     "catalogCount": 10531
+    },
+    {
+     "name": "Combat",
+     "weight": 283,
+     "catalogCount": 26798
+    },
+    {
+     "name": "LGBTQ+",
+     "weight": 246,
+     "catalogCount": 3527
+    }
+   ]
+  },
+  {
+   "appid": 3714800,
+   "name": "Warlock: Dungeons & Dragons",
+   "short": "Warlock",
+   "inPool": true,
+   "coverage": "Warlock is set in Darkon, one of Ravenloft's Domains of Dread, according to a non-hands-on preview. The preview adds that Eldritch Blast will have additional utility as an exploration tool.",
+   "tags": [
+    {
+     "name": "Action",
+     "weight": 1181,
+     "catalogCount": 81810
+    },
+    {
+     "name": "Adventure",
+     "weight": 1106,
+     "catalogCount": 76967
+    },
+    {
+     "name": "Exploration",
+     "weight": 757,
+     "catalogCount": 40037
+    },
+    {
+     "name": "Open World",
+     "weight": 681,
+     "catalogCount": 14624
+    },
+    {
+     "name": "Story Rich",
+     "weight": 651,
+     "catalogCount": 34710
+    },
+    {
+     "name": "Fantasy",
+     "weight": 560,
+     "catalogCount": 31987
+    },
+    {
+     "name": "Gore",
+     "weight": 560,
+     "catalogCount": 9038
+    },
+    {
+     "name": "Violent",
+     "weight": 545,
+     "catalogCount": 10255
+    },
+    {
+     "name": "Third Person",
+     "weight": 545,
+     "catalogCount": 20553
+    },
+    {
+     "name": "Female Protagonist",
+     "weight": 484,
+     "catalogCount": 16318
+    },
+    {
+     "name": "Atmospheric",
+     "weight": 454,
+     "catalogCount": 44732
+    },
+    {
+     "name": "Singleplayer",
+     "weight": 454,
+     "catalogCount": 131397
+    },
+    {
+     "name": "Medieval",
+     "weight": 424,
+     "catalogCount": 10834
+    },
+    {
+     "name": "Combat",
+     "weight": 378,
+     "catalogCount": 26798
+    },
+    {
+     "name": "Action-Adventure",
+     "weight": 333,
+     "catalogCount": 27048
+    },
+    {
+     "name": "Emotional",
+     "weight": 318,
+     "catalogCount": 9365
+    },
+    {
+     "name": "Swordplay",
+     "weight": 212,
+     "catalogCount": 2068
+    },
+    {
+     "name": "Dark Fantasy",
+     "weight": 136,
+     "catalogCount": 10531
+    },
+    {
+     "name": "Magic",
+     "weight": 121,
+     "catalogCount": 12504
+    },
+    {
+     "name": "LGBTQ+",
+     "weight": 90,
+     "catalogCount": 3527
+    }
+   ]
+  },
+  {
+   "appid": 1145350,
+   "name": "Hades II",
+   "short": "Hades II",
+   "inPool": true,
+   "coverage": "Hades II casts you as Melinoë, a young woman raised by Hecate, the witch of the Crossroads. Her fight stems from urgent necessity rather than rebellion, and you fight your way down through the underworld to confront Chronos, the Titan of Time. Each run, divine boons from the gods of Olympus shape your build. In the Early Access build, clearing a room lets you choose the next from doors showing a god's gift or a resource reward. Post-game play adds challenge runs, extra upgrade paths and an extended endgame. Melinoë plays in a more considered and cerebral way than Zagreus, who relied on rushdown-style aggression. The game has two distinct paths, each with its own bosses, enemies and storylines.",
+   "tags": [
+    {
+     "name": "Action",
+     "weight": 793,
+     "catalogCount": 81810
+    },
+    {
+     "name": "Roguelike",
+     "weight": 761,
+     "catalogCount": 17083
+    },
+    {
+     "name": "Roguelite",
+     "weight": 724,
+     "catalogCount": 17226
+    },
+    {
+     "name": "Hack and Slash",
+     "weight": 698,
+     "catalogCount": 8159
+    },
+    {
+     "name": "Mythology",
+     "weight": 636,
+     "catalogCount": 3420
+    },
+    {
+     "name": "Action Roguelike",
+     "weight": 628,
+     "catalogCount": 12183
+    },
+    {
+     "name": "Female Protagonist",
+     "weight": 602,
+     "catalogCount": 16318
+    },
+    {
+     "name": "RPG",
+     "weight": 569,
+     "catalogCount": 37899
+    },
+    {
+     "name": "Dungeon Crawler",
+     "weight": 540,
+     "catalogCount": 8137
+    },
+    {
+     "name": "Action RPG",
+     "weight": 500,
+     "catalogCount": 11760
+    },
+    {
+     "name": "Story Rich",
+     "weight": 477,
+     "catalogCount": 34710
+    },
+    {
+     "name": "Indie",
+     "weight": 461,
+     "catalogCount": 109131
+    },
+    {
+     "name": "Singleplayer",
+     "weight": 460,
+     "catalogCount": 131397
+    },
+    {
+     "name": "Isometric",
+     "weight": 458,
+     "catalogCount": 6613
+    },
+    {
+     "name": "Hand-drawn",
+     "weight": 409,
+     "catalogCount": 12909
+    },
+    {
+     "name": "Atmospheric",
+     "weight": 356,
+     "catalogCount": 44732
+    },
+    {
+     "name": "Difficult",
+     "weight": 266,
+     "catalogCount": 10806
+    },
+    {
+     "name": "Souls-like",
+     "weight": 247,
+     "catalogCount": 3379
+    },
+    {
+     "name": "LGBTQ+",
+     "weight": 222,
+     "catalogCount": 3527
+    },
+    {
+     "name": "Perma Death",
+     "weight": 183,
+     "catalogCount": 4863
+    }
+   ]
+  },
+  {
+   "appid": 1091500,
+   "name": "Cyberpunk 2077",
+   "short": "Cyberpunk",
+   "inPool": true,
+   "coverage": "Cyberpunk 2077 follows V through Night City, which is dense, diverse, and consistently beautiful, and its central questline is surprisingly short but compelling. Your confrontational relationship with Johnny Silverhand anchors the story. Your choices have a major impact on V's story, and completing optional character stories can change how the main story ends. Several boss battles are tedious, though. Many optional quests come through phone calls, so you often don't need to seek out quest givers. The main story took about 20 hours to finish.",
+   "tags": [
+    {
+     "name": "Cyberpunk",
+     "weight": 872,
+     "catalogCount": 4988
+    },
+    {
+     "name": "Open World",
+     "weight": 827,
+     "catalogCount": 14624
+    },
+    {
+     "name": "Nudity",
+     "weight": 731,
+     "catalogCount": 3054
+    },
+    {
+     "name": "RPG",
+     "weight": 670,
+     "catalogCount": 37899
+    },
+    {
+     "name": "Singleplayer",
+     "weight": 669,
+     "catalogCount": 131397
+    },
+    {
+     "name": "Story Rich",
+     "weight": 632,
+     "catalogCount": 34710
+    },
+    {
+     "name": "FPS",
+     "weight": 595,
+     "catalogCount": 11850
+    },
+    {
+     "name": "Sci-fi",
+     "weight": 593,
+     "catalogCount": 22069
+    },
+    {
+     "name": "Futuristic",
+     "weight": 582,
+     "catalogCount": 9856
+    },
+    {
+     "name": "First-Person",
+     "weight": 547,
+     "catalogCount": 34991
+    },
+    {
+     "name": "Atmospheric",
+     "weight": 503,
+     "catalogCount": 44732
+    },
+    {
+     "name": "Exploration",
+     "weight": 484,
+     "catalogCount": 40037
+    },
+    {
+     "name": "Action",
+     "weight": 422,
+     "catalogCount": 81810
+    },
+    {
+     "name": "Violent",
+     "weight": 368,
+     "catalogCount": 10255
+    },
+    {
+     "name": "Great Soundtrack",
+     "weight": 328,
+     "catalogCount": 4417
+    },
+    {
+     "name": "Action RPG",
+     "weight": 321,
+     "catalogCount": 11760
+    },
+    {
+     "name": "Character Customization",
+     "weight": 299,
+     "catalogCount": 14152
+    },
+    {
+     "name": "Adventure",
+     "weight": 297,
+     "catalogCount": 76967
+    },
+    {
+     "name": "Immersive Sim",
+     "weight": 166,
+     "catalogCount": 10875
+    },
+    {
+     "name": "LGBTQ+",
+     "weight": 84,
+     "catalogCount": 3527
+    }
+   ]
+  },
+  {
+   "appid": 2161710,
+   "name": "NO LAW",
+   "short": "NO LAW",
+   "inPool": true,
+   "coverage": "No Law is an upcoming RPG set in Port Desire, a cyber-noir setting (hands-off preview), and its main character, Grey Harker, is a gruff and thorough detective. A demo showed multiple ways to infiltrate an apartment complex to find a missing informant, and you can taser sleeping enemies as a non-lethal option. The more you lean into violence, the more citizens of Port Desire come to fear you.",
+   "tags": [
+    {
+     "name": "RPG",
+     "weight": 781,
+     "catalogCount": 37899
+    },
+    {
+     "name": "Cyberpunk",
+     "weight": 740,
+     "catalogCount": 4988
+    },
+    {
+     "name": "Open World",
+     "weight": 703,
+     "catalogCount": 14624
+    },
+    {
+     "name": "Action",
+     "weight": 691,
+     "catalogCount": 81810
+    },
+    {
+     "name": "FPS",
+     "weight": 687,
+     "catalogCount": 11850
+    },
+    {
+     "name": "Singleplayer",
+     "weight": 650,
+     "catalogCount": 131397
+    },
+    {
+     "name": "Immersive Sim",
+     "weight": 605,
+     "catalogCount": 10875
+    },
+    {
+     "name": "Stealth",
+     "weight": 593,
+     "catalogCount": 6347
+    },
+    {
+     "name": "First-Person",
+     "weight": 576,
+     "catalogCount": 34991
+    },
+    {
+     "name": "Sci-fi",
+     "weight": 486,
+     "catalogCount": 22069
+    },
+    {
+     "name": "Story Rich",
+     "weight": 462,
+     "catalogCount": 34710
+    },
+    {
+     "name": "Assassins",
+     "weight": 408,
+     "catalogCount": 842
+    },
+    {
+     "name": "Adventure",
+     "weight": 376,
+     "catalogCount": 76967
+    },
+    {
+     "name": "Nonlinear",
+     "weight": 368,
+     "catalogCount": 4955
+    },
+    {
+     "name": "Choices Matter",
+     "weight": 347,
+     "catalogCount": 18780
+    },
+    {
+     "name": "Exploration",
+     "weight": 335,
+     "catalogCount": 40037
+    },
+    {
+     "name": "Shooter",
+     "weight": 314,
+     "catalogCount": 21011
+    },
+    {
+     "name": "Investigation",
+     "weight": 306,
+     "catalogCount": 6661
+    },
+    {
+     "name": "Futuristic",
+     "weight": 294,
+     "catalogCount": 9856
+    },
+    {
+     "name": "Detective",
+     "weight": 269,
+     "catalogCount": 5446
+    }
+   ]
+  },
+  {
+   "appid": 588650,
+   "name": "Dead Cells",
+   "short": "DeadCells",
+   "inPool": false,
+   "coverage": "",
+   "tags": [
+    {
+     "name": "Adventure",
+     "weight": 620,
+     "catalogCount": 76967
+    },
+    {
+     "name": "Roguelike",
+     "weight": 592,
+     "catalogCount": 17083
+    },
+    {
+     "name": "Metroidvania",
+     "weight": 588,
+     "catalogCount": 3479
+    },
+    {
+     "name": "Action Roguelike",
+     "weight": 588,
+     "catalogCount": 12183
+    },
+    {
+     "name": "Pixel Graphics",
+     "weight": 588,
+     "catalogCount": 36786
+    },
+    {
+     "name": "2D",
+     "weight": 583,
+     "catalogCount": 71617
+    },
+    {
+     "name": "Roguelite",
+     "weight": 563,
+     "catalogCount": 17226
+    },
+    {
+     "name": "Souls-like",
+     "weight": 560,
+     "catalogCount": 3379
+    },
+    {
+     "name": "Hack and Slash",
+     "weight": 544,
+     "catalogCount": 8159
+    },
+    {
+     "name": "Replay Value",
+     "weight": 543,
+     "catalogCount": 5618
+    },
+    {
+     "name": "Platformer",
+     "weight": 538,
+     "catalogCount": 18631
+    },
+    {
+     "name": "Singleplayer",
+     "weight": 538,
+     "catalogCount": 131397
+    },
+    {
+     "name": "Action",
+     "weight": 528,
+     "catalogCount": 81810
+    },
+    {
+     "name": "Dark Fantasy",
+     "weight": 516,
+     "catalogCount": 10531
+    },
+    {
+     "name": "Atmospheric",
+     "weight": 513,
+     "catalogCount": 44732
+    },
+    {
+     "name": "Procedural Generation",
+     "weight": 511,
+     "catalogCount": 11457
+    },
+    {
+     "name": "Funny",
+     "weight": 504,
+     "catalogCount": 25223
+    },
+    {
+     "name": "Difficult",
+     "weight": 292,
+     "catalogCount": 10806
+    },
+    {
+     "name": "Indie",
+     "weight": 204,
+     "catalogCount": 109131
+    },
+    {
+     "name": "Great Soundtrack",
+     "weight": 77,
+     "catalogCount": 4417
+    }
+   ]
+  },
+  {
+   "appid": 1920780,
+   "name": "Stray Gods: The Roleplaying Musical",
+   "short": "StrayGods",
+   "inPool": false,
+   "coverage": "",
+   "tags": [
+    {
+     "name": "Interactive Fiction",
+     "weight": 612,
+     "catalogCount": 9485
+    },
+    {
+     "name": "Story Rich",
+     "weight": 594,
+     "catalogCount": 34710
+    },
+    {
+     "name": "Choices Matter",
+     "weight": 587,
+     "catalogCount": 18780
+    },
+    {
+     "name": "Music",
+     "weight": 580,
+     "catalogCount": 2092
+    },
+    {
+     "name": "Female Protagonist",
+     "weight": 571,
+     "catalogCount": 16318
+    },
+    {
+     "name": "Singleplayer",
+     "weight": 538,
+     "catalogCount": 131397
+    },
+    {
+     "name": "Multiple Endings",
+     "weight": 529,
+     "catalogCount": 16239
+    },
+    {
+     "name": "Mythology",
+     "weight": 516,
+     "catalogCount": 3420
+    },
+    {
+     "name": "Atmospheric",
+     "weight": 509,
+     "catalogCount": 44732
+    },
+    {
+     "name": "Romance",
+     "weight": 509,
+     "catalogCount": 5438
+    },
+    {
+     "name": "Choose Your Own Adventure",
+     "weight": 504,
+     "catalogCount": 8731
+    },
+    {
+     "name": "Adventure",
+     "weight": 504,
+     "catalogCount": 76967
+    },
+    {
+     "name": "Comic Book",
+     "weight": 463,
+     "catalogCount": 3625
+    },
+    {
+     "name": "Stylized",
+     "weight": 456,
+     "catalogCount": 28485
+    },
+    {
+     "name": "Hand-drawn",
+     "weight": 451,
+     "catalogCount": 12909
+    },
+    {
+     "name": "Fantasy",
+     "weight": 442,
+     "catalogCount": 31987
+    },
+    {
+     "name": "Cinematic",
+     "weight": 433,
+     "catalogCount": 6187
+    },
+    {
+     "name": "Comedy",
+     "weight": 410,
+     "catalogCount": 15517
+    },
+    {
+     "name": "Funny",
+     "weight": 399,
+     "catalogCount": 25223
+    },
+    {
+     "name": "Visual Novel",
+     "weight": 385,
+     "catalogCount": 12956
+    }
+   ]
+  }
+ ],
+ "live": {
+  "1086940-3714800": {
+   "gameplay": 0.753,
+   "story": 0.734
+  },
+  "1091500-2161710": {
+   "gameplay": 0.757,
+   "story": 0.727
+  },
+  "1086940-1091500": {
+   "gameplay": 0.742,
+   "story": 0.675
+  },
+  "1086940-1145350": {
+   "gameplay": 0.74,
+   "story": 0.76
+  },
+  "1091500-1145350": {
+   "gameplay": 0.739,
+   "story": 0.652
+  },
+  "1145350-2161710": {
+   "gameplay": 0.704,
+   "story": 0.68
+  },
+  "1086940-2161710": {
+   "gameplay": 0.697,
+   "story": 0.68
+  },
+  "1145350-3714800": {
+   "gameplay": 0.687,
+   "story": 0.677
+  },
+  "2161710-3714800": {
+   "gameplay": 0.683,
+   "story": 0.713
+  },
+  "1091500-3714800": {
+   "gameplay": null,
+   "story": null
+  },
+  "588650-1145350": {
+   "gameplay": 0.768,
+   "story": 0.713
+  },
+  "1145350-1920780": {
+   "gameplay": 0.736,
+   "story": 0.74
+  }
+ }
+}

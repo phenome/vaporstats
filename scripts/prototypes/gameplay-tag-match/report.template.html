@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PROTOTYPE · Gameplay match grounding</title>
+<style>
+  :root { --bg:#0c0c0e; --panel:#151518; --line:#2a2a30; --text:#e7e7ea; --dim:#8b8b94; --accent:#f97316; }
+  @media (prefers-color-scheme: light) { :root { --bg:#fafafa; --panel:#fff; --line:#e2e2e6; --text:#18181b; --dim:#71717a; --accent:#c2410c; } }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:14px/1.5 system-ui, sans-serif; }
+  main { max-width:1040px; margin:0 auto; padding:24px 16px 64px; }
+  h1 { font-size:20px; margin:0 0 4px; }
+  h2 { font-size:15px; margin:32px 0 8px; }
+  p { margin:6px 0; max-width:74ch; }
+  .tag { display:inline-block; font:11px ui-monospace, monospace; text-transform:uppercase; letter-spacing:.06em; color:var(--accent); border:1px solid var(--accent); padding:1px 6px; border-radius:3px; margin-bottom:10px; }
+  .dim { color:var(--dim); }
+  .tabs { display:flex; flex-wrap:wrap; gap:6px; margin:14px 0 8px; }
+  button { font:inherit; color:var(--text); background:var(--panel); border:1px solid var(--line); border-radius:4px; padding:6px 10px; cursor:pointer; }
+  button[aria-pressed="true"] { border-color:var(--accent); color:var(--accent); }
+  .controls { display:flex; flex-wrap:wrap; align-items:center; gap:10px 20px; margin:12px 0; padding:12px; background:var(--panel); border:1px solid var(--line); border-radius:6px; }
+  input[type=range] { width:260px; accent-color:var(--accent); }
+  .grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(300px, 1fr)); gap:10px; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:6px; padding:12px; }
+  .card h3 { margin:0 0 8px; font-size:14px; }
+  .row { display:grid; grid-template-columns:1fr auto; gap:2px 10px; padding:4px 0; border-top:1px solid var(--line); }
+  .row.off { opacity:.42; }
+  .row .why { grid-column:1 / -1; font-size:12px; color:var(--dim); }
+  .score { font:12px ui-monospace, monospace; }
+  .none { color:var(--dim); font-style:italic; padding:4px 0; border-top:1px solid var(--line); }
+  .scroll { overflow-x:auto; }
+  table { border-collapse:collapse; font:12px ui-monospace, monospace; }
+  th, td { border:1px solid var(--line); padding:5px 8px; text-align:right; white-space:nowrap; }
+  th:first-child { text-align:left; }
+  td.off { color:var(--dim); }
+  td.on { color:var(--accent); font-weight:600; }
+  pre { margin:0; white-space:pre-wrap; font:12px/1.5 ui-monospace, monospace; color:var(--dim); }
+</style>
+</head>
+<body>
+<main>
+  <span class="tag">Prototype · throwaway</span>
+  <h1>Grounding the Gameplay &amp; systems match on Steam community tags</h1>
+  <p>The question: if the gameplay match reads a game's Steam community tags, does the pool come out in an order a player would agree with, and is there a bar below which a game should not be listed at all?</p>
+  <p class="dim">Pick a scoring approach, then move the bar. Each card shows what that game's page would list: at most three games, and only those at or above the bar.</p>
+
+  <div class="tabs" id="tabs"></div>
+  <p id="note" class="dim"></p>
+  <div class="controls">
+    <label>Bar to be listed <input type="range" id="bar" min="0" max="1" step="0.005"> <span class="score" id="barValue"></span></label>
+    <label><input type="checkbox" id="refs"> Include the two reference games as candidates</label>
+  </div>
+
+  <h2>What each page would list</h2>
+  <div class="grid" id="cards"></div>
+
+  <h2>Every pair</h2>
+  <div class="scroll"><table id="matrix"></table></div>
+
+  <h2>Gameplay tags per game</h2>
+  <div class="grid" id="profiles"></div>
+</main>
+<script>
+const DATA = /*DATA*/null;
+const state = { variant: "tags-rarity", bars: {}, refs: false };
+for (const variant of DATA.variants) state.bars[variant.id] = variant.defaultBar;
+const key = (a, b) => [a.appid, b.appid].sort((x, y) => x - y).join("-");
+const el = (tag, attrs = {}, text) => { const node = document.createElement(tag); for (const [k, v] of Object.entries(attrs)) node.setAttribute(k, v); if (text !== undefined) node.textContent = text; return node; };
+const format = (score) => score === null || score === undefined ? "n/a" : score.toFixed(3);
+
+function render() {
+  const variant = DATA.variants.find((item) => item.id === state.variant);
+  const bar = state.bars[variant.id];
+  const tabs = document.getElementById("tabs");
+  tabs.replaceChildren(...DATA.variants.map((item) => {
+    const button = el("button", { "aria-pressed": String(item.id === variant.id) }, item.label);
+    button.onclick = () => { state.variant = item.id; render(); };
+    return button;
+  }));
+  document.getElementById("note").textContent = variant.note;
+  document.getElementById("bar").value = bar;
+  document.getElementById("barValue").textContent = bar.toFixed(3);
+  document.getElementById("refs").checked = state.refs;
+
+  const candidates = DATA.games.filter((game) => game.inPool || state.refs);
+  const cards = document.getElementById("cards");
+  cards.replaceChildren(...DATA.games.filter((game) => game.inPool).map((game) => {
+    const card = el("div", { class: "card" });
+    card.append(el("h3", {}, game.name));
+    const ranked = candidates.filter((other) => other !== game)
+      .map((other) => ({ other, score: variant.scores[key(game, other)], shared: variant.shared?.[key(game, other)] ?? [] }))
+      .sort((a, b) => (b.score ?? -1) - (a.score ?? -1));
+    let listed = 0;
+    const rows = ranked.map(({ other, score, shared }) => {
+      const on = score !== null && score !== undefined && score >= bar && listed < 3;
+      if (on) listed += 1;
+      const row = el("div", { class: on ? "row" : "row off" });
+      row.append(el("span", {}, (on ? "" : "not listed · ") + other.name), el("span", { class: "score" }, format(score)));
+      if (shared.length > 0) row.append(el("span", { class: "why" }, "shared: " + shared.slice(0, 5).join(", ")));
+      return row;
+    });
+    if (listed === 0) card.append(el("div", { class: "none" }, "No game listed"));
+    card.append(...rows);
+    return card;
+  }));
+
+  const matrix = document.getElementById("matrix");
+  const head = el("tr");
+  head.append(el("th", {}, ""), ...DATA.games.map((game) => el("th", {}, game.short)));
+  matrix.replaceChildren(head, ...DATA.games.map((row) => {
+    const tr = el("tr");
+    tr.append(el("th", {}, row.short), ...DATA.games.map((column) => {
+      if (row === column) return el("td", { class: "off" }, "—");
+      const score = variant.scores[key(row, column)];
+      return el("td", { class: score !== null && score !== undefined && score >= bar ? "on" : "off" }, format(score));
+    }));
+    return tr;
+  }));
+
+  document.getElementById("profiles").replaceChildren(...DATA.games.map((game) => {
+    const card = el("div", { class: "card" });
+    card.append(el("h3", {}, game.name + (game.inPool ? "" : " (reference)")), el("pre", {}, game.profile));
+    return card;
+  }));
+}
+document.getElementById("bar").oninput = (event) => { state.bars[state.variant] = Number(event.target.value); render(); };
+document.getElementById("refs").onchange = (event) => { state.refs = event.target.checked; render(); };
+render();
+</script>
+</body>
+</html>

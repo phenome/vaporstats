@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PROTOTYPE · Gameplay match grounding</title>
+<style>
+  :root { --bg:#0c0c0e; --panel:#151518; --line:#2a2a30; --text:#e7e7ea; --dim:#8b8b94; --accent:#f97316; }
+  @media (prefers-color-scheme: light) { :root { --bg:#fafafa; --panel:#fff; --line:#e2e2e6; --text:#18181b; --dim:#71717a; --accent:#c2410c; } }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:14px/1.5 system-ui, sans-serif; }
+  main { max-width:1040px; margin:0 auto; padding:24px 16px 64px; }
+  h1 { font-size:20px; margin:0 0 4px; }
+  h2 { font-size:15px; margin:32px 0 8px; }
+  p { margin:6px 0; max-width:74ch; }
+  .tag { display:inline-block; font:11px ui-monospace, monospace; text-transform:uppercase; letter-spacing:.06em; color:var(--accent); border:1px solid var(--accent); padding:1px 6px; border-radius:3px; margin-bottom:10px; }
+  .dim { color:var(--dim); }
+  .tabs { display:flex; flex-wrap:wrap; gap:6px; margin:14px 0 8px; }
+  button { font:inherit; color:var(--text); background:var(--panel); border:1px solid var(--line); border-radius:4px; padding:6px 10px; cursor:pointer; }
+  button[aria-pressed="true"] { border-color:var(--accent); color:var(--accent); }
+  .controls { display:flex; flex-wrap:wrap; align-items:center; gap:10px 20px; margin:12px 0; padding:12px; background:var(--panel); border:1px solid var(--line); border-radius:6px; }
+  input[type=range] { width:260px; accent-color:var(--accent); }
+  .grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(300px, 1fr)); gap:10px; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:6px; padding:12px; }
+  .card h3 { margin:0 0 8px; font-size:14px; }
+  .row { display:grid; grid-template-columns:1fr auto; gap:2px 10px; padding:4px 0; border-top:1px solid var(--line); }
+  .row.off { opacity:.42; }
+  .row .why { grid-column:1 / -1; font-size:12px; color:var(--dim); }
+  .score { font:12px ui-monospace, monospace; }
+  .none { color:var(--dim); font-style:italic; padding:4px 0; border-top:1px solid var(--line); }
+  .scroll { overflow-x:auto; }
+  table { border-collapse:collapse; font:12px ui-monospace, monospace; }
+  th, td { border:1px solid var(--line); padding:5px 8px; text-align:right; white-space:nowrap; }
+  th:first-child { text-align:left; }
+  td.off { color:var(--dim); }
+  td.on { color:var(--accent); font-weight:600; }
+  pre { margin:0; white-space:pre-wrap; font:12px/1.5 ui-monospace, monospace; color:var(--dim); }
+</style>
+</head>
+<body>
+<main>
+  <span class="tag">Prototype · throwaway</span>
+  <h1>Grounding the Gameplay &amp; systems match on Steam community tags</h1>
+  <p>The question: if the gameplay match reads a game's Steam community tags, does the pool come out in an order a player would agree with, and is there a bar below which a game should not be listed at all?</p>
+  <p class="dim">Pick a scoring approach, then move the bar. Each card shows what that game's page would list: at most three games, and only those at or above the bar.</p>
+
+  <div class="tabs" id="tabs"></div>
+  <p id="note" class="dim"></p>
+  <div class="controls">
+    <label>Bar to be listed <input type="range" id="bar" min="0" max="1" step="0.005"> <span class="score" id="barValue"></span></label>
+    <label><input type="checkbox" id="refs"> Include the two reference games as candidates</label>
+  </div>
+
+  <h2>What each page would list</h2>
+  <div class="grid" id="cards"></div>
+
+  <h2>Every pair</h2>
+  <div class="scroll"><table id="matrix"></table></div>
+
+  <h2>Gameplay tags per game</h2>
+  <div class="grid" id="profiles"></div>
+</main>
+<script>
+const DATA = {"games":[{"appid":1086940,"name":"Baldur's Gate 3","short":"BG3","inPool":true,"profile":"Genres: RPG, CRPG, Adventure, Strategy\nMechanics and structure: Character Customization, Choices Matter, Turn-Based Combat, Class-Based, Combat"},{"appid":3714800,"name":"Warlock: Dungeons & Dragons","short":"Warlock","inPool":true,"profile":"Genres: Action, Adventure, Action-Adventure\nViewpoint: Third Person\nMechanics and structure: Exploration, Open World, Combat, Swordplay"},{"appid":1145350,"name":"Hades II","short":"Hades II","inPool":true,"profile":"Genres: Action, Roguelike, Roguelite, Hack and Slash, Action Roguelike, RPG, Dungeon Crawler, Action RPG, Souls-like\nViewpoint: Isometric\nMechanics and structure: Difficult, Perma Death"},{"appid":1091500,"name":"Cyberpunk 2077","short":"Cyberpunk","inPool":true,"profile":"Genres: RPG, FPS, Action, Action RPG, Adventure, Immersive Sim\nViewpoint: First-Person\nMechanics and structure: Open World, Exploration, Character Customization"},{"appid":2161710,"name":"NO LAW","short":"NO LAW","inPool":true,"profile":"Genres: RPG, Action, FPS, Immersive Sim, Stealth, Adventure, Shooter\nViewpoint: First-Person\nMechanics and structure: Open World, Nonlinear, Choices Matter, Exploration, Investigation"},{"appid":588650,"name":"Dead Cells","short":"DeadCells","inPool":false,"profile":"Genres: Adventure, Roguelike, Metroidvania, Action Roguelike, Roguelite, Souls-like, Hack and Slash, Platformer, Action\nViewpoint: 2D\nMechanics and structure: Replay Value, Procedural Generation, Difficult"},{"appid":1920780,"name":"Stray Gods: The Roleplaying Musical","short":"StrayGods","inPool":false,"profile":"Genres: Interactive Fiction, Choose Your Own Adventure, Adventure, Visual Novel\nMechanics and structure: Choices Matter, Music, Multiple Endings"}],"variants":[{"id":"live","label":"Live today","note":"Production scores: embedding of the coverage sentences. Reference games use the scores from the 2026-11-25 fixed ranking evaluation; pairs with no recorded score are blank.","defaultBar":0.75,"scores":{"1086940-3714800":0.753,"1086940-1145350":0.74,"1086940-1091500":0.742,"1086940-2161710":0.697,"588650-1086940":null,"1086940-1920780":null,"1145350-3714800":0.687,"1091500-3714800":null,"2161710-3714800":0.683,"588650-3714800":null,"1920780-3714800":null,"1091500-1145350":0.739,"1145350-2161710":0.704,"588650-1145350":0.768,"1145350-1920780":0.736,"1091500-2161710":0.757,"588650-1091500":null,"1091500-1920780":null,"588650-2161710":null,"1920780-2161710":null,"588650-1920780":null}},{"id":"tags-plain","label":"Steam tags, vote share only","note":"Overlap of genre, viewpoint and mechanics tags, each counted by its share of the game's votes. No provider cost.","defaultBar":0.45,"scores":{"1086940-3714800":0.17383988722156113,"1086940-1145350":0.15251580258468625,"1086940-1091500":0.3486478116348948,"1086940-2161710":0.3321278086467289,"588650-1086940":0.08499795802995809,"1086940-1920780":0.25858487074623976,"1145350-3714800":0.23138667722395895,"1091500-3714800":0.5381051817101009,"2161710-3714800":0.48844458685156233,"588650-3714800":0.32148259587264527,"1920780-3714800":0.19158473020701727,"1091500-1145350":0.2819582911817201,"1145350-2161710":0.2591440630157258,"588650-1145350":0.5780676428872952,"1145350-1920780":0,"1091500-2161710":0.8076972617674227,"588650-1091500":0.13012144110898385,"1091500-1920780":0.06699483836402223,"588650-2161710":0.1551888347577068,"1920780-2161710":0.14283717608137195,"588650-1920780":0.11208945571725135},"shared":{"1086940-3714800":["Adventure","Combat"],"1086940-1145350":["RPG"],"1086940-1091500":["RPG","Character Customization","Adventure"],"1086940-2161710":["RPG","Choices Matter","Adventure"],"588650-1086940":["Adventure"],"1086940-1920780":["Choices Matter","Adventure"],"1145350-3714800":["Action"],"1091500-3714800":["Open World","Action","Exploration","Adventure"],"2161710-3714800":["Action","Open World","Adventure","Exploration"],"588650-3714800":["Adventure","Action"],"1920780-3714800":["Adventure"],"1091500-1145350":["RPG","Action","Action RPG"],"1145350-2161710":["Action","RPG"],"588650-1145350":["Roguelike","Action","Roguelite","Hack and Slash","Action Roguelike","Souls-like","Difficult"],"1145350-1920780":[],"1091500-2161710":["Open World","RPG","FPS","First-Person","Action","Exploration","Adventure","Immersive Sim"],"588650-1091500":["Action","Adventure"],"1091500-1920780":["Adventure"],"588650-2161710":["Action","Adventure"],"1920780-2161710":["Choices Matter","Adventure"],"588650-1920780":["Adventure"]}},{"id":"tags-rarity","label":"Steam tags, rarity-weighted","note":"Overlap of genre, viewpoint and mechanics tags. Each tag counts by its share of the game's votes and by how rare it is across Steam, so 'Roguelike' outweighs 'Action'. No provider cost.","defaultBar":0.3,"scores":{"1086940-3714800":0.060258614902844836,"1086940-1145350":0.06260378331574709,"1086940-1091500":0.20850856330701745,"1086940-2161710":0.16259064667087672,"588650-1086940":0.01032823158868791,"1086940-1920780":0.12751217577473137,"1145350-3714800":0.043496985628025626,"1091500-3714800":0.48868193861205317,"2161710-3714800":0.32588723404729303,"588650-3714800":0.060651155521427774,"1920780-3714800":0.03539596955300397,"1091500-1145350":0.14622326131971852,"1145350-2161710":0.06812618422752574,"588650-1145350":0.5508322928427527,"1145350-1920780":0,"1091500-2161710":0.6849855726337981,"588650-1091500":0.017145317661421352,"1091500-1920780":0.008730089872466047,"588650-2161710":0.018524563895075178,"1920780-2161710":0.06508099832928002,"588650-1920780":0.011592257043635503},"shared":{"1086940-3714800":["Adventure","Combat"],"1086940-1145350":["RPG"],"1086940-1091500":["RPG","Character Customization","Adventure"],"1086940-2161710":["RPG","Choices Matter","Adventure"],"588650-1086940":["Adventure"],"1086940-1920780":["Choices Matter","Adventure"],"1145350-3714800":["Action"],"1091500-3714800":["Open World","Exploration","Action","Adventure"],"2161710-3714800":["Open World","Exploration","Action","Adventure"],"588650-3714800":["Adventure","Action"],"1920780-3714800":["Adventure"],"1091500-1145350":["Action RPG","RPG","Action"],"1145350-2161710":["RPG","Action"],"588650-1145350":["Hack and Slash","Action Roguelike","Roguelike","Roguelite","Souls-like","Difficult","Action"],"1145350-1920780":[],"1091500-2161710":["Open World","FPS","RPG","First-Person","Immersive Sim","Exploration","Action","Adventure"],"588650-1091500":["Action","Adventure"],"1091500-1920780":["Adventure"],"588650-2161710":["Action","Adventure"],"1920780-2161710":["Choices Matter","Adventure"],"588650-1920780":["Adventure"]}},{"id":"embed-coverage","label":"Embedding: public coverage text","note":"Stand-in for today's approach, using the published Overview text because the production inputs are private.","defaultBar":0.75,"scores":{"1086940-3714800":0.683004028483783,"1086940-1145350":0.6542888801741159,"1086940-1091500":0.6837760885921181,"1086940-2161710":0.6767417573776496,"588650-1086940":null,"1086940-1920780":null,"1145350-3714800":0.6130536313512256,"1091500-3714800":0.5529637520625811,"2161710-3714800":0.6844155386430436,"588650-3714800":null,"1920780-3714800":null,"1091500-1145350":0.6717518549614537,"1145350-2161710":0.6508213874621986,"588650-1145350":null,"1145350-1920780":null,"1091500-2161710":0.6723587260018918,"588650-1091500":null,"1091500-1920780":null,"588650-2161710":null,"1920780-2161710":null,"588650-1920780":null}},{"id":"embed-tags","label":"Embedding: tag profile","note":"Embedding of a three-line profile built only from the game's genre, viewpoint and mechanics tags.","defaultBar":0.8,"scores":{"1086940-3714800":0.8168587395720722,"1086940-1145350":0.7839355302441657,"1086940-1091500":0.8477309323120731,"1086940-2161710":0.8529589774698976,"588650-1086940":0.8044412390979961,"1086940-1920780":0.8500180953678308,"1145350-3714800":0.7792698754168006,"1091500-3714800":0.8474345995886269,"2161710-3714800":0.8567096455361085,"588650-3714800":0.8231181534995462,"1920780-3714800":0.7833454537627589,"1091500-1145350":0.7677280073323668,"1145350-2161710":0.7646178306178217,"588650-1145350":0.9099008996317259,"1145350-1920780":0.7360822531716028,"1091500-2161710":0.9612127342202058,"588650-1091500":0.7930128740454923,"1091500-1920780":0.7709035287392924,"588650-2161710":0.793070224821056,"1920780-2161710":0.8052418220704384,"588650-1920780":0.7850671897353715}},{"id":"embed-both","label":"Embedding: tag profile + coverage","note":"The tag profile followed by the published Overview text, as a stand-in for a tag-grounded synthesis.","defaultBar":0.78,"scores":{"1086940-3714800":0.7708426320438644,"1086940-1145350":0.7433303621336378,"1086940-1091500":0.7593519463801149,"1086940-2161710":0.7227772662094645,"588650-1086940":null,"1086940-1920780":null,"1145350-3714800":0.7335240869492529,"1091500-3714800":0.719633870407343,"2161710-3714800":0.753152193857621,"588650-3714800":null,"1920780-3714800":null,"1091500-1145350":0.7463902652695409,"1145350-2161710":0.7149406408080794,"588650-1145350":null,"1145350-1920780":null,"1091500-2161710":0.7590515709320133,"588650-1091500":null,"1091500-1920780":null,"588650-2161710":null,"1920780-2161710":null,"588650-1920780":null}}]};
+const state = { variant: "tags-rarity", bars: {}, refs: false };
+for (const variant of DATA.variants) state.bars[variant.id] = variant.defaultBar;
+const key = (a, b) => [a.appid, b.appid].sort((x, y) => x - y).join("-");
+const el = (tag, attrs = {}, text) => { const node = document.createElement(tag); for (const [k, v] of Object.entries(attrs)) node.setAttribute(k, v); if (text !== undefined) node.textContent = text; return node; };
+const format = (score) => score === null || score === undefined ? "n/a" : score.toFixed(3);
+
+function render() {
+  const variant = DATA.variants.find((item) => item.id === state.variant);
+  const bar = state.bars[variant.id];
+  const tabs = document.getElementById("tabs");
+  tabs.replaceChildren(...DATA.variants.map((item) => {
+    const button = el("button", { "aria-pressed": String(item.id === variant.id) }, item.label);
+    button.onclick = () => { state.variant = item.id; render(); };
+    return button;
+  }));
+  document.getElementById("note").textContent = variant.note;
+  document.getElementById("bar").value = bar;
+  document.getElementById("barValue").textContent = bar.toFixed(3);
+  document.getElementById("refs").checked = state.refs;
+
+  const candidates = DATA.games.filter((game) => game.inPool || state.refs);
+  const cards = document.getElementById("cards");
+  cards.replaceChildren(...DATA.games.filter((game) => game.inPool).map((game) => {
+    const card = el("div", { class: "card" });
+    card.append(el("h3", {}, game.name));
+    const ranked = candidates.filter((other) => other !== game)
+      .map((other) => ({ other, score: variant.scores[key(game, other)], shared: variant.shared?.[key(game, other)] ?? [] }))
+      .sort((a, b) => (b.score ?? -1) - (a.score ?? -1));
+    let listed = 0;
+    const rows = ranked.map(({ other, score, shared }) => {
+      const on = score !== null && score !== undefined && score >= bar && listed < 3;
+      if (on) listed += 1;
+      const row = el("div", { class: on ? "row" : "row off" });
+      row.append(el("span", {}, (on ? "" : "not listed · ") + other.name), el("span", { class: "score" }, format(score)));
+      if (shared.length > 0) row.append(el("span", { class: "why" }, "shared: " + shared.slice(0, 5).join(", ")));
+      return row;
+    });
+    if (listed === 0) card.append(el("div", { class: "none" }, "No game listed"));
+    card.append(...rows);
+    return card;
+  }));
+
+  const matrix = document.getElementById("matrix");
+  const head = el("tr");
+  head.append(el("th", {}, ""), ...DATA.games.map((game) => el("th", {}, game.short)));
+  matrix.replaceChildren(head, ...DATA.games.map((row) => {
+    const tr = el("tr");
+    tr.append(el("th", {}, row.short), ...DATA.games.map((column) => {
+      if (row === column) return el("td", { class: "off" }, "—");
+      const score = variant.scores[key(row, column)];
+      return el("td", { class: score !== null && score !== undefined && score >= bar ? "on" : "off" }, format(score));
+    }));
+    return tr;
+  }));
+
+  document.getElementById("profiles").replaceChildren(...DATA.games.map((game) => {
+    const card = el("div", { class: "card" });
+    card.append(el("h3", {}, game.name + (game.inPool ? "" : " (reference)")), el("pre", {}, game.profile));
+    return card;
+  }));
+}
+document.getElementById("bar").oninput = (event) => { state.bars[state.variant] = Number(event.target.value); render(); };
+document.getElementById("refs").onchange = (event) => { state.refs = event.target.checked; render(); };
+render();
+</script>
+</body>
+</html>
