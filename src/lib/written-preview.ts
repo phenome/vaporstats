@@ -42,6 +42,7 @@ export function writtenPreviewEvidence(outlet: MediaOutlet, title: string, body:
     : observedDemo ? "observed_demo" : developerInterview ? "developer_interview" : null;
   const handsOn = /\bhands?[- ]on (?:preview|impressions|session)\b/i.test(headline)
     && !/\b(?:not|non|no)[- ](?:an? )?hands?[- ]on\b/i.test(headline)
-    || /\b(?:I|we) (?:played(?! with\b)|went hands?[- ]on|got to play)\b/i.test(lead);
+    || /\b(?:I|we) (?:played(?! with (?:the |an? )?(?:idea|notion|possibility)\b)|went hands?[- ]on|got to play)\b/i.test(lead)
+    || /\bafter playing\b[^.!?]{0,160},\s*(?:I|we)\b/i.test(lead);
   return { evidence, handsOn };
 }

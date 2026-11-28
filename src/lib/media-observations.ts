@@ -196,8 +196,12 @@ function rejectedArticleEvidence(
       const sentence = prefix + quote;
       const speech = /\b(?:said|says|told|explained|confirmed|according to)\b/i;
       const firsthand = /\b(?:I|we) (?:played|tested|watched|observed|tried|saw)\b/i;
-      const reportedAt = sentence.search(speech);
-      if (reportedAt >= 0 && !firsthand.test(sentence.slice(0, reportedAt))) {
+      const reported = sentence.split(/[.!?;\n]|,?\s+(?:but|while|whereas)\s+/i).some((clause) => {
+        const marker = clause.search(speech);
+        if (marker < 0) return false;
+        return !firsthand.test(clause.slice(0, marker)) || !/^confirmed\b/i.test(clause.slice(marker));
+      });
+      if (reported) {
         return "reported speech does not establish witnessed play or demonstration";
       }
     }

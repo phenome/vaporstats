@@ -13,7 +13,7 @@ import { approvedGameSpotVideos, GAMESPOT_VIDEO_URL_PREFIX, gameSpotCaptionDirec
 import { writtenArticleMetadata, writtenPreviewEvidence, type WrittenPreviewEvidence } from "./written-preview";
 import { createTavilyTransport } from "./media-tavily";
 
-import { endPreviewOccurrence, PREVIEW_DEFERRAL_KEY, previewCeilingReached, previewMonthlyCreditShare, shiftMediaDay } from "./media-watchlist";
+import { endPreviewOccurrence, preparePreviewQueries, PREVIEW_DEFERRAL_KEY, previewCeilingReached, previewMonthlyCreditShare, shiftMediaDay } from "./media-watchlist";
 
 export { MEDIA_GAME_CHOICES, type MediaGameChoice } from "./media-publication";
 export { ASSESSMENT_MEDIA_OUTLETS, MEDIA_OUTLETS, type MediaOutlet } from "./media-outlet-access";
@@ -1382,6 +1382,7 @@ export async function runAuthorizedMediaDiscovery(db: AppDatabase, options: Medi
     const startedAt = isoTimestamp(run.started_at ?? clock().toISOString());
     const day = startedAt.slice(0, 10);
     const scheduledPasses = scheduled ? await duePasses(db, discoveryTargets, startedAt) : null;
+    if (scheduled) await preparePreviewQueries(db, run.id, day);
     const previews = scheduled ? await pendingPreviews(db, targetAppids, day) : [];
     const videoDirectory = gameSpotCaptionDirectory();
     if (videoDirectory) {

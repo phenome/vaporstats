@@ -1,3 +1,4 @@
+import { writtenPreviewEvidence } from "../src/lib/written-preview";
 import { afterEach, expect, test } from "bun:test";
 import type { TestDatabase } from "./support/db";
 import { openTestDatabase } from "./support/db";
@@ -1306,6 +1307,7 @@ test("one written preview keeps played, demonstrated and developer-reported clai
     { ...mediaObservation(ROOT, "play", "finding", "Players select gear before leaving port.", play), previewEvidence: { scope: "hands-on preview" } },
     { ...mediaObservation(ROOT, "demo", "finding", "Players navigate flooded streets.", demo), previewEvidence: { scope: "demo" } },
     { ...mediaObservation(ROOT, "plan", "finding", "The team plans to add optional rescue missions.", plan), previewEvidence: { scope: "developer statement", attribution: "Mira Dane" } },
+    { ...mediaObservation(ROOT, "cross-sentence", "finding", "Rescue missions are available.", play + " " + demo + " " + plan), previewEvidence: { scope: "hands-on preview" } },
     ...["demo", "hands-on preview"].map((scope) => ({
       ...mediaObservation(ROOT, "misattributed-" + scope, "finding", "Optional rescue missions are available.", "the team plans to add optional rescue missions."),
       previewEvidence: { scope },
@@ -1351,4 +1353,32 @@ test("one written preview keeps played, demonstrated and developer-reported clai
     .toEqual(observations.slice(0, 3).map(({ id, previewEvidence }) => ({ id, previewEvidence })));
   const overview = JSON.parse(database.native.query<{ output_json: string }, []>("SELECT output_json FROM media_game_overviews WHERE active = 1").get()!.output_json);
   expect(overview.statements.map(({ text }: { text: string }) => text)).toEqual(statements);
+});
+
+test.each([
+  ["After playing NO LAW for two hours, I explored the opening mission.", true],
+  ["I played with a controller for two hours.", true],
+  ["We played with the idea of adding co-op.", false],
+  ["After playing the opening mission, the developer explained their plans.", false],
+])("written preview detects the reporter's literal play in %s", (body, expected) => {
+  expect(writtenPreviewEvidence("RPG Site", "NO LAW Preview", body).handsOn).toBe(expected);
+});
+
+test("a scheduled run reopened after outlet expansion fills only missing preview progress", async () => {
+  const database = fixture();
+  admit(database, ROOT);
+  await watch(database);
+  const api = world();
+  api.noArticles();
+  await api.tick(database, "2027-01-25");
+  const oldRows = () => database.native.query("SELECT * FROM media_discovery_progress WHERE outlet NOT IN ('RPG Site', 'Game Informer', 'TechRadar Gaming') ORDER BY id").all();
+  const retained = oldRows();
+  database.native.exec(`
+    DELETE FROM media_discovery_progress WHERE outlet IN ('RPG Site', 'Game Informer', 'TechRadar Gaming');
+    UPDATE media_preview_occurrences SET ended_at = NULL, end_reason = NULL;
+    UPDATE media_discovery_runs SET status = 'running', finished_at = NULL;
+  `);
+  await api.tick(database, "2027-01-25", {}, "06:15");
+  expect(oldRows()).toEqual(retained);
+  expect(database.native.query("SELECT COUNT(*) AS count FROM media_discovery_progress WHERE occurrence_id IS NOT NULL AND status='completed'").get()).toEqual({ count: MEDIA_OUTLETS.length });
 });
