@@ -17,11 +17,12 @@ export interface MediaObservation {
   technicalTiming?: string[];
 }
 
-export type PreviewScope = "announcement" | "hands-on preview" | "non-hands-on preview";
+export type PreviewScope = "announcement" | "hands-on preview" | "non-hands-on preview" | "developer interview";
 
 function isPreviewCoverageLabel(label: string, scope: PreviewScope): boolean {
   return /^preview$/i.test(label) || ({
     announcement: /^announcement$/i,
+    "developer interview": /^developer interview$/i,
     "hands-on preview": /^hands[- ]on preview$/i,
     "non-hands-on preview": /^(?:non[- ]hands[- ]on|hands[- ]off) preview$/i,
   } satisfies Record<PreviewScope, RegExp>)[scope].test(label);
@@ -35,6 +36,7 @@ function withoutPreviewQualifierList(text: string, scope: PreviewScope): string 
 }
 const PREVIEW_WORDING: Record<PreviewScope, RegExp> = {
   announcement: /\b(?:announcement|announced)\b/i,
+  "developer interview": /\b(?:(?:developer|director|producer|designer|studio(?: head)?) (?:said|says|explained|described|reported)|(?:an? |the )?(?:developer )?interview)\b/i,
   "hands-on preview": /(?<!non[- ])\bhands[- ]on (?:preview|play|session)\b/i,
   "non-hands-on preview": /\b(?:(?:non[- ]hands[- ]on|hands[- ]off) (?:preview|demo|demonstration)|(?:preview|demo|demonstration|trailer|footage) (?:showed|shows)|(?:shown|seen|observed) in (?:an? |the )?(?:demo|demonstration|trailer|footage))\b/i,
 };

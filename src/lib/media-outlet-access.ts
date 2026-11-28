@@ -10,7 +10,7 @@ import type { MediaPass } from "./media-discovery";
  * source for whether an outlet may be contacted.
  */
 
-export const MEDIA_OUTLETS = [
+export const ASSESSMENT_MEDIA_OUTLETS = [
   { name: "IGN", domain: "ign.com" },
   { name: "Eurogamer", domain: "eurogamer.net" },
   { name: "GameSpot", domain: "gamespot.com" },
@@ -19,14 +19,25 @@ export const MEDIA_OUTLETS = [
   { name: "GamesRadar+", domain: "gamesradar.com" },
 ] as const;
 
+// New written outlets are searched on preview occurrences, so adding one
+// does not reopen the initial or later assessment roster on retained games.
+export const WRITTEN_PREVIEW_OUTLETS = [
+  { name: "Game Informer", domain: "gameinformer.com", previewOnly: true },
+  { name: "RPG Site", domain: "rpgsite.net", previewOnly: true },
+  { name: "TechRadar Gaming", domain: "techradar.com", previewOnly: true, section: "/gaming/" },
+] as const;
+
+export const MEDIA_OUTLETS = [...ASSESSMENT_MEDIA_OUTLETS, ...WRITTEN_PREVIEW_OUTLETS] as const;
+
 export type MediaOutlet = (typeof MEDIA_OUTLETS)[number]["name"];
-export function hostInOutlet(url: string, outlet: (typeof MEDIA_OUTLETS)[number]): boolean {
+export function urlInOutlet(url: string, outlet: (typeof MEDIA_OUTLETS)[number]): boolean {
   try {
     const address = new URL(url);
     if (address.protocol !== "http:" && address.protocol !== "https:") return false;
     const host = address.hostname.toLowerCase();
     const domain = outlet.domain.toLowerCase();
-    return host === domain || host.endsWith(`.${domain}`);
+    const withinDomain = host === domain || host.endsWith(`.${domain}`);
+    return withinDomain && (!("section" in outlet) || address.pathname.startsWith(outlet.section));
   } catch {
     return false;
   }
@@ -298,7 +309,7 @@ export async function fetchOutletArticle(
 
   let url = options.url;
   for (let redirects = 0; redirects <= MAX_REDIRECTS; redirects += 1) {
-    if (!hostInOutlet(url, config)) return null;
+    if (!urlInOutlet(url, config)) return null;
     const reservation = await reserveOutletAttempt(db, { runId, pass, appid, outlet, kind: "fetch", url, date: clock(), stage });
     if ("stop" in reservation) return { stop: reservation.stop, contacted: redirects > 0 };
     const { attemptId } = reservation;

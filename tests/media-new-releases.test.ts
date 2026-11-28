@@ -1,5 +1,5 @@
 import { afterEach, expect, spyOn, test } from "bun:test";
-import { MEDIA_OUTLETS, getMediaSources } from "../src/lib/media-discovery";
+import { ASSESSMENT_MEDIA_OUTLETS, getMediaSources } from "../src/lib/media-discovery";
 import { getMediaOverview } from "../src/lib/media-overview";
 import { handleGameDetailRequest, type GameDetailResponseData } from "../src/routes/api.games.$appid.detail";
 import { openTestDatabase, type TestDatabase } from "./support/db";
@@ -173,7 +173,7 @@ test("reschedules an unstarted initial pass after a Main Released change and sta
   await media.tick(database, "2026-11-28");
   expect(media.tavily.searches).toEqual([]);
   await media.tick(database, "2026-11-29");
-  expect(media.searches).toEqual(MEDIA_OUTLETS.map(({ domain }) => ({ appid: ROOT, domain, later: false })));
+  expect(media.searches).toEqual(ASSESSMENT_MEDIA_OUTLETS.map(({ domain }) => ({ appid: ROOT, domain, later: false })));
   expect(enrollments(database)).toEqual([enrollment(ROOT, START)]);
 });
 
@@ -192,7 +192,7 @@ test("retains enrollment after a pre-start release correction, and waits for a v
   await media.tick(database, "2026-12-22");
   expect(media.tavily.searches).toEqual([]);
   await media.tick(database, "2026-12-23");
-  expect(media.searches).toEqual(MEDIA_OUTLETS.map(({ domain }) => ({ appid: ROOT, domain, later: false })));
+  expect(media.searches).toEqual(ASSESSMENT_MEDIA_OUTLETS.map(({ domain }) => ({ appid: ROOT, domain, later: false })));
   expect(enrollments(database)).toEqual([enrollment(ROOT, START)]);
 });
 
@@ -205,7 +205,7 @@ test("gives a root and its released DLC and expansion their own passes and evide
   await media.tick(database, "2026-11-27");
   expect(new Set(media.searches.map(({ appid }) => appid))).toEqual(new Set([ROOT, DLC]));
   await media.tick(database, "2026-11-28");
-  expect(media.searches.filter(({ appid }) => appid === EXPANSION)).toHaveLength(MEDIA_OUTLETS.length);
+  expect(media.searches.filter(({ appid }) => appid === EXPANSION)).toHaveLength(ASSESSMENT_MEDIA_OUTLETS.length);
   await media.tick(database, "2027-02-17");
   expect(media.searches.filter(({ later }) => later)).toEqual([]);
 
@@ -214,7 +214,7 @@ test("gives a root and its released DLC and expansion their own passes and evide
   await media.tick(database, "2027-02-19");
   for (const app of apps) {
     const own = media.searches.filter(({ appid }) => appid === app.appid);
-    expect(own).toEqual([false, true].flatMap((later) => MEDIA_OUTLETS.map(({ domain }) => ({ appid: app.appid, domain, later }))));
+    expect(own).toEqual([false, true].flatMap((later) => ASSESSMENT_MEDIA_OUTLETS.map(({ domain }) => ({ appid: app.appid, domain, later }))));
     const urls = own.map(({ domain, later }) => media.articleUrl(app.appid, domain, later)).sort();
     const sources = await getMediaSources(database.db, app.appid, { includeUnpublished: true });
     expect(sources.map(({ originalUrl }) => originalUrl).sort()).toEqual(urls);
@@ -226,7 +226,7 @@ test("gives a root and its released DLC and expansion their own passes and evide
   await media.tick(database, "2027-02-20");
   await media.tick(database, "2027-02-27");
   await media.tick(database, "2027-05-21");
-  expect(media.tavily.searches).toHaveLength(2 * apps.length * MEDIA_OUTLETS.length);
+  expect(media.tavily.searches).toHaveLength(2 * apps.length * ASSESSMENT_MEDIA_OUTLETS.length);
   expect(enrollments(database)).toEqual([enrollment(ROOT, START)]);
   expect(await getMediaSources(database.db, LATE_DLC, { includeUnpublished: true })).toEqual([]);
 });
@@ -241,7 +241,7 @@ test("a root's empty later pass keeps its late-child cutoff after a release-date
   await media.tick(database, "2026-11-27");
   await media.tick(database, DAY_90);
   const initialSearches = media.tavily.searches.slice();
-  expect(initialSearches).toEqual(MEDIA_OUTLETS.map(({ domain }) => `${root.name}@${domain}`));
+  expect(initialSearches).toEqual(ASSESSMENT_MEDIA_OUTLETS.map(({ domain }) => `${root.name}@${domain}`));
 
   database.reopen();
   database.native.prepare("UPDATE apps SET original_release_date = '2026-12-20' WHERE appid = ?").run(ROOT);
@@ -262,8 +262,8 @@ test("a root at the 15-article ceiling leaves its child's independent allowance 
   const urls = async (appid: number) => (await getMediaSources(database.db, appid, { includeUnpublished: true })).map(({ originalUrl }) => originalUrl);
   expect(await urls(ROOT)).toHaveLength(15);
   expect(await urls(DLC)).toHaveLength(15);
-  expect(await urls(ROOT)).toContain(media.articleUrl(ROOT, MEDIA_OUTLETS[0]!.domain));
-  expect(await urls(DLC)).toEqual(expect.arrayContaining(MEDIA_OUTLETS.slice(0, 2).map(({ domain }) => media.articleUrl(DLC, domain))));
+  expect(await urls(ROOT)).toContain(media.articleUrl(ROOT, ASSESSMENT_MEDIA_OUTLETS[0]!.domain));
+  expect(await urls(DLC)).toEqual(expect.arrayContaining(ASSESSMENT_MEDIA_OUTLETS.slice(0, 2).map(({ domain }) => media.articleUrl(DLC, domain))));
 });
 
 test("records the pending initial pass skip after eligibility loss and retains the enrollment across a restart", async () => {
@@ -281,7 +281,7 @@ test("records the pending initial pass skip after eligibility loss and retains t
   const skipped = database.native.query<{ outlet: string; status: string; stop_reason: string }, [number]>(
     "SELECT outlet, status, stop_reason FROM media_discovery_progress WHERE appid = ? AND pass = 'initial' ORDER BY outlet",
   ).all(ROOT);
-  expect(skipped).toEqual(MEDIA_OUTLETS.map(({ name }) => ({ outlet: name, status: "stopped", stop_reason: "entity_ineligible" })).sort((a, b) => a.outlet.localeCompare(b.outlet)));
+  expect(skipped).toEqual(ASSESSMENT_MEDIA_OUTLETS.map(({ name }) => ({ outlet: name, status: "stopped", stop_reason: "entity_ineligible" })).sort((a, b) => a.outlet.localeCompare(b.outlet)));
 });
 
 test("carries an outlet-capped and credit-limited backlog forward oldest due first across days", async () => {
@@ -291,7 +291,7 @@ test("carries an outlet-capped and credit-limited backlog forward oldest due fir
   const apps = [oldest, middle, newest];
   const database = fixture(...apps);
   const media = world(...apps);
-  const outlet = MEDIA_OUTLETS[0]!;
+  const outlet = ASSESSMENT_MEDIA_OUTLETS[0]!;
   await media.tick(database, START);
   await media.tick(database, "2026-11-22");
 
@@ -319,7 +319,7 @@ test("carries an outlet-capped and credit-limited backlog forward oldest due fir
 
   await media.tick(database, "2026-12-01", { paidSubmissionsPerTick: 0 });
   const ids = media.searches.map(({ appid, domain }) => `${appid}@${domain}`);
-  expect(ids.sort()).toEqual(apps.flatMap(({ appid }) => MEDIA_OUTLETS.map(({ domain }) => `${appid}@${domain}`)).sort());
+  expect(ids.sort()).toEqual(apps.flatMap(({ appid }) => ASSESSMENT_MEDIA_OUTLETS.map(({ domain }) => `${appid}@${domain}`)).sort());
   for (const { appid } of apps) {
     expect(await getMediaSources(database.db, appid, { includeUnpublished: true })).toHaveLength(6);
   }
@@ -356,7 +356,7 @@ test("serves an Overview persisted by ingestion through the trusted API and chec
   expect(await detail()).toMatchObject({ mediaOverview: null, sources: [], mediaMatches: [] });
   expect(await detail(false, "?includeUnpublished=true")).toMatchObject({ mediaOverview: null, sources: [], mediaMatches: [] });
   const internal = await detail(true);
-  const urls = MEDIA_OUTLETS.map(({ domain }) => media.articleUrl(ROOT, domain)).sort();
+  const urls = ASSESSMENT_MEDIA_OUTLETS.map(({ domain }) => media.articleUrl(ROOT, domain)).sort();
   expect(internal.sources.map(({ originalUrl }) => originalUrl).sort()).toEqual(urls);
   expect([...new Set(internal.mediaOverview?.statements.flatMap(({ sourceUrls }) => sourceUrls))].sort()).toEqual(urls);
 
@@ -396,8 +396,8 @@ test("discards a model answer received after eligibility loss and explicitly ski
 test("a Provider stop keeps the pass due, an Outlet day stop reopens, and an Outlet denial persists", async () => {
   const database = fixture(root);
   const media = world(root);
-  const denied = MEDIA_OUTLETS[0]!;
-  const limited = MEDIA_OUTLETS[1]!;
+  const denied = ASSESSMENT_MEDIA_OUTLETS[0]!;
+  const limited = ASSESSMENT_MEDIA_OUTLETS[1]!;
   const limitedCandidate = media.articleUrl(ROOT, limited.domain);
   const fallback = limitedCandidate + "-second";
   const standardResults = media.tavily.results!;
@@ -432,7 +432,7 @@ test("a Provider stop keeps the pass due, an Outlet day stop reopens, and an Out
   expect(media.fetched.filter((url) => url === limitedCandidate)).toHaveLength(1);
   expect(media.fetched).toContain(fallback);
   const sources = await getMediaSources(database.db, ROOT, { includeUnpublished: true });
-  expect(sources.map(({ outlet }) => outlet).sort()).toEqual(MEDIA_OUTLETS.slice(1).map(({ name }) => name).sort());
+  expect(sources.map(({ outlet }) => outlet).sort()).toEqual(ASSESSMENT_MEDIA_OUTLETS.slice(1).map(({ name }) => name).sort());
   expect(sources.find(({ outlet }) => outlet === limited.name)?.originalUrl).toBe(fallback);
 });
 
@@ -452,7 +452,7 @@ test.each([
     await media.tick(database, "2027-02-15", options);
     media.tavily.remaining = 100;
   }
-  const domain = MEDIA_OUTLETS[0]!.domain;
+  const domain = ASSESSMENT_MEDIA_OUTLETS[0]!.domain;
   const childReview = media.articleUrl(DLC, domain, true);
   // Only the root's query finds this particular follow-up about the child.
   media.tavily.results = (search) =>
@@ -476,7 +476,7 @@ test("a corrected release date leaves a partially searched initial pass due acro
   database.reopen();
   media.tavily.remaining = 100;
   await media.tick(database, "2026-11-28", options);
-  expect(media.searches).toEqual(MEDIA_OUTLETS.map(({ domain }) => ({ appid: ROOT, domain, later: false })));
+  expect(media.searches).toEqual(ASSESSMENT_MEDIA_OUTLETS.map(({ domain }) => ({ appid: ROOT, domain, later: false })));
 });
 
 test("a deferred root leaves its child's started pass due across restart", async () => {
@@ -492,5 +492,5 @@ test("a deferred root leaves its child's started pass due across restart", async
   database.reopen();
   media.tavily.remaining = 100;
   await media.tick(database, "2026-11-27", options);
-  expect(media.searches).toEqual(MEDIA_OUTLETS.map(({ domain }) => ({ appid: DLC, domain, later: false })));
+  expect(media.searches).toEqual(ASSESSMENT_MEDIA_OUTLETS.map(({ domain }) => ({ appid: DLC, domain, later: false })));
 });

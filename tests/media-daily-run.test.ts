@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { getMediaSources, MEDIA_OUTLETS } from "../src/lib/media-discovery";
+import { getMediaSources, ASSESSMENT_MEDIA_OUTLETS } from "../src/lib/media-discovery";
 import { getMediaOverview } from "../src/lib/media-overview";
 import { authorizeMediaProcessing } from "../src/lib/media-processing";
 import { handleGameDetailRequest } from "../src/routes/api.games.$appid.detail";
@@ -319,7 +319,7 @@ describe("the daily media run", () => {
     expect(resumed.mediaDiscovery).toMatchObject({ status: "completed", queries: 18 });
     // The fetch in flight at the restart may have reached its outlet, so it is
     // never repeated; its candidate is skipped with that reason.
-    const crashedOutlet = MEDIA_OUTLETS.find(({ domain }) => new URL(crashedFetch!).hostname === domain)!;
+    const crashedOutlet = ASSESSMENT_MEDIA_OUTLETS.find(({ domain }) => new URL(crashedFetch!).hostname === domain)!;
     expect(resumed.mediaDiscovery?.stopReasons).toContain(`${crashedOutlet.name}:fetch_interrupted`);
     expect(fetched.filter((url) => url === crashedFetch)).toEqual([crashedFetch!]);
     // Its attempt, reserved before the restart, records that it was interrupted.
@@ -521,7 +521,7 @@ function extractionStatus(database: TestDatabase, url: string) {
 describe("settled source rules in automatic runs", () => {
   test("an Outlet denial is permanent across daily media runs and the processing fetches they cause, and an Outlet day stop at the 30-attempt cap holds discovery and processing until the next UTC day", async () => {
     const database = experimentCatalog();
-    const [ign, eurogamer] = [MEDIA_OUTLETS[0], MEDIA_OUTLETS[1]];
+    const [ign, eurogamer] = [ASSESSMENT_MEDIA_OUTLETS[0], ASSESSMENT_MEDIA_OUTLETS[1]];
     // An unprocessed article on each outlet, carried over from the experiment.
     insertSources(database.native, CYBERPUNK, "initial", 1, ign);
     insertSources(database.native, CYBERPUNK, "initial", 1, eurogamer);
@@ -569,7 +569,7 @@ describe("settled source rules in automatic runs", () => {
     ["an outlet rate limit", "fetch_http_429"],
   ] as const)("a query stopped by an Outlet day stop at %s reopens in the next daily media run even after the queue fetched from that outlet earlier that UTC day", async (_, stopReason) => {
     const database = experimentCatalog();
-    const eurogamer = MEDIA_OUTLETS[1];
+    const eurogamer = ASSESSMENT_MEDIA_OUTLETS[1];
     // An unprocessed Eurogamer article carried over from the experiment keeps
     // the paid-work queue fetching from Eurogamer in every tick.
     insertSources(database.native, CYBERPUNK, "initial", 1, eurogamer);
@@ -639,7 +639,7 @@ describe("experiment progress", () => {
     await tick(database, providers, "2026-11-20T06:00:00.000Z");
 
     const cyberpunk = providers.tavily.searches.filter((search) => search.startsWith("Cyberpunk 2077@"));
-    expect(cyberpunk.sort()).toEqual(MEDIA_OUTLETS.filter(({ name }) => name !== "IGN").map(({ domain }) => `Cyberpunk 2077@${domain}`).sort());
+    expect(cyberpunk.sort()).toEqual(ASSESSMENT_MEDIA_OUTLETS.filter(({ name }) => name !== "IGN").map(({ domain }) => `Cyberpunk 2077@${domain}`).sort());
     expect(providers.tavily.searches).toHaveLength(17);
   });
 });

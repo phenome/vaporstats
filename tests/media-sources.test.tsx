@@ -355,6 +355,72 @@ describe("game media sources", () => {
       .toEqual([["#media-source-1"], ["#media-source-1", "#media-source-2"]]);
   });
 
+  test("groups written and video sources by publisher and cites each exact item", async () => {
+    const previous = process.env.MEDIA_OVERVIEW_PUBLIC;
+    process.env.MEDIA_OVERVIEW_PUBLIC = "true";
+    const { db, native } = createFixture();
+    const ignVideo = "https://www.youtube.com/watch?v=exampleIGN1";
+    const gameSpotVideo = "https://www.youtube.com/watch?v=aemQLUwnw7I";
+    try {
+      await seedGame(db, native);
+      const insertSource = native.prepare(
+        "INSERT INTO media_sources (appid, pass, original_url, title, outlet, retrieved_at, type) VALUES (?, 'preview', ?, ?, ?, '2026-09-10', 'preview')",
+      );
+      insertSource.run(source.appid, ignVideo, "IGN video preview", "IGN");
+      insertSource.run(source.appid, gameSpotVideo, "GameSpot video preview", "GameSpot");
+      native.prepare(
+        "INSERT INTO media_game_overviews (appid, input_identity, model, config_version, output_json) VALUES (?, 'mixed-sources', 'model', 'config', ?)",
+      ).run(source.appid, JSON.stringify({
+        statements: [{
+          text: "The city offers several ways to explore.",
+          sourceUrls: [source.originalUrl, ignVideo, gameSpotVideo],
+        }],
+      }));
+
+      const response = await handleGameHttpRequest(
+        new Request("https://vaporstats.test/games/1091500-cyberpunk-2077"),
+        db,
+      );
+      expect(response.status).toBe(200);
+      const { document } = parseHTML(await response.text());
+      const sources = document.querySelector("#media-sources")!;
+      expect(sources.textContent).toContain("1 article and 2 videos · 2 outlets");
+      expect(sources.querySelectorAll("details")).toHaveLength(1);
+      const group = sources.querySelector("details")!;
+      expect(group.querySelector("summary")?.textContent).toContain("1 article and 1 video");
+      expect(group.querySelector("summary strong")?.textContent).toBe("IGN▸");
+      expect(group.hasAttribute("open")).toBe(false);
+
+      const citations = [...document.querySelectorAll('#media-overview a[href^="#media-source-"]')];
+      expect(citations.map((citation) => citation.getAttribute("aria-label"))).toEqual([
+        "Source 1.1: Cyberpunk 2077 Review on IGN",
+        "Source 1.2: IGN video preview on IGN",
+        "Source 2: GameSpot video preview on GameSpot",
+      ]);
+      expect(citations.map((citation) => citation.querySelector("sub")?.textContent)).toEqual(["1", "2", undefined]);
+      const targets = citations.map((citation) => sources.querySelector(citation.getAttribute("href")!)!);
+      expect(targets.map((target) => target.querySelector("a")?.getAttribute("href")))
+        .toEqual([source.originalUrl, ignVideo, gameSpotVideo]);
+      expect(targets.map((target) => target.closest("details"))).toEqual([group, group, null]);
+      expect(targets.map((target) => target.getAttribute("tabindex"))).toEqual(["-1", "-1", "-1"]);
+      expect(targets[1]?.querySelector("a")?.getAttribute("aria-label"))
+        .toBe("Watch IGN video preview from IGN on YouTube (opens in a new tab)");
+      expect(targets[2]?.querySelector("strong")?.textContent).toBe("GameSpot");
+      expect(targets[2]?.querySelector("sub")).toBeNull();
+    } finally {
+      native.close(true);
+      if (previous === undefined) delete process.env.MEDIA_OVERVIEW_PUBLIC;
+      else process.env.MEDIA_OVERVIEW_PUBLIC = previous;
+    }
+  });
+
+  test("renders a single video and outlet in the singular", () => {
+    const video = { ...source, originalUrl: "https://www.youtube.com/watch?v=aemQLUwnw7I" };
+    const { document } = parseHTML(renderToString(React.createElement(MediaSources, { sources: [video] })));
+    expect(document.querySelector("#media-sources")?.textContent).toContain("1 video · 1 outlet");
+    expect(document.querySelector("details")).toBeNull();
+  });
+
   test("renders one known edition as topics without an edition chapter", () => {
     const finding = { text: "The city looks distinct at night.", sourceUrls: [source.originalUrl], edition: "PC at launch" };
     const html = renderToString(React.createElement(MediaOverviewSection, {

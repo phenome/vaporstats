@@ -997,7 +997,7 @@ export const mediaDiscoveryProgress = sqliteTable(
     check("media_discovery_progress_pass_check", sql`${table.pass} IN ('initial', 'later', 'preview')`),
     check(
       "media_discovery_progress_outlet_check",
-      sql`${table.outlet} IN ('IGN', 'Eurogamer', 'GameSpot', 'PC Gamer', 'Kotaku', 'GamesRadar+')`,
+      sql`${table.outlet} IN ('IGN', 'Eurogamer', 'GameSpot', 'PC Gamer', 'Kotaku', 'GamesRadar+', 'Game Informer', 'RPG Site', 'TechRadar Gaming')`,
     ),
     check(
       "media_discovery_progress_status_check",
@@ -1037,7 +1037,7 @@ export const mediaDiscoveryAttempts = sqliteTable(
     check("media_discovery_attempts_pass_check", sql`${table.pass} IN ('initial', 'later', 'preview')`),
     check(
       "media_discovery_attempts_outlet_check",
-      sql`${table.outlet} IN ('IGN', 'Eurogamer', 'GameSpot', 'PC Gamer', 'Kotaku', 'GamesRadar+')`,
+      sql`${table.outlet} IN ('IGN', 'Eurogamer', 'GameSpot', 'PC Gamer', 'Kotaku', 'GamesRadar+', 'Game Informer', 'RPG Site', 'TechRadar Gaming')`,
     ),
     check(
       "media_discovery_attempts_kind_check",
@@ -1069,6 +1069,7 @@ export const mediaSources = sqliteTable(
     retrievedAt: text("retrieved_at").notNull(),
     type: text("type").notNull(),
     handsOn: integer("hands_on"),
+    previewEvidence: text("preview_evidence"),
     affiliation: text("affiliation"),
     platform: text("platform"),
     buildContext: text("build_context"),
@@ -1087,9 +1088,10 @@ export const mediaSources = sqliteTable(
     check("media_sources_pass_check", sql`${table.pass} IN ('initial', 'later', 'preview')`),
     check(
       "media_sources_outlet_check",
-      sql`${table.outlet} IN ('IGN', 'Eurogamer', 'GameSpot', 'PC Gamer', 'Kotaku', 'GamesRadar+')`,
+      sql`${table.outlet} IN ('IGN', 'Eurogamer', 'GameSpot', 'PC Gamer', 'Kotaku', 'GamesRadar+', 'Game Informer', 'RPG Site', 'TechRadar Gaming')`,
     ),
     check("media_sources_type_check", sql`${table.type} IN ('review', 'preview', 'announcement')`),
+    check("media_sources_preview_evidence_check", sql`${table.pass} = 'preview' AND ${table.previewEvidence} IN ('observed_demo', 'developer_interview', 'observed_demo_and_developer_interview') OR ${table.previewEvidence} IS NULL`),
     check("media_sources_hands_on_check", sql`${table.handsOn} IN (0, 1)`),
   ],
 );

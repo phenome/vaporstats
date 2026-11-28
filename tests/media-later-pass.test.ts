@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { MEDIA_OUTLETS, type MediaSource } from "../src/lib/media-discovery";
+import { ASSESSMENT_MEDIA_OUTLETS, type MediaSource } from "../src/lib/media-discovery";
 import { handleCatalogRequest } from "../src/routes/api.catalog";
 import { handleGameDetailRequest } from "../src/routes/api.games.$appid.detail";
 import { openTestDatabase, type TestDatabase } from "./support/db";
@@ -40,7 +40,7 @@ afterEach(() => {
 });
 
 const EXPERIMENT = [BALDURS_GATE, CYBERPUNK, HADES_II];
-type Outlet = (typeof MEDIA_OUTLETS)[number];
+type Outlet = (typeof ASSESSMENT_MEDIA_OUTLETS)[number];
 
 function experimentCatalog(): TestDatabase {
   const database = openTestDatabase("vaporstats-media-later-");
@@ -54,7 +54,7 @@ function articleUrl(appid: number, outlet: Outlet, suffix = ""): string {
 }
 
 function outletOf(url: string): Outlet {
-  return MEDIA_OUTLETS.find(({ domain }) => new URL(url).hostname === domain)!;
+  return ASSESSMENT_MEDIA_OUTLETS.find(({ domain }) => new URL(url).hostname === domain)!;
 }
 
 /**
@@ -73,14 +73,14 @@ function world(options: { later?: (appid: number, outlet: Outlet) => Array<{ url
     const key = `${appid}@${domain}`;
     const count = (searchCounts.get(key) ?? 0) + 1;
     searchCounts.set(key, count);
-    const outlet = MEDIA_OUTLETS.find((item) => item.domain === domain)!;
+    const outlet = ASSESSMENT_MEDIA_OUTLETS.find((item) => item.domain === domain)!;
     return count === 1 ? [{ url: articleUrl(appid, outlet) }] : later(appid, outlet);
   };
   const pages = new Map<string, () => Response>();
   const fetched: string[] = [];
   const page = (url: string, html: string) => pages.set(url, () => new Response(html));
   for (const appid of EXPERIMENT) {
-    for (const outlet of MEDIA_OUTLETS) {
+    for (const outlet of ASSESSMENT_MEDIA_OUTLETS) {
       // Each article has its own text, so no two are one originating assessment.
       const body = (when: string) => `${GAME_NAMES[appid]} offers a substantial playable campaign with detailed systems, as ${outlet.name}'s ${when} assessment describes at length. `.repeat(5) + "Builds reward experimentation.";
       page(articleUrl(appid, outlet), discoveryArticleHtml(appid, `${GAME_NAMES[appid]} Review`, { date: "2026-11-10T00:00:00.000Z", author: `${outlet.name} critic`, body: body("first") }));
@@ -131,10 +131,10 @@ describe("when the later pass is due", () => {
     await tick(database, "2026-11-21T06:00:00.000Z");
 
     const later = queries(tavily).slice(18);
-    expect(later.sort()).toEqual(EXPERIMENT.flatMap((appid) => MEDIA_OUTLETS.map(({ domain }) => `${GAME_NAMES[appid]} review revisited@${domain}`)).sort());
+    expect(later.sort()).toEqual(EXPERIMENT.flatMap((appid) => ASSESSMENT_MEDIA_OUTLETS.map(({ domain }) => `${GAME_NAMES[appid]} review revisited@${domain}`)).sort());
     for (const appid of EXPERIMENT) {
       const { sources } = await detail(database, appid);
-      expect(sources.map(({ originalUrl }) => originalUrl).sort()).toEqual(MEDIA_OUTLETS.flatMap((outlet) => [articleUrl(appid, outlet), articleUrl(appid, outlet, "-revisited")]).sort());
+      expect(sources.map(({ originalUrl }) => originalUrl).sort()).toEqual(ASSESSMENT_MEDIA_OUTLETS.flatMap((outlet) => [articleUrl(appid, outlet), articleUrl(appid, outlet, "-revisited")]).sort());
     }
 
     for (const day of ["2026-11-22", "2026-11-23", "2027-03-01"]) await tick(database, `${day}T06:00:00.000Z`);
@@ -166,7 +166,7 @@ describe("when the later pass is due", () => {
   });
 });
 
-const [IGN, EUROGAMER, GAMESPOT, PC_GAMER, KOTAKU, GAMESRADAR] = MEDIA_OUTLETS;
+const [IGN, EUROGAMER, GAMESPOT, PC_GAMER, KOTAKU, GAMESRADAR] = ASSESSMENT_MEDIA_OUTLETS;
 const PHANTOM_LIBERTY = 2138330;
 
 function reviewPage(appid: number, title: string, options: { date?: string | null; updated?: string; canonical?: string } = {}): string {
@@ -232,7 +232,7 @@ describe("later-pass selection", () => {
     // discovery fetch and one processing fetch.
     expect(fetched.filter((url) => url === articleUrl(CYBERPUNK, IGN))).toHaveLength(2);
     const { sources } = await detail(database, CYBERPUNK);
-    const laterSources = sources.filter(({ originalUrl }) => !MEDIA_OUTLETS.some((outlet) => originalUrl === articleUrl(CYBERPUNK, outlet)));
+    const laterSources = sources.filter(({ originalUrl }) => !ASSESSMENT_MEDIA_OUTLETS.some((outlet) => originalUrl === articleUrl(CYBERPUNK, outlet)));
     expect(laterSources.map(({ outlet, originalUrl, publishedAt, updatedAt }): { outlet: string; originalUrl: string; publishedAt: string | null; updatedAt: string | null } => ({ outlet, originalUrl, publishedAt, updatedAt })).sort((a, b) => a.originalUrl.localeCompare(b.originalUrl))).toEqual([
       { outlet: "GameSpot", originalUrl: articleUrl(CYBERPUNK, GAMESPOT, "-undated"), publishedAt: null, updatedAt: null },
       { outlet: "GamesRadar+", originalUrl: articleUrl(CYBERPUNK, GAMESRADAR, "-revisited"), publishedAt: "2026-11-19T00:00:00.000Z", updatedAt: null },
@@ -396,7 +396,7 @@ describe("later articles in processing and results", () => {
 
     const synthesis = syntheses.filter(({ urls }) => urls.includes(ignLater));
     expect(synthesis).toHaveLength(1);
-    expect(synthesis[0]!.urls).toEqual(expect.arrayContaining(MEDIA_OUTLETS.flatMap((outlet) => [articleUrl(CYBERPUNK, outlet), articleUrl(CYBERPUNK, outlet, "-revisited")])));
+    expect(synthesis[0]!.urls).toEqual(expect.arrayContaining(ASSESSMENT_MEDIA_OUTLETS.flatMap((outlet) => [articleUrl(CYBERPUNK, outlet), articleUrl(CYBERPUNK, outlet, "-revisited")])));
     expect(synthesis[0]!.content).not.toMatch(/initial assessments/i);
 
     process.env.MEDIA_OVERVIEW_PUBLIC = "true";
@@ -454,7 +454,7 @@ describe("undated articles in Sources", () => {
 
     const { sources } = await detail(database, CYBERPUNK);
     expect(sources.map(({ outlet, publishedAt }) => ({ outlet, publishedAt }))).toEqual([
-      ...MEDIA_OUTLETS.filter((outlet) => outlet !== GAMESPOT).map(({ name }) => ({ outlet: name, publishedAt: "2026-11-10T00:00:00.000Z" })),
+      ...ASSESSMENT_MEDIA_OUTLETS.filter((outlet) => outlet !== GAMESPOT).map(({ name }) => ({ outlet: name, publishedAt: "2026-11-10T00:00:00.000Z" })),
       { outlet: "IGN", publishedAt: "2026-11-20T12:00:00.000Z" },
       { outlet: "GameSpot", publishedAt: null },
     ]);
@@ -507,7 +507,7 @@ describe("the later pass end to end", () => {
     };
     await ticks("2026-11-20", ["06:00", "06:15", "06:30"]);
     expect(queries(tavily)).toHaveLength(18);
-    const laterUrls = EXPERIMENT.flatMap((appid) => MEDIA_OUTLETS.map((outlet) => articleUrl(appid, outlet, "-revisited")));
+    const laterUrls = EXPERIMENT.flatMap((appid) => ASSESSMENT_MEDIA_OUTLETS.map((outlet) => articleUrl(appid, outlet, "-revisited")));
 
     // The process stops during the fourth later-pass search on November 21.
     const answer = tavily.results!;

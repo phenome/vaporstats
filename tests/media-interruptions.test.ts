@@ -9,6 +9,7 @@ import {
   controlledTavilyApi,
   discoveryArticleHtml,
   experimentWorld,
+  outletFixtureUrl,
   HADES_II,
   PROCESSING_FETCH_RESENT_AFTER_RESTART,
   seedApps,
@@ -96,7 +97,7 @@ function previewShareWorld(): MediaWorld {
   const world = experimentWorld();
   const tavily = controlledTavilyApi({ ...GAME_NAMES, [NO_LAW]: "NO LAW" });
   const experiment = world.tavily.results!;
-  const noLawUrl = (domain: string, name: string) => `https://${domain}/articles/${NO_LAW}-${name}`;
+  const noLawUrl = (domain: string, name: string) => outletFixtureUrl(domain, `articles/${NO_LAW}-${name}`);
   tavily.results = (search) => search.appid === NO_LAW
     ? ["patch-1", "patch-2", "preview"].map((name) => ({ url: noLawUrl(search.domain, name) }))
     : experiment(search);
@@ -136,7 +137,7 @@ const SCENARIOS: Registered[] = [
       world() {
         const world = experimentWorld();
         const tavily = controlledTavilyApi({ 2161710: "NO LAW" });
-        tavily.results = ({ domain }) => [1, 2].map((n) => ({ url: `https://${domain}/articles/2161710-preview-${n}` }));
+        tavily.results = ({ domain }) => [1, 2].map((n) => ({ url: outletFixtureUrl(domain, `articles/2161710-preview-${n}`) }));
         return {
           ...world, tavily,
           outlet: (url) => new Response(discoveryArticleHtml(2161710, "NO LAW Preview", {
@@ -150,7 +151,7 @@ const SCENARIOS: Registered[] = [
       days: 1,
     },
     invariants: { restarts: ["search", "outlet_fetch"], dayStops: true, combined: 2 },
-    baseline: { search: 6, outlet_fetch: 12, openrouter: 7, gemini_submit: 1 },
+    baseline: { search: 9, outlet_fetch: 18, openrouter: 10, gemini_submit: 1 },
   },
   {
     // NO LAW's preview occurrence goes first and meets each outlet's preview
@@ -161,7 +162,7 @@ const SCENARIOS: Registered[] = [
     // their third candidate. Restarts and day stops must keep the share.
     scenario: { name: "preview occurrence at its daily share beside an initial pass", seed: seedPreviewBesideAssessment, world: previewShareWorld, ticks: FIRST_DAY, days: 1 },
     invariants: { restarts: ["search", "outlet_fetch"], dayStops: true, combined: 2, sample: 10 },
-    baseline: { search: 12, outlet_fetch: 36, openrouter: 7, gemini_submit: 1 },
+    baseline: { search: 15, outlet_fetch: 42, openrouter: 7, gemini_submit: 1 },
   },
   {
     // The catalog learns about a release on the day its first pass is due.

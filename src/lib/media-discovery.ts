@@ -5,16 +5,18 @@ import { writeTransaction } from "./db-transaction";
 import { ENROLLMENT_START_DATE_KEY, isNewReleaseDate } from "./media-enrollment";
 import { boundedMediaError } from "./media-error";
 import { mainReleasedDate, type MainReleasedFields } from "./lifecycle-history";
-import { fetchOutletArticle, finishOutletAttempt, hostInOutlet, isOutletDenialStop, isPreviewShareStop, outletDenial, MEDIA_OUTLETS, OUTLET_HTTP_STOPS, OUTLET_STOP_REASONS, reserveOutletAttempt, servedPreviewSearches, type MediaOutlet } from "./media-outlet-access";
+import { fetchOutletArticle, finishOutletAttempt, urlInOutlet, isOutletDenialStop, isPreviewShareStop, outletDenial, ASSESSMENT_MEDIA_OUTLETS, MEDIA_OUTLETS, OUTLET_HTTP_STOPS, OUTLET_STOP_REASONS, reserveOutletAttempt, servedPreviewSearches, type MediaOutlet } from "./media-outlet-access";
 import { isMediaOverviewPublic, MEDIA_EXPERIMENT_GAMES, PUBLIC_MEDIA_ROOT_SQL } from "./media-publication";
 import { parsePreciseReleaseDate } from "./releases";
 import { ELIGIBLE_MEDIA_ENTITY_SQL, ELIGIBLE_MEDIA_ROOT_SQL } from "./media-similarity";
+import { approvedGameSpotVideos, GAMESPOT_VIDEO_URL_PREFIX, gameSpotCaptionDirectory, gameSpotWatchUrl, readGameSpotCaptions } from "./media-video";
+import { writtenArticleMetadata, writtenPreviewEvidence, type WrittenPreviewEvidence } from "./written-preview";
 import { createTavilyTransport } from "./media-tavily";
 
 import { endPreviewOccurrence, PREVIEW_DEFERRAL_KEY, previewCeilingReached, previewMonthlyCreditShare, shiftMediaDay } from "./media-watchlist";
 
 export { MEDIA_GAME_CHOICES, type MediaGameChoice } from "./media-publication";
-export { MEDIA_OUTLETS, type MediaOutlet } from "./media-outlet-access";
+export { ASSESSMENT_MEDIA_OUTLETS, MEDIA_OUTLETS, type MediaOutlet } from "./media-outlet-access";
 type AssessmentPass = "initial" | "later";
 export type MediaPass = AssessmentPass | "preview";
 export type MediaArticleType = "review" | "preview" | "announcement";
@@ -37,6 +39,7 @@ export interface MediaSource {
   retrievedAt: string;
   type: MediaArticleType;
   handsOn: boolean | null;
+  previewEvidence?: WrittenPreviewEvidence;
   affiliation: string | null;
   platform: string | null;
   buildContext: string | null;
@@ -334,7 +337,7 @@ const ENTITY_INELIGIBLE = "entity_ineligible";
 
 /** Preserve finished queries and stop pending queries for enrollments that lost catalog eligibility. */
 export async function skipIneligibleMediaPasses(db: AppDatabase, runId: number, at: Date): Promise<void> {
-  const outlets = JSON.stringify(MEDIA_OUTLETS.map(({ name }) => name));
+  const outlets = JSON.stringify(ASSESSMENT_MEDIA_OUTLETS.map(({ name }) => name));
   const stoppedAt = at.toISOString();
   await db.prepare(
     `INSERT INTO media_discovery_progress (run_id, appid, pass, outlet, status, stop_reason, stopped_at)
@@ -421,7 +424,7 @@ function passFinishedAt(progress: readonly ProgressRow[], outlets: readonly Medi
 
 const INITIAL_PASS_RELEASE_AGE_DAYS = 7;
 const LATER_PASS_RELEASE_AGE_DAYS = 90;
-const ASSESSMENT_OUTLETS = MEDIA_OUTLETS.map(({ name }) => name);
+const ASSESSMENT_OUTLETS = ASSESSMENT_MEDIA_OUTLETS.map(({ name }) => name);
 
 function releaseAgeDueAt(releasedOn: string, days: number): string {
   return new Date(Date.parse(`${releasedOn}T00:00:00.000Z`) + days * 86_400_000).toISOString();
@@ -593,11 +596,11 @@ export async function nextMediaAssessment(db: AppDatabase, root: number, now: Da
   return next;
 }
 
-type PreviewOccurrence = { id: number; appid: number; due_at: string };
+type PreviewOccurrence = { id: number; appid: number; due_at: string; scheduled_on: string };
 
 async function pendingPreviews(db: AppDatabase, targetAppids: number[], day: string): Promise<PreviewOccurrence[]> {
   return rows(db,
-    `SELECT occurrence.id, occurrence.appid, occurrence.due_at FROM media_preview_occurrences AS occurrence
+    `SELECT occurrence.id, occurrence.appid, occurrence.due_at, occurrence.scheduled_on FROM media_preview_occurrences AS occurrence
      JOIN media_watch_coverage AS coverage ON coverage.appid = occurrence.appid
      JOIN media_watches AS watch ON watch.appid = coverage.root_appid
      JOIN apps AS app ON app.appid = occurrence.appid
@@ -640,7 +643,7 @@ async function reviewSearchReservation(
   let count = 0;
   for (const { target, pass, pendingInitial } of forecast) {
     if (await articleCeiling(db, target.appid, pass)) continue;
-    for (const { name } of MEDIA_OUTLETS) {
+    for (const { name } of ASSESSMENT_MEDIA_OUTLETS) {
       if (denied.has(name) || !needsSearch(find(target.appid, pass, name))) continue;
       if (pass === "later") {
         const initial = find(target.appid, "initial", name);
@@ -654,17 +657,41 @@ async function reviewSearchReservation(
 
 async function admitSource(db: AppDatabase, pass: MediaPass, source: MediaSource, root: number): Promise<boolean> {
   const result = await db.prepare(
-    `INSERT OR IGNORE INTO media_sources (appid, pass, original_url, discovery_url, title, outlet, author, published_at, updated_at, retrieved_at, type, hands_on, affiliation, platform, build_context)
-     SELECT app.appid, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+    `INSERT OR IGNORE INTO media_sources (appid, pass, original_url, discovery_url, title, outlet, author, published_at, updated_at, retrieved_at, type, hands_on, affiliation, platform, build_context, preview_evidence)
+     SELECT app.appid, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
      FROM apps AS app
      WHERE app.appid = ? AND app.is_eligible = 1 AND ${ELIGIBLE_MEDIA_ENTITY_SQL}
        AND COALESCE(app.parent_appid, app.appid) = ?
        AND NOT EXISTS (SELECT 1 FROM media_sources WHERE appid = app.appid
          AND (original_url IN (?, ?) OR discovery_url IN (?, ?)))`,
   ).bind(pass, source.originalUrl, source.discoveryUrl, source.title, source.outlet, source.author, source.publishedAt, source.updatedAt,
-    source.retrievedAt, source.type, source.handsOn === null ? null : Number(source.handsOn), source.affiliation, source.platform, source.buildContext, source.appid, root,
+    source.retrievedAt, source.type, source.handsOn === null ? null : Number(source.handsOn), source.affiliation, source.platform, source.buildContext, source.previewEvidence ?? null, source.appid, root,
     source.originalUrl, source.discoveryUrl, source.originalUrl, source.discoveryUrl).run();
   return result.meta.changes === 1;
+}
+
+async function admitGameSpotPreviewVideo(
+  db: AppDatabase, directory: string, preview: PreviewOccurrence, target: MediaTarget, at: Date,
+): Promise<boolean> {
+  for (const video of await approvedGameSpotVideos(directory, preview.appid)) {
+    const url = gameSpotWatchUrl(video);
+    if (!await readGameSpotCaptions(directory, video)) continue;
+    const admitted = await transaction(db, async () => {
+      if (!await previewOpen(db, preview.id) || await articleCeiling(db, preview.appid, "preview")) return false;
+      // One captioned video per preview occurrence, including resumed runs.
+      if (await first(db, `SELECT 1 FROM media_sources
+        WHERE appid = ? AND outlet = 'GameSpot' AND pass = 'preview' AND
+        (original_url = ? OR (original_url LIKE ? AND retrieved_at >= ?))`,
+        preview.appid, url, `${GAMESPOT_VIDEO_URL_PREFIX}%`, `${preview.scheduled_on}T00:00:00.000Z`)) return false;
+      return admitSource(db, "preview", {
+        appid: preview.appid, originalUrl: url, discoveryUrl: null, title: video.title, outlet: "GameSpot",
+        author: null, publishedAt: video.publishedAt, updatedAt: null, retrievedAt: at.toISOString(),
+        type: "preview", handsOn: false, affiliation: video.developer, platform: null, buildContext: null,
+      }, rootAppid(target));
+    });
+    if (admitted) return true;
+  }
+  return false;
 }
 
 /**
@@ -710,8 +737,12 @@ async function admittedEntities(db: AppDatabase, pass: MediaPass, outlet: MediaO
 }
 
 /** The one query an entity's pass sends to each outlet's domain. */
-function passQuery(target: MediaTarget, pass: MediaPass): string {
-  if (pass === "preview") return `${target.name} preview hands-on announcement`;
+function passQuery(target: MediaTarget, pass: MediaPass, outlet: (typeof MEDIA_OUTLETS)[number]): string {
+  if (pass === "preview") {
+    const scope = "section" in outlet ? ` site:${outlet.domain}${outlet.section}` : "";
+    const interview = "previewOnly" in outlet ? " developer interview" : "";
+    return `${target.name}${scope} preview hands-on${interview} announcement`;
+  }
   return pass === "initial" ? `${target.name} review preview` : `${target.name} review revisited`;
 }
 
@@ -1022,7 +1053,7 @@ function articleFacts(
  * the cost of magical power: a hands-off preview") and is not a second title.
  */
 const CO_TITLED_PREVIEW = /§\s*(?:and|&)\s+(?!(?:the|a|an|its|their|our|my|more|other)\b)(?:[^\s:–—-]+\s+){1,3}(?:hands?[- ]o(?:n|ff)\s+)?(?:previews?|announcements?)\b/;
-const MULTI_GAME_PREVIEW_TITLE = /\b(round[- ]?up|best games?|games like|versus|vs\.?|comparison|ranking|ranked|top\s+\d+|listicle|(?:our|this|my)\s+lists?\s+of\s+(?:\w+\s+){0,3}games|metacritic)\b/;
+const MULTI_GAME_PREVIEW_TITLE = /\b(every game we played|gaming awards|round[- ]?up|best games?|games like|versus|vs\.?|comparison|ranking|ranked|top\s+\d+|listicle|(?:our|this|my)\s+lists?\s+of\s+(?:\w+\s+){0,3}games|metacritic)\b/;
 
 /**
  * Why a preview pass refuses an article whose subject is its exact entity, or
@@ -1053,18 +1084,22 @@ function assessmentPassRefusal(facts: ArticleFacts): string | null {
 
 /**
  * The type a preview pass records: a preview when the title says "preview",
- * the article shows hands-on evidence or the outlet's own preview marker,
+ * the article shows firsthand or interview evidence, or has the outlet's preview marker,
  * even beside an announcement word; an announcement when the title has an
  * announcement word and none of those; otherwise a preview.
  */
-function previewArticleType(facts: ArticleFacts): MediaArticleType {
-  if (facts.previewTitle || facts.explicitHandsOn || facts.outletPreviewMarker) return "preview";
+function previewArticleType(facts: ArticleFacts, evidence?: WrittenPreviewEvidence | null): MediaArticleType {
+  if (facts.previewTitle || facts.explicitHandsOn || facts.outletPreviewMarker || evidence) return "preview";
   return facts.announcement ? "announcement" : "preview";
 }
 
 function parseSource(html: string, finalUrl: string, target: MediaTarget, targets: readonly MediaTarget[], outlet: MediaOutlet, retrievedAt: string, pass: MediaPass): MediaSource | null {
+  const outletConfig = MEDIA_OUTLETS.find((item) => item.name === outlet);
+  if (!outletConfig || !urlInOutlet(finalUrl, outletConfig)) return null;
+  const writtenPreview = pass === "preview" && "previewOnly" in outletConfig;
   const document = parseArticleDocument(html);
   if (!document) return null;
+  const structured = writtenPreview ? writtenArticleMetadata(document) : null;
   for (const element of Array.from(document.querySelectorAll("script,style,noscript,template"))) element.remove();
   const titleMeta = meta(document, "og:title", "twitter:title");
   const authorMeta = meta(document, "author", "article:author");
@@ -1094,9 +1129,11 @@ function parseSource(html: string, finalUrl: string, target: MediaTarget, target
   if (!attributedTarget) return null;
   const rootCanAttributeChild = target.parentAppid === null && attributedTarget.parentAppid === target.appid;
   if (attributedTarget.appid !== target.appid && (pass === "preview" || !rootCanAttributeChild)) return null;
-  const byline = cleanText(authorMeta ?? readable?.byline ?? document.querySelector("[rel='author'],.byline,[class*='author']")?.textContent);
+  const byline = cleanText((!writtenPreview || (authorMeta && !/^https?:\/\//i.test(authorMeta)) ? authorMeta : structured?.author) ?? readable?.byline ?? document.querySelector("[rel='author'],.byline,[class*='author']")?.textContent);
   const affiliation = cleanText(affiliationMeta);
   const facts = articleFacts(title, titleLower, articleLeadLower, bodyLower, fullArticleText, targets, { byline, affiliation, gamesRadarTags }, pass);
+  const preview = writtenPreview ? writtenPreviewEvidence(outlet, title, fullArticleText) : null;
+  if (preview) facts.explicitHandsOn = preview.handsOn;
   if ((pass === "preview" ? previewPassRefusal(facts) : assessmentPassRefusal(facts)) !== null) return null;
   const handsOn = facts.explicitHandsOn ? true : pass === "preview" ? false : null;
   const canonical = cleanText(canonicalMeta);
@@ -1106,9 +1143,8 @@ function parseSource(html: string, finalUrl: string, target: MediaTarget, target
   } catch {
     return null;
   }
-  const outletConfig = MEDIA_OUTLETS.find((item) => item.name === outlet);
-  if (!outletConfig || !hostInOutlet(normalizedUrl, outletConfig)) return null;
-  const articleType: MediaArticleType = pass === "preview" ? previewArticleType(facts)
+  if (!urlInOutlet(normalizedUrl, outletConfig)) return null;
+  const articleType: MediaArticleType = pass === "preview" ? previewArticleType(facts, preview?.evidence)
     : facts.review ? "review" : facts.announcement && !facts.previewTitle ? "announcement" : "preview";
   const platform = cleanText(platformMeta) ?? (/\b(pc|playstation|xbox|switch)\b/i.exec(fullArticleText.slice(0, 4_000))?.[1] ?? null);
   const buildContext = cleanText(buildMeta) ?? (/\bearly access (?:review|preview|build)\b|\breview(?:ed)? in early access\b/i.test(title) || /\bthis early access (?:review|build|preview)\b/i.test(fullArticleText) ? "Early Access" : null);
@@ -1119,11 +1155,12 @@ function parseSource(html: string, finalUrl: string, target: MediaTarget, target
     title,
     outlet,
     author: byline,
-    publishedAt: dateValue(publishedMeta ?? publishedTime),
-    updatedAt: dateValue(updatedMeta),
+    publishedAt: dateValue(publishedMeta ?? publishedTime) ?? dateValue(structured?.publishedAt),
+    updatedAt: dateValue(updatedMeta) ?? dateValue(structured?.updatedAt),
     retrievedAt,
     type: articleType,
     handsOn,
+    ...(preview?.evidence ? { previewEvidence: preview.evidence } : {}),
     affiliation,
     platform,
     buildContext,
@@ -1254,12 +1291,16 @@ type MediaRunCounts = {
 async function mediaRunCounts(db: AppDatabase, passes: readonly MediaPass[], targetAppids: readonly number[]): Promise<MediaRunCounts> {
   const targetAppidsJson = JSON.stringify(targetAppids);
   const pass = JSON.stringify(passes);
-  const articleCount = Number((await first<{ count: number }>(
+  const sourceCounts = await first<{ count: number; video_count: number }>(
     db,
-    "SELECT COUNT(*) AS count FROM media_sources WHERE pass IN (SELECT value FROM json_each(?)) AND appid IN (SELECT value FROM json_each(?))",
+    `SELECT COUNT(*) AS count,
+       COUNT(CASE WHEN outlet = 'GameSpot' AND original_url LIKE ? THEN 1 END) AS video_count
+     FROM media_sources WHERE pass IN (SELECT value FROM json_each(?)) AND appid IN (SELECT value FROM json_each(?))`,
+    `${GAMESPOT_VIDEO_URL_PREFIX}%`,
     pass,
     targetAppidsJson,
-  ))?.count ?? 0);
+  );
+  const articleCount = Number(sourceCounts?.count ?? 0);
   const queryCount = Number((await first<{ count: number }>(
     db,
     "SELECT COUNT(*) AS count FROM media_discovery_progress WHERE query_attempted_at IS NOT NULL AND pass IN (SELECT value FROM json_each(?)) AND appid IN (SELECT value FROM json_each(?))",
@@ -1272,7 +1313,8 @@ async function mediaRunCounts(db: AppDatabase, passes: readonly MediaPass[], tar
     pass,
     targetAppidsJson,
   );
-  const discoveredCount = progressCandidates.reduce((total, row) => total + json<Candidate[]>(row.candidate_urls, []).length, 0);
+  // Caption bundles enter discovery directly after validation and have no search progress row.
+  const discoveredCount = Number(sourceCounts?.video_count ?? 0) + progressCandidates.reduce((total, row) => total + json<Candidate[]>(row.candidate_urls, []).length, 0);
   const attemptCount = Number((await first<{ count: number }>(
     db,
     "SELECT COUNT(*) AS count FROM media_discovery_attempts WHERE pass IN (SELECT value FROM json_each(?)) AND appid IN (SELECT value FROM json_each(?))",
@@ -1292,7 +1334,7 @@ async function mediaRunCounts(db: AppDatabase, passes: readonly MediaPass[], tar
     targetAppidsJson,
   );
   const acceptedOutletNames = new Set(acceptedOutlets.map((row) => row.outlet));
-  const missingOutlets = MEDIA_OUTLETS.filter((item) => !acceptedOutletNames.has(item.name)).map((item) => item.name);
+  const missingOutlets = (passes.includes("preview") ? MEDIA_OUTLETS : ASSESSMENT_MEDIA_OUTLETS).filter((item) => !acceptedOutletNames.has(item.name)).map((item) => item.name);
   const outletShortfall = acceptedOutletNames.size < 3
     ? { required: 3, actual: acceptedOutletNames.size, missing: missingOutlets }
     : null;
@@ -1336,6 +1378,13 @@ export async function runAuthorizedMediaDiscovery(db: AppDatabase, options: Medi
     const day = startedAt.slice(0, 10);
     const scheduledPasses = scheduled ? await duePasses(db, discoveryTargets, startedAt) : null;
     const previews = scheduled ? await pendingPreviews(db, targetAppids, day) : [];
+    const videoDirectory = gameSpotCaptionDirectory();
+    if (videoDirectory) {
+      for (const preview of previews) {
+        const target = discoveryTargets.find(({ appid }) => appid === preview.appid);
+        if (target && await admitGameSpotPreviewVideo(db, videoDirectory, preview, target, clock())) issued.articles += 1;
+      }
+    }
     const stopReasons = new Set<string>();
     const stoppedOutlets = new Set<MediaOutlet>();
     let searchesStopped = false;
@@ -1402,8 +1451,8 @@ export async function runAuthorizedMediaDiscovery(db: AppDatabase, options: Medi
       // outlet and their monthly share of search credits; the assessment
       // queries follow. Each group is ordered oldest due first, then by entity.
       const queries = scheduledPasses
-        ? [...previewQueries, ...scheduledPasses.flatMap(({ target, pass, dueAt }) => MEDIA_OUTLETS.map((outlet) => ({ outlet, target, pass, dueAt, occurrenceId: null })))]
-        : MEDIA_OUTLETS.flatMap((outlet) => discoveryTargets.map((target) => ({ outlet, target, pass, dueAt: null, occurrenceId: null })));
+        ? [...previewQueries, ...scheduledPasses.flatMap(({ target, pass, dueAt }) => ASSESSMENT_MEDIA_OUTLETS.map((outlet) => ({ outlet, target, pass, dueAt, occurrenceId: null })))]
+        : ASSESSMENT_MEDIA_OUTLETS.flatMap((outlet) => discoveryTargets.map((target) => ({ outlet, target, pass, dueAt: null, occurrenceId: null })));
       const dueEntities: Record<MediaPass, Set<number>> = { initial: new Set(), later: new Set(), preview: new Set() };
       for (const { target, pass } of scheduledPasses ?? []) dueEntities[pass].add(target.appid);
       /** Outlets whose preview share is used today: their preview queries wait, their assessment queries do not. */
@@ -1463,7 +1512,7 @@ export async function runAuthorizedMediaDiscovery(db: AppDatabase, options: Medi
           // eligible entities × outlets per pass: progress is unique per entity,
           // outlet and pass, and query_attempted_at is persisted before the
           // search, so reruns and restarts never search that row again.
-          const query = passQuery(target, pass);
+          const query = passQuery(target, pass, outlet);
           const attemptNow = clock();
           const reservation = await reserveOutletAttempt(db, { runId: run.id, pass, appid, outlet: outlet.name, kind: "search", url: null, date: attemptNow });
           if ("stop" in reservation) {
@@ -1499,7 +1548,7 @@ export async function runAuthorizedMediaDiscovery(db: AppDatabase, options: Medi
             searchCreditsConsumed += reportedCredits;
           }
           candidates = Array.isArray(jsonObject(body).results)
-            ? (jsonObject(body).results as TavilyResult[]).slice(0, 10).map((item) => ({ url: typeof item.url === "string" ? item.url : "", publishedDate: dateValue(item.published_date) })).filter((item) => item.url && hostInOutlet(item.url, outlet))
+            ? (jsonObject(body).results as TavilyResult[]).slice(0, 10).map((item) => ({ url: typeof item.url === "string" ? item.url : "", publishedDate: dateValue(item.published_date) })).filter((item) => item.url && urlInOutlet(item.url, outlet))
             : [];
           if (occurrenceId !== null && !await previewOpen(db, occurrenceId)) continue;
           await db.prepare("UPDATE media_discovery_progress SET query_attempted_at = ?, status = 'fetching', candidate_urls = ?, candidate_index = 0, provider_request_id = ?, credits_used = ?, usage = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND status = 'searching'").bind(attemptNow.toISOString(), JSON.stringify(candidates), providerRequestId, typeof (usage.credits ?? usage.credits_used) === "number" ? (usage.credits ?? usage.credits_used) : null, JSON.stringify(usage), progressId).run();
@@ -1708,12 +1757,12 @@ export async function getMediaSources(
   const sourceRows = await rows<{
     appid: number; original_url: string; discovery_url: string | null; title: string; outlet: MediaOutlet;
     author: string | null; published_at: string | null; updated_at: string | null; retrieved_at: string;
-    type: MediaArticleType; hands_on: number | null; affiliation: string | null; platform: string | null; build_context: string | null;
+    type: MediaArticleType; hands_on: number | null; preview_evidence: WrittenPreviewEvidence | null; affiliation: string | null; platform: string | null; build_context: string | null;
   }>(
     db,
     `SELECT source.appid, source.original_url, source.discovery_url, source.title, source.outlet,
             source.author, source.published_at, source.updated_at, source.retrieved_at,
-            source.type, source.hands_on, source.affiliation, source.platform, source.build_context
+            source.type, source.hands_on, source.preview_evidence, source.affiliation, source.platform, source.build_context
      FROM media_sources AS source
      JOIN apps AS app
        ON app.appid = source.appid
@@ -1725,7 +1774,7 @@ export async function getMediaSources(
      ORDER BY source.published_at IS NULL, source.published_at, source.id`,
     appid,
   );
-  return sourceRows.map((row) => ({ appid: row.appid, originalUrl: row.original_url, discoveryUrl: row.discovery_url, title: row.title, outlet: row.outlet, author: row.author, publishedAt: row.published_at, updatedAt: row.updated_at, retrievedAt: row.retrieved_at, type: row.type, handsOn: row.hands_on === null ? null : row.hands_on === 1, affiliation: row.affiliation, platform: row.platform, buildContext: row.build_context }));
+  return sourceRows.map((row) => ({ appid: row.appid, originalUrl: row.original_url, discoveryUrl: row.discovery_url, title: row.title, outlet: row.outlet, author: row.author, publishedAt: row.published_at, updatedAt: row.updated_at, retrievedAt: row.retrieved_at, type: row.type, handsOn: row.hands_on === null ? null : row.hands_on === 1, ...(row.preview_evidence ? { previewEvidence: row.preview_evidence } : {}), affiliation: row.affiliation, platform: row.platform, buildContext: row.build_context }));
 }
 
 const activeMediaDiscovery = new Map<number, Promise<MediaRunSummary>>();
@@ -1751,7 +1800,7 @@ async function replayPreview(
   const progress = await first<ProgressRow>(db, `SELECT ${PROGRESS_COLUMNS} FROM media_discovery_progress WHERE id = ? AND pass = 'preview'`, progressId);
   const occurrenceId = progress?.occurrence_id;
   const outlet = MEDIA_OUTLETS.find(({ name }) => name === progress?.outlet);
-  if (!progress || occurrenceId == null || !outlet || !hostInOutlet(url, outlet) ||
+  if (!progress || occurrenceId == null || !outlet || !urlInOutlet(url, outlet) ||
       progress.status !== "completed" || !progress.query_attempted_at) {
     return { admitted: false, reason: "not_a_rejected_candidate" };
   }

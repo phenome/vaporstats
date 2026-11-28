@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { authorizeMediaRun, MEDIA_OUTLETS, runAuthorizedMediaDiscovery, type MediaOutlet, type MediaPass } from "../src/lib/media-discovery";
+import { authorizeMediaRun, ASSESSMENT_MEDIA_OUTLETS, runAuthorizedMediaDiscovery, type MediaOutlet, type MediaPass } from "../src/lib/media-discovery";
 import {
   advanceMediaProcessing,
   authorizeMediaProcessing,
@@ -60,7 +60,7 @@ function progress(database: TestDatabase, pass: MediaPass, outlet: MediaOutlet):
 }
 
 /** Gives `appid` one accepted initial article on each of `outlets`, so its later pass asks them. */
-function representOutlets(database: TestDatabase, appid = CYBERPUNK, outlets: readonly (typeof MEDIA_OUTLETS)[number][] = MEDIA_OUTLETS): void {
+function representOutlets(database: TestDatabase, appid = CYBERPUNK, outlets: readonly (typeof ASSESSMENT_MEDIA_OUTLETS)[number][] = ASSESSMENT_MEDIA_OUTLETS): void {
   for (const outlet of outlets) insertSources(database.native, appid, "initial", 1, outlet);
 }
 
@@ -202,7 +202,7 @@ describe("outlet stops across passes", () => {
     expect(rerun.status).toBe("completed");
     expect(outletCalls(calls, "ign.com")).toEqual({ searches: 1, fetches: 1 });
     expect(progress(database, "initial", "IGN")).toEqual({ status: "completed", stop_reason: null });
-    expect(rerun.queries).toBe(MEDIA_OUTLETS.length);
+    expect(rerun.queries).toBe(ASSESSMENT_MEDIA_OUTLETS.length);
   });
 
   test("a search provider rate limit stops searching for the run without limiting the outlet, and its query reopens on the next UTC day", async () => {
@@ -230,7 +230,7 @@ describe("outlet stops across passes", () => {
     const reopened = await runAuthorizedMediaDiscovery(database.db, { runId: nextDayRun.runId, tavilyApiKey: "test-key", fetch: nextDay.fetchFn, now: DAY_TWO });
     expect(outletCalls(nextDay.calls, "ign.com")).toEqual({ searches: 1, fetches: 1 });
     expect(progress(database, "initial", "IGN")).toEqual({ status: "completed", stop_reason: null });
-    expect(reopened.queries).toBe(MEDIA_OUTLETS.length);
+    expect(reopened.queries).toBe(ASSESSMENT_MEDIA_OUTLETS.length);
   });
 
   test("exhausted search credits stop the run and leave the unissued query for the next authorized run, which issues it once", async () => {
@@ -257,7 +257,7 @@ describe("outlet stops across passes", () => {
     expect(outletCalls(calls, "ign.com")).toEqual({ searches: 0, fetches: 0 });
     expect(outletCalls(calls, "eurogamer.net")).toEqual({ searches: 1, fetches: 1 });
     expect(progress(database, "initial", "Eurogamer")).toEqual({ status: "completed", stop_reason: null });
-    expect(rerun.queries).toBe(MEDIA_OUTLETS.length);
+    expect(rerun.queries).toBe(ASSESSMENT_MEDIA_OUTLETS.length);
   });
 
   test.each([
@@ -287,7 +287,7 @@ describe("outlet stops across passes", () => {
     expect(rerun.stopReasons.filter((stop) => stop.startsWith("IGN:"))).toEqual([]);
     expect(outletCalls(calls, "ign.com")).toEqual({ searches: 1, fetches: 1 });
     expect(progress(database, "initial", "IGN")).toEqual({ status: "completed", stop_reason: null });
-    expect(rerun.queries).toBe(MEDIA_OUTLETS.length);
+    expect(rerun.queries).toBe(ASSESSMENT_MEDIA_OUTLETS.length);
   });
 
   test("a same-day initial-pass rate limit stops later-pass work that day and reopens on the next UTC day", async () => {
@@ -346,7 +346,7 @@ describe("provider stops for every search outcome", () => {
 
   test.each(cases.map((item) => [item.outcome, item] as const))("%s", async (_outcome, item) => {
     const database = fixture();
-    const outlet = MEDIA_OUTLETS.find((candidate) => candidate.name === item.outlet)!;
+    const outlet = ASSESSMENT_MEDIA_OUTLETS.find((candidate) => candidate.name === item.outlet)!;
     seedAttempts(database, item.outlet, "initial", "2026-09-10", 28);
     const base = discoveryFetch();
     const failingFetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
@@ -411,8 +411,8 @@ describe("discovery query bound per pass", () => {
   });
 });
 
-const IGN = MEDIA_OUTLETS[0];
-const EUROGAMER = MEDIA_OUTLETS[1];
+const IGN = ASSESSMENT_MEDIA_OUTLETS[0];
+const EUROGAMER = ASSESSMENT_MEDIA_OUTLETS[1];
 
 /** A completed later-pass run authorized for processing, with fetches recorded by URL. */
 function processingRun(database: TestDatabase, respond: (url: string) => Response | string = () => processingArticleHtml(CYBERPUNK)) {

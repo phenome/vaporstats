@@ -268,7 +268,10 @@ describe("repair of the first live run's cut-off extractions (migration 0028)", 
       usage_json: JSON.stringify({ promptTokens: 3_081, completionTokens: 1_200 }),
       generation_id: "gen-live-a",
     });
-    expect(otherRows(native, ids.truncated)).toEqual(before!);
+    const expected = before!;
+    expect(otherRows(native, ids.truncated)).toEqual({
+      ...expected, sources: expected.sources.map((source) => ({ ...(source as object), preview_evidence: null })),
+    });
     expect(native.query("SELECT status, error, max_output_tokens FROM media_processing_jobs WHERE id = ?").get(ids.complete)).toEqual({ status: "refused", error: "invalid_output: no supported contributions", max_output_tokens: 1_200 });
 
     // The next tick, before the daily run, extracts it once more with the
@@ -305,6 +308,8 @@ describe("repair of the first live run's cut-off extractions (migration 0028)", 
     for (const table of ["media_watches", "media_watch_coverage", "media_preview_occurrences", "media_preview_rejections"]) {
       before[table] = [];
     }
-    expect(mediaState(production.native)).toEqual(before);
+    expect(mediaState(production.native)).toEqual({
+      ...before, media_sources: before.media_sources!.map((source) => ({ ...(source as object), preview_evidence: null })),
+    });
   });
 });
