@@ -30,17 +30,18 @@ const FIRST_PERSON_INTERVIEW = /\b(?:in our interview|(?:I|we) (?:interviewed|sp
 
 export function writtenPreviewEvidence(outlet: MediaOutlet, title: string, body: string) {
   // Exclude quoted first-person accounts when looking for what the journalist did.
-  const lead = body.slice(0, 4_000).replace(/“[^”]*”|"[^"]*"/g, " ");
-  const context = `${title} ${lead}`;
+  const withoutQuotes = (text: string) => text.replace(/“[^”]*”|"[^"]*"|‘.*?’(?![\p{L}\p{N}])|(?<![\p{L}\p{N}])'.*?'(?![\p{L}\p{N}])/gu, " ");
+  const lead = withoutQuotes(body).slice(0, 4_000);
+  const headline = withoutQuotes(title);
+  const context = `${headline} ${lead}`;
   const observedDemo = /\bhands?[- ]off (?:preview|demo(?:nstration)?)\b/i.test(context)
     || (/\bdemo(?:nstration)?\b/i.test(context)
       && /\b(?:I|we) (?:watch(?:ed)?|observ(?:e|ed))\b.{0,100}\b(?:gameplay|demo)\b|\b(?:gameplay|demo) (?:I|we) (?:watch(?:ed)?|observ(?:e|ed))\b/i.test(lead));
   const developerInterview = (INTERVIEW_CREDIT[outlet]?.test(lead) || FIRST_PERSON_INTERVIEW.test(lead)) && /\b(?:developer|development team|studio head|studios head|director|producer|designer|co-founder)\b/i.test(lead);
   const evidence: WrittenPreviewEvidence | null = observedDemo && developerInterview ? "observed_demo_and_developer_interview"
     : observedDemo ? "observed_demo" : developerInterview ? "developer_interview" : null;
-  const handsOn = !observedDemo && (
-    /\bhands?[- ]on (?:preview|impressions)\b/i.test(title) && !/\b(?:not|non|no)[- ](?:an? )?hands?[- ]on\b/i.test(title)
-    || /\b(?:I|we) (?:played(?! with\b)|went hands?[- ]on|got to play)\b/i.test(lead)
-  );
+  const handsOn = /\bhands?[- ]on (?:preview|impressions|session)\b/i.test(headline)
+    && !/\b(?:not|non|no)[- ](?:an? )?hands?[- ]on\b/i.test(headline)
+    || /\b(?:I|we) (?:played(?! with\b)|went hands?[- ]on|got to play)\b/i.test(lead);
   return { evidence, handsOn };
 }

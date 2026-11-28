@@ -47,7 +47,7 @@ import {
   type MediaOutlet,
   type MediaPass,
 } from "./media-discovery";
-import { WRITTEN_PREVIEW_OUTLETS, fetchOutletArticle, isOutletDenialStop, OUTLET_STOP_REASONS, type OutletAccessStop, type OutletStopReason } from "./media-outlet-access";
+import { fetchOutletArticle, isOutletDenialStop, OUTLET_STOP_REASONS, type OutletAccessStop, type OutletStopReason } from "./media-outlet-access";
 import { approvedGameSpotVideos, gameSpotCaptionDirectory, gameSpotVideoId, readGameSpotCaptions } from "./media-video";
 import {
   createOpenRouterTransport,
@@ -476,9 +476,13 @@ function previewEvidenceScope(source: SourceRow): PreviewScope | null {
 }
 
 function eligiblePreviewObservations(source: SourceRow, observations: MediaObservation[]): MediaObservation[] {
-  if (source.pass !== "preview" || source.hands_on === 1) return observations;
-  return observations.filter((observation) =>
-    observation.kind !== "pro" && observation.kind !== "con" && observation.technicalTiming === undefined);
+  if (source.pass !== "preview") return observations;
+  return observations.filter((observation) => {
+    const firsthand = observation.previewEvidence
+      ? observation.previewEvidence.scope === "hands-on preview"
+      : source.hands_on === 1;
+    return firsthand || (observation.kind !== "pro" && observation.kind !== "con" && observation.technicalTiming === undefined);
+  });
 }
 
 function makeExtractionRequest(source: SourceRow, content: string, configVersion: string): OpenRouterChatRequest {
@@ -487,13 +491,13 @@ function makeExtractionRequest(source: SourceRow, content: string, configVersion
   const captionGuidance = video ? " Use only clear English caption evidence. Attribute plans and design statements to the developer when the speaker is clear. Skip a claim if its speaker or meaning is uncertain. Keep pre-release plans qualified and omit assessments of played or released gameplay."
     + (source.affiliation ? " The host's questions and commentary do not establish game facts." : " Distinguish the outlet's reporting from developer statements. Describe a demo detail as observed only when the captions establish that it was shown.")
     : "";
-  const writtenPreview = source.pass === "preview" && WRITTEN_PREVIEW_OUTLETS.some(({ name }) => name === source.outlet);
-  const writtenGuidance = writtenPreview
-    ? " Distinguish what the writer directly saw or played from what developers said. Attribute developer claims to the speaker or studio in each observation and preserve plans as plans. Describe details as observed in a demo only when the excerpt establishes that they were shown. Keep the attribution in the supporting excerpt."
+  const claimScopedPreview = source.pass === "preview" && !(video && source.affiliation);
+  const claimGuidance = claimScopedPreview
+    ? " Distinguish what the writer directly saw or played from what developers said. Attribute developer claims to the speaker or studio in each observation and preserve plans as plans. Describe details as observed in a demo only when the excerpt establishes that they were shown. For each observation add a previewEvidence object with a scope of \"developer statement\" for claims known only from what a developer said, \"demo\" for details witnessed in a demo or shown in footage, \"hands-on preview\" for what the journalist experienced while playing, \"announcement\" for announced facts, or \"non-hands-on preview\" for other reporting. For developer statements, add an attribution field to that object naming the speaker, studio or role verbatim in the supporting excerpt. Include enough of the excerpt to establish how that particular claim is known. Separate observations when the evidence changes, even inside the same article or captions. Use pro, con, originatingAssessment and firsthand performance findings only for the journalist’s own play."
     : "";
   const request = chatRequest(
     EXTRACTION_MAX_OUTPUT_TOKENS,
-    { role: "system", content: `Analyze the ${format} about Steam app ${source.appid}. Return JSON only.${captionGuidance}${writtenGuidance}
+    { role: "system", content: `Analyze the ${format} about Steam app ${source.appid}. Return JSON only.${captionGuidance}${claimGuidance}
 Return {observations, originatingAssessment}. Each observation has id (unique short stable identifier), appid (the target Steam app ID as a JSON integer), kind ("finding", "pro", "con", "tag", "gameplay", or "storyWorld"), category (one of the categories below for findings, "" otherwise), text (one independently checkable assertion), quote (verbatim supporting excerpt, 12–480 characters), and qualifiers (array, empty only when scope does not materially change the claim). Omit originatingAssessment if unknown.
 ${CATEGORY_GUIDANCE}
 Ground every observation in substantive reporting about the target game. Omit factboxes, page metadata, incidental comparisons, and other games or editions. When a platform, edition, build, patch, preview, announcement, or release state changes the meaning of a specific observation, copy the exact phrase into qualifiers from that observation's own quote or from its non-null platform or buildContext metadata. Each qualifier must appear verbatim as a contiguous phrase in one of those places. Include a material qualifier even when the observation text already contains it. Use [] for general observations. Omit placeholders such as "platform and build not stated", labels such as "reviewer assessment", and a platform that merely identifies where the reviewer played. Publication dates do not establish the build played.${source.pass === "preview" ? " Apply the pre-release scope to every claim. If handsOn is 0, extract only factual descriptions from reporting or attributed plans. Never describe play experience, performance, or an assessment of how the game feels. Omit originatingAssessment." : ""} If interpretation is uncertain, include a short reviewQuestion on the candidate observation identifying the unresolved issue; the candidate is held for editorial review.${extractsTechnicalTiming(configVersion) ? `
@@ -650,7 +654,7 @@ ${shortLead ? `For statements, first draft two or three sentences of 45–70 wor
 Only AFTER drafting that paragraph, divide it into citation spans. Different parts of a sentence may cite different articles. Fictional illustration of pacing and boundaries: "Low Tide puts you at the helm of a ferry as the last bridge out of town collapses." [premise] "Each crossing means choosing between another passenger" [capacity] "and enough fuel to make it home." [fuel]. Use the actual game evidence; never reuse details from this illustration.
 ` : ""}${usesSourceGroundedScope(version) ? `Treat the source platform, review date and build as review context. Give ordinary gameplay, story, world and qualitative assessments directly when the excerpt supports them without that context. A review of a PC release or console port does not establish that every detail differs by version. Use an explicit version distinction only for a concrete change, comparison, restriction or platform-specific behavior indicated by the observation's edition and required qualifiers. These come from the verified excerpt, or the accepted wording for legacy observations. Keep historical and technical limits listed in the observation's qualifiers, including patch-dependent bugs and preview-only evidence. Preserve both sides of an explicit version comparison in the claim text. Use the supplied scopeGroup when combining IDs.
 ` : ""}${(usesTechnicalTiming(version)) ? `For an observed bug or performance problem in any prose section, use past tense and put the timing in the clause itself. Preserve each material build, patch or period explicitly supported by every selected observation's excerpt. For example, say "Animation glitches interrupted scenes at launch" only if every citation establishes launch timing. If the citations only establish what happened while the reviewer played, say "during review" explicitly, such as "Animation glitches interrupted scenes during review." Do not infer launch or patch timing from a publication date, source metadata or other observations. Keep differently timed evidence in separate clauses. Ordinary gameplay and other general claims need no such timing.
-` : ""}${version === "v19" || usesAuthoredTags(version) ? "When a source describes the effect of a tested patch, include the observed change and any remaining problems as a separate technical finding with that source’s own citation and timing. Prioritize this over incidental interface complaints. Mention each hardware configuration only once.\n" : ""}${selections.evidence.some(({ pass }) => pass === "preview") ? usesPreviewScope(version) ? `Use previewScope to frame pre-release claims in natural prose. Describe plans as announced, details observed in a demo or trailer as shown there, and play impressions as firsthand only when the source played the game. Hands-off reporting alone does not prove that a particular feature was shown in a demo. In the lead, establish the scope on the first span of each run of adjacent spans with the same preview scope and cited articles. Carry it through the next span in that run without repeating the label. Reintroduce it when the evidence switches, and make every topic, pro, and con independently clear. Keep other material qualifiers. Leave the generic word "preview" out of qualifier lists when the prose already sets the scope.
+` : ""}${version === "v19" || usesAuthoredTags(version) ? "When a source describes the effect of a tested patch, include the observed change and any remaining problems as a separate technical finding with that source’s own citation and timing. Prioritize this over incidental interface complaints. Mention each hardware configuration only once.\n" : ""}${selections.evidence.some(({ pass }) => pass === "preview") ? usesPreviewScope(version) ? `Use each observation’s previewScope to frame pre-release claims in natural prose. For a developer statement, name the supplied attribution and say what that speaker said or plans. Claims from the same article can have different scopes. Describe plans as announced, details observed in a demo or trailer as shown there, and play impressions as firsthand only when the source played the game. Hands-off reporting alone does not prove that a particular feature was shown in a demo. In the lead, establish the scope on the first span of each run of adjacent spans with the same preview scope and cited articles. Carry it through the next span in that run without repeating the label. Reintroduce it when the evidence switches, and make every topic, pro, and con independently clear. Keep other material qualifiers. Leave the generic word "preview" out of qualifier lists when the prose already sets the scope.
 For example, if only an announcement establishes the setting and only the hands-off demo shows stealth and mission choice, write separate spans: "The announcement sets the game in a flooded town." [setting announcement] "A hands-off demo showed how you slip through empty streets" [demo stealth] "and choose which mission to take next." [demo mission choice]. Attach the announcement only to the setting span. Even within a sentence, use only the IDs establishing the entire span at its stated scope.
 ` : "Describe announced features as announced and material shown in trailers as shown. Use hands-on language only when the source played the game, and keep its preview context.\n" : ""}${selections.evidence.some(({ outlet, sourceUrl, context }) => context.affiliation && gameSpotVideoId(outlet, sourceUrl)) ? "For claims grounded only in GameSpot developer interviews, name the developer from the source context's affiliation and attribute its pre-release statements to that developer. Treat the interviews as developer accounts. A second outlet quoting the same developer adds no independent corroboration.\n" : ""}${JSON.stringify(selections.evidence.map(({ observations, editorialOmissions: _editorialOmissions, legacySimilarityInputs: _legacySimilarityInputs, ...source }) => ({ ...source, extraction: { observations } })))}` });
   if (usesTagFirst(version)) {
@@ -995,12 +999,18 @@ async function persistExtraction(db: AppDatabase, job: JobRow, output: unknown, 
   const context = [source.platform, source.build_context, source.type === "preview" ? "preview" : null, scope];
   const includeTechnicalTiming = extractsTechnicalTiming(job.config_version);
   const includeVersionEvidence = includeTechnicalTiming || job.config_version === VERSION_EVIDENCE_EXTRACTION_VERSION;
-  const qualified = article === undefined ? [] : parseArticleObservations(output, source.appid, article, context, false, includeVersionEvidence, includeTechnicalTiming, scope ?? undefined);
+  const video = gameSpotVideoId(source.outlet, source.original_url) !== null;
+  const previewContext = scope && !(video && source.affiliation) ? {
+    handsOn: source.hands_on === 1,
+    defaultToReporting: scope === "hands-on preview" || video || source.preview_evidence === "observed_demo"
+      || source.preview_evidence === "observed_demo_and_developer_interview",
+  } : undefined;
+  const qualified = article === undefined ? [] : parseArticleObservations(output, source.appid, article, context, false, includeVersionEvidence, includeTechnicalTiming, scope ?? undefined, previewContext);
   const observations = eligiblePreviewObservations(source, qualified);
   const pendingObservations = article === undefined ? [] : eligiblePreviewObservations(source,
-    parseArticleObservations(output, source.appid, article, context, true, includeVersionEvidence, includeTechnicalTiming, scope ?? undefined));
+    parseArticleObservations(output, source.appid, article, context, true, includeVersionEvidence, includeTechnicalTiming, scope ?? undefined, previewContext));
   const hasLegacyOutput = article === undefined && (parsed.contributions.length > 0 || parsed.traits.length > 0 || parsed.categories || parsed.similarityInputs);
-  const editorialOmissions = article === undefined ? [] : extractionReviewIssues(output, source.appid, job.input_identity, qualified, article, context, includeTechnicalTiming);
+  const editorialOmissions = article === undefined ? [] : extractionReviewIssues(output, source.appid, job.input_identity, qualified, article, context, includeTechnicalTiming, previewContext);
   if (observations.length === 0 && pendingObservations.length === 0 && !hasLegacyOutput) {
     await db.prepare("UPDATE media_sources SET processing_content = NULL WHERE id = ?").bind(source.id).run();
     return { status: "refused", error: "invalid_output: no supported contributions", ...(editorialOmissions.length ? { outputJson: JSON.stringify({ editorialOmissions }) } : {}) };

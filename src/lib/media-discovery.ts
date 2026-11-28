@@ -1022,9 +1022,7 @@ function articleFacts(
     previewWording: /\b(preview|early access)\b/i.test(`${title} ${lead}`),
     previewTitle: /\bpreview\b/i.test(title),
     outletPreviewMarker: meta.gamesRadarTags.includes("unindexedFreeform:preview"),
-    explicitHandsOn: pass === "preview"
-      ? !/\b(?:not (?:an? )?hands?[- ]on|non[- ]hands?[- ]on|no hands?[- ]on)\b/i.test(title) && (/\bhands?[- ]on\b/i.test(title) || /\b(?:(?:we|i) (?:played|went hands?[- ]on)|after playing|played for)\b/i.test(lead))
-      : /\b(hands?[- ]on|we played|after playing|played for|impressions?)\b/i.test(`${title} ${lead}`),
+    explicitHandsOn: pass !== "preview" && /\b(hands?[- ]on|we played|after playing|played for|impressions?)\b/i.test(`${title} ${lead}`),
     announcement: /\b(announced|announcement|announces|revealed|reveal|trailer|launches)\b/.test(titleLower),
     patchNotes: /\b(patch notes|update notes|roadmap)\b/.test(titleLower),
     guide: /\b(guide|walkthrough)\b/.test(titleLower),
@@ -1111,7 +1109,7 @@ function parseSource(html: string, finalUrl: string, target: MediaTarget, target
   const buildMeta = meta(document, "game:build", "article:build");
   const affiliationMeta = meta(document, "author_affiliation", "article:author_affiliation");
   const gamesRadarTags = outlet === "GamesRadar+" ? (meta(document, "mrf:tags")?.split(";") ?? []) : [];
-  type ReadableResult = { title?: string; byline?: string; textContent?: string };
+  type ReadableResult = { title?: string; byline?: string; textContent?: string; content?: string };
   let readable: ReadableResult | null = null;
   try {
     readable = new Readability(document).parse() as ReadableResult | null;
@@ -1132,7 +1130,14 @@ function parseSource(html: string, finalUrl: string, target: MediaTarget, target
   const byline = cleanText((!writtenPreview || (authorMeta && !/^https?:\/\//i.test(authorMeta)) ? authorMeta : structured?.author) ?? readable?.byline ?? document.querySelector("[rel='author'],.byline,[class*='author']")?.textContent);
   const affiliation = cleanText(affiliationMeta);
   const facts = articleFacts(title, titleLower, articleLeadLower, bodyLower, fullArticleText, targets, { byline, affiliation, gamesRadarTags }, pass);
-  const preview = writtenPreview ? writtenPreviewEvidence(outlet, title, fullArticleText) : null;
+  const preview = pass === "preview" ? (() => {
+    const root = readable?.content
+      ? parseArticleDocument(`<!doctype html><html><body>${readable.content}</body></html>`)?.body
+      : document.querySelector("article") ?? document.body;
+    for (const quote of root?.querySelectorAll("blockquote,q") ?? []) quote.replaceWith(" ");
+    const reporting = root?.textContent?.replace(/\s+/g, " ").trim() ?? fullArticleText;
+    return writtenPreviewEvidence(outlet, title, reporting);
+  })() : null;
   if (preview) facts.explicitHandsOn = preview.handsOn;
   if ((pass === "preview" ? previewPassRefusal(facts) : assessmentPassRefusal(facts)) !== null) return null;
   const handsOn = facts.explicitHandsOn ? true : pass === "preview" ? false : null;

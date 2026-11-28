@@ -1269,3 +1269,81 @@ test("written preview outlets stay game-specific and retain demo, play and devel
   expect(interviewExtraction?.body.messages[0]?.content).toContain("Attribute developer claims to the speaker");
   expect(interviewExtraction?.body.messages[1]?.content).toContain('"handsOn":0');
 });
+
+test.each([
+  "‘I played the game for hours.’",
+  "'I played the game for hours.'",
+  "“I played the game for hours.”",
+  "</p><blockquote>I played the game for hours.</blockquote><p>",
+])("an RPG Site recap of an IGN interview does not claim hands-on from %s", async (quote) => {
+  const database = fixture();
+  admit(database, ROOT);
+  await watch(database);
+  const api = world();
+  const url = "https://www.rpgsite.net/preview/no-law";
+  api.tavily.results = ({ domain }) => domain === "rpgsite.net" ? [{ url }] : [];
+  await api.tick(database, "2027-01-25", { outlet: () => new Response(discoveryArticleHtml(ROOT, "NO LAW Preview", {
+    body: `The director spoke in an interview with IGN. ${quote} The interview covered how players select gear for each mission. ${api.quote} ${api.quote}`,
+  })) });
+  expect(await getMediaSources(database.db, ROOT, { includeUnpublished: true })).toEqual([
+    expect.objectContaining({ originalUrl: url, handsOn: false }),
+  ]);
+  expect(api.openRouter.requests.find(({ stage }) => stage === "extraction")?.body.messages[1]?.content).toContain('"handsOn":0');
+});
+
+test("one written preview keeps played, demonstrated and developer-reported claims distinct through synthesis", async () => {
+  const database = fixture();
+  admit(database, ROOT);
+  await watch(database);
+  const api = world();
+  const url = "https://www.rpgsite.net/preview/no-law";
+  api.tavily.results = ({ domain }) => domain === "rpgsite.net" ? [{ url }] : [];
+  const play = "I played the opening mission, where I selected gear before leaving port.";
+  const demo = "I watched a separate demo that showed the player navigating flooded streets.";
+  const plan = "In an interview with RPG Site, creative director Mira Dane said the team plans to add optional rescue missions.";
+  const observations = [
+    { ...mediaObservation(ROOT, "play", "finding", "Players select gear before leaving port.", play), previewEvidence: { scope: "hands-on preview" } },
+    { ...mediaObservation(ROOT, "demo", "finding", "Players navigate flooded streets.", demo), previewEvidence: { scope: "demo" } },
+    { ...mediaObservation(ROOT, "plan", "finding", "The team plans to add optional rescue missions.", plan), previewEvidence: { scope: "developer statement", attribution: "Mira Dane" } },
+    { ...mediaObservation(ROOT, "false-speaker", "finding", "Another director plans to add optional rescue missions.", plan), previewEvidence: { scope: "developer statement", attribution: "Other Director" } },
+    { ...mediaObservation(ROOT, "dev-assessment", "pro", "Rescue missions are satisfying.", plan), previewEvidence: { scope: "developer statement", attribution: "Mira Dane" } },
+  ];
+  const statements = [
+    "In the hands-on session, players select gear before leaving port.",
+    "A demo showed players navigating flooded streets.",
+    "Mira Dane said the team plans to add optional rescue missions.",
+  ];
+  api.openRouter.onChat = (request) => {
+    if (request.stage === "extraction") {
+      expect(request.body.messages[1]?.content).toContain('"handsOn":1');
+      expect(request.body.messages[0]?.content).toContain("add a previewEvidence object");
+      api.openRouter.output("extraction", { observations });
+      return;
+    }
+    const sources = synthesisEvidence(request.body);
+    const source = sources.find(({ sourceUrl }) => sourceUrl === url)!;
+    expect(source.extraction.observations).toEqual(observations.slice(0, 3).map(({ id, previewEvidence }) =>
+      expect.objectContaining({ id, previewEvidence, previewScope: previewEvidence.scope })));
+    expect(new Set(source.extraction.observations.map(({ scopeGroup }) => scopeGroup)).size).toBe(3);
+    const clause = (text: string, id: string) => ({ text, observationIds: [synthesisSelectionId(source, id)] });
+    api.openRouter.output("synthesis", {
+      ...emptySynthesisSelection(sources),
+      statements: [
+        ...statements.map((text, index) => clause(text, observations[index]!.id)),
+        clause("A demo showed optional rescue missions.", "plan"),
+        clause("Optional rescue missions are planned.", "plan"),
+      ],
+    });
+  };
+  await api.tick(database, "2027-01-25", { outlet: () => new Response(discoveryArticleHtml(ROOT, "NO LAW Preview", {
+    body: `${play} ${demo} ${plan}`,
+  })) });
+  expect(await getMediaSources(database.db, ROOT, { includeUnpublished: true })).toEqual([
+    expect.objectContaining({ originalUrl: url, handsOn: true, previewEvidence: "observed_demo_and_developer_interview" }),
+  ]);
+  const persisted = JSON.parse(database.native.query<{ output_json: string }, []>("SELECT output_json FROM media_article_extractions").get()!.output_json);
+  expect(persisted.observations.map(({ id, previewEvidence }: typeof observations[number]) => ({ id, previewEvidence })))
+    .toEqual(observations.slice(0, 3).map(({ id, previewEvidence }) => ({ id, previewEvidence })));
+  const overview = JSON.parse(database.native.query<{ output_json: string }, []>("SELECT output_json FROM media_game_overviews WHERE active = 1").get()!.output_json);
+  expect(overview.statements.map(({ text }: { text: string }) => text)).toEqual(statements);
+});
