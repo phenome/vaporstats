@@ -588,8 +588,28 @@ async function requeueUnrunBatch(db: AppDatabase, job: JobRow, retry: { attemptC
     .bind(queued.provider, queued.model, queued.config_version, queued.max_output_tokens, queued.input_identity, retry.attemptCount, retry.nextAttemptAt, retry.error, job.id).run();
 }
 
+const CAPTION_HOLD_REASON = PROCESSING_STOP_REASONS.APPROVED_CAPTIONS_UNAVAILABLE;
+const CAPTION_HOLD_SUFFIX = `; ${CAPTION_HOLD_REASON}`;
+const CAPTION_HOLD = `(error IS NOT NULL AND (error = '${CAPTION_HOLD_REASON}' OR substr(error, -${CAPTION_HOLD_SUFFIX.length}) = '${CAPTION_HOLD_SUFFIX}'))`;
+const PENDING_OVERVIEW_INPUT = `(status = 'submitted' OR (${WAITING} AND NOT ${CAPTION_HOLD}))`;
+
+/** Keeps the hold alongside any provider failure so availability does not reset retry history. */
+export async function setCaptionHold(db: AppDatabase, job: JobRow, held: boolean): Promise<void> {
+  const error = job.error;
+  const hasHold = error === CAPTION_HOLD_REASON || (error?.endsWith(CAPTION_HOLD_SUFFIX) ?? false);
+  if (held === hasHold) return;
+  const nextError = held
+    ? (error ? error + CAPTION_HOLD_SUFFIX : CAPTION_HOLD_REASON)
+    : (error === CAPTION_HOLD_REASON ? null : error!.slice(0, -CAPTION_HOLD_SUFFIX.length));
+  await db.prepare(`UPDATE media_processing_jobs SET error = ? WHERE id = ? AND ${WAITING}`).bind(nextError, job.id).run();
+}
+
+export async function hasCaptionHold(db: AppDatabase, runId?: number): Promise<boolean> {
+  return (await first(db, `SELECT 1 FROM media_processing_jobs WHERE ${WAITING} AND ${CAPTION_HOLD} AND (?1 IS NULL OR run_id = ?1) LIMIT 1`, runId ?? null)) !== null;
+}
+
 export async function hasPendingExtractions(db: AppDatabase, appid: number): Promise<boolean> {
-  return (await first<{ pending: number }>(db, `SELECT 1 AS pending FROM media_processing_jobs WHERE appid = ? AND stage = 'extraction' AND (status = 'submitted' OR ${WAITING}) LIMIT 1`, appid)) !== null;
+  return (await first<{ pending: number }>(db, `SELECT 1 AS pending FROM media_processing_jobs WHERE appid = ? AND stage = 'extraction' AND ${PENDING_OVERVIEW_INPUT} LIMIT 1`, appid)) !== null;
 }
 
 export async function hasUnresolvedSynthesis(db: AppDatabase, appid: number, inputIdentity: string): Promise<boolean> {
@@ -604,7 +624,7 @@ export async function hasUnresolvedSynthesis(db: AppDatabase, appid: number, inp
  * advance replaces (#80).
  */
 export async function overviewReplacementPending(db: AppDatabase, appid: number): Promise<boolean> {
-  return (await first<{ pending: number }>(db, `SELECT 1 AS pending FROM media_processing_jobs WHERE appid = ? AND stage IN ('extraction', 'synthesis') AND (status = 'submitted' OR ${WAITING}) LIMIT 1`, appid)) !== null;
+  return (await first<{ pending: number }>(db, `SELECT 1 AS pending FROM media_processing_jobs WHERE appid = ? AND stage IN ('extraction', 'synthesis') AND ${PENDING_OVERVIEW_INPUT} LIMIT 1`, appid)) !== null;
 }
 
 export async function activeOverviewAppids(db: AppDatabase, entities: readonly number[]): Promise<number[]> {

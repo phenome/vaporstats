@@ -19,6 +19,10 @@ The manifest is a JSON array. Use the following field structure and fill in the 
 ]
 ```
 
-Store each WebVTT file under `<id>.<language>.vtt`. Supply the actual English track code. Regional English tracks are accepted. The file stays in the configured directory for extraction or bounded provider retries. A missing file keeps an admitted extraction queued until approved captions are available again. The database stores the canonical YouTube URL, publisher, source metadata, content hash, and existing extraction outputs.
+Store each WebVTT file under `<id>.<language>.vtt`. Supply the actual English track code. Regional English tracks are accepted. Keep the file in the configured directory for extraction and any bounded provider retries. The database stores the canonical YouTube URL, publisher, source metadata, content hash, and existing extraction outputs.
+
+If an admitted extraction cannot read approved captions, the ingestion log reports `approved_captions_unavailable` in `mediaProcessing.stopReasons`. The extraction stays queued with that reason on its job. The Overview can publish using available extractions while the video waits.
+
+To recover, restore `MEDIA_GAMESPOT_CAPTION_DIRECTORY` in the worker configuration if it is unset. Verify that the directory contains a readable `<appid>.json` approving the same video and developer, plus a readable English `<id>.<language>.vtt` matching the manifest. The next eligible ingestion tick checks the bundle and resumes the queued extraction under its existing retry limits. A prior extraction of identical normalized captions is reused without a paid request.
 
 VaporStats reads these files locally. Caption acquisition happens separately under YouTube's applicable access and rate limits. GameSpot website access continues to use the normal outlet guard.

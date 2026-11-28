@@ -63,6 +63,7 @@ export const PROCESSING_STOP_REASONS = {
   UNCERTAIN_SUBMISSION: "uncertain_submission",
   MISSING_GEMINI_EMBEDDING_BATCH: "missing_gemini_embedding_batch",
   ITEM_ERROR: "item_error",
+  APPROVED_CAPTIONS_UNAVAILABLE: "approved_captions_unavailable",
 } as const;
 
 export type ProcessingStopReason = (typeof PROCESSING_STOP_REASONS)[keyof typeof PROCESSING_STOP_REASONS];

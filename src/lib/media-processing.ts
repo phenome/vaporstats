@@ -88,6 +88,7 @@ import {
   automaticRequestKey,
   countOutputs,
   enqueuePaidWork,
+  hasCaptionHold,
   hasDefiniteEditorialRefusal,
   hasOpenExtraction,
   hasPendingExtractions,
@@ -112,6 +113,7 @@ import {
   resolveWithoutProvider,
   returnUnrunBatch,
   runRequestKey,
+  setCaptionHold,
   setWaitingInputIdentity,
   upgradeWaitingTextJob,
   settleOutput,
@@ -1415,7 +1417,8 @@ const PASSING_STOPS = /^(?:pricing_unconfirmed|capability_unconfirmed|missing_ge
 
 /** The explicit stop reasons a run recorded about its work, without passing conditions. */
 function recordedWorkStops(stopReason: string | null): string[] {
-  return (stopReason ?? "").split("; ").filter((reason) => reason && !PASSING_STOPS.test(reason));
+  return (stopReason ?? "").split("; ").filter((reason) =>
+    reason && reason !== PROCESSING_STOP_REASONS.APPROVED_CAPTIONS_UNAVAILABLE && !PASSING_STOPS.test(reason));
 }
 
 /**
@@ -1494,10 +1497,10 @@ async function enqueueExtractions(advance: QueueAdvance, runId: number, affected
 /**
  * Queues Overview and embedding work for the games `runId` may rebuild: an
  * authorized run's rebuild scope, or every one of `entities` for automatic
- * work. An Overview is queued only when its game has no queued or in-flight
- * extraction, and its current contributions differ from those its active
- * Overview was built from, or it has none. A model or configuration version
- * change alone queues nothing. Automatic work never queues again work that
+ * work. An Overview is queued when its game's extractions have settled or
+ * are held for unavailable captions, and its current contributions differ
+ * from those of its active Overview or it has none. A model or configuration
+ * version change alone queues nothing. Automatic work never queues again work that
  * already has an item, whatever its outcome.
  */
 async function enqueueOverviewWork(advance: QueueAdvance, runId: number, entities: readonly number[], automatic = false): Promise<void> {
@@ -1617,16 +1620,17 @@ async function takeExtractionTurn(advance: QueueAdvance, job: JobRow): Promise<b
   const videoId = gameSpotVideoId(source.outlet, source.original_url);
   if (videoId) {
     const directory = gameSpotCaptionDirectory();
-    if (!directory) return false;
     cleaned = null;
-    for (const video of await approvedGameSpotVideos(directory, source.appid)) {
-      if (video.id !== videoId || video.developer !== source.affiliation) continue;
-      const content = await readGameSpotCaptions(directory, video);
-      if (!content) continue;
-      cleaned = { content, hash: sha256(content) };
-      break;
+    if (directory) {
+      for (const video of await approvedGameSpotVideos(directory, source.appid)) {
+        if (video.id !== videoId || video.developer !== source.affiliation) continue;
+        const content = await readGameSpotCaptions(directory, video);
+        if (!content) continue;
+        cleaned = { content, hash: sha256(content) };
+        break;
+      }
     }
-    // Leave the queued item waiting while its approved captions are unavailable.
+    await setCaptionHold(db, job, !cleaned);
     if (!cleaned) return false;
   } else {
     const stopped = advance.outletStops.get(source.outlet);
@@ -1876,6 +1880,7 @@ async function finishRun(advance: QueueAdvance, run: OpenAuthorization): Promise
   const allCovered = gamesWithSources.every((appid) => coveredGames.has(appid));
   const pending = Number(runAggregate?.pending ?? 0);
   const reasons = [...(advance.reasons.get(auth.run_id) ?? [])];
+  if (await hasCaptionHold(db, auth.run_id)) reasons.push(PROCESSING_STOP_REASONS.APPROVED_CAPTIONS_UNAVAILABLE);
   if (Number(runAggregate?.waiting ?? 0) > 0) {
     for (const provider of PAID_PROVIDERS) {
       const state = await providerState(db, provider);
@@ -2058,13 +2063,15 @@ async function advanceMediaProcessingNow(db: AppDatabase, options: MediaProcessi
   if (reconciliationRunId === undefined) throw new Error("Media processing authorization not found");
   const recorded = await first<{ stop_reason: string | null }>(db, "SELECT stop_reason FROM media_processing_authorizations WHERE run_id = ?", reconciliationRunId);
   const entities = automatic?.entities ?? (pollOnly ? globallySubmitted.map(({ appid }) => appid) : await enrolledEntities(db));
+  const stopReasons = (recorded?.stop_reason ?? "").split("; ").filter(Boolean);
+  if (!terminal && await hasCaptionHold(db)) stopReasons.push(PROCESSING_STOP_REASONS.APPROVED_CAPTIONS_UNAVAILABLE);
   return {
     runId: reconciliationRunId,
     status: terminal?.status ?? (await hasUnresolvedPaidWork(db) ? "waiting" : "completed"),
     submitted: advance.requestsSent,
     completed: advance.textSucceeded + prePoll.succeeded + currentPoll.succeeded,
     outputs: await outputCounts(db, reconciliationRunId),
-    stopReasons: (recorded?.stop_reason ?? "").split("; ").filter(Boolean),
+    stopReasons: [...new Set(stopReasons)],
     failed: advance.textFailed + prePoll.failed + currentPoll.failed,
     uncertain: advance.textUncertain + prePoll.uncertain + currentPoll.uncertain,
     overviewAppids: await activeOverviewAppids(db, entities),

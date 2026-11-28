@@ -1004,6 +1004,8 @@ export interface InterruptionScenario {
   seed(native: Database): void;
   /** A fresh controlled world for each run. */
   world(): MediaWorld;
+  /** Checks scenario-specific settlement after each uninterrupted or interrupted run. */
+  verifySettlement?(native: Database, interrupted: readonly OutboundCall[]): void;
   /**
    * Uninterrupted ticks that build the state the sweep starts from. They run
    * once, until quiescent, into a template every run copies, so they are not
@@ -1304,6 +1306,7 @@ async function sweepRun(template: { database: TestDatabase; calls: OutboundCall[
     for (const { original_url } of native.query<{ original_url: string }, []>("SELECT original_url FROM media_sources AS s WHERE NOT EXISTS (SELECT 1 FROM media_article_extractions AS e WHERE e.source_id = s.id AND e.active = 1) AND NOT EXISTS (SELECT 1 FROM media_processing_jobs AS j WHERE j.source_id = s.id AND j.stage = 'extraction' AND j.status IN ('uncertain_exhausted', 'client_error_exhausted'))").all()) {
       violations.push(`${label}: accepted ${original_url} was never extracted`);
     }
+    scenario.verifySettlement?.(native, driver.interrupted);
     return { swept, violations, resentUnderException, resentAfterUncertain, retriedAfterItemError, dayStopped: stopped.length, peak: Math.max(0, ...recorded.map(({ attempts }) => attempts)), previewPeak: Math.max(0, ...previewObserved.values()) };
   } catch (error) {
     return { swept: [], violations: [`${label}: ${error instanceof Error ? error.message : String(error)}`], resentUnderException: [], resentAfterUncertain: [], retriedAfterItemError: [], dayStopped: 0, peak: 0, previewPeak: 0 };

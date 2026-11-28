@@ -1,5 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import type { Database } from "bun:sqlite";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { previewDailyAttemptShare } from "../src/lib/media-outlet-access";
 import {
   BALDURS_GATE,
@@ -9,6 +12,8 @@ import {
   controlledTavilyApi,
   discoveryArticleHtml,
   experimentWorld,
+  mediaObservation,
+  OPENROUTER_USAGE,
   outletFixtureUrl,
   HADES_II,
   PROCESSING_FETCH_RESENT_AFTER_RESTART,
@@ -77,13 +82,41 @@ function throwingItemWorld() {
 }
 
 const NO_LAW = 2161710;
+const VIDEO_ID = "aemQLUwnw7I";
+const VIDEO_URL = `https://www.youtube.com/watch?v=${VIDEO_ID}`;
+const VIDEO_QUOTE = "We plan to let players open alternate routes aboard the ship.";
+
+async function installCaptionBundle(): Promise<() => Promise<void>> {
+  const directory = await mkdtemp(join(tmpdir(), "vaporstats-caption-sweep-"));
+  const previous = process.env.MEDIA_GAMESPOT_CAPTION_DIRECTORY;
+  const cleanup = async () => {
+    if (previous === undefined) delete process.env.MEDIA_GAMESPOT_CAPTION_DIRECTORY;
+    else process.env.MEDIA_GAMESPOT_CAPTION_DIRECTORY = previous;
+    await rm(directory, { recursive: true, force: true });
+  };
+  try {
+    await Bun.write(join(directory, `${NO_LAW}.json`), JSON.stringify([{
+      id: VIDEO_ID, channelId: "UCbu2SsF-Or3Rsn3NxqODImw", title: "NO LAW developer interview", developer: "Developer Studio", language: "en",
+    }]));
+    await Bun.write(join(directory, `${VIDEO_ID}.en.vtt`), `WEBVTT\n\n00:00.000 --> 00:08.000\n${VIDEO_QUOTE} The planned routes give players more ways to navigate the ship while they explore its different systems.\n`);
+    process.env.MEDIA_GAMESPOT_CAPTION_DIRECTORY = directory;
+    return cleanup;
+  } catch (error) {
+    await cleanup();
+    throw error;
+  }
+}
+
+function seedWatchedPreview(native: Database): void {
+  native.exec(`INSERT INTO apps (appid, name, slug, release_status) VALUES (${NO_LAW}, 'NO LAW', 'no-law', 'upcoming');
+    INSERT INTO media_watches (appid, watched_at) VALUES (${NO_LAW}, '2026-11-19T10:00:00.000Z');
+    INSERT INTO media_enrollments (appid, reason, enrolled_at) VALUES (${NO_LAW}, 'watchlist', '2026-11-19T10:00:00.000Z')`);
+}
 
 /** NO LAW watched before the swept day, beside Hades II, an experiment game whose initial pass is due the same day. */
 function seedPreviewBesideAssessment(native: Database): void {
   seedApps(native, [HADES_II]);
-  native.exec(`INSERT INTO apps (appid, name, slug, release_status) VALUES (${NO_LAW}, 'NO LAW', 'no-law', 'upcoming');
-    INSERT INTO media_watches (appid, watched_at) VALUES (${NO_LAW}, '2026-11-19T10:00:00.000Z');
-    INSERT INTO media_enrollments (appid, reason, enrolled_at) VALUES (${NO_LAW}, 'watchlist', '2026-11-19T10:00:00.000Z')`);
+  seedWatchedPreview(native);
 }
 
 /**
@@ -121,6 +154,7 @@ interface Registered {
   invariants: InterruptionInvariants;
   /** Calls of each kind the uninterrupted run's swept ticks make, so a sweep never passes by sweeping nothing. */
   baseline: Record<OutboundKind, number>;
+  prepare?: () => Promise<() => Promise<void>>;
   /** Why this scenario currently breaks an invariant; it then runs as `test.failing`. */
   knownFailure?: string;
 }
@@ -128,12 +162,52 @@ interface Registered {
 const SCENARIOS: Registered[] = [
   {
     scenario: {
-      name: "watched preview occurrence",
-      seed(native) {
-        native.exec(`INSERT INTO apps (appid, name, slug, release_status) VALUES (2161710, 'NO LAW', 'no-law', 'upcoming');
-          INSERT INTO media_watches (appid, watched_at) VALUES (2161710, '2026-11-19T10:00:00.000Z');
-          INSERT INTO media_enrollments (appid, reason, enrolled_at) VALUES (2161710, 'watchlist', '2026-11-19T10:00:00.000Z')`);
+      name: "caption-backed OpenRouter extraction",
+      seed: seedWatchedPreview,
+      world() {
+        const world = experimentWorld();
+        const tavily = controlledTavilyApi({ [NO_LAW]: "NO LAW" });
+        tavily.results = () => [];
+        let extractionSends = 0;
+        world.openRouter.onChat = ({ stage }) => {
+          if (stage !== "extraction") return;
+          // This send only happens after restarting at the first extraction.
+          // Lose its answer too, so recovery settles at the three-send bound.
+          extractionSends += 1;
+          if (extractionSends === 2) {
+            world.openRouter.reply("chat", { network: "socket closed before the response" });
+            return;
+          }
+          world.openRouter.output("extraction", {
+            observations: [mediaObservation(NO_LAW, "routes", "finding", "Developer Studio plans alternate routes aboard the ship.", VIDEO_QUOTE)],
+          });
+        };
+        return { ...world, tavily };
       },
+      verifySettlement(native, interrupted) {
+        expect(native.query("SELECT original_url FROM media_sources").all()).toEqual([{ original_url: VIDEO_URL }]);
+        const jobs = native.query<{ id: number; status: string }, []>("SELECT id, status FROM media_processing_jobs WHERE stage = 'extraction'").all();
+        expect(jobs).toEqual([{ id: expect.any(Number), status: "succeeded" }]);
+        const attempts = native.query("SELECT outcome, charged_microusd, settled_at FROM media_processing_attempts WHERE job_id = ? ORDER BY attempt").all(jobs[0]!.id);
+        const lostExtraction = interrupted.some(({ identity }) => identity.includes(VIDEO_QUOTE));
+        const uncertain = { outcome: "uncertain", charged_microusd: null, settled_at: null };
+        expect(attempts).toEqual([
+          ...(lostExtraction ? [uncertain, uncertain] : []),
+          { outcome: "succeeded", charged_microusd: Math.round(OPENROUTER_USAGE.cost * 1_000_000), settled_at: expect.any(String) },
+        ]);
+        expect(native.query("SELECT output_json FROM media_game_overviews WHERE active = 1").get()).toEqual({ output_json: expect.stringContaining(VIDEO_URL) });
+      },
+      ticks: FIRST_DAY,
+      days: 1,
+    },
+    invariants: { restarts: ["openrouter"] },
+    baseline: { search: 9, outlet_fetch: 0, openrouter: 2, gemini_submit: 0 },
+    prepare: installCaptionBundle,
+  },
+  {
+    scenario: {
+      name: "watched preview occurrence",
+      seed: seedWatchedPreview,
       world() {
         const world = experimentWorld();
         const tavily = controlledTavilyApi({ 2161710: "NO LAW" });
@@ -270,11 +344,12 @@ describe("interruption sweeps", () => {
     }
   });
 
-  for (const { scenario, invariants, baseline, knownFailure } of SCENARIOS) {
+  for (const { scenario, invariants, baseline, knownFailure, prepare } of SCENARIOS) {
     const run = knownFailure ? test.failing : test;
     const faults = [invariants.restarts ? `a restart after any ${invariants.restarts.join(", ")} call` : null, invariants.dayStops ? "an Outlet day stop at any outlet fetch" : null, invariants.combined ? "both at once" : null].filter(Boolean).join(", ");
     run(`${scenario.name}: send once, one article per query, the daily attempt cap, reopening and extraction hold across ${faults}${knownFailure ? ` (known failure: ${knownFailure})` : ""}`, async () => {
-      const report = await sweepInterruptions(scenario, invariants);
+      const cleanup = await prepare?.();
+      const report = await sweepInterruptions(scenario, invariants).finally(() => cleanup?.());
       expect(report.baseline).toEqual(baseline);
       expect(report.violations).toEqual([]);
       // A restart during a processing fetch resends it under the one named

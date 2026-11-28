@@ -1,12 +1,14 @@
 import { afterEach, expect, test } from "bun:test";
+import { unlink } from "node:fs/promises";
 import { renderToStaticMarkup } from "react-dom/server";
 import { parseHTML } from "linkedom";
 import { MediaSources } from "../src/components/media-sources";
 import { getMediaSources } from "../src/lib/media-discovery";
+import { authorizeMediaProcessing } from "../src/lib/media-processing";
 import { changeMediaWatch, PREVIEW_CEILING } from "../src/lib/media-watchlist";
 import { approvedGameSpotVideos, readGameSpotCaptions } from "../src/lib/media-video";
 import { openTestDatabase } from "./support/db";
-import { controlledOpenRouterApi, controlledTavilyApi, emptySynthesisSelection, mediaObservation, mediaTickFetch, runMediaTick, synthesisEvidence, synthesisSelectionId } from "./support/media";
+import { CYBERPUNK, GAME_NAMES, controlledOpenRouterApi, controlledTavilyApi, discoveryArticleHtml, emptySynthesisSelection, insertCompletedRun, mediaObservation, mediaTickFetch, runMediaTick, synthesisEvidence, synthesisSelectionId } from "./support/media";
 
 const APPID = 3714800;
 const TITLE = "Warlock: Dungeons & Dragons";
@@ -47,22 +49,22 @@ function environment(name: string, value?: string) {
   });
 }
 
-async function fixture(watched = true) {
+async function fixture(watched = true, outlet?: (url: string) => Response | undefined, appid = APPID, title = TITLE) {
   const database = openTestDatabase("vaporstats-video-");
   cleanups.push(database.cleanup);
   environment("RECEPTION_ARTIFACT_DIR", database.directory);
   environment("MEDIA_OVERVIEW_PUBLIC", "true");
   database.native.prepare("INSERT INTO apps (appid, name, slug, type, release_status) VALUES (?, ?, 'warlock', 'game', 'upcoming')")
-    .run(APPID, TITLE);
-  if (watched) expect((await changeMediaWatch(database.db, "watch", String(APPID), new Date("2026-11-28T05:00:00Z"))).status).toBe(200);
-  await Bun.write(`${database.directory}/${APPID}.json`, JSON.stringify([VIDEO]));
+    .run(appid, title);
+  if (watched) expect((await changeMediaWatch(database.db, "watch", String(appid), new Date("2026-11-28T05:00:00Z"))).status).toBe(200);
+  await Bun.write(`${database.directory}/${appid}.json`, JSON.stringify([{ ...VIDEO, title: `${title} developer interview` }]));
   await Bun.write(`${database.directory}/${VIDEO.id}.en.vtt`, CAPTIONS);
-  const tavily = controlledTavilyApi({ [APPID]: TITLE });
+  const tavily = controlledTavilyApi({ [appid]: title });
   tavily.results = () => [];
   const openRouter = controlledOpenRouterApi();
   const apis = { tavily, openRouter };
   const requests: string[] = [];
-  const fetchFixture = mediaTickFetch(apis);
+  const fetchFixture = mediaTickFetch(apis, [], outlet);
   const customFetch = ((input: RequestInfo | URL, init?: RequestInit) => {
     requests.push(String(input));
     return fetchFixture(input, init);
@@ -189,25 +191,70 @@ test("an unapproved channel, non-English track, and missing or unusable captions
 });
 
 
-test("a queued video resumes after restart when approved captions return", async () => {
-  const fixtureState = await fixture();
-  const { directory, tick, openRouter } = fixtureState;
+test.each(["file removed", "directory unset"])("written coverage publishes and the queued video resumes when captions return (%s)", async (missing) => {
+  const appid = CYBERPUNK;
+  const title = GAME_NAMES[appid]!;
+  const writtenUrl = "https://ign.com/articles/cyberpunk-preview";
+  const writtenQuote = "The announcement revealed that the campaign takes place in a city built around a mountain.";
+  const fixtureState = await fixture(true, (url) => url === writtenUrl
+    ? new Response(discoveryArticleHtml(appid, `${title} Preview`, {
+      body: `${writtenQuote} The publisher also detailed the setting and described the project during its official announcement. The preview explains how the city is divided into districts.`,
+      author: "IGN journalist",
+    }))
+    : undefined, appid, title);
+  const { directory, tick, openRouter, tavily } = fixtureState;
+  tavily.results = ({ domain }) => domain === "ign.com" ? [{ url: writtenUrl }] : [];
   environment("MEDIA_GAMESPOT_CAPTION_DIRECTORY", directory);
-  expect((await tick(undefined, true, 0)).mediaDiscovery?.issued.articles).toBe(1);
-  const { native } = fixtureState.reopen();
+  expect((await tick(undefined, true, 0)).mediaDiscovery?.issued.articles).toBe(2);
   const path = `${directory}/${VIDEO.id}.en.vtt`;
-  await Bun.write(path, "");
-  await tick("2026-11-28T06:15:00Z");
-  expect(openRouter.requests).toEqual([]);
-  expect(native.query("SELECT status FROM media_processing_jobs WHERE stage = 'extraction'").all()).toEqual([{ status: "queued" }]);
+  if (missing === "file removed") await unlink(path);
+  else delete process.env.MEDIA_GAMESPOT_CAPTION_DIRECTORY;
+  openRouter.onChat = ({ stage, body }) => {
+    if (stage !== "extraction") return;
+    const observation = body.messages[1]!.content.includes(QUOTE)
+      ? mediaObservation(appid, "magic", "finding", "Invoke plans to make spells useful during exploration.", QUOTE)
+      : { ...mediaObservation(appid, "city", "finding", writtenQuote, writtenQuote), previewEvidence: { scope: "announcement" } };
+    openRouter.output("extraction", { observations: [observation] });
+  };
+  const held = await tick("2026-11-28T06:15:00Z");
+  expect(held.mediaProcessing?.stopReasons).toContain("approved_captions_unavailable");
+  const { native, db } = fixtureState.reopen();
+  const videoJob = () => native.query<{ id: number; source_id: number; status: string; error: string | null }, [string]>(`
+    SELECT j.id, j.source_id, j.status, j.error FROM media_processing_jobs AS j
+    JOIN media_sources AS s ON s.id = j.source_id WHERE s.original_url = ? AND j.stage = 'extraction'`).all(URL);
+  const [job] = videoJob();
+  const activeOverview = () => native.query<{ output_json: string }, []>("SELECT output_json FROM media_game_overviews WHERE active = 1").get()?.output_json;
+  expect(videoJob()).toEqual([{ id: expect.any(Number), source_id: expect.any(Number), status: "queued", error: "approved_captions_unavailable" }]);
+  expect(native.query("SELECT 1 FROM media_processing_attempts WHERE job_id = ?").all(job!.id)).toEqual([]);
+  const requestsBeforeRestore = openRouter.requests.length;
+  expect(openRouter.requests.map(({ stage, urls }) => ({ stage, urls }))).toEqual([
+    { stage: "extraction", urls: [] },
+    { stage: "synthesis", urls: [writtenUrl] },
+  ]);
+  expect(activeOverview()).toContain(writtenUrl);
+  expect(activeOverview()).not.toContain(URL);
+  expect((await tick("2026-11-28T06:30:00Z")).mediaProcessing?.stopReasons).toContain("approved_captions_unavailable");
+  expect(openRouter.requests).toHaveLength(requestsBeforeRestore);
 
   await Bun.write(path, CAPTIONS);
-  openRouter.output("extraction", {
-    observations: [mediaObservation(APPID, "magic", "finding", "Invoke plans to make spells useful during exploration.", QUOTE)],
-  });
-  await tick("2026-11-28T06:30:00Z");
-  expect(openRouter.requests.filter(({ stage }) => stage === "extraction")).toHaveLength(1);
-  expect(native.query("SELECT status FROM media_processing_jobs WHERE stage = 'extraction'").all()).toEqual([{ status: "succeeded" }]);
+  process.env.MEDIA_GAMESPOT_CAPTION_DIRECTORY = directory;
+  expect((await tick("2026-11-28T06:45:00Z")).mediaProcessing?.stopReasons).toEqual([]);
+  expect(videoJob()).toEqual([{ ...job!, status: "succeeded", error: null }]);
+  expect(openRouter.requests.slice(requestsBeforeRestore).map(({ stage }) => stage)).toEqual(["extraction", "synthesis"]);
+  expect(openRouter.requests.at(-1)?.urls).toEqual(expect.arrayContaining([writtenUrl, URL]));
+  expect(activeOverview()).toContain(writtenUrl);
+  expect(activeOverview()).toContain(URL);
+
+  const correction = insertCompletedRun(native, "initial:captions:unchanged", [appid]);
+  await authorizeMediaProcessing(db, correction, { affectedSourceIds: [job!.source_id] });
+  await unlink(path);
+  await tick("2026-11-28T07:00:00Z");
+  expect(videoJob()).toHaveLength(2);
+  const requestsBeforeUnchanged = openRouter.requests.length;
+  await Bun.write(path, CAPTIONS);
+  await tick("2026-11-28T07:15:00Z");
+  expect(videoJob()).toEqual([{ ...job!, status: "succeeded", error: null }]);
+  expect(openRouter.requests).toHaveLength(requestsBeforeUnchanged);
 });
 
 
