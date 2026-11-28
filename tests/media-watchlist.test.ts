@@ -1274,7 +1274,7 @@ test.each([
   "‘I played the game for hours.’",
   "'I played the game for hours.'",
   "“I played the game for hours.”",
-  "‘After testing both players’ builds, I played the game for hours.’",
+  "‘After testing both players’ Steam builds, I played the game for hours.’",
   "</p><blockquote>I played the game for hours.</blockquote><p>",
 ])("an RPG Site recap of an IGN interview does not claim hands-on from %s", async (quote) => {
   const database = fixture();
@@ -1299,7 +1299,7 @@ test("one written preview keeps played, demonstrated and developer-reported clai
   const api = world();
   const url = "https://www.rpgsite.net/preview/no-law";
   api.tavily.results = ({ domain }) => domain === "rpgsite.net" ? [{ url }] : [];
-  const play = "I played the opening mission, where I selected gear before leaving port.";
+  const play = "I played the opening mission and confirmed players select gear before leaving port.";
   const demo = "I watched a separate demo that showed the player navigating flooded streets.";
   const plan = "In an interview with RPG Site, creative director Mira Dane said the team plans to add optional rescue missions.";
   const observations = [
@@ -1307,7 +1307,7 @@ test("one written preview keeps played, demonstrated and developer-reported clai
     { ...mediaObservation(ROOT, "demo", "finding", "Players navigate flooded streets.", demo), previewEvidence: { scope: "demo" } },
     { ...mediaObservation(ROOT, "plan", "finding", "The team plans to add optional rescue missions.", plan), previewEvidence: { scope: "developer statement", attribution: "Mira Dane" } },
     ...["demo", "hands-on preview"].map((scope) => ({
-      ...mediaObservation(ROOT, "misattributed-" + scope, "finding", "Optional rescue missions are available.", plan),
+      ...mediaObservation(ROOT, "misattributed-" + scope, "finding", "Optional rescue missions are available.", "the team plans to add optional rescue missions."),
       previewEvidence: { scope },
     })),
     { ...mediaObservation(ROOT, "false-speaker", "finding", "Another director plans to add optional rescue missions.", plan), previewEvidence: { scope: "developer statement", attribution: "Other Director" } },
