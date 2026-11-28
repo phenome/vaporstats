@@ -85,6 +85,7 @@ const NO_LAW = 2161710;
 const VIDEO_ID = "aemQLUwnw7I";
 const VIDEO_URL = `https://www.youtube.com/watch?v=${VIDEO_ID}`;
 const VIDEO_QUOTE = "We plan to let players open alternate routes aboard the ship.";
+const VIDEO_EVIDENCE = { scope: "developer statement", attribution: "Developer Studio" };
 
 async function installCaptionBundle(): Promise<() => Promise<void>> {
   const directory = await mkdtemp(join(tmpdir(), "vaporstats-caption-sweep-"));
@@ -98,7 +99,7 @@ async function installCaptionBundle(): Promise<() => Promise<void>> {
     await Bun.write(join(directory, `${NO_LAW}.json`), JSON.stringify([{
       id: VIDEO_ID, channelId: "UCbu2SsF-Or3Rsn3NxqODImw", title: "NO LAW developer interview", developer: "Developer Studio", language: "en",
     }]));
-    await Bun.write(join(directory, `${VIDEO_ID}.en.vtt`), `WEBVTT\n\n00:00.000 --> 00:08.000\n${VIDEO_QUOTE} The planned routes give players more ways to navigate the ship while they explore its different systems.\n`);
+    await Bun.write(join(directory, `${VIDEO_ID}.en.vtt`), `WEBVTT\n\n00:00.000 --> 00:08.000\n<v Developer Studio>${VIDEO_QUOTE} The planned routes give players more ways to navigate the ship while they explore its different systems.</v>\n`);
     process.env.MEDIA_GAMESPOT_CAPTION_DIRECTORY = directory;
     return cleanup;
   } catch (error) {
@@ -179,7 +180,8 @@ const SCENARIOS: Registered[] = [
             return;
           }
           world.openRouter.output("extraction", {
-            observations: [mediaObservation(NO_LAW, "routes", "finding", "Developer Studio plans alternate routes aboard the ship.", VIDEO_QUOTE)],
+            observations: [{ ...mediaObservation(NO_LAW, "routes", "finding", "Developer Studio plans alternate routes aboard the ship.", VIDEO_QUOTE),
+              previewEvidence: VIDEO_EVIDENCE }],
           });
         };
         return { ...world, tavily };
@@ -196,6 +198,8 @@ const SCENARIOS: Registered[] = [
           { outcome: "succeeded", charged_microusd: Math.round(OPENROUTER_USAGE.cost * 1_000_000), settled_at: expect.any(String) },
         ]);
         expect(native.query("SELECT output_json FROM media_game_overviews WHERE active = 1").get()).toEqual({ output_json: expect.stringContaining(VIDEO_URL) });
+        const extraction = native.query<{ output_json: string }, []>("SELECT output_json FROM media_article_extractions").get()!;
+        expect(JSON.parse(extraction.output_json).observations).toEqual([expect.objectContaining({ previewEvidence: VIDEO_EVIDENCE })]);
       },
       ticks: FIRST_DAY,
       days: 1,

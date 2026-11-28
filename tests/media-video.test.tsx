@@ -22,16 +22,28 @@ const VIDEO = {
   language: "en",
 };
 const QUOTE = "We want magic to help you explore the world beyond combat.";
+const HOST_QUOTE = "Invoke told us that spells can open every door in the game.";
+const UNLABELED_QUOTE = "There will also be a competitive mode.";
+const DEVELOPER_EVIDENCE = { scope: "developer statement", attribution: "Invoke" };
+function magicObservation(appid: number) {
+  return { ...mediaObservation(appid, "magic", "finding", "Invoke plans to make spells useful during exploration.", QUOTE),
+    previewEvidence: { ...DEVELOPER_EVIDENCE, attribution: "Developer" } };
+}
+
 const CAPTIONS = `WEBVTT
 
 00:00.000 --> 00:04.000 align:start
-We want magic to help you
+<v Developer>We want magic to help you</v>
 
 00:04.000 --> 00:06.000
-We want magic to help you <00:05.000><c>explore the world beyond combat.</c>
+<v Developer>We want magic to help you <00:05.000><c>explore the world beyond combat.</c></v>
 
 00:06.000 --> 00:09.000
-The prototype lets you choose spells to open routes through the environment. We are still developing that feature.
+[Interviewer] ${HOST_QUOTE} [music]
+[Invoke] The prototype lets you choose spells to open routes through the environment. We are still developing that feature.
+
+00:09.000 --> 00:12.000
+${UNLABELED_QUOTE}
 
 NOTE This comment must not become evidence.
 `;
@@ -90,30 +102,52 @@ test("an approved caption-only Warlock interview is extracted and cited under Ga
       expect(body.messages[0]!.content).toContain("Attribute plans and design statements to the developer");
       const prompt = body.messages[1]!.content;
       expect(prompt).toContain('"developer":"Invoke"');
-      expect(prompt).toContain(QUOTE);
+      expect(prompt).toContain(`[Developer] ${QUOTE}\n[Interviewer] ${HOST_QUOTE}\n[Invoke] The prototype`);
       expect(prompt).not.toContain("We want magic to help you We want magic");
+      expect(prompt).not.toContain("[music]");
       expect(prompt).not.toContain("This comment must not become evidence.");
       openRouter.output("extraction", {
         observations: [
-          mediaObservation(APPID, "magic", "finding", "Invoke plans to make spells useful during exploration.", QUOTE),
-          mediaObservation(APPID, "quality", "pro", "Magic feels great to use.", QUOTE),
+          magicObservation(APPID),
+          { ...mediaObservation(APPID, "quality", "pro", "Magic feels great to use.", QUOTE), previewEvidence: magicObservation(APPID).previewEvidence },
+          { ...mediaObservation(APPID, "prototype", "finding", "Invoke said spells can open routes.", "[Invoke] The prototype lets you choose spells to open routes through the environment."), previewEvidence: DEVELOPER_EVIDENCE },
+          mediaObservation(APPID, "missing-speaker", "finding", QUOTE, QUOTE),
+          { ...mediaObservation(APPID, "host-mention", "finding", HOST_QUOTE, HOST_QUOTE), previewEvidence: DEVELOPER_EVIDENCE },
+          { ...mediaObservation(APPID, "host", "finding", HOST_QUOTE, HOST_QUOTE), previewEvidence: { ...DEVELOPER_EVIDENCE, attribution: "Interviewer" } },
+          { ...mediaObservation(APPID, "unlabeled", "finding", UNLABELED_QUOTE, UNLABELED_QUOTE), previewEvidence: DEVELOPER_EVIDENCE },
+          { ...mediaObservation(APPID, "cross-turn", "finding", HOST_QUOTE, `${QUOTE} [Interviewer] ${HOST_QUOTE}`), previewEvidence: magicObservation(APPID).previewEvidence },
         ],
       });
       return;
     }
-    expect(body.messages[0]!.content).toContain("attribute its pre-release statements to that developer");
+    expect(body.messages[0]!.content).toContain("use the per-observation previewEvidence attribution");
     const sources = synthesisEvidence(body);
     const interview = sources.find(({ sourceUrl }) => sourceUrl === URL)!;
-    expect(interview).toBeDefined();
+    expect(interview.extraction.observations).toEqual(["magic", "prototype"].map((id) =>
+      expect.objectContaining({ id, previewScope: "developer statement", previewEvidence: DEVELOPER_EVIDENCE })));
     openRouter.output("synthesis", {
       ...emptySynthesisSelection(sources),
-      statements: [{ text: "In a developer interview, Invoke said it plans to make spells useful during exploration.", observationIds: [synthesisSelectionId(interview, "magic")] }],
+      statements: [
+        { text: "In a developer interview, Invoke said it plans to make spells useful during exploration.", observationIds: [synthesisSelectionId(interview, "magic")] },
+        { text: "In a developer interview, spells open routes.", observationIds: [synthesisSelectionId(interview, "prototype")] },
+        { text: "GameSpot said spells can open routes in the game by Invoke.", observationIds: [synthesisSelectionId(interview, "prototype")] },
+      ],
     });
   };
 
-  const discovery = (await tick()).mediaDiscovery;
+  const discovery = (await tick(undefined, true, 1)).mediaDiscovery;
   expect(discovery?.issued.articles).toBe(1);
   expect(discovery?.summary.discovered).toBe(1);
+  const extraction = native.query<{ output_json: string }, []>("SELECT output_json FROM media_article_extractions").get()!.output_json;
+  const stored = JSON.parse(extraction);
+  expect(stored.observations).toEqual(["magic", "prototype"].map((id) =>
+    expect.objectContaining({ id, previewEvidence: DEVELOPER_EVIDENCE })));
+  // Older output can lack claim attribution or carry an unsupported speaker.
+  const retained = [{ ...stored.observations[0], id: "old-untagged", previewEvidence: undefined },
+    { ...stored.observations[0], id: "old-wrong", previewEvidence: { ...DEVELOPER_EVIDENCE, attribution: "Interviewer" } }];
+  native.prepare("UPDATE media_article_extractions SET output_json = ?").run(JSON.stringify({
+    ...stored, observations: [...stored.observations, ...retained],
+  }));
   await tick("2026-11-28T06:15:00Z");
   expect((await tick("2026-12-29T06:00:00Z")).mediaDiscovery?.issued.articles).toBe(0);
   expect(requests.some((url) => /youtube\.com|gamespot\.com/.test(url))).toBe(false);
@@ -123,7 +157,6 @@ test("an approved caption-only Warlock interview is extracted and cited under Ga
     .toEqual([{ url: "https://www.gamespot.com/articles/blocked" }]);
   const persisted = native.query("SELECT original_url, processing_content FROM media_sources").all();
   expect(persisted).toEqual([{ original_url: URL, processing_content: null }]);
-  const extraction = native.query<{ output_json: string }, []>("SELECT output_json FROM media_article_extractions").get()!.output_json;
   expect(extraction).toContain("Invoke plans to make spells useful during exploration.");
   expect(extraction).not.toContain(QUOTE);
   expect(extraction).not.toContain("Magic feels great");
@@ -131,6 +164,10 @@ test("an approved caption-only Warlock interview is extracted and cited under Ga
   const overview = native.query<{ output_json: string }, []>("SELECT output_json FROM media_game_overviews WHERE active = 1").get()!.output_json;
   expect(overview).toContain(URL);
   expect(overview).toContain("Invoke said it plans");
+  expect(JSON.parse(overview).statements).toHaveLength(1);
+  expect(JSON.parse(overview).observationOmissions).toEqual(expect.arrayContaining([
+    expect.objectContaining({ reason: "claim omits its developer attribution" }),
+  ]));
 
   const sources = await getMediaSources(db, APPID);
   expect(sources).toEqual([expect.objectContaining({ originalUrl: URL, outlet: "GameSpot", handsOn: false, affiliation: "Invoke" })]);
@@ -190,6 +227,30 @@ test("an unapproved channel, non-English track, and missing or unusable captions
   expect(await getMediaSources(db, APPID)).toEqual([]);
 });
 
+test("rolling captions keep repeated words across speakers and leave inline bracket mentions unattributed", async () => {
+  const { directory } = await fixture();
+  const repeated = "Spells open doors in this build.";
+  const host = "The whole combat system changes after this section, right?";
+  await Bun.write(`${directory}/${VIDEO.id}.en.vtt`, `WEBVTT
+
+00:00.000 --> 00:04.000
+<v Developer>${repeated}</v>
+
+00:04.000 --> 00:08.000
+[Host] ${repeated} [footsteps] I asked [Invoke] ${host}
+
+00:08.000 --> 00:12.000
+<v Mira Dane (Developer)>We built different paths through the environment.</v>
+`);
+  const [video] = await approvedGameSpotVideos(directory, APPID);
+  expect(await readGameSpotCaptions(directory, video!)).toBe([
+    `[Developer] ${repeated}`,
+    `[Host] ${repeated} I asked`,
+    host,
+    "[Mira Dane (Developer)] We built different paths through the environment.",
+  ].join("\n"));
+});
+
 
 test.each(["file removed", "directory unset"])("written coverage publishes and the queued video resumes when captions return (%s)", async (missing) => {
   const appid = CYBERPUNK;
@@ -212,7 +273,7 @@ test.each(["file removed", "directory unset"])("written coverage publishes and t
   openRouter.onChat = ({ stage, body }) => {
     if (stage !== "extraction") return;
     const observation = body.messages[1]!.content.includes(QUOTE)
-      ? mediaObservation(appid, "magic", "finding", "Invoke plans to make spells useful during exploration.", QUOTE)
+      ? magicObservation(appid)
       : { ...mediaObservation(appid, "city", "finding", writtenQuote, writtenQuote), previewEvidence: { scope: "announcement" } };
     openRouter.output("extraction", { observations: [observation] });
   };

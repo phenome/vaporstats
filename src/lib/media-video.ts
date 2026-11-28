@@ -75,25 +75,76 @@ const TIMESTAMP = "(?:\\d{2,}:)?[0-5]\\d:[0-5]\\d\\.\\d{3}";
 const CUE_TIMING = new RegExp(`^${TIMESTAMP}[ \\t]+-->[ \\t]+${TIMESTAMP}(?:[ \\t]+.*)?$`);
 const VTT_ESCAPES: Record<string, string> = { amp: "&", lt: "<", gt: ">", nbsp: " ", lrm: "", rlm: "" };
 
+const CAPTION_NOISE = /\b(?:music|applause|laugh(?:ter|ing|s)?|cheering|clapping|inaudible|unintelligible|silence|crosstalk|sighs?|gasps?|noise|sound effects?|footsteps?|background sounds?)\b/i;
+const SPEAKER_LABEL = /^[\p{L}\p{N}][\p{L}\p{N} .,'’&()_-]{0,119}$/u;
+const CAPTION_MARKUP = /<v(?:\.[^\s>]+)*[ \t]+([^>]+)>|(<\/v)>|<[^>]*>|\[([^\]\n]*)\]/gi;
+
+function* cueSpeech(cue: string) {
+  const decode = (text: string) =>
+    text.replace(/&(amp|lt|gt|nbsp|lrm|rlm);/g, (entity, key: string) => VTT_ESCAPES[key] ?? entity);
+  let speaker: string | null = null;
+  let speech = "";
+  let offset = 0;
+  for (const match of cue.matchAll(CAPTION_MARKUP)) {
+    speech += decode(cue.slice(offset, match.index));
+    offset = match.index + match[0].length;
+    const [, voice, endVoice, bracket] = match;
+    const label = decode(voice ?? bracket ?? "").replace(/\s+/g, " ").trim();
+    const possibleMarker = SPEAKER_LABEL.test(label) && !CAPTION_NOISE.test(label);
+    if (!voice && !endVoice && !possibleMarker) continue;
+    const startsLine = !cue.slice(cue.lastIndexOf("\n", match.index - 1) + 1, match.index).trim();
+    // Inline brackets may be an editorial insertion or a new speaker.
+    const nextSpeaker = SPEAKER_LABEL.test(label) && (voice || startsLine) ? label : null;
+    if (speech.trim()) yield { speaker, speech };
+    speech = "";
+    speaker = nextSpeaker;
+  }
+  speech += decode(cue.slice(offset));
+  if (speech.trim()) yield { speaker, speech };
+}
+
+function renderCaptionTurn(speaker: string | null, speech: string): string {
+  return speaker ? `[${speaker}] ${speech}` : speech;
+}
+
+/** Match a verbatim excerpt within one explicitly identified developer turn. */
+export function hasDeveloperCaptionEvidence(captions: string, quote: string, speaker: string, developer: string): boolean {
+  const normalized = (text: string) => text.replace(/\s+/g, " ").trim();
+  const label = normalized(speaker).toLowerCase();
+  if (label !== normalized(developer).toLowerCase() && !/^(?:developer|.+ \(developer\))$/i.test(label)) return false;
+  return captions.split("\n").some((turn) => {
+    const marker = /^\[([^\]]+)\] (.+)$/.exec(turn);
+    if (marker?.[1]?.toLowerCase() !== label) return false;
+    const speech = marker[2]!;
+    const excerpt = quote.startsWith(`[${marker[1]}] `) ? quote.slice(marker[1].length + 3) : quote;
+    return excerpt.length >= 12 && speech.includes(excerpt);
+  });
+}
+
 function usableEnglishCaptionText(vtt: string): string | null {
   if (!/^\uFEFF?WEBVTT(?:[ \t][^\r\n]*)?\r?\n/.test(vtt)) return null;
-  const words: string[] = [];
+  const turns: Array<{ speaker: string | null; words: string[] }> = [];
   for (const cue of vtt.replace(/\r\n/g, "\n").split(/\n[ \t]*\n/).slice(1)) {
     const lines = cue.trim().split("\n");
     const timing = CUE_TIMING.test(lines[0] ?? "") ? 0 : 1;
     if (/^(?:NOTE(?:\s|$)|STYLE$|REGION$)/.test(lines[0] ?? "") || !CUE_TIMING.test(lines[timing] ?? "")) continue;
-    const caption = lines.slice(timing + 1).join(" ").replace(/<[^>]*>/g, "")
-      .replace(/&(amp|lt|gt|nbsp|lrm|rlm);/g, (entity, key: string) => VTT_ESCAPES[key] ?? entity)
-      .replace(/\[[^\]]*\]/g, "").trim();
-    if (!caption) continue;
-    const cueWords = caption.split(/\s+/);
-    // Auto-captions repeat the last line while rolling in the next words.
-    let overlap = Math.min(cueWords.length, words.length, MAX_ROLLING_CUE_OVERLAP_WORDS);
-    while (overlap > 0 && !cueWords.slice(0, overlap).every((word, index) => word === words[words.length - overlap + index])) overlap -= 1;
-    for (const word of cueWords.slice(overlap)) words.push(word);
+    for (const { speaker, speech } of cueSpeech(lines.slice(timing + 1).join("\n"))) {
+      let turn = turns.at(-1);
+      if (!turn || turn.speaker !== speaker) {
+        turn = { speaker, words: [] };
+        turns.push(turn);
+      }
+      const cueWords = speech.trim().split(/\s+/);
+      // Auto-captions repeat the last line while rolling in the next words.
+      const { words } = turn;
+      let overlap = Math.min(cueWords.length, words.length, MAX_ROLLING_CUE_OVERLAP_WORDS);
+      while (overlap > 0 && !cueWords.slice(0, overlap).every((word, index) => word === words[words.length - overlap + index])) overlap -= 1;
+      for (const word of cueWords.slice(overlap)) words.push(word);
+    }
   }
-  const text = words.join(" ");
-  return text.length >= MIN_USABLE_ARTICLE_CHARS ? text : null;
+  const spokenTurns = turns.map(({ speaker, words }) => ({ speaker, speech: words.join(" ") }));
+  if (spokenTurns.map(({ speech }) => speech).join(" ").length < MIN_USABLE_ARTICLE_CHARS) return null;
+  return spokenTurns.map(({ speaker, speech }) => renderCaptionTurn(speaker, speech)).join("\n");
 }
 
 export async function readGameSpotCaptions(directory: string, video: ApprovedVideo): Promise<string | null> {

@@ -1,5 +1,6 @@
 import { MEDIA_OUTLETS } from "./media-outlet-access";
 import { LEGACY_V10_SOURCE_SUPPORT_LANGUAGE, MEDIA_CATEGORY_NAMES, normalizeMediaTag, sourceSupportTrigger } from "./media-overview";
+import { hasDeveloperCaptionEvidence } from "./media-video";
 
 const kinds = ["finding", "pro", "con", "tag", "gameplay", "storyWorld"] as const;
 type ObservationKind = (typeof kinds)[number];
@@ -23,12 +24,14 @@ export type PreviewScope = (typeof reportedPreviewScopes)[number] | "developer s
 type ClaimPreviewEvidence =
   | { scope: (typeof reportedPreviewScopes)[number] }
   | { scope: "developer statement"; attribution: string };
-type PreviewExtractionContext = { handsOn: boolean; defaultToReporting: boolean };
+type PreviewExtractionContext =
+  | { handsOn: boolean; defaultToReporting: boolean }
+  | { developer: string };
 
 function readClaimPreviewEvidence(value: unknown): ClaimPreviewEvidence | undefined {
   const { scope, attribution } = object(value);
   if (scope === "developer statement") {
-    const speaker = line(attribution, 120);
+    const speaker = line(attribution, 300);
     return speaker ? { scope, attribution: speaker } : undefined;
   }
   const reportedScope = reportedPreviewScopes.find((candidate) => candidate === scope);
@@ -76,6 +79,7 @@ export interface ObservationSource {
   editionContext?: { platform: string | null; build: string | null };
   legacySimilarityInputs?: true;
   previewScope?: PreviewScope;
+  affiliatedInterview?: true;
 }
 
 export interface ObservationReference {
@@ -104,9 +108,18 @@ function line(value: unknown, max: number): string {
   return text.length <= max ? text : "";
 }
 
-function contains(text: string, fragment: string): boolean {
+function wholePhrase(fragment: string): string {
   const escaped = fragment.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  return new RegExp(`(?<![\\p{L}\\p{N}])${escaped}(?![\\p{L}\\p{N}])`, "iu").test(text);
+  return `(?<![\\p{L}\\p{N}])${escaped}(?![\\p{L}\\p{N}])`;
+}
+
+function contains(text: string, fragment: string): boolean {
+  return new RegExp(wholePhrase(fragment), "iu").test(text);
+}
+
+function attributesInterviewClaim(text: string, developer: string): boolean {
+  const name = wholePhrase(developer);
+  return new RegExp(`\\baccording to ${name}|${name} (?:said|says|explained|described|reported|expects?|plans?|intends?)\\b`, "iu").test(text);
 }
 
 function matchesRequestedApp(subject: unknown, appid: number): boolean {
@@ -136,7 +149,7 @@ export function extractionReviewIssues(
     if (!matchesRequestedApp(subject, appid) || typeof id !== "string" || !/^[a-zA-Z0-9_-]{1,64}$/.test(id) || accepted.has(id)) return [];
     const candidate = observation(entry, appid);
     const reason = candidate
-      ? rejectedArticleEvidence(candidate, object(entry), body, context, false, includeTechnicalTiming, previewContext) ?? "observation ID is duplicated"
+      ? rejectedArticleEvidence(candidate, object(entry), body, context, false, includeTechnicalTiming, previewContext, article) ?? "observation ID is duplicated"
       : "observation lacks a valid kind, category, text or qualification";
     const question = line(reviewQuestion, 240) || `What wording and scope does the article support? ${reason}.`;
     return [{ sourceIdentity, observationId: id, question }];
@@ -183,10 +196,17 @@ export function readArticleObservations(value: unknown, appid: number, includeVe
 function rejectedArticleEvidence(
   item: MediaObservation, source: Record<string, unknown>, article: string,
   context: readonly (string | null)[], pending: boolean, includeTechnicalTiming = false, previewContext?: PreviewExtractionContext,
+  originalArticle = article,
 ): string | null {
   const quote = line(source.quote, 480);
   if (quote.length < 12 || !article.includes(quote)) return "supporting excerpt is missing or absent from the article";
-  if (previewContext && source.previewEvidence !== undefined) {
+  if (previewContext && "developer" in previewContext) {
+    const evidence = readClaimPreviewEvidence(source.previewEvidence);
+    if (evidence?.scope !== "developer statement" || !hasDeveloperCaptionEvidence(originalArticle, quote, evidence.attribution, previewContext.developer)) {
+      return "excerpt is missing verified developer speech";
+    }
+    item.previewEvidence = { scope: "developer statement", attribution: previewContext.developer };
+  } else if (previewContext && source.previewEvidence !== undefined) {
     const evidence = readClaimPreviewEvidence(source.previewEvidence);
     if (!evidence) return "preview evidence has no valid claim scope or attribution";
     if (evidence.scope === "developer statement" && !contains(quote, evidence.attribution)) return "developer attribution is absent from the supporting excerpt";
@@ -258,7 +278,9 @@ export function parseArticleObservations(
     const quote = line(source.quote, 480);
     if (previewContext) {
       item.previewEvidence = readClaimPreviewEvidence(source.previewEvidence);
-      if (!item.previewEvidence && previewContext.defaultToReporting) item.previewEvidence = { scope: "non-hands-on preview" };
+      if (!item.previewEvidence && "defaultToReporting" in previewContext && previewContext.defaultToReporting) {
+        item.previewEvidence = { scope: "non-hands-on preview" };
+      }
     }
     if (item.previewEvidence) {
       item.qualifiers = item.qualifiers.filter((label) =>
@@ -267,7 +289,7 @@ export function parseArticleObservations(
     }
     const coverageQualifier = item.previewEvidence ? context.find((fact) => fact === "preview") : requiredScope;
     if (coverageQualifier && !item.qualifiers.includes(coverageQualifier)) item.qualifiers.push(coverageQualifier);
-    if (rejectedArticleEvidence(item, source, body, context, pending, includeTechnicalTiming, previewContext) !== null) return false;
+    if (rejectedArticleEvidence(item, source, body, context, pending, includeTechnicalTiming, previewContext, article) !== null) return false;
     if (includeVersionEvidence) item.versionEvidence = classifyVersionEvidence(quote);
     const timing = includeTechnicalTiming ? extractTechnicalTiming(item, quote) : undefined;
     if (timing) item.technicalTiming = timing;
@@ -965,7 +987,9 @@ export function validateObservationSynthesis(
       return [];
     }
     if (preview === "developer statement" && evidence?.scope === "developer statement"
-      && (!contains(matchingText, evidence.attribution) || !PREVIEW_WORDING[preview].test(matchingText))) {
+      && (support.some(({ source }) => source.affiliatedInterview)
+        ? !attributesInterviewClaim(matchingText, evidence.attribution)
+        : !contains(matchingText, evidence.attribution) || !PREVIEW_WORDING[preview].test(matchingText))) {
       omit(section, "claim omits its developer attribution", refs, evidence.attribution);
       return [];
     }

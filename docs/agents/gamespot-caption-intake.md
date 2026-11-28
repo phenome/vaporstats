@@ -2,6 +2,8 @@
 
 Caption intake uses operator-approved files. Verify that each upload belongs to the official GameSpot channel (`UCbu2SsF-Or3Rsn3NxqODImw`), covers the selected Steam app, and has usable English captions that VaporStats has permission to process. Check the caption track for intelligible speech and enough speaker context to attribute statements. Supply the actual publisher title, publication date when known, and the developer name for a developer interview. Leave `developer` null for other reporting.
 
+For an affiliated interview, verify the speaker turns in the approved captions. A developer turn can use a WebVTT voice label or a bracketed speaker label at the start of a line. Use the manifest's developer name, `Developer`, or the speaker's name followed by `(Developer)`. A host's introduction of a guest does not identify the speaker of subsequent unlabeled captions.
+
 Set `MEDIA_GAMESPOT_CAPTION_DIRECTORY` to the directory holding the approved files. With automatic media ingestion enabled, the next due preview occurrence for a watched, eligible game considers the matching manifest. The preview ceiling still applies. For the longer Warlock interview, use `3714800.json` and, for a track identified as `en`, `aemQLUwnw7I.en.vtt`.
 
 The manifest is a JSON array. Use the following field structure and fill in the verified title and caption language from the capture.
