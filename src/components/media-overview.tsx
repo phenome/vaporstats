@@ -14,9 +14,9 @@ function CitationNotes({
   references: SourceReferences;
 }) {
   const notes = [...new Set(sourceUrls)].map((url) => {
-    const article = references.get(url);
-    if (!article) return null;
-    const { source, id, number, suffix } = article;
+    const item = references.get(url);
+    if (!item) return null;
+    const { source, id, number, suffix } = item;
     const label = suffix ? `${number}.${suffix}` : number;
     return (
       <a
@@ -143,8 +143,8 @@ export function MediaOverviewSection({
   overview: MediaOverview;
   sources: MediaSource[];
 }) {
-  const references = new Map(getMediaSourceReferences(sources).flatMap(({ articles }) =>
-    articles.map((article) => [article.source.originalUrl, article] as const),
+  const references = new Map(getMediaSourceReferences(sources).flatMap(({ items }) =>
+    items.map((item) => [item.source.originalUrl, item] as const),
   ));
   const { statements, categories } = overview.composedLead ? overview : mergeRepeatedLeadFindings(overview);
   const chapters = getEditionChapters(categories, references);

@@ -2,14 +2,24 @@ import { useEffect, useRef } from "react";
 import type { MediaSource } from "../lib/media-discovery";
 import { getMediaSourceReferences, type MediaSourceReference } from "./media-source-references";
 
-function ArticleRow({
-  article,
+function formatSourceCounts(items: MediaSourceReference[]): string {
+  const videos = items.filter((item) => item.isVideo).length;
+  const articles = items.length - videos;
+  return [
+    articles && `${articles} ${articles === 1 ? "article" : "articles"}`,
+    videos && `${videos} ${videos === 1 ? "video" : "videos"}`,
+  ].filter(Boolean).join(" and ");
+}
+
+function SourceRow({
+  item,
   showOutlet,
 }: {
-  article: MediaSourceReference;
+  item: MediaSourceReference;
   showOutlet: boolean;
 }) {
-  const { source, id, number, suffix } = article;
+  const { source, id, number, suffix, isVideo } = item;
+  const developerInterview = isVideo && source.outlet === "GameSpot" && source.affiliation;
   return (
     <div
       id={id}
@@ -22,14 +32,18 @@ function ArticleRow({
         href={source.originalUrl}
         target="_blank"
         rel="noopener noreferrer"
-        aria-label={`Read ${source.title} on ${source.outlet} (opens in a new tab)`}
+        aria-label={isVideo
+          ? `Watch ${source.title} from ${source.outlet} on YouTube (opens in a new tab)`
+          : `Read ${source.title} on ${source.outlet} (opens in a new tab)`}
         className="min-w-0 flex-1 wrap-anywhere text-zinc-200 hover:text-orange-300 hover:underline focus-visible:outline focus-visible:outline-orange-500"
       >
         {source.title} <span aria-hidden="true">↗</span>
       </a>
       <span className="text-[11px] text-zinc-400">
-        {source.type === "review" ? "Review" : source.type === "announcement" ? "Announcement" : source.handsOn ? "Hands-on preview" : "Preview"}
+        {isVideo && "Video · "}
+        {developerInterview ? "Developer interview" : source.type === "review" ? "Review" : source.type === "announcement" ? "Announcement" : source.handsOn ? "Hands-on preview" : "Preview"}
       </span>
+      {developerInterview && <span className="text-[11px] text-zinc-400">{developerInterview}</span>}
       {source.publishedAt && (
         <time dateTime={source.publishedAt} className="font-mono text-[11px] text-zinc-400">
           {source.publishedAt.slice(0, 10)}
@@ -44,18 +58,18 @@ export function MediaSources({ sources }: { sources: MediaSource[] }) {
   const outlets = getMediaSourceReferences(sources);
 
   useEffect(() => {
-    function revealArticle() {
-      const article = document.getElementById(window.location.hash.slice(1));
-      if (!article || !sectionRef.current?.contains(article) || !article.id.startsWith("media-source-")) return;
-      const outlet = article.closest("details");
+    function revealSource() {
+      const item = document.getElementById(window.location.hash.slice(1));
+      if (!item || !sectionRef.current?.contains(item) || !item.id.startsWith("media-source-")) return;
+      const outlet = item.closest("details");
       if (outlet) outlet.open = true;
-      article.focus({ preventScroll: true });
-      article.scrollIntoView({ block: "start" });
+      item.focus({ preventScroll: true });
+      item.scrollIntoView({ block: "start" });
     }
 
-    revealArticle();
-    window.addEventListener("hashchange", revealArticle);
-    return () => window.removeEventListener("hashchange", revealArticle);
+    revealSource();
+    window.addEventListener("hashchange", revealSource);
+    return () => window.removeEventListener("hashchange", revealSource);
   }, [sources]);
 
   if (sources.length === 0) return null;
@@ -67,14 +81,14 @@ export function MediaSources({ sources }: { sources: MediaSource[] }) {
           Sources
         </h2>
         <span className="font-mono text-xs text-zinc-400">
-          {sources.length} {sources.length === 1 ? "article" : "articles"} · {outlets.length} {outlets.length === 1 ? "outlet" : "outlets"}
+          {formatSourceCounts(outlets.flatMap(({ items }) => items))} · {outlets.length} {outlets.length === 1 ? "outlet" : "outlets"}
         </span>
       </div>
       <ul>
-        {outlets.map(({ outlet, number, articles }) => (
+        {outlets.map(({ outlet, number, items }) => (
           <li key={outlet} className="border-t border-zinc-800">
-            {articles.length === 1 ? (
-              <ArticleRow article={articles[0]!} showOutlet />
+            {items.length === 1 ? (
+              <SourceRow item={items[0]!} showOutlet />
             ) : (
               // Fragment navigation can open the disclosure before React hydrates it.
               <details className="group" suppressHydrationWarning>
@@ -84,10 +98,10 @@ export function MediaSources({ sources }: { sources: MediaSource[] }) {
                     {outlet}
                     <span aria-hidden="true" className="ml-1 inline-block text-zinc-400 group-open:rotate-90">▸</span>
                   </strong>
-                  <span className="ml-auto font-mono text-[11px] text-zinc-400">{articles.length} articles</span>
+                  <span className="ml-auto font-mono text-[11px] text-zinc-400">{formatSourceCounts(items)}</span>
                 </summary>
                 <div className="pl-4 sm:pl-8">
-                  {articles.map((article) => <ArticleRow key={article.id} article={article} showOutlet={false} />)}
+                  {items.map((item) => <SourceRow key={item.id} item={item} showOutlet={false} />)}
                 </div>
               </details>
             )}

@@ -232,6 +232,13 @@
       "when": 1795715756954,
       "tag": "0032_storefront_release_date_text",
       "breakpoints": true
+    },
+    {
+      "idx": 33,
+      "version": "6",
+      "when": 1795862921936,
+      "tag": "0033_written_preview_outlets",
+      "breakpoints": true
     }
   ]
 }

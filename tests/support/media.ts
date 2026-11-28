@@ -6,7 +6,7 @@ import type { GeminiBatchPoll, GeminiBatchTransport } from "../../src/lib/media-
 import { createOpenRouterTransport, type OpenRouterTransport } from "../../src/lib/media-openrouter";
 import { GeminiHttpError, MAX_CLIENT_ERROR_PAUSES, MAX_UNCERTAIN_SENDS } from "../../src/lib/media-paid-providers";
 import type { MediaObservation } from "../../src/lib/media-observations";
-import { MEDIA_OUTLETS, type MediaPass } from "../../src/lib/media-discovery";
+import { ASSESSMENT_MEDIA_OUTLETS, MEDIA_OUTLETS, type MediaPass } from "../../src/lib/media-discovery";
 import { previewDailyAttemptShare } from "../../src/lib/media-outlet-access";
 
 export const CYBERPUNK = 1091500;
@@ -49,6 +49,11 @@ export function insertLaterRun(native: Database, appids: readonly number[]): num
   const row = native.query<{ id: number }, []>("SELECT id FROM media_discovery_runs ORDER BY id DESC LIMIT 1").get();
   if (!row) throw new Error("Later media discovery run was not created");
   return row.id;
+}
+
+export function outletFixtureUrl(domain: string, path: string): string {
+  const outlet = MEDIA_OUTLETS.find((entry) => entry.domain === domain);
+  return `https://${domain}${outlet && "section" in outlet ? outlet.section.slice(0, -1) : ""}/${path}`;
 }
 
 /** Inserts `count` accepted sources for `appid` in `pass`, one URL each on `outlet`'s domain. */
@@ -723,7 +728,8 @@ export function mediaTickFetch(apis: MediaTickApis, fetched: string[] = [], outl
     if (apis.gemini?.isGeminiRequest(url)) return apis.gemini.fetchFn(input, init);
     if (apis.openRouter?.isOpenRouterRequest(url)) return apis.openRouter.fetchFn(input, init);
     if (apis.tavily?.isTavilyRequest(url)) return apis.tavily.fetchFn(input, init);
-    if (url.includes("/articles/")) {
+    const host = URL.parse(url)?.hostname.replace(/^www\./, "");
+    if (url.includes("/articles/") || MEDIA_OUTLETS.some((outlet) => "previewOnly" in outlet && outlet.domain === host)) {
       fetched.push(url);
       const answer = outlet?.(url);
       if (answer) return answer;
@@ -998,6 +1004,8 @@ export interface InterruptionScenario {
   seed(native: Database): void;
   /** A fresh controlled world for each run. */
   world(): MediaWorld;
+  /** Checks scenario-specific settlement after each uninterrupted or interrupted run. */
+  verifySettlement?(native: Database, interrupted: readonly OutboundCall[]): void;
   /**
    * Uninterrupted ticks that build the state the sweep starts from. They run
    * once, until quiescent, into a template every run copies, so they are not
@@ -1298,6 +1306,7 @@ async function sweepRun(template: { database: TestDatabase; calls: OutboundCall[
     for (const { original_url } of native.query<{ original_url: string }, []>("SELECT original_url FROM media_sources AS s WHERE NOT EXISTS (SELECT 1 FROM media_article_extractions AS e WHERE e.source_id = s.id AND e.active = 1) AND NOT EXISTS (SELECT 1 FROM media_processing_jobs AS j WHERE j.source_id = s.id AND j.stage = 'extraction' AND j.status IN ('uncertain_exhausted', 'client_error_exhausted'))").all()) {
       violations.push(`${label}: accepted ${original_url} was never extracted`);
     }
+    scenario.verifySettlement?.(native, driver.interrupted);
     return { swept, violations, resentUnderException, resentAfterUncertain, retriedAfterItemError, dayStopped: stopped.length, peak: Math.max(0, ...recorded.map(({ attempts }) => attempts)), previewPeak: Math.max(0, ...previewObserved.values()) };
   } catch (error) {
     return { swept: [], violations: [`${label}: ${error instanceof Error ? error.message : String(error)}`], resentUnderException: [], resentAfterUncertain: [], retriedAfterItemError: [], dayStopped: 0, peak: 0, previewPeak: 0 };
@@ -1377,7 +1386,7 @@ export function experimentWorld(): MediaWorld {
   };
   const pages = new Map<string, string>();
   for (const appid of [CYBERPUNK, BALDURS_GATE, HADES_II]) {
-    for (const outlet of MEDIA_OUTLETS) {
+    for (const outlet of ASSESSMENT_MEDIA_OUTLETS) {
       const body = (when: string) => `${GAME_NAMES[appid]} offers a substantial playable campaign with detailed systems, as ${outlet.name}'s ${when} assessment describes at length. `.repeat(5) + "Builds reward experimentation.";
       const page = (suffix: string, title: string, date: string, when: string) =>
         pages.set(experimentArticleUrl(appid, outlet.domain, suffix), discoveryArticleHtml(appid, `${GAME_NAMES[appid]} ${title}`, { date, author: `${outlet.name} critic`, body: body(when) }));

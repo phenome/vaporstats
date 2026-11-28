@@ -1,5 +1,6 @@
 import { MEDIA_OUTLETS } from "./media-outlet-access";
 import { LEGACY_V10_SOURCE_SUPPORT_LANGUAGE, MEDIA_CATEGORY_NAMES, normalizeMediaTag, sourceSupportTrigger } from "./media-overview";
+import { hasDeveloperCaptionEvidence } from "./media-video";
 
 const kinds = ["finding", "pro", "con", "tag", "gameplay", "storyWorld"] as const;
 type ObservationKind = (typeof kinds)[number];
@@ -15,13 +16,34 @@ export interface MediaObservation {
   qualifiers: string[];
   versionEvidence?: VersionEvidence;
   technicalTiming?: string[];
+  previewEvidence?: ClaimPreviewEvidence;
 }
 
-export type PreviewScope = "announcement" | "hands-on preview" | "non-hands-on preview";
+const reportedPreviewScopes = ["announcement", "hands-on preview", "demo", "non-hands-on preview"] as const;
+export type PreviewScope = (typeof reportedPreviewScopes)[number] | "developer statement" | "developer interview";
+type ClaimPreviewEvidence =
+  | { scope: (typeof reportedPreviewScopes)[number] }
+  | { scope: "developer statement"; attribution: string };
+type PreviewExtractionContext =
+  | { handsOn: boolean; defaultToReporting: boolean }
+  | { developer: string };
+
+function readClaimPreviewEvidence(value: unknown): ClaimPreviewEvidence | undefined {
+  const { scope, attribution } = object(value);
+  if (scope === "developer statement") {
+    const speaker = line(attribution, 300);
+    return speaker ? { scope, attribution: speaker } : undefined;
+  }
+  const reportedScope = reportedPreviewScopes.find((candidate) => candidate === scope);
+  return reportedScope ? { scope: reportedScope } : undefined;
+}
 
 function isPreviewCoverageLabel(label: string, scope: PreviewScope): boolean {
   return /^preview$/i.test(label) || ({
     announcement: /^announcement$/i,
+    "developer interview": /^developer interview$/i,
+    "developer statement": /^developer statement$/i,
+    demo: /^demo$/i,
     "hands-on preview": /^hands[- ]on preview$/i,
     "non-hands-on preview": /^(?:non[- ]hands[- ]on|hands[- ]off) preview$/i,
   } satisfies Record<PreviewScope, RegExp>)[scope].test(label);
@@ -33,15 +55,20 @@ function withoutPreviewQualifierList(text: string, scope: PreviewScope): string 
     return remaining.length ? ` (${remaining.join(", ")})` : "";
   });
 }
+const DEMO_WORDING = /(?:\b(?:demo|demonstration|trailer|footage) (?:showed|shows|featured|features|revealed|reveals)|(?:^|\b(?:shown|seen|observed) )(?:in|during) (?:an? |the )?(?:hands[- ]off )?(?:demo|demonstration|trailer|footage))\b/i;
 const PREVIEW_WORDING: Record<PreviewScope, RegExp> = {
   announcement: /\b(?:announcement|announced)\b/i,
+  "developer statement": /\b(?:according to|said|says|explained|described|reported|expects?|plans?|intends?)\b/i,
+  demo: DEMO_WORDING,
+  "developer interview": /\b(?:(?:developer|director|producer|designer|studio(?: head)?) (?:said|says|explained|described|reported)|(?:an? |the )?(?:developer )?interview)\b/i,
   "hands-on preview": /(?<!non[- ])\bhands[- ]on (?:preview|play|session)\b/i,
   "non-hands-on preview": /\b(?:(?:non[- ]hands[- ]on|hands[- ]off) (?:preview|demo|demonstration)|(?:preview|demo|demonstration|trailer|footage) (?:showed|shows)|(?:shown|seen|observed) in (?:an? |the )?(?:demo|demonstration|trailer|footage))\b/i,
 };
 
 function claimPreviewScope(source: ObservationSource, observation: MediaObservation): PreviewScope | undefined {
   if (!source.previewScope) return undefined;
-  // A preview can also report an announced plan outside what was shown or played.
+  if (observation.previewEvidence) return observation.previewEvidence.scope;
+  // Older extractions can also report an announced plan outside what was shown or played.
   return observation.qualifiers.some((label) => /^announcement$/i.test(label)) ? "announcement" : source.previewScope;
 }
 
@@ -52,6 +79,7 @@ export interface ObservationSource {
   editionContext?: { platform: string | null; build: string | null };
   legacySimilarityInputs?: true;
   previewScope?: PreviewScope;
+  affiliatedInterview?: true;
 }
 
 export interface ObservationReference {
@@ -80,9 +108,18 @@ function line(value: unknown, max: number): string {
   return text.length <= max ? text : "";
 }
 
-function contains(text: string, fragment: string): boolean {
+function wholePhrase(fragment: string): string {
   const escaped = fragment.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  return new RegExp(`(?<![\\p{L}\\p{N}])${escaped}(?![\\p{L}\\p{N}])`, "iu").test(text);
+  return `(?<![\\p{L}\\p{N}])${escaped}(?![\\p{L}\\p{N}])`;
+}
+
+function contains(text: string, fragment: string): boolean {
+  return new RegExp(wholePhrase(fragment), "iu").test(text);
+}
+
+function attributesInterviewClaim(text: string, developer: string): boolean {
+  const name = wholePhrase(developer);
+  return new RegExp(`\\baccording to ${name}|${name} (?:said|says|explained|described|reported|expects?|plans?|intends?)\\b`, "iu").test(text);
 }
 
 function matchesRequestedApp(subject: unknown, appid: number): boolean {
@@ -103,7 +140,7 @@ function observation(value: unknown, appid: number): MediaObservation | null {
 
 export function extractionReviewIssues(
   value: unknown, appid: number, sourceIdentity: string, observations: readonly MediaObservation[],
-  article: string, context: readonly (string | null)[], includeTechnicalTiming = false,
+  article: string, context: readonly (string | null)[], includeTechnicalTiming = false, previewContext?: PreviewExtractionContext,
 ): EditorialOmission[] {
   const body = line(article, Number.MAX_SAFE_INTEGER);
   const accepted = new Set(observations.map(({ id }) => id));
@@ -112,7 +149,7 @@ export function extractionReviewIssues(
     if (!matchesRequestedApp(subject, appid) || typeof id !== "string" || !/^[a-zA-Z0-9_-]{1,64}$/.test(id) || accepted.has(id)) return [];
     const candidate = observation(entry, appid);
     const reason = candidate
-      ? rejectedArticleEvidence(candidate, object(entry), body, context, false, includeTechnicalTiming) ?? "observation ID is duplicated"
+      ? rejectedArticleEvidence(candidate, object(entry), body, context, false, includeTechnicalTiming, previewContext, article) ?? "observation ID is duplicated"
       : "observation lacks a valid kind, category, text or qualification";
     const question = line(reviewQuestion, 240) || `What wording and scope does the article support? ${reason}.`;
     return [{ sourceIdentity, observationId: id, question }];
@@ -138,6 +175,8 @@ function articleObservations(value: unknown, appid: number, check: (item: MediaO
 
 export function readArticleObservations(value: unknown, appid: number, includeVersionEvidence = false, includeTechnicalTiming = false): MediaObservation[] {
   return articleObservations(value, appid, (item, entry) => {
+    const previewEvidence = readClaimPreviewEvidence(object(entry).previewEvidence);
+    if (previewEvidence) item.previewEvidence = previewEvidence;
     if (includeVersionEvidence) {
       const { observed, distinctions, technical } = object(object(entry).versionEvidence);
       if (Array.isArray(observed) && Array.isArray(distinctions) && typeof technical === "boolean") {
@@ -156,10 +195,38 @@ export function readArticleObservations(value: unknown, appid: number, includeVe
 
 function rejectedArticleEvidence(
   item: MediaObservation, source: Record<string, unknown>, article: string,
-  context: readonly (string | null)[], pending: boolean, includeTechnicalTiming = false,
+  context: readonly (string | null)[], pending: boolean, includeTechnicalTiming = false, previewContext?: PreviewExtractionContext,
+  originalArticle = article,
 ): string | null {
   const quote = line(source.quote, 480);
   if (quote.length < 12 || !article.includes(quote)) return "supporting excerpt is missing or absent from the article";
+  if (previewContext && "developer" in previewContext) {
+    const evidence = readClaimPreviewEvidence(source.previewEvidence);
+    if (evidence?.scope !== "developer statement" || !hasDeveloperCaptionEvidence(originalArticle, quote, evidence.attribution, previewContext.developer)) {
+      return "excerpt is missing verified developer speech";
+    }
+    item.previewEvidence = { scope: "developer statement", attribution: previewContext.developer };
+  } else if (previewContext && source.previewEvidence !== undefined) {
+    const evidence = readClaimPreviewEvidence(source.previewEvidence);
+    if (!evidence) return "preview evidence has no valid claim scope or attribution";
+    if (evidence.scope === "developer statement" && !contains(quote, evidence.attribution)) return "developer attribution is absent from the supporting excerpt";
+    if (evidence.scope === "demo" || evidence.scope === "hands-on preview") {
+      const offset = article.indexOf(quote);
+      const prefix = article.slice(Math.max(0, offset - 480), offset).split(/[.!?\n]/).at(-1) ?? "";
+      const sentence = prefix + quote;
+      const speech = /\b(?:said|says|told|explained|confirmed|according to)\b/i;
+      const firsthand = /\b(?:I|we) (?:played|tested|watched|observed|tried|saw)\b/i;
+      const reported = sentence.split(/[.!?;\n]|,?\s+(?:but|while|whereas)\s+/i).some((clause) => {
+        const marker = clause.search(speech);
+        if (marker < 0) return false;
+        return !firsthand.test(clause.slice(0, marker)) || !/^confirmed\b/i.test(clause.slice(marker));
+      });
+      if (reported) {
+        return "reported speech does not establish witnessed play or demonstration";
+      }
+    }
+    if (evidence.scope === "hands-on preview" && !previewContext.handsOn) return "source does not establish firsthand play";
+  }
   const timing = includeTechnicalTiming ? extractTechnicalTiming(item, quote) : undefined;
   if (timing) {
     // Retain context qualifiers on matching inputs for the embedding filter.
@@ -201,14 +268,28 @@ export function parseArticleObservations(
   includeVersionEvidence = false,
   includeTechnicalTiming = false,
   requiredScope?: string,
+  previewContext?: PreviewExtractionContext,
 ): MediaObservation[] {
   const body = line(article, Number.MAX_SAFE_INTEGER);
   return articleObservations(value, appid, (item, raw) => {
     const source = object(raw);
-    if (requiredScope && !item.qualifiers.includes(requiredScope)) item.qualifiers.push(requiredScope);
     const needsReview = source.reviewQuestion !== undefined && source.reviewQuestion !== null && source.reviewQuestion !== "";
-    if (needsReview !== pending || rejectedArticleEvidence(item, source, body, context, pending, includeTechnicalTiming) !== null) return false;
+    if (needsReview !== pending) return false;
     const quote = line(source.quote, 480);
+    if (previewContext) {
+      item.previewEvidence = readClaimPreviewEvidence(source.previewEvidence);
+      if (!item.previewEvidence && "defaultToReporting" in previewContext && previewContext.defaultToReporting) {
+        item.previewEvidence = { scope: "non-hands-on preview" };
+      }
+    }
+    if (item.previewEvidence) {
+      item.qualifiers = item.qualifiers.filter((label) =>
+        !isPreviewCoverageLabel(label, "developer interview") && !isPreviewCoverageLabel(label, "developer statement")
+        && !reportedPreviewScopes.some((scope) => isPreviewCoverageLabel(label, scope)));
+    }
+    const coverageQualifier = item.previewEvidence ? context.find((fact) => fact === "preview") : requiredScope;
+    if (coverageQualifier && !item.qualifiers.includes(coverageQualifier)) item.qualifiers.push(coverageQualifier);
+    if (rejectedArticleEvidence(item, source, body, context, pending, includeTechnicalTiming, previewContext, article) !== null) return false;
     if (includeVersionEvidence) item.versionEvidence = classifyVersionEvidence(quote);
     const timing = includeTechnicalTiming ? extractTechnicalTiming(item, quote) : undefined;
     if (timing) item.technicalTiming = timing;
@@ -489,7 +570,9 @@ function observationScope(source: ObservationSource, observation: MediaObservati
     if (usesAuthoredTags(version) && observation.kind === "tag") return authoredTagScope(source, observation, version);
     const scope = sourceGroundedScope(source, observation, usesTechnicalTiming(version));
     const preview = usesPreviewScope(version) ? claimPreviewScope(source, observation) : undefined;
-    return preview ? { ...scope, key: JSON.stringify([scope.key, preview]) } : scope;
+    const evidence = observation.previewEvidence;
+    const developer = evidence?.scope === "developer statement" ? evidence.attribution.toLowerCase() : undefined;
+    return preview ? { ...scope, key: JSON.stringify([scope.key, preview, developer]) } : scope;
   }
   const scopeInText = version === "v12"
     ? /\b(?:on the (?:Nintendo )?Switch 2 port|reviewed (?:PC|PS5|Xbox Series X) (?:version|build)|at (?:PC )?launch|early access|day[- ]\d+ patch)\b/gi
@@ -898,6 +981,18 @@ export function validateObservationSynthesis(
       omit(section, "claim describes firsthand play without hands-on evidence", refs);
       return [];
     }
+    const evidence = support[0]!.observation.previewEvidence;
+    if (preview && evidence && preview !== "demo" && DEMO_WORDING.test(matchingText)) {
+      omit(section, "claim describes a demonstration outside its evidence scope", refs);
+      return [];
+    }
+    if (preview === "developer statement" && evidence?.scope === "developer statement"
+      && (support.some(({ source }) => source.affiliatedInterview)
+        ? !attributesInterviewClaim(matchingText, evidence.attribution)
+        : !contains(matchingText, evidence.attribution) || !PREVIEW_WORDING[preview].test(matchingText))) {
+      omit(section, "claim omits its developer attribution", refs, evidence.attribution);
+      return [];
+    }
     const sourceTexts = [...new Set(support.map(({ observation }) => observation.text))];
     if (usesArticleTags(clauses) && authoredTag
       && (isTechnicalTagEvidence(matchingText) || sourceTexts.some(isTechnicalTagEvidence))) {
@@ -997,7 +1092,8 @@ export function validateObservationSynthesis(
       : browseWording;
     const wording = usesControllerTags(clauses) && authoredTag ? omitImpliedControllerPlatform(tagWording) : tagWording;
     const sourceUrls = [...new Set(support.map(({ source }) => source.sourceUrl))];
-    const previewKey = preview ? JSON.stringify([preview, [...sourceUrls].sort()]) : undefined;
+    const previewKey = preview ? JSON.stringify([preview, [...sourceUrls].sort(),
+      evidence?.scope === "developer statement" ? evidence.attribution : undefined]) : undefined;
     const needsPreviewLabel = preview && !PREVIEW_WORDING[preview].test(wording)
       && (section !== "statements" || previewKey !== previousLeadPreview);
     const sourceHasOtherPreviewScope = support[0]!.source.previewScope;

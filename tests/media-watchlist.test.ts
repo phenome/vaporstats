@@ -1,13 +1,14 @@
+import { writtenPreviewEvidence } from "../src/lib/written-preview";
 import { afterEach, expect, test } from "bun:test";
 import type { TestDatabase } from "./support/db";
 import { openTestDatabase } from "./support/db";
 import { fetchSteamAppDetails } from "../workers/catalog-seed";
 import { upsertApp } from "../src/lib/catalog";
-import { getMediaSources, MEDIA_OUTLETS, nextMediaAssessment, replayRejectedPreviewCandidate } from "../src/lib/media-discovery";
+import { ASSESSMENT_MEDIA_OUTLETS, getMediaSources, MEDIA_OUTLETS, nextMediaAssessment, replayRejectedPreviewCandidate } from "../src/lib/media-discovery";
 import { outletDailyAttemptCap, previewDailyAttemptShare } from "../src/lib/media-outlet-access";
 import { changeMediaWatch, expectedMediaReleaseDate, mediaWatchSchedule, previewInterval, PREVIEW_DEFERRAL_KEY, previewMonthlyCreditShare, shiftMediaDay } from "../src/lib/media-watchlist";
 import { handleGameDetailRequest, type GameDetailResponseData } from "../src/routes/api.games.$appid.detail";
-import { controlledGeminiApi, controlledOpenRouterApi, controlledTavilyApi, discoveryArticleHtml, mediaObservation, runMediaTick, overviewOutputForUrls, synthesisEvidence, synthesisSelectionId, emptySynthesisSelection, type MediaTickOptions } from "./support/media";
+import { controlledGeminiApi, controlledOpenRouterApi, controlledTavilyApi, discoveryArticleHtml, outletFixtureUrl, mediaObservation, runMediaTick, overviewOutputForUrls, synthesisEvidence, synthesisSelectionId, emptySynthesisSelection, type MediaTickOptions } from "./support/media";
 
 const ROOT = 2161710;
 const CHILD = 2161711;
@@ -79,12 +80,12 @@ function world(extraArticleText = "") {
   const fetched: string[] = [];
   tavily.results = ({ query, appid, domain }) => {
     const pass = query.endsWith("review revisited") ? "later" : query.endsWith("review preview") ? "initial" : "preview";
-    return deliver ? [{ url: `https://${domain}/articles/${appid}/${pass}/${day}` }] : [];
+    return deliver ? [{ url: outletFixtureUrl(domain, `articles/${appid}/${pass}/${day}`) }] : [];
   };
   const quote = "Builds reward experimentation when players select a new set of tools for each mission.";
   const outlet = (url: string) => {
     const { pathname, hostname } = new URL(url);
-    const [, , appid, pass, published] = pathname.split("/");
+    const [, , appid, pass, published] = pathname.replace(/^\/gaming(?=\/)/, "").split("/");
     const name = names[Number(appid)];
     if (!name) return new Response(null, { status: 404 });
     const articleType = pass === "preview" ? hostname.includes("ign") ? "Announcement" : "Preview" : "Review";
@@ -174,17 +175,17 @@ test("disabled watches persist, release changes move preview cadence, and rewatc
   expect(api.tavily.usageCalls).toBe(0);
   await api.tick(database, "2027-01-26");
   await api.tick(database, "2027-01-27");
-  expect(queries(database).map(({ day }) => day)).toEqual(Array(6).fill("2027-01-26"));
+  expect(queries(database).map(({ day }) => day)).toEqual(Array(MEDIA_OUTLETS.length).fill("2027-01-26"));
   database.native.exec(`UPDATE apps SET storefront_release_date_text = 'Feb 2027' WHERE appid = ${ROOT}`);
   await api.tick(database, "2027-01-28");
-  expect(queries(database)).toHaveLength(12);
+  expect(queries(database)).toHaveLength(2 * MEDIA_OUTLETS.length);
   await watch(database, ROOT, "2027-01-29", "unwatch");
   await api.tick(database, "2027-01-29");
-  expect(queries(database)).toHaveLength(12);
+  expect(queries(database)).toHaveLength(2 * MEDIA_OUTLETS.length);
   database.native.exec(`UPDATE apps SET storefront_release_date_text = 'Q4 2028' WHERE appid = ${ROOT}`);
   await watch(database, ROOT, "2027-01-30");
   await api.tick(database, "2027-01-30");
-  expect(queries(database)).toHaveLength(18);
+  expect(queries(database)).toHaveLength(3 * MEDIA_OUTLETS.length);
   expect(database.native.query("SELECT reason, enrolled_at FROM media_enrollments").get()).toEqual({
     reason: "watchlist", enrolled_at: "2027-01-25T05:00:00.000Z",
   });
@@ -200,7 +201,7 @@ test("previews of new children precede old reviews and a late released child sta
   const api = world();
   await api.tick(database, "2027-01-25");
   expect(queries(database).map(({ appid, pass }) => [appid, pass])).toEqual([
-    ...Array(6).fill([CHILD, "preview"]), ...Array(6).fill([ROOT, "initial"]),
+    ...Array(MEDIA_OUTLETS.length).fill([CHILD, "preview"]), ...Array(6).fill([ROOT, "initial"]),
   ]);
   await api.tick(database, "2027-01-26");
   expect(queries(database).filter(({ pass, appid }) => pass === "later" && appid === ROOT)).toHaveLength(6);
@@ -236,7 +237,7 @@ test("beyond the preview credit share, the credit reservation survives restart a
   expect(queries(database).map(({ pass }) => pass)).toEqual(Array(6).fill("initial"));
   await api.tick(database, "2027-02-01");
   // A new month brings a new preview credit share.
-  expect(queries(database).map(({ pass }) => pass)).toEqual([...Array(6).fill("initial"), ...Array(6).fill("preview")]);
+  expect(queries(database).map(({ pass }) => pass)).toEqual([...Array(6).fill("initial"), ...Array(MEDIA_OUTLETS.length).fill("preview")]);
   expect(database.native.query("SELECT scheduled_on, due_at, end_reason FROM media_preview_occurrences ORDER BY id").all()).toEqual(
     ["2027-01-25", "2027-01-29", "2027-01-31", "2027-02-01"].map((scheduled_on, i) => ({
       scheduled_on, due_at: "2027-01-25T06:00:00.000Z", end_reason: i < 3 ? "superseded" : "completed",
@@ -255,7 +256,7 @@ test("release without a date ends previews and uses the first observed day for b
   expect(database.native.query("SELECT observed_released_on FROM media_watch_coverage").get()).toEqual({ observed_released_on: "2027-01-26" });
   await watch(database, ROOT, "2027-01-27", "unwatch");
   await api.tick(database, "2027-02-01");
-  expect(queries(database).map(({ pass }) => pass)).toEqual(Array(6).fill("preview"));
+  expect(queries(database).map(({ pass }) => pass)).toEqual(Array(MEDIA_OUTLETS.length).fill("preview"));
   await api.tick(database, "2027-02-02");
   expect(queries(database).filter(({ pass }) => pass === "initial")).toHaveLength(6);
   database.native.exec(`UPDATE apps SET steam_release_date = '2027-02-01' WHERE appid = ${ROOT}`);
@@ -274,7 +275,7 @@ test("preview and review each admit 15 articles and rejected preview URLs are re
   api.tavily.results = (search) => {
     const accepted = defaultResults(search)!;
     if (search.query.endsWith("announcement")) {
-      return [{ url: `https://${search.domain}/articles/${search.appid}/rejected-preview` }, ...accepted];
+      return [{ url: outletFixtureUrl(search.domain, `articles/${search.appid}/rejected-preview`) }, ...accepted];
     }
     if (search.appid === ROOT && search.query.endsWith("review preview")) {
       const extra = defaultResults({ ...search, appid: CHILD })![0]!;
@@ -430,14 +431,14 @@ test("an unwatch during a due occurrence stops its remaining queries and keeps a
   await watch(database);
   const api = world();
   await api.tick(database, "2027-01-25");
-  expect(database.native.query("SELECT COUNT(*) AS count FROM media_sources").get()).toEqual({ count: 12 });
+  expect(database.native.query("SELECT COUNT(*) AS count FROM media_sources").get()).toEqual({ count: 2 * MEDIA_OUTLETS.length });
   api.tavily.reply({ status: 503 });
   await api.tick(database, "2027-02-24");
   const served = queries(database).length;
   await watch(database, ROOT, "2027-02-25", "unwatch");
   await api.tick(database, "2027-02-25");
   expect(queries(database)).toHaveLength(served);
-  expect(database.native.query("SELECT COUNT(*) AS count FROM media_sources").get()).toEqual({ count: 12 });
+  expect(database.native.query("SELECT COUNT(*) AS count FROM media_sources").get()).toEqual({ count: 2 * MEDIA_OUTLETS.length });
   expect(database.native.query("SELECT end_reason FROM media_preview_occurrences WHERE scheduled_on = '2027-02-24'").all()).toEqual([
     { end_reason: "unwatched" }, { end_reason: "unwatched" },
   ]);
@@ -449,9 +450,9 @@ test("a resumed preview skips the prior occurrence's article and admits one new 
   await watch(database);
   const api = world();
   const { name, domain } = MEDIA_OUTLETS[0]!;
-  const articleA = `https://${domain}/articles/a`;
-  const articleB = `https://${domain}/articles/b`;
-  const articleC = `https://${domain}/articles/c`;
+  const articleA = outletFixtureUrl(domain, `articles/a`);
+  const articleB = outletFixtureUrl(domain, `articles/b`);
+  const articleC = outletFixtureUrl(domain, `articles/c`);
   const sources = () => database.native.query("SELECT original_url FROM media_sources WHERE pass = 'preview' ORDER BY id").all();
   api.tavily.results = (request) => request.domain === domain ? [{ url: articleA }] : [];
   const outlet = () => new Response(discoveryArticleHtml(ROOT, "NO LAW Hands-on Preview", {
@@ -550,15 +551,15 @@ test("reject non-preview candidates, admit plain coverage without preview wordin
   const plain = "NO LAW sends you through a harbor city one mission at a time";
   api.tavily.results = ({ domain, query, appid }) => {
     if (appid !== ROOT) return [];
-    if (domain === MEDIA_OUTLETS[1]!.domain) return query.endsWith("announcement") ? [{ url: `https://${domain}/articles/plain` }] : [];
+    if (domain === MEDIA_OUTLETS[1]!.domain) return query.endsWith("announcement") ? [{ url: outletFixtureUrl(domain, `articles/plain`) }] : [];
     // A query returns at most 10 candidates, so GameSpot returns the developer page and the unusable one.
-    if (domain === MEDIA_OUTLETS[2]!.domain) return query.endsWith("announcement") ? GAMESPOT_KINDS.map((kind) => ({ url: `https://${domain}/articles/${kind}` })) : [];
+    if (domain === MEDIA_OUTLETS[2]!.domain) return query.endsWith("announcement") ? GAMESPOT_KINDS.map((kind) => ({ url: outletFixtureUrl(domain, `articles/${kind}`) })) : [];
     if (domain !== MEDIA_OUTLETS[0]!.domain) return [];
     const titlesForPass = query.endsWith("announcement") ? Object.keys(titles).filter((kind) => !GAMESPOT_KINDS.includes(kind)) : ["review"];
-    return titlesForPass.map((kind) => ({ url: `https://${domain}/articles/${kind}` }));
+    return titlesForPass.map((kind) => ({ url: outletFixtureUrl(domain, `articles/${kind}`) }));
   };
   const outlet = (url: string) => {
-    const name = new URL(url).pathname.split("/").at(-1)!;
+    const name = new URL(url).pathname.replace(/^\/gaming(?=\/)/, "").split("/").at(-1)!;
     const title = name === "plain" ? plain : titles[name]!;
     return new Response(discoveryArticleHtml(ROOT, title, {
       body: name === "short" ? "NO LAW in brief." : `${title} details a campaign where you choose tools before each mission. ${api.quote} `.repeat(3),
@@ -728,8 +729,8 @@ test("watching and unwatching an undated experiment root preserves its due asses
   expect(await next("2027-01-26")).toEqual(later);
   await api.tick(database, "2027-01-26");
   expect(queries(database).map(({ pass, day }) => [pass, day])).toEqual([
-    ...MEDIA_OUTLETS.map(() => ["initial", "2027-01-25"]),
-    ...MEDIA_OUTLETS.map(() => ["later", "2027-01-26"]),
+    ...ASSESSMENT_MEDIA_OUTLETS.map(() => ["initial", "2027-01-25"]),
+    ...ASSESSMENT_MEDIA_OUTLETS.map(() => ["later", "2027-01-26"]),
   ]);
 });
 
@@ -891,7 +892,7 @@ async function subjectTick(
   for (const [key, byDomain] of Object.entries(candidates)) {
     for (const [domain, list] of Object.entries(byDomain)) {
       urls[`${key}:${domain}`] = list.map(({ title, body, tags }, index) => {
-        const url = `https://${domain}/articles/${key.replace(":", "-")}-${index}`;
+        const url = outletFixtureUrl(domain, `articles/${key.replace(":", "-")}-${index}`);
         articles[url] = featureHtml(title, body, tags ?? "articleType:Features");
         return url;
       });
@@ -1046,7 +1047,7 @@ test("a preview pass types announcements by title, preview wording and hands-on 
     // The word "preview" in the title outweighs an announcement word.
     "kotaku.com": discoveryArticleHtml(ROOT, "NO LAW preview: new trailer breakdown", { body }),
   };
-  api.tavily.results = ({ domain }) => pages[domain] ? [{ url: `https://${domain}/articles/no-law` }] : [];
+  api.tavily.results = ({ domain }) => pages[domain] ? [{ url: outletFixtureUrl(domain, `articles/no-law`) }] : [];
   await api.tick(database, "2027-01-25", { outlet: (url) => new Response(pages[new URL(url).hostname]) });
   expect(database.native.query("SELECT outlet, type, hands_on FROM media_sources ORDER BY outlet").all()).toEqual([
     { outlet: "Eurogamer", type: "preview", hands_on: 1 },
@@ -1072,7 +1073,7 @@ test("previews go first within each outlet's daily preview share, assessment que
   const defaultResults = api.tavily.results!;
   // Two rejected candidates (reviews, left for the released-game flow) come before the preview.
   api.tavily.results = (search) => search.query.endsWith("announcement")
-    ? [`https://${search.domain}/articles/${ROOT}/review-1`, `https://${search.domain}/articles/${ROOT}/review-2`].map((url) => ({ url })).concat(defaultResults(search)!)
+    ? [outletFixtureUrl(search.domain, `articles/${ROOT}/review-1`), outletFixtureUrl(search.domain, `articles/${ROOT}/review-2`)].map((url) => ({ url })).concat(defaultResults(search)!)
     : defaultResults(search);
   expect(previewDailyAttemptShare()).toBe(3);
   expect(previewDailyAttemptShare(200)).toBe(20);
@@ -1080,7 +1081,7 @@ test("previews go first within each outlet's daily preview share, assessment que
 
   await api.tick(database, "2027-01-25");
   expect(queries(database).map(({ appid, pass }) => [appid, pass])).toEqual([
-    ...Array(6).fill([ROOT, "preview"]), ...Array(6).fill([REVIEW, "initial"]),
+    ...Array(MEDIA_OUTLETS.length).fill([ROOT, "preview"]), ...Array(6).fill([REVIEW, "initial"]),
   ]);
   // Each preview query used the share on its search and two rejected fetches; its third candidate waits.
   expect(previewProgress(database)).toEqual(MEDIA_OUTLETS.map(({ name }) => ({
@@ -1094,7 +1095,7 @@ test("previews go first within each outlet's daily preview share, assessment que
   await api.tick(database, "2027-01-26");
   expect(queries(database).filter(({ pass, day }) => pass === "preview" && day === "2027-01-26")).toEqual([]);
   expect(previewProgress(database)).toEqual(MEDIA_OUTLETS.map(({ name }) => ({ outlet: name, status: "completed", stop_reason: null, candidate_index: 3 })));
-  expect(database.native.query("SELECT COUNT(*) AS count FROM media_sources WHERE appid = ? AND pass = 'preview'").get(ROOT)).toEqual({ count: 6 });
+  expect(database.native.query("SELECT COUNT(*) AS count FROM media_sources WHERE appid = ? AND pass = 'preview'").get(ROOT)).toEqual({ count: MEDIA_OUTLETS.length });
   expect(database.native.query("SELECT end_reason FROM media_preview_occurrences").all()).toEqual([{ end_reason: "completed" }]);
 });
 
@@ -1123,7 +1124,7 @@ test("previews are searched within the month's preview credit share despite the 
 
   api.tavily.remaining = 100;
   await api.tick(database, "2027-02-01");
-  expect(queries(database).filter(({ day }) => day === "2027-02-01").map(({ pass }) => pass)).toEqual(Array(6).fill("preview"));
+  expect(queries(database).filter(({ day }) => day === "2027-02-01").map(({ pass }) => pass)).toEqual(Array(MEDIA_OUTLETS.length).fill("preview"));
 });
 
 test("a deferral recorded earlier in the month with previews still within their credit share holds nothing: status shows the next daily run, which searches them", async () => {
@@ -1141,9 +1142,9 @@ test("a deferral recorded earlier in the month with previews still within their 
   expect(schedule.map(({ appid, next }) => [appid, next])).toEqual([[ROOT, { pass: "preview", dueAt: "2027-01-30T06:00:00.000Z" }]]);
   const api = world();
   api.noArticles();
-  api.tavily.remaining = 13;
+  api.tavily.remaining = 16;
   await api.tick(database, "2027-01-30");
-  expect(queries(database).map(({ pass }) => pass)).toEqual([...Array(6).fill("preview"), ...Array(6).fill("initial")]);
+  expect(queries(database).map(({ pass }) => pass)).toEqual([...Array(MEDIA_OUTLETS.length).fill("preview"), ...Array(6).fill("initial")]);
 });
 
 test.each(["daily_attempt_cap", "fetch_http_429", "preview_daily_share"] as const)(
@@ -1202,12 +1203,182 @@ test("the review reservation checked mid-run counts only the preview queries sti
   admit(database, REVIEW, { status: "released", date: "2024-12-05" });
   await watch(database, ROOT, "2027-01-30");
   await watch(database, REVIEW, "2027-01-30");
-  // 97 of January's 100 preview searches are served: three previews fit the share, the other three need the reservation check.
+  // 97 of January's 100 preview searches are served: three previews fit the share, the other six need the reservation check.
   usePreviewCreditShare(database, "2027-01", 97);
   const api = world();
-  // 19 credits: after three previews, 16 remain; the initial and later passes reserve 12, which leaves 4 for the 3 unsearched previews.
-  api.tavily.remaining = 19;
+  // 22 credits: after three previews, 19 remain; the initial and later passes reserve 12, which leaves 7 for the 6 unsearched previews.
+  api.tavily.remaining = 22;
   await api.tick(database, "2027-01-30");
-  expect(queries(database).map(({ pass }) => pass)).toEqual([...Array(6).fill("preview"), ...Array(6).fill("initial")]);
+  expect(queries(database).map(({ pass }) => pass)).toEqual([...Array(MEDIA_OUTLETS.length).fill("preview"), ...Array(6).fill("initial")]);
   expect(database.native.query("SELECT value FROM checkpoints WHERE key = ?").get(PREVIEW_DEFERRAL_KEY)).toBeNull();
+});
+
+test("written preview outlets stay game-specific and retain demo, play and developer attribution", async () => {
+  const database = fixture();
+  productionOutletCap();
+  admit(database, ROOT);
+  admit(database, REVIEW);
+  await watch(database);
+  const api = world();
+  const demo = "https://gameinformer.com/preview/2027/01/24/no-law";
+  const wrongGame = "https://www.rpgsite.net/preview/one";
+  const played = "https://www.rpgsite.net/preview/two";
+  const interview = "https://www.techradar.com/gaming/no-law-interview";
+  const wrongSection = "https://www.techradar.com/computing/no-law";
+  const moved = "https://techradar.com/gaming/no-law-moved";
+  const badCanonical = "https://techradar.com/gaming/no-law-canonical";
+  const roundup = "https://gameinformer.com/feature/2027/01/24/every-game";
+  const pages: Record<string, { title: string; text: string; canonical?: string }> = {
+    [roundup]: { title: "NO LAW and every game we played", text: "We played NO LAW at the show." },
+    [demo]: { title: "NO LAW Preview", text: "The developer showed me gameplay in a hands-off demo. The director said, “I played the game for hours.”" },
+    [wrongGame]: { title: "Fort Harbor Preview", text: "I played Fort Harbor myself at the show." },
+    [played]: { title: "NO LAW Preview", text: "I went hands-on with NO LAW at the show." },
+    [interview]: { title: "NO LAW director discusses the upcoming game", text: "Speaking in an interview with TechRadar Gaming, the creative director discussed the team's plans. “We played with the idea of alternate routes,” she said." },
+    [badCanonical]: { title: "NO LAW Preview", text: "I played NO LAW at the show.", canonical: wrongSection },
+  };
+  api.tavily.results = ({ domain }) => ({
+    "gameinformer.com": [roundup, demo],
+    "rpgsite.net": [wrongGame, played],
+    "techradar.com": [wrongSection, moved, badCanonical, interview],
+  }[domain] ?? []).map((url) => ({ url }));
+  await api.tick(database, "2027-01-25", { outlet: (url) => {
+    if (url === moved) return new Response(null, { status: 301, headers: { Location: wrongSection } });
+    const page = pages[url];
+    if (!page) throw new Error(`Unexpected article fetch: ${url}`);
+    return new Response(`<html><head><meta property="og:title" content="${page.title}"><meta property="article:author" content="https://author.example/profile">
+      ${page.canonical ? `<link rel="canonical" href="${page.canonical}">` : ""}
+      <script type="application/ld+json">invalid</script>
+      <script type="application/ld+json">${JSON.stringify({ "@graph": [{ "@type": "Article", datePublished: "2027-01-24T09:30:00-0500", dateModified: "2027-01-24T19:00:00Z", author: { name: "Fixture Journalist" } }] })}</script>
+      </head><body><article><h1>${page.title}</h1><p>${page.text} ${"The article describes an upcoming game's missions and the equipment players can select. ".repeat(4)}</p></article></body></html>`);
+  } });
+  const sources = await getMediaSources(database.db, ROOT, { includeUnpublished: true });
+  expect(sources.map(({ outlet, originalUrl, handsOn, previewEvidence }) => [outlet, originalUrl, handsOn, previewEvidence])).toEqual([
+    ["Game Informer", demo, false, "observed_demo"],
+    ["RPG Site", played, true, undefined],
+    ["TechRadar Gaming", interview, false, "developer_interview"],
+  ]);
+  for (const source of sources) {
+    expect(source).toMatchObject({ author: "Fixture Journalist", publishedAt: "2027-01-24T14:30:00.000Z", updatedAt: "2027-01-24T19:00:00.000Z" });
+  }
+  expect(api.fetched).not.toContain(wrongSection);
+  const techRadarSearch = api.tavily.requests.map(({ body }) => JSON.parse(String(body)) as { include_domains: string[]; query: string })
+    .find(({ include_domains }) => include_domains[0] === "techradar.com");
+  expect(techRadarSearch?.query).toContain("site:techradar.com/gaming/");
+  expect(techRadarSearch?.query).toContain("developer interview");
+  const interviewExtraction = api.openRouter.requests.find(({ stage, body }) =>
+    stage === "extraction" && body.messages.some(({ content }) => content?.includes('"previewEvidence":"developer_interview"')));
+  expect(interviewExtraction?.body.messages[0]?.content).toContain("Attribute developer claims to the speaker");
+  expect(interviewExtraction?.body.messages[1]?.content).toContain('"handsOn":0');
+});
+
+test.each([
+  "‘I played the game for hours.’",
+  "'I played the game for hours.'",
+  "“I played the game for hours.”",
+  "‘After testing both players’ Steam builds, I played the game for hours.’",
+  "</p><blockquote>I played the game for hours.</blockquote><p>",
+])("an RPG Site recap of an IGN interview does not claim hands-on from %s", async (quote) => {
+  const database = fixture();
+  admit(database, ROOT);
+  await watch(database);
+  const api = world();
+  const url = "https://www.rpgsite.net/preview/no-law";
+  api.tavily.results = ({ domain }) => domain === "rpgsite.net" ? [{ url }] : [];
+  await api.tick(database, "2027-01-25", { outlet: () => new Response(discoveryArticleHtml(ROOT, "NO LAW Preview", {
+    body: `The director spoke in an interview with IGN. ${quote} The interview covered how players select gear for each mission. ${api.quote} ${api.quote}`,
+  })) });
+  expect(await getMediaSources(database.db, ROOT, { includeUnpublished: true })).toEqual([
+    expect.objectContaining({ originalUrl: url, handsOn: false }),
+  ]);
+  expect(api.openRouter.requests.find(({ stage }) => stage === "extraction")?.body.messages[1]?.content).toContain('"handsOn":0');
+});
+
+test("one written preview keeps played, demonstrated and developer-reported claims distinct through synthesis", async () => {
+  const database = fixture();
+  admit(database, ROOT);
+  await watch(database);
+  const api = world();
+  const url = "https://www.rpgsite.net/preview/no-law";
+  api.tavily.results = ({ domain }) => domain === "rpgsite.net" ? [{ url }] : [];
+  const play = "I played the opening mission and confirmed players select gear before leaving port.";
+  const demo = "I watched a separate demo that showed the player navigating flooded streets.";
+  const plan = "In an interview with RPG Site, creative director Mira Dane said the team plans to add optional rescue missions.";
+  const observations = [
+    { ...mediaObservation(ROOT, "play", "finding", "Players select gear before leaving port.", play), previewEvidence: { scope: "hands-on preview" } },
+    { ...mediaObservation(ROOT, "demo", "finding", "Players navigate flooded streets.", demo), previewEvidence: { scope: "demo" } },
+    { ...mediaObservation(ROOT, "plan", "finding", "The team plans to add optional rescue missions.", plan), previewEvidence: { scope: "developer statement", attribution: "Mira Dane" } },
+    { ...mediaObservation(ROOT, "cross-sentence", "finding", "Rescue missions are available.", play + " " + demo + " " + plan), previewEvidence: { scope: "hands-on preview" } },
+    ...["demo", "hands-on preview"].map((scope) => ({
+      ...mediaObservation(ROOT, "misattributed-" + scope, "finding", "Optional rescue missions are available.", "the team plans to add optional rescue missions."),
+      previewEvidence: { scope },
+    })),
+    { ...mediaObservation(ROOT, "false-speaker", "finding", "Another director plans to add optional rescue missions.", plan), previewEvidence: { scope: "developer statement", attribution: "Other Director" } },
+    { ...mediaObservation(ROOT, "dev-assessment", "pro", "Rescue missions are satisfying.", plan), previewEvidence: { scope: "developer statement", attribution: "Mira Dane" } },
+  ];
+  const statements = [
+    "In the hands-on session, players select gear before leaving port.",
+    "A demo showed players navigating flooded streets.",
+    "Mira Dane said the team plans to add optional rescue missions.",
+  ];
+  api.openRouter.onChat = (request) => {
+    if (request.stage === "extraction") {
+      expect(request.body.messages[1]?.content).toContain('"handsOn":1');
+      expect(request.body.messages[0]?.content).toContain("add a previewEvidence object");
+      api.openRouter.output("extraction", { observations });
+      return;
+    }
+    const sources = synthesisEvidence(request.body);
+    const source = sources.find(({ sourceUrl }) => sourceUrl === url)!;
+    expect(source.extraction.observations).toEqual(observations.slice(0, 3).map(({ id, previewEvidence }) =>
+      expect.objectContaining({ id, previewEvidence, previewScope: previewEvidence.scope })));
+    expect(new Set(source.extraction.observations.map(({ scopeGroup }) => scopeGroup)).size).toBe(3);
+    const clause = (text: string, id: string) => ({ text, observationIds: [synthesisSelectionId(source, id)] });
+    api.openRouter.output("synthesis", {
+      ...emptySynthesisSelection(sources),
+      statements: [
+        ...statements.map((text, index) => clause(text, observations[index]!.id)),
+        clause("A demo showed optional rescue missions.", "plan"),
+        clause("Optional rescue missions are planned.", "plan"),
+      ],
+    });
+  };
+  await api.tick(database, "2027-01-25", { outlet: () => new Response(discoveryArticleHtml(ROOT, "NO LAW Preview", {
+    body: `${play} ${demo} ${plan}`,
+  })) });
+  expect(await getMediaSources(database.db, ROOT, { includeUnpublished: true })).toEqual([
+    expect.objectContaining({ originalUrl: url, handsOn: true, previewEvidence: "observed_demo_and_developer_interview" }),
+  ]);
+  const persisted = JSON.parse(database.native.query<{ output_json: string }, []>("SELECT output_json FROM media_article_extractions").get()!.output_json);
+  expect(persisted.observations.map(({ id, previewEvidence }: typeof observations[number]) => ({ id, previewEvidence })))
+    .toEqual(observations.slice(0, 3).map(({ id, previewEvidence }) => ({ id, previewEvidence })));
+  const overview = JSON.parse(database.native.query<{ output_json: string }, []>("SELECT output_json FROM media_game_overviews WHERE active = 1").get()!.output_json);
+  expect(overview.statements.map(({ text }: { text: string }) => text)).toEqual(statements);
+});
+
+test.each([
+  ["After playing NO LAW for two hours, I explored the opening mission.", true],
+  ["I played with a controller for two hours.", true],
+  ["We played with the idea of adding co-op.", false],
+  ["After playing the opening mission, the developer explained their plans.", false],
+])("written preview detects the reporter's literal play in %s", (body, expected) => {
+  expect(writtenPreviewEvidence("RPG Site", "NO LAW Preview", body).handsOn).toBe(expected);
+});
+
+test("a scheduled run reopened after outlet expansion fills only missing preview progress", async () => {
+  const database = fixture();
+  admit(database, ROOT);
+  await watch(database);
+  const api = world();
+  api.noArticles();
+  await api.tick(database, "2027-01-25");
+  const oldRows = () => database.native.query("SELECT * FROM media_discovery_progress WHERE outlet NOT IN ('RPG Site', 'Game Informer', 'TechRadar Gaming') ORDER BY id").all();
+  const retained = oldRows();
+  database.native.exec(`
+    DELETE FROM media_discovery_progress WHERE outlet IN ('RPG Site', 'Game Informer', 'TechRadar Gaming');
+    UPDATE media_preview_occurrences SET ended_at = NULL, end_reason = NULL;
+    UPDATE media_discovery_runs SET status = 'running', finished_at = NULL;
+  `);
+  await api.tick(database, "2027-01-25", {}, "06:15");
+  expect(oldRows()).toEqual(retained);
+  expect(database.native.query("SELECT COUNT(*) AS count FROM media_discovery_progress WHERE occurrence_id IS NOT NULL AND status='completed'").get()).toEqual({ count: MEDIA_OUTLETS.length });
 });

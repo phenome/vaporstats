@@ -1,3 +1,4 @@
+import type { WrittenPreviewEvidence } from "./written-preview";
 import { createHash } from "node:crypto";
 import { Readability } from "@mozilla/readability";
 import { MIN_USABLE_ARTICLE_CHARS, parseArticleDocument } from "./article-document";
@@ -47,6 +48,7 @@ import {
   type MediaPass,
 } from "./media-discovery";
 import { fetchOutletArticle, isOutletDenialStop, OUTLET_STOP_REASONS, type OutletAccessStop, type OutletStopReason } from "./media-outlet-access";
+import { approvedGameSpotVideos, gameSpotCaptionDirectory, gameSpotVideoId, readGameSpotCaptions } from "./media-video";
 import {
   createOpenRouterTransport,
   type OpenRouterChatRequest,
@@ -86,6 +88,7 @@ import {
   automaticRequestKey,
   countOutputs,
   enqueuePaidWork,
+  hasCaptionHold,
   hasDefiniteEditorialRefusal,
   hasOpenExtraction,
   hasPendingExtractions,
@@ -110,6 +113,7 @@ import {
   resolveWithoutProvider,
   returnUnrunBatch,
   runRequestKey,
+  setCaptionHold,
   setWaitingInputIdentity,
   upgradeWaitingTextJob,
   settleOutput,
@@ -390,6 +394,7 @@ function metadataFor(source: SourceRow): Record<string, unknown> {
     updatedAt: source.updated_at,
     type: source.type,
     handsOn: source.hands_on,
+    ...(source.preview_evidence ? { previewEvidence: source.preview_evidence } : {}),
     affiliation: source.affiliation,
     platform: source.platform,
     buildContext: source.build_context,
@@ -462,33 +467,57 @@ const CATEGORY_GUIDANCE = `Use these category boundaries:
 - Technical experience & accessibility: performance, stability, controls, readability, and access options.
 Split mixed evidence where appropriate and omit categories without evidence.`;
 
+function affiliatedVideoDeveloper(source: SourceRow): string | null {
+  return gameSpotVideoId(source.outlet, source.original_url) ? source.affiliation?.replace(/\s+/g, " ").trim() || null : null;
+}
+
 function previewEvidenceScope(source: SourceRow): PreviewScope | null {
   if (source.pass !== "preview") return null;
+  if (source.hands_on !== 1 && (source.preview_evidence === "developer_interview"
+    || affiliatedVideoDeveloper(source))) return "developer interview";
   if (source.type === "announcement") return "announcement";
   return source.hands_on === 1 ? "hands-on preview" : "non-hands-on preview";
 }
 
 function eligiblePreviewObservations(source: SourceRow, observations: MediaObservation[]): MediaObservation[] {
-  if (source.pass !== "preview" || source.hands_on === 1) return observations;
-  return observations.filter((observation) =>
-    observation.kind !== "pro" && observation.kind !== "con" && observation.technicalTiming === undefined);
+  const developer = affiliatedVideoDeveloper(source);
+  if (source.pass !== "preview") return observations;
+  return observations.filter((observation) => {
+    if (developer && (observation.previewEvidence?.scope !== "developer statement"
+      || observation.previewEvidence.attribution !== developer)) return false;
+    const firsthand = observation.previewEvidence
+      ? observation.previewEvidence.scope === "hands-on preview"
+      : source.hands_on === 1;
+    return firsthand || (observation.kind !== "pro" && observation.kind !== "con" && observation.technicalTiming === undefined);
+  });
 }
 
 function makeExtractionRequest(source: SourceRow, content: string, configVersion: string): OpenRouterChatRequest {
+  const video = gameSpotVideoId(source.outlet, source.original_url) !== null;
+  const format = video ? (source.affiliation ? "developer interview captions" : "video captions") : "article";
+  const captionGuidance = video ? " Use only clear English caption evidence. Attribute plans and design statements to the developer when the speaker is clear. Skip a claim if its speaker or meaning is uncertain. Keep pre-release plans qualified and omit assessments of played or released gameplay."
+    + (source.affiliation ? ' For every observation, supply previewEvidence with scope "developer statement" and attribution equal to the caption’s bracketed speaker label, without brackets. Quote verbatim speech within one turn labeled with the approved developer name, Developer, or a speaker name followed by (Developer). Omit unlabeled speech and host questions or commentary, even if the host names the developer.' : " Distinguish the outlet's reporting from developer statements. Describe a demo detail as observed only when the captions establish that it was shown.")
+    : "";
+  const claimScopedPreview = source.pass === "preview" && !(video && source.affiliation);
+  const claimGuidance = claimScopedPreview
+    ? " Distinguish what the writer directly saw or played from what developers said. Attribute developer claims to the speaker or studio in each observation and preserve plans as plans. Describe details as observed in a demo only when the excerpt establishes that they were shown. For each observation add a previewEvidence object with a scope of \"developer statement\" for claims known only from what a developer said, \"demo\" for details witnessed in a demo or shown in footage, \"hands-on preview\" for what the journalist experienced while playing, \"announcement\" for announced facts, or \"non-hands-on preview\" for other reporting. For developer statements, add an attribution field to that object naming the speaker, studio or role verbatim in the supporting excerpt. Include enough of the excerpt to establish how that particular claim is known. Separate observations when the evidence changes, even inside the same article or captions. Use pro, con, originatingAssessment and firsthand performance findings only for the journalist’s own play."
+    : "";
   const request = chatRequest(
     EXTRACTION_MAX_OUTPUT_TOKENS,
-    { role: "system", content: `Analyze the article about Steam app ${source.appid}. Return JSON only.
+    { role: "system", content: `Analyze the ${format} about Steam app ${source.appid}. Return JSON only.${captionGuidance}${claimGuidance}
 Return {observations, originatingAssessment}. Each observation has id (unique short stable identifier), appid (the target Steam app ID as a JSON integer), kind ("finding", "pro", "con", "tag", "gameplay", or "storyWorld"), category (one of the categories below for findings, "" otherwise), text (one independently checkable assertion), quote (verbatim supporting excerpt, 12–480 characters), and qualifiers (array, empty only when scope does not materially change the claim). Omit originatingAssessment if unknown.
 ${CATEGORY_GUIDANCE}
 Ground every observation in substantive reporting about the target game. Omit factboxes, page metadata, incidental comparisons, and other games or editions. When a platform, edition, build, patch, preview, announcement, or release state changes the meaning of a specific observation, copy the exact phrase into qualifiers from that observation's own quote or from its non-null platform or buildContext metadata. Each qualifier must appear verbatim as a contiguous phrase in one of those places. Include a material qualifier even when the observation text already contains it. Use [] for general observations. Omit placeholders such as "platform and build not stated", labels such as "reviewer assessment", and a platform that merely identifies where the reviewer played. Publication dates do not establish the build played.${source.pass === "preview" ? " Apply the pre-release scope to every claim. If handsOn is 0, extract only factual descriptions from reporting or attributed plans. Never describe play experience, performance, or an assessment of how the game feels. Omit originatingAssessment." : ""} If interpretation is uncertain, include a short reviewQuestion on the candidate observation identifying the unresolved issue; the candidate is held for editorial review.${extractsTechnicalTiming(configVersion) ? `
 For an observed bug or performance problem, use past tense. If the article explicitly ties the problem to a build, patch or period of play, choose a verbatim excerpt that includes both the problem and that timing and put the excerpt's exact timing phrase in qualifiers. For example, a quote saying a crash occurred on the launch build supports the qualifier "launch build". Publication dates, metadata and timing mentioned elsewhere do not establish when this problem occurred. If the article only establishes that the problem happened while the reviewer played, preserve that limited finding and leave build or release timing unspecified.` : ""}
 Tags must be concise factual characteristics with explicit evidence.${configVersion === EXTRACTION_CONFIG_VERSION ? ' Write each tag as a browsable label of a few words. Examples of form include "Open world", "No load screens", "FPS", "Choices matter", "Joy-Con support" and "Adaptive triggers". Include each only when the excerpt actually establishes that feature. First-person perspective alone does not establish a shooter. Keep the evidence sentence in quote.' : ""} Omit quality judgments, popularity, ratings, scores, performance and technical complaints. Playing solo does not establish a single-player mode. A past build does not establish a general characteristic. A concrete announced feature must remain announced. Use pro and con only for supported assessments. For similarity, separately record directly described mechanics or progression as gameplay observations and directly described settings, characters or narrative premises as storyWorld observations. When the same excerpt also supports a category finding, give the similarity observation its own id and the same supported scope. Exclude praise alone, ratings, popularity, technical complaints and hardware mappings from similarity. Omit any dimension the article does not describe.` },
-    { role: "user", content: `Article metadata: ${JSON.stringify({
+    { role: "user", content: `${video ? "Video" : "Article"} metadata: ${JSON.stringify({
+      ...(video ? { publisher: source.outlet, developer: source.affiliation, url: source.original_url } : {}),
       type: source.type,
       handsOn: source.hands_on,
+      ...(source.preview_evidence ? { previewEvidence: source.preview_evidence } : {}),
       platform: source.platform,
       buildContext: source.build_context,
-    })}\n\nArticle text:\n${content}` },
+    })}\n\n${video ? "English captions" : "Article text"}:\n${content}` },
   );
   return { ...request, response_format: { type: "json_object" } };
 }
@@ -566,16 +595,19 @@ function effectiveObservationSources(appid: number, extractions: ExtractionRow[]
     });
     if (legacy) editorialOmissions.push(...legacy.editorialOmissions.map((item) => ({ ...item, sourceIdentity })));
     const candidates = [...current, ...pending.filter(({ id }) => mediaAmendment(sourceIdentity, id) !== undefined)];
-    const observations = legacy?.observations ?? candidates.flatMap((observation) => {
+    const amended = legacy?.observations ?? candidates.flatMap((observation) => {
       const amendment = mediaAmendment(sourceIdentity, observation.id);
       if (amendment === undefined) return [observation];
       if (isOmissionAmendment(amendment)) return [];
       return readArticleObservations({ observations: [{ ...observation, text: cleanLine(amendment) }] }, appid, includeVersionEvidence, includeTechnicalTiming);
     });
+    const affiliatedInterview = affiliatedVideoDeveloper(source) !== null;
+    const observations = affiliatedInterview ? eligiblePreviewObservations(source, amended) : amended;
     const editionContext = { platform: source.platform, build: source.build_context ?? (source.type === "preview" ? "preview" : null) };
     const previewScope = usesPreviewScope(version) ? previewEvidenceScope(source) : null;
     return [{ sourceIdentity, sourceUrl: source.original_url, outlet: source.outlet, editionContext,
       ...(previewScope ? { previewScope } : {}),
+      ...(affiliatedInterview ? { affiliatedInterview: true as const } : {}),
       pass: source.pass, contentHash: row.content_hash, context: metadataFor(source), observations, editorialOmissions, ...(legacy ? { legacySimilarityInputs: true as const } : {}) }];
   });
 }
@@ -632,9 +664,9 @@ ${shortLead ? `For statements, first draft two or three sentences of 45–70 wor
 Only AFTER drafting that paragraph, divide it into citation spans. Different parts of a sentence may cite different articles. Fictional illustration of pacing and boundaries: "Low Tide puts you at the helm of a ferry as the last bridge out of town collapses." [premise] "Each crossing means choosing between another passenger" [capacity] "and enough fuel to make it home." [fuel]. Use the actual game evidence; never reuse details from this illustration.
 ` : ""}${usesSourceGroundedScope(version) ? `Treat the source platform, review date and build as review context. Give ordinary gameplay, story, world and qualitative assessments directly when the excerpt supports them without that context. A review of a PC release or console port does not establish that every detail differs by version. Use an explicit version distinction only for a concrete change, comparison, restriction or platform-specific behavior indicated by the observation's edition and required qualifiers. These come from the verified excerpt, or the accepted wording for legacy observations. Keep historical and technical limits listed in the observation's qualifiers, including patch-dependent bugs and preview-only evidence. Preserve both sides of an explicit version comparison in the claim text. Use the supplied scopeGroup when combining IDs.
 ` : ""}${(usesTechnicalTiming(version)) ? `For an observed bug or performance problem in any prose section, use past tense and put the timing in the clause itself. Preserve each material build, patch or period explicitly supported by every selected observation's excerpt. For example, say "Animation glitches interrupted scenes at launch" only if every citation establishes launch timing. If the citations only establish what happened while the reviewer played, say "during review" explicitly, such as "Animation glitches interrupted scenes during review." Do not infer launch or patch timing from a publication date, source metadata or other observations. Keep differently timed evidence in separate clauses. Ordinary gameplay and other general claims need no such timing.
-` : ""}${version === "v19" || usesAuthoredTags(version) ? "When a source describes the effect of a tested patch, include the observed change and any remaining problems as a separate technical finding with that source’s own citation and timing. Prioritize this over incidental interface complaints. Mention each hardware configuration only once.\n" : ""}${selections.evidence.some(({ pass }) => pass === "preview") ? usesPreviewScope(version) ? `Use previewScope to frame pre-release claims in natural prose. Describe plans as announced, details observed in a demo or trailer as shown there, and play impressions as firsthand only when the source played the game. Hands-off reporting alone does not prove that a particular feature was shown in a demo. In the lead, establish the scope on the first span of each run of adjacent spans with the same preview scope and cited articles. Carry it through the next span in that run without repeating the label. Reintroduce it when the evidence switches, and make every topic, pro, and con independently clear. Keep other material qualifiers. Leave the generic word "preview" out of qualifier lists when the prose already sets the scope.
+` : ""}${version === "v19" || usesAuthoredTags(version) ? "When a source describes the effect of a tested patch, include the observed change and any remaining problems as a separate technical finding with that source’s own citation and timing. Prioritize this over incidental interface complaints. Mention each hardware configuration only once.\n" : ""}${selections.evidence.some(({ pass }) => pass === "preview") ? usesPreviewScope(version) ? `Use each observation’s previewScope to frame pre-release claims in natural prose. For a developer statement, name the supplied attribution and say what that speaker said or plans. Claims from the same article can have different scopes. Describe plans as announced, details observed in a demo or trailer as shown there, and play impressions as firsthand only when the source played the game. Hands-off reporting alone does not prove that a particular feature was shown in a demo. In the lead, establish the scope on the first span of each run of adjacent spans with the same preview scope and cited articles. Carry it through the next span in that run without repeating the label. Reintroduce it when the evidence switches, and make every topic, pro, and con independently clear. Keep other material qualifiers. Leave the generic word "preview" out of qualifier lists when the prose already sets the scope.
 For example, if only an announcement establishes the setting and only the hands-off demo shows stealth and mission choice, write separate spans: "The announcement sets the game in a flooded town." [setting announcement] "A hands-off demo showed how you slip through empty streets" [demo stealth] "and choose which mission to take next." [demo mission choice]. Attach the announcement only to the setting span. Even within a sentence, use only the IDs establishing the entire span at its stated scope.
-` : "Describe announced features as announced and material shown in trailers as shown. Use hands-on language only when the source played the game, and keep its preview context.\n" : ""}${JSON.stringify(selections.evidence.map(({ observations, editorialOmissions: _editorialOmissions, legacySimilarityInputs: _legacySimilarityInputs, ...source }) => ({ ...source, extraction: { observations } })))}` });
+` : "Describe announced features as announced and material shown in trailers as shown. Use hands-on language only when the source played the game, and keep its preview context.\n" : ""}${selections.evidence.some(({ affiliatedInterview }) => affiliatedInterview) ? "For claims grounded in GameSpot developer interviews, use the per-observation previewEvidence attribution to identify the developer in the prose, including each lead claim. Treat the interviews as developer accounts. A second outlet quoting the same developer adds no independent corroboration.\n" : ""}${JSON.stringify(selections.evidence.map(({ observations, editorialOmissions: _editorialOmissions, legacySimilarityInputs: _legacySimilarityInputs, ...source }) => ({ ...source, extraction: { observations } })))}` });
   if (usesTagFirst(version)) {
     const index = synthesisTagIndex(selections);
     const message = request.messages[0]!;
@@ -747,8 +779,8 @@ function storedExtractionJson(value: unknown, sourceIdentity: string, sourceUrl:
 
 type AuthorizationRow = { run_id: number; status: MediaProcessingSummary["status"]; stop_reason: string | null; billing_confirmation: string | null; affected_source_ids: string };
 
-type SourceRow = { id: number; appid: number; pass: MediaPass; original_url: string; title: string; outlet: MediaOutlet; author: string | null; published_at: string | null; updated_at: string | null; retrieved_at: string; type: string; hands_on: number | null; affiliation: string | null; platform: string | null; build_context: string | null; normalized_content_hash: string | null; cleanup_version: string | null; processing_content: string | null; processing_input_identity: string | null; processing_run_id: number | null };
-const SOURCE_COLUMNS = "id, appid, pass, original_url, title, outlet, author, published_at, updated_at, retrieved_at, type, hands_on, affiliation, platform, build_context, normalized_content_hash, cleanup_version, processing_content, processing_input_identity, processing_run_id";
+type SourceRow = { id: number; appid: number; pass: MediaPass; original_url: string; title: string; outlet: MediaOutlet; author: string | null; published_at: string | null; updated_at: string | null; retrieved_at: string; type: string; hands_on: number | null; preview_evidence: WrittenPreviewEvidence | null; affiliation: string | null; platform: string | null; build_context: string | null; normalized_content_hash: string | null; cleanup_version: string | null; processing_content: string | null; processing_input_identity: string | null; processing_run_id: number | null };
+const SOURCE_COLUMNS = "id, appid, pass, original_url, title, outlet, author, published_at, updated_at, retrieved_at, type, hands_on, preview_evidence, affiliation, platform, build_context, normalized_content_hash, cleanup_version, processing_content, processing_input_identity, processing_run_id";
 function parseAffectedSourceIds(value: string): number[] {
   const parsed = parseJson(value);
   return Array.isArray(parsed) ? parsed.filter((id): id is number => Number.isSafeInteger(id) && id > 0) : [];
@@ -977,12 +1009,19 @@ async function persistExtraction(db: AppDatabase, job: JobRow, output: unknown, 
   const context = [source.platform, source.build_context, source.type === "preview" ? "preview" : null, scope];
   const includeTechnicalTiming = extractsTechnicalTiming(job.config_version);
   const includeVersionEvidence = includeTechnicalTiming || job.config_version === VERSION_EVIDENCE_EXTRACTION_VERSION;
-  const qualified = article === undefined ? [] : parseArticleObservations(output, source.appid, article, context, false, includeVersionEvidence, includeTechnicalTiming, scope ?? undefined);
+  const video = gameSpotVideoId(source.outlet, source.original_url) !== null;
+  const developer = affiliatedVideoDeveloper(source);
+  const previewContext = developer ? { developer } : scope ? {
+    handsOn: source.hands_on === 1,
+    defaultToReporting: scope === "hands-on preview" || video || source.preview_evidence === "observed_demo"
+      || source.preview_evidence === "observed_demo_and_developer_interview",
+  } : undefined;
+  const qualified = article === undefined ? [] : parseArticleObservations(output, source.appid, article, context, false, includeVersionEvidence, includeTechnicalTiming, scope ?? undefined, previewContext);
   const observations = eligiblePreviewObservations(source, qualified);
   const pendingObservations = article === undefined ? [] : eligiblePreviewObservations(source,
-    parseArticleObservations(output, source.appid, article, context, true, includeVersionEvidence, includeTechnicalTiming, scope ?? undefined));
+    parseArticleObservations(output, source.appid, article, context, true, includeVersionEvidence, includeTechnicalTiming, scope ?? undefined, previewContext));
   const hasLegacyOutput = article === undefined && (parsed.contributions.length > 0 || parsed.traits.length > 0 || parsed.categories || parsed.similarityInputs);
-  const editorialOmissions = article === undefined ? [] : extractionReviewIssues(output, source.appid, job.input_identity, qualified, article, context, includeTechnicalTiming);
+  const editorialOmissions = article === undefined ? [] : extractionReviewIssues(output, source.appid, job.input_identity, qualified, article, context, includeTechnicalTiming, previewContext);
   if (observations.length === 0 && pendingObservations.length === 0 && !hasLegacyOutput) {
     await db.prepare("UPDATE media_sources SET processing_content = NULL WHERE id = ?").bind(source.id).run();
     return { status: "refused", error: "invalid_output: no supported contributions", ...(editorialOmissions.length ? { outputJson: JSON.stringify({ editorialOmissions }) } : {}) };
@@ -1399,7 +1438,8 @@ const PASSING_STOPS = /^(?:pricing_unconfirmed|capability_unconfirmed|missing_ge
 
 /** The explicit stop reasons a run recorded about its work, without passing conditions. */
 function recordedWorkStops(stopReason: string | null): string[] {
-  return (stopReason ?? "").split("; ").filter((reason) => reason && !PASSING_STOPS.test(reason));
+  return (stopReason ?? "").split("; ").filter((reason) =>
+    reason && reason !== PROCESSING_STOP_REASONS.APPROVED_CAPTIONS_UNAVAILABLE && !PASSING_STOPS.test(reason));
 }
 
 /**
@@ -1478,10 +1518,10 @@ async function enqueueExtractions(advance: QueueAdvance, runId: number, affected
 /**
  * Queues Overview and embedding work for the games `runId` may rebuild: an
  * authorized run's rebuild scope, or every one of `entities` for automatic
- * work. An Overview is queued only when its game has no queued or in-flight
- * extraction, and its current contributions differ from those its active
- * Overview was built from, or it has none. A model or configuration version
- * change alone queues nothing. Automatic work never queues again work that
+ * work. An Overview is queued when its game's extractions have settled or
+ * are held for unavailable captions, and its current contributions differ
+ * from those of its active Overview or it has none. A model or configuration
+ * version change alone queues nothing. Automatic work never queues again work that
  * already has an item, whatever its outcome.
  */
 async function enqueueOverviewWork(advance: QueueAdvance, runId: number, entities: readonly number[], automatic = false): Promise<void> {
@@ -1597,30 +1637,48 @@ async function takeExtractionTurn(advance: QueueAdvance, job: JobRow): Promise<b
     await resolveWithoutProvider(db, job);
     return false;
   }
-  const stopped = advance.outletStops.get(source.outlet);
-  if (stopped) {
-    noteReason(advance, job.run_id, `${source.outlet}:${stopped}`);
-    // An Outlet denial is permanent, so its article can never be fetched.
-    if (isOutletDenialStop(stopped)) await refuseItem(db, job, "outlet_denied", now);
-    // A day stop holds the item waiting; it keeps its place.
-    return false;
-  }
-  const fetched = await fetchOutletArticle(db, {
-    url: source.original_url, outlet: source.outlet, appid: source.appid, pass: source.pass, stage: "processing",
-    runId: job.run_id, fetch: advance.articleFetch, clock: advance.clock, secrets: advance.secrets,
-  });
-  if (fetched && "stop" in fetched) {
-    advance.outletStops.set(source.outlet, fetched.stop);
-    noteReason(advance, job.run_id, `${source.outlet}:${fetched.stop}`);
-    if (isOutletDenialStop(fetched.stop)) await refuseItem(db, job, "outlet_denied", now);
-    return true;
-  }
-  const cleaned = fetched ? cleanArticle(fetched.html) : null;
-  if (!cleaned) {
-    const reason = fetched === null ? OUTLET_STOP_REASONS.ARTICLE_UNREACHABLE : OUTLET_STOP_REASONS.ARTICLE_UNUSABLE;
-    await refuseItem(db, job, reason, now);
-    noteReason(advance, job.run_id, `${source.outlet}:${reason}`);
-    return true;
+  let cleaned: ReturnType<typeof cleanArticle>;
+  const videoId = gameSpotVideoId(source.outlet, source.original_url);
+  if (videoId) {
+    const directory = gameSpotCaptionDirectory();
+    cleaned = null;
+    if (directory) {
+      for (const video of await approvedGameSpotVideos(directory, source.appid)) {
+        if (video.id !== videoId || video.developer !== source.affiliation) continue;
+        const content = await readGameSpotCaptions(directory, video);
+        if (!content) continue;
+        cleaned = { content, hash: sha256(content) };
+        break;
+      }
+    }
+    await setCaptionHold(db, job, !cleaned);
+    if (!cleaned) return false;
+  } else {
+    const stopped = advance.outletStops.get(source.outlet);
+    if (stopped) {
+      noteReason(advance, job.run_id, `${source.outlet}:${stopped}`);
+      // An Outlet denial is permanent, so its article can never be fetched.
+      if (isOutletDenialStop(stopped)) await refuseItem(db, job, "outlet_denied", now);
+      // A day stop holds the item waiting; it keeps its place.
+      return false;
+    }
+    const fetched = await fetchOutletArticle(db, {
+      url: source.original_url, outlet: source.outlet, appid: source.appid, pass: source.pass, stage: "processing",
+      runId: job.run_id, fetch: advance.articleFetch, clock: advance.clock, secrets: advance.secrets,
+    });
+    if (fetched && "stop" in fetched) {
+      advance.outletStops.set(source.outlet, fetched.stop);
+      noteReason(advance, job.run_id, `${source.outlet}:${fetched.stop}`);
+      if (isOutletDenialStop(fetched.stop)) await refuseItem(db, job, "outlet_denied", now);
+      return true;
+    }
+    cleaned = fetched ? cleanArticle(fetched.html) : null;
+    if (!cleaned) {
+      const reason = fetched === null ? OUTLET_STOP_REASONS.ARTICLE_UNREACHABLE : OUTLET_STOP_REASONS.ARTICLE_UNUSABLE;
+      await refuseItem(db, job, reason, now);
+      noteReason(advance, job.run_id, `${source.outlet}:${reason}`);
+      return true;
+    }
   }
   let identity: string | null = null;
   let kept = false;
@@ -1843,6 +1901,7 @@ async function finishRun(advance: QueueAdvance, run: OpenAuthorization): Promise
   const allCovered = gamesWithSources.every((appid) => coveredGames.has(appid));
   const pending = Number(runAggregate?.pending ?? 0);
   const reasons = [...(advance.reasons.get(auth.run_id) ?? [])];
+  if (await hasCaptionHold(db, auth.run_id)) reasons.push(PROCESSING_STOP_REASONS.APPROVED_CAPTIONS_UNAVAILABLE);
   if (Number(runAggregate?.waiting ?? 0) > 0) {
     for (const provider of PAID_PROVIDERS) {
       const state = await providerState(db, provider);
@@ -2025,13 +2084,15 @@ async function advanceMediaProcessingNow(db: AppDatabase, options: MediaProcessi
   if (reconciliationRunId === undefined) throw new Error("Media processing authorization not found");
   const recorded = await first<{ stop_reason: string | null }>(db, "SELECT stop_reason FROM media_processing_authorizations WHERE run_id = ?", reconciliationRunId);
   const entities = automatic?.entities ?? (pollOnly ? globallySubmitted.map(({ appid }) => appid) : await enrolledEntities(db));
+  const stopReasons = (recorded?.stop_reason ?? "").split("; ").filter(Boolean);
+  if (!terminal && await hasCaptionHold(db)) stopReasons.push(PROCESSING_STOP_REASONS.APPROVED_CAPTIONS_UNAVAILABLE);
   return {
     runId: reconciliationRunId,
     status: terminal?.status ?? (await hasUnresolvedPaidWork(db) ? "waiting" : "completed"),
     submitted: advance.requestsSent,
     completed: advance.textSucceeded + prePoll.succeeded + currentPoll.succeeded,
     outputs: await outputCounts(db, reconciliationRunId),
-    stopReasons: (recorded?.stop_reason ?? "").split("; ").filter(Boolean),
+    stopReasons: [...new Set(stopReasons)],
     failed: advance.textFailed + prePoll.failed + currentPoll.failed,
     uncertain: advance.textUncertain + prePoll.uncertain + currentPoll.uncertain,
     overviewAppids: await activeOverviewAppids(db, entities),
