@@ -89,7 +89,6 @@ export function sharedGameplayTagLabels(
   left: GameplayTagVector,
   right: GameplayTagVector,
   nameOf: (sourceId: string) => string | null | undefined,
-  limit: number = GAMEPLAY_SHARED_TAG_LIMIT,
 ): string[] {
   const shared: Array<{ id: string; contribution: number }> = [];
   for (const [id, value] of left) {
@@ -99,7 +98,7 @@ export function sharedGameplayTagLabels(
   shared.sort((a, b) => b.contribution - a.contribution || compareTagIds(a.id, b.id));
   const labels: string[] = [];
   for (const { id } of shared) {
-    if (labels.length >= limit) break;
+    if (labels.length >= GAMEPLAY_SHARED_TAG_LIMIT) break;
     const name = nameOf(id)?.trim();
     if (name) labels.push(name);
   }

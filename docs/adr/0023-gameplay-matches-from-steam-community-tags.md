@@ -36,4 +36,4 @@ The scoring lives in pure functions in `src/lib/media-gameplay-tags.ts`; `getMed
 - The tag table and its Steam-wide counts are a dated snapshot. Someone must refresh it, and reclassify any new tags, as Steam's catalog changes; nothing refreshes it automatically.
 - Gameplay matches no longer derive from coverage. Steam community tags reflect player voting, so a game whose tags differ from its coverage is matched by its tags.
 - Gameplay similarity inputs are still extracted and gameplay embeddings are still produced and stored. A separate change under the media probes retires that work, so the tag-based match can be reverted without paid reprocessing.
-- The gameplay cases of the 2026-11-25 fixed ranking evaluation describe the superseded embedding ranking.
+- The gameplay cases of the 2026-11-25 fixed ranking evaluation describe the superseded embedding ranking. Its harness, `scripts/evaluations/fixed-media.ts`, asserts that ranking and reproduces at revision 7a83316.

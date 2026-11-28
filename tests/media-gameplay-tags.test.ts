@@ -120,7 +120,6 @@ describe("gameplay tag scoring", () => {
     expect(sharedGameplayTagLabels(left, right, (id) => names[id])).toEqual(["Ten", "Forty", "Thirty"]);
     names["40"] = null;
     expect(sharedGameplayTagLabels(left, right, (id) => names[id])).toEqual(["Ten", "Thirty", "Twenty"]);
-    expect(sharedGameplayTagLabels(left, right, (id) => names[id], 1)).toEqual(["Ten"]);
     expect(sharedGameplayTagLabels(left, new Map([["70", 1]]), (id) => names[id])).toEqual([]);
     // Equal contributions are ordered by tag ID.
     expect(sharedGameplayTagLabels(new Map([["30", 1], ["20", 1]]), new Map([["20", 1], ["30", 1]]), (id) => names[id]))
