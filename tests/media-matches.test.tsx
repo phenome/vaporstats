@@ -144,6 +144,68 @@ describe("media matches section", () => {
     expect(Array.from(document.querySelectorAll("ul"), (list) => list.children.length)).toEqual([2, 1]);
   });
 
+  test("shows a gameplay match's shared tags after its name and omits them from story and world matches", () => {
+    const gameplay: MediaGameMatch = { ...matches[0]!, sharedTags: ["Open World", "FPS", "RPG"] };
+    const story: MediaGameMatch = { ...matches[1]!, sharedTags: ["Ignored"] };
+    const { document } = parseHTML(renderToString(
+      React.createElement(MediaMatchesSection, { matches: [gameplay, story], paths }),
+    ));
+
+    const items = Array.from(document.querySelectorAll("ul"), (list) => Array.from(list.querySelectorAll("li")));
+    expect(items).toHaveLength(2);
+    const gameplayItem = items[0]![0]!;
+    expect(gameplayItem.textContent).toBe("MMatched SystemsShared tags: Open World · FPS · RPG");
+    const tags = gameplayItem.querySelector("li > span:last-child");
+    expect(tags?.className).toContain("text-zinc-500");
+    expect(tags?.querySelector(".sr-only")?.textContent).toBe("Shared tags: ");
+    expect(gameplayItem.querySelector("a")?.textContent).toBe("MMatched Systems");
+    expect(items[1]![0]!.textContent).toBe("MMatched Worlds");
+    expect(document.body.textContent).not.toContain("Ignored");
+
+    const noTags = parseHTML(renderToString(
+      React.createElement(MediaMatchesSection, { matches: [{ ...matches[0]!, sharedTags: [] }], paths }),
+    )).document;
+    expect(noTags.querySelector("li")?.textContent).toBe("MMatched Systems");
+    expect(noTags.querySelector(".sr-only")).toBeNull();
+  });
+
+  test("keeps shared tags in a merged group and on the DLC/expansion page", () => {
+    const gameplay = [
+      { ...matches[0]!, sharedTags: ["Roguelike", "Hack and Slash"] },
+      { ...matchInDimension(matches[1]!, "gameplay"), sharedTags: ["Action"] },
+    ];
+    const story = gameplay.map(({ sharedTags: _sharedTags, ...match }) => matchInDimension(match, "story_world"));
+    const { document } = parseHTML(renderToString(
+      React.createElement(MediaMatchesSection, { matches: [...story, ...gameplay], paths }),
+    ));
+
+    expect(Array.from(document.querySelectorAll("h3"), (heading) => heading.textContent))
+      .toEqual(["Gameplay & systems and Story & world"]);
+    expect(Array.from(document.querySelectorAll("li"), (item) => item.textContent)).toEqual([
+      "MMatched SystemsShared tags: Roguelike · Hack and Slash",
+      "MMatched WorldsShared tags: Action",
+    ]);
+  });
+
+  test("shows shared tags beside the matched game on the game page", () => {
+    const html = renderToString(
+      React.createElement(
+        QueryClientProvider,
+        { client: createQueryClient() },
+        React.createElement(GamePageView, {
+          game,
+          priceHistory: null,
+          mediaMatches: [{ ...matches[0]!, sharedTags: ["Open World", "FPS", "RPG"] }],
+          mediaMatchPaths: paths,
+        }),
+      ),
+    );
+    const { document } = parseHTML(html);
+    const item = document.querySelector("#media-matches li");
+    expect(item?.querySelector("a")?.getAttribute("href")).toBe(paths[20]);
+    expect(item?.textContent).toBe("MMatched SystemsShared tags: Open World · FPS · RPG");
+  });
+
   test("renders decorative Steam artwork over a local fallback even without a game link", () => {
     const { document } = parseHTML(renderToString(
       React.createElement(MediaMatchesSection, { matches: [matches[0]!] }),
@@ -225,7 +287,7 @@ describe("media matches section", () => {
           prosCons: null,
           tags: [],
         },
-        mediaMatches: matches,
+        mediaMatches: [{ ...matches[0]!, sharedTags: ["Open World", "FPS"] }, matches[1]!],
         mediaMatchPaths: paths,
         pricerange: 2,
         onPriceRangeChange,
@@ -235,6 +297,7 @@ describe("media matches section", () => {
     expect(html).toContain("Child evidence statement.");
     expect(html).toContain("Child Review");
     expect(html).toContain("Similar Games");
+    expect(html).toContain("Open World · FPS");
     expect(html).toMatch(/aria-pressed="true"[^>]*>6m<\/button>/);
     expect(html).not.toMatch(/aria-pressed="true"[^>]*>All<\/button>/);
   });

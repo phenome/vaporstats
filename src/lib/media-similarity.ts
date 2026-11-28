@@ -1,5 +1,12 @@
 import type { AppDatabase } from "./db";
 import { decodeVector, GEMINI_EMBEDDING_DIMENSIONS } from "./media-embedding-vector";
+import {
+  type CommunityTagMembership,
+  gameplayTagScore,
+  gameplayTagVector,
+  meetsGameplayMatchBar,
+  sharedGameplayTagLabels,
+} from "./media-gameplay-tags";
 import { isMediaOverviewPublic, PUBLIC_MEDIA_ROOT_SQL } from "./media-publication";
 import { getCanonicalChildPath } from "./related";
 import { getCanonicalGamePath } from "./slug";
@@ -42,8 +49,11 @@ export const ELIGIBLE_MEDIA_ENTITY_SQL = `(
 
 export interface MediaGameMatch {
   dimension: MediaMatchDimension;
+  /** Gameplay: the gameplay tag score. Story & world: the embedding cosine. */
   similarity: number;
   matchedGame: { appid: number; name: string; slug: string };
+  /** Gameplay matches only: tags both games share, strongest first. */
+  sharedTags?: string[];
 }
 
 type GameRow = {
@@ -125,31 +135,128 @@ export async function getMediaGameMatches(
   ).bind(appid).first<OverviewRow>();
   if (!currentOverview?.input_identity) return [];
 
+  const gameplay = await rankGameplayMatches(db, appid, publicScope, limit);
+  const story = await rankStoryWorldMatches(db, appid, currentOverview.input_identity, publicScope, limit);
+  return [...gameplay, ...story];
+}
+
+/**
+ * Gameplay & systems: the overlap of the two games' gameplay tags (ADR 0023). Candidates
+ * pass the same eligibility and publication rules as the current game and have an active
+ * Overview; they need no embedding. Only candidates that reach the bar are listed.
+ */
+async function rankGameplayMatches(
+  db: AppDatabase,
+  appid: number,
+  publicScope: string,
+  limit: number,
+): Promise<MediaGameMatch[]> {
+  const currentResult = await db.prepare(
+    `SELECT membership.source_id, membership.weight, facet.name
+     FROM app_facet_memberships AS membership
+     LEFT JOIN app_facets AS facet
+       ON facet.facet_group = membership.facet_group
+      AND facet.source_id = membership.source_id
+     WHERE membership.appid = ? AND membership.facet_group = 'community_tag'
+     ORDER BY membership.source_order, membership.source_id`,
+  ).bind(appid).all<{ source_id: string; weight: number | null; name: string | null }>();
+  const currentRows = currentResult.results ?? [];
+  const currentVector = gameplayTagVector(
+    currentRows.map((row) => ({ sourceId: row.source_id, weight: row.weight })),
+  );
+  if (currentVector.size === 0) return [];
+  const names = new Map(currentRows.map((row) => [row.source_id, row.name]));
+
+  const ranked: Array<{ similarity: number; game: GameRow; sharedTags: string[] }> = [];
+  let cursorAppid = 0;
+  while (true) {
+    const candidateResult = await db.prepare(
+      `SELECT app.appid, app.name, app.slug
+       FROM apps AS app
+       WHERE app.appid <> ? AND app.appid > ?
+         AND app.is_eligible = 1
+         AND ${ELIGIBLE_MEDIA_ENTITY_SQL}
+         ${publicScope}
+         AND EXISTS (
+           SELECT 1
+           FROM media_game_overviews AS overview
+           WHERE overview.appid = app.appid AND overview.active = 1
+         )
+       ORDER BY app.appid
+       LIMIT ?`,
+    ).bind(appid, cursorAppid, CANDIDATE_BATCH_SIZE).all<GameRow>();
+    const candidates = candidateResult.results ?? [];
+    if (candidates.length > 0) {
+      const placeholders = candidates.map(() => "?").join(", ");
+      const membershipResult = await db.prepare(
+        `SELECT appid, source_id, weight
+         FROM app_facet_memberships
+         WHERE facet_group = 'community_tag' AND appid IN (${placeholders})`,
+      ).bind(...candidates.map((candidate) => candidate.appid))
+        .all<{ appid: number; source_id: string; weight: number | null }>();
+      const membershipsByApp = new Map<number, CommunityTagMembership[]>();
+      for (const row of membershipResult.results ?? []) {
+        const memberships = membershipsByApp.get(row.appid) ?? [];
+        memberships.push({ sourceId: row.source_id, weight: row.weight });
+        membershipsByApp.set(row.appid, memberships);
+      }
+      for (const candidate of candidates) {
+        if (!candidate.name || !candidate.slug) continue;
+        const vector = gameplayTagVector(membershipsByApp.get(candidate.appid) ?? []);
+        if (vector.size === 0) continue;
+        const similarity = gameplayTagScore(currentVector, vector);
+        if (!meetsGameplayMatchBar(similarity)) continue;
+        ranked.push({
+          similarity,
+          game: { appid: candidate.appid, name: candidate.name, slug: candidate.slug },
+          sharedTags: sharedGameplayTagLabels(currentVector, vector, (id) => names.get(id)),
+        });
+        ranked.sort((left, right) => right.similarity - left.similarity || left.game.appid - right.game.appid);
+        if (ranked.length > limit) ranked.length = limit;
+      }
+    }
+    const last = candidates.at(-1);
+    if (!last || candidates.length < CANDIDATE_BATCH_SIZE) break;
+    cursorAppid = last.appid;
+  }
+  return ranked.map((match) => ({
+    dimension: "gameplay",
+    similarity: match.similarity,
+    matchedGame: match.game,
+    sharedTags: match.sharedTags,
+  }));
+}
+
+/** Story & world: the cosine of the current story/world embeddings tied to each game's current Overview. */
+async function rankStoryWorldMatches(
+  db: AppDatabase,
+  appid: number,
+  overviewInputIdentity: string,
+  publicScope: string,
+  limit: number,
+): Promise<MediaGameMatch[]> {
   const currentResult = await db.prepare(
     `SELECT appid, dimension, input_identity, overview_input_identity, vector
      FROM media_game_embeddings
-     WHERE appid = ? AND active = 1
+     WHERE appid = ? AND active = 1 AND dimension = 'story_world'
        AND overview_input_identity = ? AND model = ? AND dimensions = ?
        AND config_version = ?
      ORDER BY id DESC`,
   ).bind(
     appid,
-    currentOverview.input_identity,
+    overviewInputIdentity,
     GEMINI_EMBEDDING_MODEL,
     GEMINI_EMBEDDING_DIMENSIONS,
     GEMINI_EMBEDDING_CONFIG_VERSION,
   ).all<VectorRow>();
-  const currentRows = currentResult.results ?? [];
-  const currentVectors = new Map<MediaMatchDimension, Float32Array>();
-  for (const row of currentRows) {
-    if (row.dimension !== "gameplay" && row.dimension !== "story_world") continue;
-    const vector = decodeVector(row.vector);
-    if (vector && !currentVectors.has(row.dimension)) currentVectors.set(row.dimension, vector);
+  let target: Float32Array | null = null;
+  for (const row of currentResult.results ?? []) {
+    target = decodeVector(row.vector);
+    if (target) break;
   }
-  if (currentVectors.size === 0) return [];
+  if (!target) return [];
 
-  const rankedByDimension = new Map<MediaMatchDimension, Array<{ similarity: number; game: GameRow }>>();
-  let cursorDimension = "";
+  const ranked: Array<{ similarity: number; game: GameRow }> = [];
   let cursorAppid = 0;
   while (true) {
     const candidateResult = await db.prepare(
@@ -176,53 +283,36 @@ export async function getMediaGameMatches(
        WHERE embedding.appid <> ? AND embedding.active = 1
          AND embedding.model = ? AND embedding.dimensions = ?
          AND embedding.config_version = ?
-         AND embedding.dimension IN ('gameplay', 'story_world')
-         AND (
-           embedding.dimension > ?
-           OR (embedding.dimension = ? AND embedding.appid > ?)
-         )
-       ORDER BY embedding.dimension, embedding.appid
+         AND embedding.dimension = 'story_world'
+         AND embedding.appid > ?
+       ORDER BY embedding.appid
        LIMIT ?`,
     ).bind(
       appid,
       GEMINI_EMBEDDING_MODEL,
       GEMINI_EMBEDDING_DIMENSIONS,
       GEMINI_EMBEDDING_CONFIG_VERSION,
-      cursorDimension,
-      cursorDimension,
       cursorAppid,
       CANDIDATE_BATCH_SIZE,
     ).all<VectorRow>();
     const candidateRows = candidateResult.results ?? [];
     for (const row of candidateRows) {
-      if (row.dimension !== "gameplay" && row.dimension !== "story_world") continue;
-      const target = currentVectors.get(row.dimension);
-      if (!target || !row.name || !row.slug) continue;
+      if (!row.name || !row.slug) continue;
       const vector = decodeVector(row.vector);
       const similarity = vector ? cosine(target, vector) : null;
       if (similarity === null) continue;
-      const ranked = rankedByDimension.get(row.dimension) ?? [];
       ranked.push({
         similarity,
         game: { appid: row.appid, name: row.name, slug: row.slug },
       });
       ranked.sort((left, right) => right.similarity - left.similarity || left.game.appid - right.game.appid);
       if (ranked.length > limit) ranked.length = limit;
-      rankedByDimension.set(row.dimension, ranked);
     }
     const last = candidateRows.at(-1);
     if (!last || candidateRows.length < CANDIDATE_BATCH_SIZE) break;
-    cursorDimension = last.dimension;
     cursorAppid = last.appid;
   }
-
-  const result: MediaGameMatch[] = [];
-  for (const dimension of MEDIA_MATCH_DIMENSIONS) {
-    for (const match of rankedByDimension.get(dimension) ?? []) {
-      result.push({ dimension, similarity: match.similarity, matchedGame: match.game });
-    }
-  }
-  return result;
+  return ranked.map((match) => ({ dimension: "story_world", similarity: match.similarity, matchedGame: match.game }));
 }
 
 export async function getMediaGameMatchPaths(

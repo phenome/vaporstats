@@ -175,6 +175,9 @@ A characteristic of a game supported by attributed media coverage, organized wit
 **Media Discovery Tag**:
 A shared, normalized label for a coverage-supported game characteristic, used to find games with that characteristic. A game matches the label only when its **Media Observations** support the wording as displayed, including any material qualification. Its wording is independent of the game summary, and it is distinct from a Steam Catalog Facet.
 
+**Gameplay tag**:
+A Steam community tag (a Catalog Facet) that the project classifies as describing genre, viewpoint or mechanics. Only gameplay tags count toward Gameplay & systems matches, weighted by their share of the game's votes and their rarity across Steam. It is distinct from a **Media Discovery Tag**, which comes from coverage. See [ADR 0023](docs/adr/0023-gameplay-matches-from-steam-community-tags.md).
+
 **Monthly Score Comparison**:
 An earlier score comparison for the games eligible in a selected catalog group now. It may use a Reconstructed Player Score when no Recorded Player Score exists; missing historical evidence remains missing, and the comparison does not assert that the same games were eligible then.
 

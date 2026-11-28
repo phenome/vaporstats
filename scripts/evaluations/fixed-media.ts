@@ -45,7 +45,7 @@ try {
         vector[index] = 1;
         db.native.run(`INSERT INTO media_game_embeddings
           (appid, dimension, input_identity, overview_input_identity, model, dimensions, config_version, vector)
-          SELECT appid, 'gameplay', 'controlled-routing', input_identity, ?, 3072, ?, ?
+          SELECT appid, 'story_world', 'controlled-routing', input_identity, ?, 3072, ?, ?
           FROM media_game_overviews WHERE appid=? AND active=1`,
           [GEMINI_EMBEDDING_MODEL, GEMINI_EMBEDDING_CONFIG_VERSION, new Uint8Array(vector.buffer), appid]);
       }
@@ -55,7 +55,7 @@ try {
         assert.ok(!ranked.some(m => m.matchedGame.appid === appid));
         const pair = ranked.filter(m => m.matchedGame.appid === sibling);
         assert.equal(pair.length, 1);
-        assert.equal(pair[0]!.dimension, "gameplay");
+        assert.equal(pair[0]!.dimension, "story_world");
         assert.equal(pair[0]!.similarity, 0);
         assert.deepEqual(await getMediaGameMatches(db, appid), []);
       }
@@ -64,7 +64,7 @@ try {
     }
     if (process.argv[3] === "pairs") {
       process.env.MEDIA_OVERVIEW_PUBLIC = "false";
-      for (const [appid, dimension] of [[588650, "gameplay"], [1920780, "story_world"]] as const) {
+      for (const [appid, dimension] of [[1920780, "story_world"]] as const) {
         const forward = (await matches(h2)).filter(m => m.matchedGame.appid === appid && m.dimension === dimension);
         const reverse = (await matches(appid)).filter(m => m.matchedGame.appid === h2 && m.dimension === dimension);
         assert.equal(forward.length, 1, `Missing Hades II / ${appid} ${dimension} match`);

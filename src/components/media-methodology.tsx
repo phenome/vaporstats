@@ -74,10 +74,7 @@ export function MediaMethodologyView(): React.JSX.Element {
       </Question>
 
       <Question id="media-matches" title="How are similar games found?">
-        <p>
-          Similar Games lists other games whose coverage describes similar characteristics. They are grouped in two
-          independent dimensions:
-        </p>
+        <p>Similar Games lists other games that resemble this one, grouped in two independent dimensions:</p>
         <ul className="list-inside list-disc space-y-1">
           <li>
             <span className="font-semibold text-zinc-100">Gameplay &amp; systems</span>: what you do in the game and
@@ -88,10 +85,18 @@ export function MediaMethodologyView(): React.JSX.Element {
           </li>
         </ul>
         <p>
-          For each dimension, a game's coverage is condensed into short descriptions. These descriptions are turned
-          into numeric representations (embeddings) and compared, and the games described most similarly are listed.
-          The two dimensions are compared separately, so a shared setting does not imply similar gameplay.
+          Gameplay &amp; systems compares the Steam community tags that describe each game's genre, viewpoint, and
+          mechanics, such as Roguelike, First-Person, or Open World. Tags that players vote for more count for more,
+          and so do rarer tags: sharing Action says less than sharing Action Roguelike. A game is listed only when
+          the overlap is strong enough, so some games have no gameplay matches. Each listed game shows the tags the
+          two games share.
         </p>
+        <p>
+          Story &amp; world compares what the coverage describes. A game's coverage is condensed into short
+          descriptions of its setting, characters, and themes. These descriptions are turned into numeric
+          representations (embeddings) and compared, and the games described most similarly are listed.
+        </p>
+        <p>The two dimensions are compared separately, so a shared setting does not imply similar gameplay.</p>
         <p>
           Quality judgments, popularity, and technical problems are left out of the comparison. A match describes
           shared characteristics; it does not say how good a game is or predict whether you will enjoy it. No

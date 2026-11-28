@@ -57,8 +57,9 @@ function MatchLink({ match, paths }: { match: MediaGameMatch; paths: Readonly<Re
       <span className="min-w-0 wrap-anywhere">{game.name}</span>
     </>
   );
+  const sharedTags = match.dimension === "gameplay" ? match.sharedTags ?? [] : [];
   return (
-    <li className="min-w-0 max-w-full">
+    <li className="flex min-w-0 max-w-full flex-wrap items-baseline gap-x-2 gap-y-0.5">
       {path ? (
         <AppLink
           href={path}
@@ -68,6 +69,12 @@ function MatchLink({ match, paths }: { match: MediaGameMatch; paths: Readonly<Re
         </AppLink>
       ) : (
         <span className={className}>{content}</span>
+      )}
+      {sharedTags.length > 0 && (
+        <span className="min-w-0 wrap-anywhere text-[11px] text-zinc-500">
+          <span className="sr-only">Shared tags: </span>
+          {sharedTags.join(" · ")}
+        </span>
       )}
     </li>
   );

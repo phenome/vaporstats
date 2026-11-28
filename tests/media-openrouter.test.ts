@@ -1315,8 +1315,11 @@ describe("cutover from Gemini text generation", () => {
       { appid: BALDURS_GATE, model: "gemini-embedding-2", dimensions: 3072, bytes: 3072 * 4 },
       { appid: CYBERPUNK, model: "gemini-embedding-2", dimensions: 3072, bytes: 3072 * 4 },
     ]);
-    expect((await gameDetail(database, BALDURS_GATE)).mediaMatches.map((match) => match.matchedGame.appid)).toEqual([CYBERPUNK]);
-    expect((await gameDetail(database, CYBERPUNK)).mediaMatches.map((match) => match.matchedGame.appid)).toEqual([BALDURS_GATE]);
+    // Live matching reads stored vectors only for Story & world (ADR 0023); the fake pipeline
+    // embeds the gameplay inputs, so the two stored vectors are read back under that dimension.
+    database.native.prepare("UPDATE media_game_embeddings SET dimension = 'story_world' WHERE active = 1").run();
+    expect((await gameDetail(database, BALDURS_GATE)).mediaMatches.map((match) => [match.dimension, match.matchedGame.appid])).toEqual([["story_world", CYBERPUNK]]);
+    expect((await gameDetail(database, CYBERPUNK)).mediaMatches.map((match) => [match.dimension, match.matchedGame.appid])).toEqual([["story_world", BALDURS_GATE]]);
   });
 });
 

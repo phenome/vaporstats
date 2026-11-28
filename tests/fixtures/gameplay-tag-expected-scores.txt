@@ -1,0 +1,22 @@
+# appid_a appid_b score listed(>=0.30) shared_tags (strongest first, max 3) # names
+1091500 2161710 0.684986 yes [Open World, FPS, RPG] # Cyberpunk 2077 / NO LAW
+588650 1145350 0.589402 yes [Hack and Slash, Action Roguelike, Roguelike] # Dead Cells / Hades II
+1091500 3714800 0.488682 yes [Open World, Exploration, Action] # Cyberpunk 2077 / Warlock: Dungeons & Dragons
+2161710 3714800 0.325887 yes [Open World, Exploration, Action] # NO LAW / Warlock: Dungeons & Dragons
+1086940 1091500 0.208509 no [RPG, Character Customization, Adventure] # Baldur's Gate 3 / Cyberpunk 2077
+1086940 1920780 0.163466 no [Choices Matter, Adventure] # Baldur's Gate 3 / Stray Gods: The Roleplaying Musical
+1086940 2161710 0.162591 no [RPG, Choices Matter, Adventure] # Baldur's Gate 3 / NO LAW
+1091500 1145350 0.146223 no [Action RPG, RPG, Action] # Cyberpunk 2077 / Hades II
+1920780 2161710 0.083431 no [Choices Matter, Adventure] # Stray Gods: The Roleplaying Musical / NO LAW
+1145350 2161710 0.068126 no [RPG, Action] # Hades II / NO LAW
+588650 3714800 0.064898 no [Adventure, Action] # Dead Cells / Warlock: Dungeons & Dragons
+1086940 1145350 0.062604 no [RPG] # Baldur's Gate 3 / Hades II
+1086940 3714800 0.060259 no [Adventure, Combat] # Baldur's Gate 3 / Warlock: Dungeons & Dragons
+1920780 3714800 0.045376 no [Adventure] # Stray Gods: The Roleplaying Musical / Warlock: Dungeons & Dragons
+1145350 3714800 0.043497 no [Action] # Hades II / Warlock: Dungeons & Dragons
+588650 2161710 0.019822 no [Action, Adventure] # Dead Cells / NO LAW
+588650 1091500 0.018346 no [Action, Adventure] # Dead Cells / Cyberpunk 2077
+588650 1920780 0.015901 no [Adventure] # Dead Cells / Stray Gods: The Roleplaying Musical
+1091500 1920780 0.011192 no [Adventure] # Cyberpunk 2077 / Stray Gods: The Roleplaying Musical
+588650 1086940 0.011051 no [Adventure] # Dead Cells / Baldur's Gate 3
+1145350 1920780 0.000000 no [] # Hades II / Stray Gods: The Roleplaying Musical
